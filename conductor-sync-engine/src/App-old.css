@@ -1,26 +1,24 @@
-@font-face {
-    font-family: "Geist";
-    src: url("./assets/fonts/Geist.woff2") format("woff2");
-    font-weight: 100 900;
-    font-style: normal;
-    font-display: swap;
+.logo.vite:hover {
+  filter: drop-shadow(0 0 2em #747bff);
 }
 
-@font-face {
-    font-family: "Geist Mono";
-    src: url("./assets/fonts/GeistMono.woff2") format("woff2");
-    font-weight: 100 900;
-    font-style: normal;
-    font-display: swap;
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafb);
 }
-
 :root {
-    color: #1d2433;
-    background: #f6f7f9;
-    --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
 
-    font-family: var(--font-sans);
+  color: #0f0f0f;
+  background-color: #f6f6f6;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
 }
 
 .container {
