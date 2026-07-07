@@ -1,0 +1,5 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "conductor-sync-engine/src-tauri/Cargo.toml"
+  ]
+}
