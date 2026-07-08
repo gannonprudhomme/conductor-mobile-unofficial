@@ -47,3 +47,9 @@ agent.
 
 The repository is intentionally minimal right now. Prefer small, explicit
 structure and document any new app, package, or service layout as it is added.
+
+## Investigations
+
+Note that Conductor is a Tauri app using very similar stack to what we're using here (intentionally).
+Furthermore it exposes its dev tools / HTML inspector.
+As a result of this, if you want to know specifics you can give me a script to run in its console rather than guessing e.g. CSS values

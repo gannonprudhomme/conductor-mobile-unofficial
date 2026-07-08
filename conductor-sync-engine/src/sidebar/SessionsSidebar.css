@@ -1,0 +1,82 @@
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+
+.toolbar h1 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.session-list {
+    display: grid;
+    gap: 10px;
+}
+
+.session-row {
+    display: grid;
+    grid-template-columns: minmaxX(0, 1fr) auto;
+    gap: 16px;
+    align-items: center;
+    border: 1px solid #d8dde6;
+    border-radius: 8px;
+    background: #fff;
+    padding: 14px 16px;
+}
+
+.session-main {
+    min-width: 0;
+}
+
+.session-main h2 {
+    overflow: hidden;
+    margin: 0;
+    font-size: 16px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.session-main p {
+    margin: 5px 0 0;
+    color: #667085;
+    font-size: 13px;
+}
+
+.session-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    color: #475467;
+    font-size: 12px;
+}
+
+.session-meta span {
+    border: 1px solid #d8dde6;
+    border-radius: 999px;
+    background: #f8fafc;
+    padding: 4px 8px;
+}
+
+
+@media (max-width: 720px) {
+    .container {
+        padding: 20px;
+    }
+
+    .toolbar {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .session-row {
+        grid-template-columns: 1fr;
+    }
+
+    .session-meta {
+        justify-content: flex-start;
+    }
+}
