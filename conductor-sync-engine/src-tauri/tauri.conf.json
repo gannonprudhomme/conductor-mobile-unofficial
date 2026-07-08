@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.gannonprudomme.conductor-sync-engine",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm build:sidecar-proxy && pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"

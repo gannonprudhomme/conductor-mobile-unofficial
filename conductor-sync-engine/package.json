@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "pnpm build:sidecar-proxy && tsc && vite build",
+    "build:sidecar-proxy": "tsc -p sidecar-proxy/tsconfig.json",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -18,6 +19,7 @@
   "devDependencies": {
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@types/node": "^24.10.1",
     "@vitejs/plugin-react": "^6.0.2",
     "typescript": "~6.0.3",
     "vite": "^8.0.16",
