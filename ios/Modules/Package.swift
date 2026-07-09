@@ -13,6 +13,7 @@ let package = Package(
         .iOS(.v26),
     ],
     products: [
+        .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
         .library(name: "ConductorData", targets: ["ConductorData"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
@@ -26,6 +27,11 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ConductorDesign",
+            path: "ConductorDesign/Sources",
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "ConductorData",
             dependencies: [
                 .product(name: "Dependencies", package: "swift-dependencies"),
@@ -38,6 +44,7 @@ let package = Package(
             name: "ConductorWorkspaces",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                "ConductorDesign",
                 "ConductorData",
             ],
             path: "ConductorWorkspaces/Sources",

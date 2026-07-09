@@ -1,5 +1,6 @@
 import ComposableArchitecture
 import ConductorData
+import ConductorDesign
 import ConductorMain
 import Dependencies
 import SwiftUI
@@ -11,6 +12,8 @@ struct ConductorMobileApp: App {
     }
 
     init() {
+        Font.registerThemeFonts()
+
         try! prepareDependencies {
             try $0.bootstrapDatabase()
         }
