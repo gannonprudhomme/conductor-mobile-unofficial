@@ -21,8 +21,8 @@ live runtime.
 
 ## Current prototype
 
-- `conductor-sync-engine/`: initial Tauri app scaffold.
-- `conductor-sync-engine/sidecar-proxy/runtime-proxy.mts`: small TypeScript
+- `desktop/`: initial Tauri app scaffold.
+- `desktop/sidecar-proxy/runtime-proxy.mts`: small TypeScript
   proxy for the reverse-engineered message-send path. It compiles to `.mjs`
   because the installed Conductor runtime wrapper runs plain Node. It should
   stay send-only; SQLite reads, local-storage drafts, pairing, and streaming
@@ -31,7 +31,7 @@ live runtime.
 Build and syntax-check the proxy with:
 
 ```sh
-cd conductor-sync-engine
+cd desktop
 pnpm build:sidecar-proxy
 node --check sidecar-proxy/dist/runtime-proxy.mjs
 ```

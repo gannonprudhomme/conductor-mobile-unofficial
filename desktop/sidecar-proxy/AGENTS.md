@@ -66,7 +66,7 @@ Control API:
 - `tsconfig.json`: sidecar-proxy-only TypeScript build config.
 - `dist/runtime-proxy.mjs`: generated build output; do not hand edit.
 
-Build and syntax-check from `conductor-sync-engine/`:
+Build and syntax-check from `desktop/`:
 
 ```sh
 pnpm build:sidecar-proxy
