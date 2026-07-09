@@ -1,0 +1,4 @@
+.swiftpm/
+*.xcodeproj
+.derivedData/
+*DO-NOT-COMMIT*

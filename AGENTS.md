@@ -3,9 +3,14 @@
 This is an early monorepo for Conductor mobile access. Keep changes aligned with
 two planned pieces:
 
-- A React Native mobile app for interacting with https://conductor.build.
+- A native SwiftUI iOS app for interacting with https://conductor.build.
 - A local desktop service that pairs with the phone and controls or relays
   messages to the Conductor desktop app.
+
+## Native iOS app
+
+The native app lives in `ios/`. Follow `ios/AGENTS.md` for iOS-specific build,
+module, architecture, and dependency rules.
 
 ## Teaching-first collaboration
 

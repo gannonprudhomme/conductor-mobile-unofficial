@@ -1,0 +1,8 @@
+[tasks.gen]
+description = "Generate the native iOS Xcode project"
+run = "scripts/gen.sh"
+
+[tasks.build]
+description = "Build the native iOS app"
+depends = ["gen"]
+run = "scripts/build.sh"
