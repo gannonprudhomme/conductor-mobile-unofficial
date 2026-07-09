@@ -1,5 +1,9 @@
-use std::{env, fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 use serde::Serialize;
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 const BRIDGE_MARKER: &str = "FAKE_CONDUCTOR_BRIDGE_MARKER;v0.1";
 
@@ -49,7 +53,8 @@ impl ConductorPaths {
 
         Ok(ConductorPaths {
             application_support_runtime_path: application_support_dir.join("conductor-runtime"),
-            application_support_runtime_real_path: application_support_dir.join("conductor-runtime.real"),
+            application_support_runtime_real_path: application_support_dir
+                .join("conductor-runtime.real"),
             source_fake_runtime_path: source_bridge_dir.join("conductor-runtime"),
             source_runtime_proxy_js_path: source_bridge_dir.join("dist").join("runtime-proxy.mjs"),
             dest_runtime_proxy_js_path: application_support_dir.join("runtime-proxy.mjs"),
@@ -66,26 +71,41 @@ pub fn install_bridge() -> Result<(), String> {
 
     let conductor_paths: ConductorPaths = ConductorPaths::new()?;
 
-    if !conductor_paths.application_bundle_runtime_path.exists() { // if it doesn't exist, we got a problem
+    if !conductor_paths.application_bundle_runtime_path.exists() {
+        // if it doesn't exist, we got a problem
         return Err("There is no conductor-runtime file!".to_string());
     }
 
     // If the `conductor-runtime` IS our bridge then we don't want to copt it
     // thus if it's the original one move it from conductor-runtime -> conductor-runtime.real
-    let is_conductor_runtime_our_bridge_proxy = is_file_our_bridge_runtime(&conductor_paths.application_bundle_runtime_path)?;
+    let is_conductor_runtime_our_bridge_proxy =
+        is_file_our_bridge_runtime(&conductor_paths.application_bundle_runtime_path)?;
     if !is_conductor_runtime_our_bridge_proxy {
         // Move it from conductor-runtime -> conductor-runtime.real
-        fs::copy(&conductor_paths.application_bundle_runtime_path, &conductor_paths.application_support_runtime_real_path)
-            .map_err(|error| format!("Failed to move conductor-runtime -> conductor-runtime.real with error: {error}"))?;
+        fs::copy(
+            &conductor_paths.application_bundle_runtime_path,
+            &conductor_paths.application_support_runtime_real_path,
+        )
+        .map_err(|error| {
+            format!(
+                "Failed to move conductor-runtime -> conductor-runtime.real with error: {error}"
+            )
+        })?;
     }
 
     // Copy in the Javascript file into the conductor internal directory (for the script to call it)
-    fs::copy(&conductor_paths.source_runtime_proxy_js_path, &conductor_paths.dest_runtime_proxy_js_path)
-        .map_err(|error| format!("Failed to copy runtime-proxy.mjs with error: {error}"))?;
+    fs::copy(
+        &conductor_paths.source_runtime_proxy_js_path,
+        &conductor_paths.dest_runtime_proxy_js_path,
+    )
+    .map_err(|error| format!("Failed to copy runtime-proxy.mjs with error: {error}"))?;
 
     // Now move our fake conductor-runtime in the spot of the real one
-    fs::copy(&conductor_paths.source_fake_runtime_path, &conductor_paths.application_bundle_runtime_path)
-        .map_err(|error| format!("Failed to move fake runtime -> real one with error: {error}"))?;
+    fs::copy(
+        &conductor_paths.source_fake_runtime_path,
+        &conductor_paths.application_bundle_runtime_path,
+    )
+    .map_err(|error| format!("Failed to move fake runtime -> real one with error: {error}"))?;
 
     chmod_executable(&conductor_paths.application_bundle_runtime_path)?;
 
@@ -97,8 +117,13 @@ pub fn uninstall_bridge() -> Result<(), String> {
     // Remove the existing one and put conductor-runtime.real -> conductor-runtime
     let conductor_paths = ConductorPaths::new()?;
 
-    fs::copy(&conductor_paths.application_support_runtime_real_path, &conductor_paths.application_bundle_runtime_path)
-        .map_err(|err| format!("Failed to move conductor-runtime.real -> conductor.real with error: {err}"))?;
+    fs::copy(
+        &conductor_paths.application_support_runtime_real_path,
+        &conductor_paths.application_bundle_runtime_path,
+    )
+    .map_err(|err| {
+        format!("Failed to move conductor-runtime.real -> conductor.real with error: {err}")
+    })?;
 
     Ok(())
 }
@@ -133,23 +158,25 @@ pub struct BridgeStatus {
 }
 
 #[tauri::command]
-pub async fn get_bridge_status(client: tauri::State<'_, reqwest::Client>) -> Result<BridgeStatus, String> {
-    let conductor_paths = ConductorPaths::new()?; 
+pub async fn get_bridge_status(
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<BridgeStatus, String> {
+    let conductor_paths = ConductorPaths::new()?;
 
-    let is_bridge_installed_in_applications = is_file_our_bridge_runtime(&conductor_paths.application_bundle_runtime_path)?;
-    let is_bridge_installed_in_application_support = is_file_our_bridge_runtime(&conductor_paths.application_support_runtime_path)?;
+    let is_bridge_installed_in_applications =
+        is_file_our_bridge_runtime(&conductor_paths.application_bundle_runtime_path)?;
+    let is_bridge_installed_in_application_support =
+        is_file_our_bridge_runtime(&conductor_paths.application_support_runtime_path)?;
 
     const BRIDGE_BASE_URL: &str = "http://127.0.0.1:49321";
 
     // If it's not installed then don't fetch
     if !is_bridge_installed_in_application_support {
-        return Ok(
-            BridgeStatus {
-                is_bridge_installed_in_applications,
-                is_bridge_installed_in_application_support: false,
-                is_bridge_reachable: false
-            }
-        )
+        return Ok(BridgeStatus {
+            is_bridge_installed_in_applications,
+            is_bridge_installed_in_application_support: false,
+            is_bridge_reachable: false,
+        });
     }
 
     let is_bridge_reachable: bool = client
@@ -161,11 +188,9 @@ pub async fn get_bridge_status(client: tauri::State<'_, reqwest::Client>) -> Res
 
     // Try to ping it
 
-    return Ok(
-        BridgeStatus {
-            is_bridge_installed_in_applications,
-            is_bridge_installed_in_application_support,
-            is_bridge_reachable
-        }
-    )
+    return Ok(BridgeStatus {
+        is_bridge_installed_in_applications,
+        is_bridge_installed_in_application_support,
+        is_bridge_reachable,
+    });
 }

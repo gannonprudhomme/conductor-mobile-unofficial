@@ -1,32 +1,29 @@
+use crate::models::ConductorSession;
 use rusqlite::{Connection, OpenFlags, Result};
 use std::{path::PathBuf, time::Duration};
-use crate::{models::ConductorSession};
 
-mod models;
 mod bridge_installer;
+mod models;
 
 fn conductor_db_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME")
-        .map_err(|error| format!("Could not find HOME directory: {error}"))?;
+    let home =
+        std::env::var("HOME").map_err(|error| format!("Could not find HOME directory: {error}"))?;
 
     Ok(PathBuf::from(home)
         .join("Library")
         .join("Application Support")
         .join("com.conductor.app")
-        .join("conductor.db")
-    )
+        .join("conductor.db"))
 }
 
 fn open_conductor_db_readonly() -> Result<Connection, String> {
     let db_path = conductor_db_path()?;
-    
-    let connection = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-    )
-    .map_err(|error| format!("Could not open Conductor database: {error}"))?;
 
-    connection.pragma_update(None, "query_only", true)
+    let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("Could not open Conductor database: {error}"))?;
+
+    connection
+        .pragma_update(None, "query_only", true)
         .map_err(|error| format!("Could not enable query_only mode: {error}"))?;
 
     Ok(connection)
@@ -59,14 +56,14 @@ fn list_sessions() -> Result<Vec<ConductorSession>, String> {
         )
         .map_err(|error| format!("Could not prepare sessions query: {error}"))?;
 
-let rows = statement
-    .query_map([], ConductorSession::create_from_row)
-    .map_err(|error| format!("Could not query sessions: {error}"))?;
+    let rows = statement
+        .query_map([], ConductorSession::create_from_row)
+        .map_err(|error| format!("Could not query sessions: {error}"))?;
 
     let mut sessions = Vec::new();
 
     for row in rows {
-        sessions.push(row.map_err(|error| format!("Could not read session row: {error}"))?); 
+        sessions.push(row.map_err(|error| format!("Could not read session row: {error}"))?);
     }
 
     Ok(sessions)
@@ -77,7 +74,7 @@ pub fn run() {
     let bridge_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .expect("Could not create bridge HTTP client");   
+        .expect("Could not create bridge HTTP client");
 
     tauri::Builder::default()
         .manage(bridge_client)

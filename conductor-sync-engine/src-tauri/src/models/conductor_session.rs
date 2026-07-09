@@ -13,7 +13,7 @@ pub struct ConductorSession {
     last_user_message_at: Option<String>,
 
     status: String, // "idle", "error", "working"
-    model: String, // "gpt-5.5", "sonnet", "opus-1m", "opus-4-8-1m", "opus", "gpt-5.3-codex"
+    model: String,  // "gpt-5.5", "sonnet", "opus-1m", "opus-4-8-1m", "opus", "gpt-5.3-codex"
 
     unread_count: i64,
     freshly_compacted: i64,
@@ -34,7 +34,7 @@ impl ConductorSession {
             model: row.get("model")?,
             unread_count: row.get("unread_count")?,
             freshly_compacted: row.get("freshly_compacted")?,
-            context_token_count: row.get("context_token_count")?
+            context_token_count: row.get("context_token_count")?,
         })
     }
 }
