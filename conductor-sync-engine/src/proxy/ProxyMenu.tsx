@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Download, X } from "lucide-react";
 import { AnimatedText } from "./AnimatedText";
 import "./ProxyMenu.css";
 
@@ -15,19 +16,20 @@ function StatusTag({ title, enabled }: { title: string, enabled: boolean }) {
   );
 }
 
-function ChipButton({ title, onClick }: { title: string, onClick: () => void }) {
+function ChipButton({ title, icon, onClick }: { title: string; icon?: ReactNode; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="inline-flex items-center justify-center
+      className="inline-flex items-center justify-center gap-2
                  px-3 py-3 h-8 text-sm border rounded-md
                  hover:bg-accent hover:text-accent-foreground
                  whitespace-nowrap
                  disabled:pointer-events-node disabled:opacity-50
-                 [&_svg]:pointer-events-none
+                 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0
                  bg-background
                  "
     >
+      {icon}
       <AnimatedText title={title} />
     </button>
   );
@@ -120,6 +122,7 @@ export function ProxyMenu() {
           <div className="flex items-center gap-2">
             <ChipButton
               title={isBridgeInstalledInApplications ? "Uninstall proxy" : "Install proxy"}
+              icon={isBridgeInstalledInApplications ? <X /> : <Download />}
               onClick={() => isBridgeInstalledInApplications ? uninstallBridge() : installBridge()}
             />
           </div>
