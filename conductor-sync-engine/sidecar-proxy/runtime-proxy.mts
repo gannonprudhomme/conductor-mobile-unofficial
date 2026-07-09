@@ -10,6 +10,8 @@ import type { Server as NetServer, Socket } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
+const BRIDGE_MARKER = "FAKE_CONDUCTOR_BRIDGE_MARKER;v0.1";
+
 type JsonObject = Record<string, unknown>;
 type JsonBodyCallback = (body: MessageInput) => void;
 
@@ -151,7 +153,7 @@ function createProxyServer(context: ProxyContext): NetServer {
 
 function listen(context: ProxyContext, proxyServer: NetServer, controlServer: HttpServer): void {
   proxyServer.listen(context.publicSocketPath, () => {
-    controlServer.listen(0, "127.0.0.1", () => {
+    controlServer.listen(49321, "127.0.0.1", () => {
       const control = controlServer.address();
       if (!control || typeof control === "string") {
         throw new Error("Expected HTTP control server to listen on a TCP address");

@@ -1,0 +1,21 @@
+#!/bin/zsh
+
+# FAKE_CONDUCTOR_BRIDGE_MARKER;v0.1
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+REAL="$DIR/conductor-runtime.real"
+NODE="$DIR/node"
+BRIDGE="$DIR/runtime-proxy.mjs"
+
+if [[ ! -x "$REAL" ]]; then
+  echo "Missing real Conductor runtime: $REAL" >&2
+  exit 127
+fi
+
+if [[ "${1:-}" == "sidecar" ]]; then
+  exec "$NODE" "$BRIDGE" "$REAL" "$@"
+else
+    exec "$REAL" "$@"
+fi

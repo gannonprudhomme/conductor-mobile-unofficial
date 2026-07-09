@@ -1,8 +1,9 @@
 use rusqlite::{Connection, OpenFlags, Result};
-use std::path::PathBuf;
-use crate::models::ConductorSession;
+use std::{path::PathBuf, time::Duration};
+use crate::{models::ConductorSession};
 
 mod models;
+mod bridge_installer;
 
 fn conductor_db_path() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
@@ -73,9 +74,20 @@ let rows = statement
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let bridge_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("Could not create bridge HTTP client");   
+
     tauri::Builder::default()
+        .manage(bridge_client)
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![list_sessions])
+        .invoke_handler(tauri::generate_handler![
+            list_sessions,
+            bridge_installer::install_bridge,
+            bridge_installer::uninstall_bridge,
+            bridge_installer::get_bridge_status,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
