@@ -11,3 +11,12 @@ run = "scripts/build.sh"
 description = "Run native iOS module tests"
 depends = ["gen"]
 run = "scripts/test.sh"
+
+[tasks.deploy]
+description = "Build and install the native iOS app to a destination"
+depends = ["gen"]
+usage = '''
+arg "<destination>" help="xcodebuild destination, such as id=<UDID>"
+flag "--attach" help="Stream simulator OS logs after installing"
+'''
+run = 'scripts/deploy.sh "${usage_destination}" ${usage_attach:+--attach}'
