@@ -16,6 +16,8 @@ The native iOS app lives here and is SwiftUI/TCA-first.
   XcodeGen wire them into the workspace. Do not assume `swift test` is the
   default runner for app modules, though it can be used deliberately for
   platform-independent foundation code.
+- Use XcodeBuildMCP to build, run, and visually inspect SwiftUI changes in the
+  simulator whenever possible.
 - Use XcodeGen as the source of truth for the app project. Edit
   `ios/project.yml`, then run `mise -C ios run gen`.
 - Keep `ios/ConductorMobile.xcworkspace` checked in. It includes the generated
@@ -32,6 +34,8 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Put feature state/actions/reducers/views in feature modules such as
   `ConductorWorkspaces`.
 - Use SwiftUI all the way down.
+- Use `@ScaledMetric` for manually sized SwiftUI images so image dimensions
+  scale with Dynamic Type.
 - When presenting runtime errors to users, use an alert title that states what
   failed in user terms, and put `error.localizedDescription` in the alert
   message/description.

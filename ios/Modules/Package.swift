@@ -19,6 +19,7 @@ let package = Package(
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/JakubMazur/lucide-icons-swift", exact: "1.23.0"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
         .package(url: "https://github.com/pointfreeco/swift-composable-architecture.git", exact: "1.25.5"),
         .package(url: "https://github.com/pointfreeco/swift-dependencies", from: "1.14.1"),
@@ -45,6 +46,7 @@ let package = Package(
             name: "ConductorWorkspaces",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
                 "ConductorDesign",
                 "ConductorData",

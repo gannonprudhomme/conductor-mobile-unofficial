@@ -1,6 +1,7 @@
 import ComposableArchitecture
 import ConductorData
 import Foundation
+import LucideIcons
 import SQLiteData
 import SwiftUI
 
@@ -94,6 +95,7 @@ public struct WorkspacesView: View {
         NavigationStack {
             List(store.workspaces) { workspace in
                 WorkspaceRow(workspace: workspace)
+                    .listRowSeparator(.hidden)
             }
             .listStyle(.plain)
             .overlay {
@@ -119,12 +121,18 @@ public struct WorkspacesView: View {
 
     private struct WorkspaceRow: View {
         let workspace: Workspace
+        @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
             Label {
                 Text(workspace.displayBranchName)
             } icon: {
-                Image(systemName: "tv")
+                Image(uiImage: Lucide.gitBranch)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: iconSize, height: iconSize)
+                    .foregroundStyle(.secondary)
             }
         }
     }
