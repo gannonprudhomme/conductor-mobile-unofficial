@@ -1,1 +1,57 @@
+# Package managers
 .pnpm-store/
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Expo
+.expo/
+web-build/
+*.tsbuildinfo
+/mobile/expo-env.d.ts
+/mobile/example/
+/mobile/ios/
+/mobile/android/
+
+# Native credentials and generated files
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# Metro
+.metro-health-check*
+
+# Tauri and Rust
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/schemas
+
+# Local env files
+.env*.local
+
+# Editor directories and files
+/desktop/.vscode/*
+!/desktop/.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
