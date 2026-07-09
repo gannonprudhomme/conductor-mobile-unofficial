@@ -1,15 +1,24 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AnimatedText } from "./AnimatedText";
 import "./ProxyMenu.css";
+
+function StatusTag({ title, enabled }: { title: string, enabled: boolean }) {
+  let additionalTags = enabled ? "border-success/40 bg-success/10 text-success" : "border-destructive/40 bg-destructive/10 text-destructive";
+
+  let className= "inline-flex items-center rounded-md px-2 py-0.5 text-xs border font-sans font-normal normal-case shadow-none motion-safe:transition-colors motion-safe:duration-[240ms] " + additionalTags;
+
+  return (
+    <div className={className}>
+      <AnimatedText title={title} animationKey={`${title}-${enabled}`} />
+    </div>
+  );
+}
 
 function ChipButton({ title, onClick }: { title: string, onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      // inline-flex items-center justify-center whitespace-nowrap ring-offset-background focus-visible:outline-none
-      // focus-visible:ring-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0
-      // !border-input bg-background font-450 h-8
-      // gap-2
       className="inline-flex items-center justify-center
                  px-3 py-3 h-8 text-sm border rounded-md
                  hover:bg-accent hover:text-accent-foreground
@@ -19,12 +28,12 @@ function ChipButton({ title, onClick }: { title: string, onClick: () => void }) 
                  bg-background
                  "
     >
-      {title}
+      <AnimatedText title={title} />
     </button>
   );
 }
 
-function MenuRow({ title, subtitle, children }: { title: ReactNode; subtitle?: string; children?: ReactNode }) {
+function MenuRow({ title, subtitle, children }: { title: ReactNode; subtitle?: ReactNode; children?: ReactNode }) {
   return (
     <div className="border-b pt-4 pb-4">
       <div className="flex items-center justify-between gap-3">
@@ -36,8 +45,6 @@ function MenuRow({ title, subtitle, children }: { title: ReactNode; subtitle?: s
 
         <div>
           {children}
-
-          {/* <button> Remove proxy </button> */}
         </div>
       </div>
     </div>
@@ -45,9 +52,9 @@ function MenuRow({ title, subtitle, children }: { title: ReactNode; subtitle?: s
 }
 
 export function ProxyMenu() {
-  const [isBridgeInstalledInApplications, setIsBridgeInstalledInApplications] = useState<Boolean>(false);
-  const [isBridgeInstalledInApplicationSupport, setIsBridgeInstalledInApplicationSupport] = useState<Boolean>(false);
-  const [isBridgeRunning, setIsBridgeRunning] = useState<Boolean>(false);
+  const [isBridgeInstalledInApplications, setIsBridgeInstalledInApplications] = useState<boolean>(false);
+  const [isBridgeInstalledInApplicationSupport, setIsBridgeInstalledInApplicationSupport] = useState<boolean>(false);
+  const [isBridgeRunning, setIsBridgeRunning] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   type BridgeStatus = {
@@ -112,43 +119,64 @@ export function ProxyMenu() {
         <MenuRow title="Installation" subtitle="Install the conductor sidecar proxy to enable">
           <div className="flex items-center gap-2">
             <ChipButton
-              title="Install proxy"
-              onClick={() => installBridge()}
+              title={isBridgeInstalledInApplications ? "Uninstall proxy" : "Install proxy"}
+              onClick={() => isBridgeInstalledInApplications ? uninstallBridge() : installBridge()}
             />
-
-            {isBridgeInstalledInApplications ? (
-              <ChipButton
-                title="Uninstall proxy"
-                onClick={() => uninstallBridge()}
-              />
-            ) : null}
           </div>
         </MenuRow>
 
         <MenuRow
           title={
             <>
-              Is bridge installed in{" "}
+              Bridge installed in{" "}
               <span className="font-mono">/Applications/...</span>
             </>
           }
+          subtitle={
+            <>
+              {/* This is where{" "}
+              <span className="font-mono">Install proxy </span>
+              installs into. */}
+
+              Conductor copies the binary at this location into its{" "}
+              <span className="font-mono">~/Library/Applications Support/...</span>
+              directory at launch.
+            </>
+          }
         >
-          {isBridgeInstalledInApplications ? "Yes" : "No"}
+          <StatusTag
+            title={isBridgeInstalledInApplications ? "Installed" : "Not installed"}
+            enabled={isBridgeInstalledInApplications}
+          />
         </MenuRow>
 
         <MenuRow
           title={
             <>
-              Is bridge installed in{" "}
+              Bridge installed in{" "}
               <span className="font-mono">~/Library/Applications Support/...</span>
             </>
           }
+          subtitle={
+            <>
+              The location of the binary that Conductor actually uses at runtime.
+              {/* If this is false and you've pressed{" "}
+              <span className="font-mono">Install proxy </span>
+              then restart Conductor. */}
+            </>
+          }
         >
-          {isBridgeInstalledInApplicationSupport ? "Yes" : "No"}
+          <StatusTag
+            title={isBridgeInstalledInApplicationSupport ? "Installed" : "Not installed"}
+            enabled={isBridgeInstalledInApplicationSupport}
+          />
         </MenuRow>
 
-        <MenuRow title="Is bridge running">
-          {isBridgeRunning ? "Yes" : "No"}
+        <MenuRow title="Bridge running" subtitle="">
+          <StatusTag
+            title={isBridgeRunning ? "Running" : "Not running"}
+            enabled={isBridgeRunning}
+          />
         </MenuRow>
 
         {errorMessage != null ? (
