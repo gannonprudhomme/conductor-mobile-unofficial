@@ -79,6 +79,36 @@ pub fn run() {
     tauri::Builder::default()
         .manage(bridge_client)
         .plugin(tauri_plugin_opener::init())
+        .menu(|handle| {
+            let toggle_devtools = tauri::menu::MenuItemBuilder::with_id(
+                "toggle-devtools",
+                "Toggle Dev Tools"
+            )
+            .accelerator("CmdOrCtrl+Shift+I")
+            .build(handle)?;
+
+            let view_menu = tauri::menu::SubmenuBuilder::new(handle, "View")
+                .item(&toggle_devtools)
+                .build()?;
+
+            let menu = tauri::menu::Menu::new(handle)?;
+            menu.append(&view_menu)?;
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            #[cfg(debug_assertions)]
+            if event.id() == "toggle-devtools" {
+                use tauri::Manager;
+
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_devtools_open() {
+                        window.close_devtools();
+                    } else {
+                        window.open_devtools();
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             bridge_installer::install_bridge,
