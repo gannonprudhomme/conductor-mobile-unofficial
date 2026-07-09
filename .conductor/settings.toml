@@ -1,16 +1,16 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
-[scripts.run.deploy_gannons_iphone_16_pro]
+[scripts.run.physical]
 available_in = ["local"]
 command = "mise -C ios run deploy -- id=00008140-000611C801F3001C --attach"
 icon = "smartphone"
 
-[scripts.run.deploy_iphone_17_ios_26_5]
+[scripts.run.iphone_17]
 available_in = ["local"]
 command = "mise -C ios run deploy -- id=22F507F3-FF8F-4909-BB21-ABDB8BB84AAA --attach"
 icon = "smartphone"
 
-[scripts.run.deploy_iphone_17_pro_ios_26_5]
+[scripts.run.iphone_17_pro]
 available_in = ["local"]
 command = "mise -C ios run deploy -- id=D8D4100B-BDAB-492D-8ABB-5E05DC8B345B --attach"
 icon = "smartphone"
