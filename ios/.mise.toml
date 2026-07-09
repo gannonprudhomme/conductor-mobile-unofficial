@@ -6,3 +6,8 @@ run = "scripts/gen.sh"
 description = "Build the native iOS app"
 depends = ["gen"]
 run = "scripts/build.sh"
+
+[tasks.test]
+description = "Run native iOS module tests"
+depends = ["gen"]
+run = "scripts/test.sh"

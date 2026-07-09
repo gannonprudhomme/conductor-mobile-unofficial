@@ -25,6 +25,10 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: ConductorMobile
+      - path: ConductorMobile/Fonts/Geist[wght].ttf
+        buildPhase: resources
+      - path: ConductorMobile/Fonts/GeistMono[wght].ttf
+        buildPhase: resources
     info:
       path: ConductorMobile/Info.plist
       properties:
@@ -69,3 +73,46 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile
         PRODUCT_NAME: $(TARGET_NAME)
         TARGETED_DEVICE_FAMILY: "1,2"
+  ConductorDataTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/Foundations/ConductorData/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorData
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorDataTests
+        PRODUCT_NAME: $(TARGET_NAME)
+  ConductorWorkspacesTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/ConductorWorkspaces/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorWorkspaces
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorWorkspacesTests
+        PRODUCT_NAME: $(TARGET_NAME)
+schemes:
+  ConductorDataTests:
+    build:
+      targets:
+        ConductorDataTests: test
+    test:
+      targets:
+        - ConductorDataTests
+  ConductorWorkspacesTests:
+    build:
+      targets:
+        ConductorWorkspacesTests: test
+    test:
+      targets:
+        - ConductorWorkspacesTests
