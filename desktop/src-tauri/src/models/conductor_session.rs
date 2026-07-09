@@ -21,6 +21,45 @@ pub struct ConductorSession {
 }
 
 impl ConductorSession {
+    pub fn load() -> Result<Vec<Self>, String> {
+        let connection = crate::open_conductor_db_readonly()?;
+
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT
+                    id,
+                    workspace_id,
+                    title,
+                    agent_type,
+                    created_at,
+                    updated_at,
+                    last_user_message_at,
+                    status,
+                    model,
+                    unread_count,
+                    freshly_compacted,
+                    context_token_count
+                FROM sessions
+                ORDER BY updated_at desc
+                limit 200
+                "#,
+            )
+            .map_err(|error| format!("Could not prepare sessions query: {error}"))?;
+
+        let rows = statement
+            .query_map([], Self::create_from_row)
+            .map_err(|error| format!("Could not query sessions: {error}"))?;
+
+        let mut sessions = Vec::new();
+
+        for row in rows {
+            sessions.push(row.map_err(|error| format!("Could not read session row: {error}"))?);
+        }
+
+        Ok(sessions)
+    }
+
     pub fn create_from_row(row: &Row<'_>) -> Result<Self> {
         Ok(Self {
             id: row.get("id")?,

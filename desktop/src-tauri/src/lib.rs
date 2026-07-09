@@ -1,4 +1,5 @@
-use crate::models::ConductorSession;
+use crate::models::{ConductorSession, ConductorWorkspace};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use rusqlite::{Connection, OpenFlags, Result};
 use std::{path::PathBuf, time::Duration};
 
@@ -16,7 +17,7 @@ fn conductor_db_path() -> Result<PathBuf, String> {
         .join("conductor.db"))
 }
 
-fn open_conductor_db_readonly() -> Result<Connection, String> {
+pub(crate) fn open_conductor_db_readonly() -> Result<Connection, String> {
     let db_path = conductor_db_path()?;
 
     let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -29,44 +30,38 @@ fn open_conductor_db_readonly() -> Result<Connection, String> {
     Ok(connection)
 }
 
-#[tauri::command]
-fn list_sessions() -> Result<Vec<ConductorSession>, String> {
-    let connection = open_conductor_db_readonly()?;
-
-    let mut statement = connection
-        .prepare(
-            r#"
-            SElECT
-                id,
-                workspace_id,
-                title,
-                agent_type,
-                created_at,
-                updated_at,
-                last_user_message_at,
-                status,
-                model,
-                unread_count,
-                freshly_compacted,
-                context_token_count
-            FROM sessions
-            ORDER BY updated_at desc
-            limit 200
-            "#,
-        )
-        .map_err(|error| format!("Could not prepare sessions query: {error}"))?;
-
-    let rows = statement
-        .query_map([], ConductorSession::create_from_row)
-        .map_err(|error| format!("Could not query sessions: {error}"))?;
-
-    let mut sessions = Vec::new();
-
-    for row in rows {
-        sessions.push(row.map_err(|error| format!("Could not read session row: {error}"))?);
+async fn get_sessions() -> impl IntoResponse {
+    match ConductorSession::load() {
+        Ok(sessions) => Ok(Json(sessions)),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
     }
+}
 
-    Ok(sessions)
+async fn get_workspaces() -> impl IntoResponse {
+    match ConductorWorkspace::load() {
+        Ok(workspaces) => Ok(Json(workspaces)),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+    }
+}
+
+fn start_mobile_api_server() {
+    tauri::async_runtime::spawn(async {
+        let app = Router::new()
+            .route("/sessions", get(get_sessions))
+            .route("/workspaces", get(get_workspaces));
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:3768").await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("Could not bind mobile API server: {error}");
+                return;
+            }
+        };
+
+        if let Err(error) = axum::serve(listener, app).await {
+            eprintln!("Mobile API server failed: {error}");
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -77,15 +72,17 @@ pub fn run() {
         .expect("Could not create bridge HTTP client");
 
     tauri::Builder::default()
+        .setup(|_app| {
+            start_mobile_api_server();
+            Ok(())
+        })
         .manage(bridge_client)
         .plugin(tauri_plugin_opener::init())
         .menu(|handle| {
-            let toggle_devtools = tauri::menu::MenuItemBuilder::with_id(
-                "toggle-devtools",
-                "Toggle Dev Tools"
-            )
-            .accelerator("CmdOrCtrl+Shift+I")
-            .build(handle)?;
+            let toggle_devtools =
+                tauri::menu::MenuItemBuilder::with_id("toggle-devtools", "Toggle Dev Tools")
+                    .accelerator("CmdOrCtrl+Shift+I")
+                    .build(handle)?;
 
             let view_menu = tauri::menu::SubmenuBuilder::new(handle, "View")
                 .item(&toggle_devtools)
@@ -110,7 +107,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            list_sessions,
             bridge_installer::install_bridge,
             bridge_installer::uninstall_bridge,
             bridge_installer::get_bridge_status,
