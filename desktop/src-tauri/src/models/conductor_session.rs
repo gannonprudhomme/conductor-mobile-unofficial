@@ -22,10 +22,22 @@ pub struct ConductorSession {
 
 impl ConductorSession {
     pub fn load() -> Result<Vec<Self>, String> {
+        Self::load_with_workspace_id(None)
+    }
+
+    pub fn load_for_workspace(workspace_id: &str) -> Result<Vec<Self>, String> {
+        Self::load_with_workspace_id(Some(workspace_id))
+    }
+
+    fn load_with_workspace_id(workspace_id: Option<&str>) -> Result<Vec<Self>, String> {
         let connection = crate::open_conductor_db_readonly()?;
+        let (filter, limit) = match workspace_id {
+            Some(_) => ("WHERE workspace_id = ?1", ""),
+            None => ("", "LIMIT 200"),
+        };
 
         let mut statement = connection
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT
                     id,
@@ -41,20 +53,29 @@ impl ConductorSession {
                     freshly_compacted,
                     context_token_count
                 FROM sessions
+                {filter}
                 ORDER BY updated_at desc
-                limit 200
-                "#,
-            )
+                {limit}
+                "#
+            ))
             .map_err(|error| format!("Could not prepare sessions query: {error}"))?;
 
-        let rows = statement
-            .query_map([], Self::create_from_row)
-            .map_err(|error| format!("Could not query sessions: {error}"))?;
+        let mut rows = match workspace_id {
+            Some(workspace_id) => statement.query([workspace_id]),
+            None => statement.query([]),
+        }
+        .map_err(|error| format!("Could not query sessions: {error}"))?;
 
         let mut sessions = Vec::new();
 
-        for row in rows {
-            sessions.push(row.map_err(|error| format!("Could not read session row: {error}"))?);
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("Could not read session row: {error}"))?
+        {
+            sessions.push(
+                Self::create_from_row(row)
+                    .map_err(|error| format!("Could not read session row: {error}"))?,
+            );
         }
 
         Ok(sessions)

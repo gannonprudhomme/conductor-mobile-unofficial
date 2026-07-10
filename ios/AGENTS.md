@@ -34,6 +34,13 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Put feature state/actions/reducers/views in feature modules such as
   `ConductorWorkspaces`.
 - Use SwiftUI all the way down.
+- Use the `ConductorDesign` theme for all colors and fonts: `.theme(_:)`
+  (`ThemeColorStyle`/`ThemeFontStyle`), e.g. `.foregroundStyle(.theme(.textPrimary))`,
+  `.background(.theme(.background))`, `.font(.theme(.body))`. Never use Apple's
+  platform colors (`.secondary`, `Color.gray`, `.primary`, etc.) or system fonts
+  (`.caption`, `.body`) directly in app UI.
+- All screens are dark mode only. We do not support light mode. Force dark mode in
+  previews with `.preferredColorScheme(.dark)`.
 - Use `@ScaledMetric` for manually sized SwiftUI images so image dimensions
   scale with Dynamic Type.
 - When presenting runtime errors to users, use an alert title that states what

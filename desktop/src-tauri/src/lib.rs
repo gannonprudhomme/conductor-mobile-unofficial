@@ -1,5 +1,5 @@
 use crate::models::{ConductorSession, ConductorWorkspace};
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use rusqlite::{Connection, OpenFlags, Result};
 use std::{path::PathBuf, time::Duration};
 
@@ -37,6 +37,13 @@ async fn get_sessions() -> impl IntoResponse {
     }
 }
 
+async fn get_workspace_sessions(Path(workspace_id): Path<String>) -> impl IntoResponse {
+    match ConductorSession::load_for_workspace(&workspace_id) {
+        Ok(sessions) => Ok(Json(sessions)),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+    }
+}
+
 async fn get_workspaces() -> impl IntoResponse {
     match ConductorWorkspace::load() {
         Ok(workspaces) => Ok(Json(workspaces)),
@@ -48,7 +55,11 @@ fn start_mobile_api_server() {
     tauri::async_runtime::spawn(async {
         let app = Router::new()
             .route("/sessions", get(get_sessions))
-            .route("/workspaces", get(get_workspaces));
+            .route("/workspaces", get(get_workspaces))
+            .route(
+                "/workspaces/{workspace_id}/sessions",
+                get(get_workspace_sessions),
+            );
 
         let listener = match tokio::net::TcpListener::bind("127.0.0.1:3768").await {
             Ok(listener) => listener,

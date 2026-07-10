@@ -11,7 +11,9 @@ fi
 
 TEST_SCHEMES=(
   ConductorDataTests
+  ConductorSessionsTests
   ConductorWorkspacesTests
+  ConductorMainTests
 )
 
 for scheme in "${TEST_SCHEMES[@]}"; do

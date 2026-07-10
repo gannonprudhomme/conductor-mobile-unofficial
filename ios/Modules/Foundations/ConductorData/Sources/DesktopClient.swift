@@ -4,6 +4,7 @@ import Foundation
 
 @DependencyClient
 public struct DesktopClient: Sendable {
+    public var fetchSessions: @Sendable (_ workspaceID: String) async throws -> [Session]
     public var fetchWorkspaces: @Sendable () async throws -> [Workspace]
 }
 
@@ -29,24 +30,44 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
 extension DesktopClient: DependencyKey {
     public static var liveValue: Self {
         Self(
+            fetchSessions: { workspaceID in
+                try await fetch(
+                    [Session].self,
+                    from: baseURL
+                        .appending(path: "workspaces")
+                        .appending(path: workspaceID)
+                        .appending(path: "sessions")
+                )
+            },
             fetchWorkspaces: {
-                let url = URL(string: "http://127.0.0.1:3768/workspaces")!
-                let (data, response) = try await URLSession.shared.data(from: url)
-
-                guard let response = response as? HTTPURLResponse
-                else { throw DesktopClientError.invalidResponse }
-
-                guard response.statusCode == 200
-                else {
-                    throw DesktopClientError.requestFailed(
-                        statusCode: response.statusCode,
-                        message: String(decoding: data, as: UTF8.self)
-                    )
-                }
-
-                return try JSONDecoder().decode([Workspace].self, from: data)
+                try await fetch(
+                    [Workspace].self,
+                    from: baseURL.appending(path: "workspaces")
+                )
             }
         )
+    }
+
+    private static let baseURL = URL(string: "http://127.0.0.1:3768")!
+
+    private static func fetch<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        from url: URL
+    ) async throws -> Value {
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        guard let response = response as? HTTPURLResponse
+        else { throw DesktopClientError.invalidResponse }
+
+        guard response.statusCode == 200
+        else {
+            throw DesktopClientError.requestFailed(
+                statusCode: response.statusCode,
+                message: String(decoding: data, as: UTF8.self)
+            )
+        }
+
+        return try JSONDecoder().decode(type, from: data)
     }
 }
 

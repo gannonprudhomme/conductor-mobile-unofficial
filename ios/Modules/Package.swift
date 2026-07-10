@@ -16,6 +16,7 @@ let package = Package(
         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
         .library(name: "ConductorData", targets: ["ConductorData"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
+        .library(name: "ConductorSessions", targets: ["ConductorSessions"]),
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
     ],
     dependencies: [
@@ -43,6 +44,18 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .target(
+            name: "ConductorSessions",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                .product(name: "SQLiteData", package: "sqlite-data"),
+                "ConductorDesign",
+                "ConductorData",
+            ],
+            path: "ConductorSessions/Sources",
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "ConductorWorkspaces",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
@@ -58,6 +71,7 @@ let package = Package(
             name: "ConductorMain",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                "ConductorSessions",
                 "ConductorWorkspaces",
             ],
             path: "ConductorMain/Sources",

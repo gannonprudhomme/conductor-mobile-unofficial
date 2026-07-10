@@ -60,6 +60,35 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Create sessions") { db in
+        try #sql(
+            """
+            CREATE TABLE "sessions" (
+              "id" TEXT PRIMARY KEY,
+              "workspace_id" TEXT NOT NULL,
+              "title" TEXT NOT NULL,
+              "agent_type" TEXT NOT NULL,
+              "created_at" TEXT NOT NULL,
+              "updated_at" TEXT NOT NULL,
+              "last_user_message_at" TEXT,
+              "status" TEXT NOT NULL,
+              "model" TEXT NOT NULL,
+              "unread_count" INTEGER NOT NULL DEFAULT 0,
+              "freshly_compacted" INTEGER NOT NULL DEFAULT 0,
+              "context_token_count" INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "sessions_workspace_id_updated_at"
+            ON "sessions" ("workspace_id", "updated_at" DESC);
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }

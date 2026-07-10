@@ -9,7 +9,11 @@ struct MigrationsTests {
         let workspaces = try database.read { db in
             try Workspace.fetchCount(db)
         }
+        let sessions = try database.read { db in
+            try Session.fetchCount(db)
+        }
 
         #expect(workspaces == 0)
+        #expect(sessions == 0)
     }
 }
