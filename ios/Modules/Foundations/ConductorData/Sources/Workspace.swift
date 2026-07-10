@@ -100,9 +100,25 @@ extension Workspace {
 
 extension Workspace {
     public var displayBranchName: String {
-        [branch, placeholderBranchName, workspaceName, directoryName]
-            .compactMap(\.self)
-            .first { !$0.isEmpty } ?? "Untitled branch"
+        let name = [branch, placeholderBranchName, workspaceName, directoryName]
+            .compactMap { $0 }
+            .first(where: { !$0.isEmpty })
+
+        guard let name
+        else {
+            return "Untitled branch"
+        }
+
+        let words = name.split { character in
+            ["-", "_"].contains(character) || character.isWhitespace
+        }
+        let sentence = words.joined(separator: " ").lowercased()
+
+        guard let firstCharacter = sentence.first else {
+            return sentence
+        }
+
+        return firstCharacter.uppercased() + sentence.dropFirst()
     }
 }
 

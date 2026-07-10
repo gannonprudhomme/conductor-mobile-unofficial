@@ -2,33 +2,9 @@ import ConductorData
 import Foundation
 import Testing
 
-struct ConductorDataTests {
-    @Test
-    func testDesktopClientErrorDescriptions() {
-        #expect(
-            DesktopClientError.requestFailed(statusCode: 500, message: "boom").localizedDescription
-                == "The desktop service returned HTTP 500: boom"
-        )
-
-        #expect(
-            DesktopClientError.requestFailed(statusCode: 404, message: "").localizedDescription
-                == "The desktop service returned HTTP 404."
-        )
-    }
-
-    @Test
-    func testMigrationsCreateReadableTables() throws {
-        let database = try appDatabase()
-
-        let workspaces = try database.read { db in
-            try Workspace.fetchCount(db)
-        }
-
-        #expect(workspaces == 0)
-    }
-
-    @Test
-    func testWorkspaceStateDecodingKeepsKnownAndUnknownValues() throws {
+struct WorkspaceTests {
+    @Test("Workspace state decoding keeps known and unknown values")
+    func stateDecodingKeepsKnownAndUnknownValues() throws {
         let archived = try JSONDecoder().decode(
             Workspace.self,
             from: Data(
@@ -60,5 +36,23 @@ struct ConductorDataTests {
         )
 
         #expect(future.state?.rawValue == "waiting_on_moonlight")
+    }
+
+    @Test("Workspace display branch names use Conductor sentence case")
+    func displayBranchNameFormatsConductorNames() {
+        let workspace = Workspace.preview(branch: "foo-baz_qux")
+
+        #expect(workspace.displayBranchName == "Foo baz qux")
+    }
+
+    @Test("Workspace display branch names use the first available name")
+    func displayBranchNameFallsBackThroughAvailableNames() {
+        let workspace = Workspace.preview(
+            directoryName: "also-unused",
+            placeholderBranchName: "stuttgart-v1",
+            workspaceName: "unused-name"
+        )
+
+        #expect(workspace.displayBranchName == "Stuttgart v1")
     }
 }
