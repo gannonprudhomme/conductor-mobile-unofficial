@@ -11,6 +11,7 @@ public struct SessionsList: Sendable {
     @ObservableState
     public struct State: Equatable {
         @Presents public var alert: AlertState<Action.Alert>?
+        public var hasLoadedSessions = false
         public let workspace: Workspace
 
         @FetchAll(Session.none)
@@ -30,6 +31,7 @@ public struct SessionsList: Sendable {
     public enum Action {
         case alert(PresentationAction<Alert>)
         case loadSessionsFailed(String)
+        case loadSessionsSucceeded
         case refresh
         case task
 
@@ -51,11 +53,16 @@ public struct SessionsList: Sendable {
                 state.alert = .failedToLoadSessions(message: message)
                 return .none
 
+            case .loadSessionsSucceeded:
+                state.hasLoadedSessions = true
+                return .none
+
             case .refresh, .task:
                 let workspaceID = state.workspace.id
                 return .run { send in
                     do {
                         try await loadSessions(workspaceID: workspaceID)
+                        await send(.loadSessionsSucceeded)
                     } catch {
                         await send(.loadSessionsFailed(error.localizedDescription))
                     }
@@ -109,11 +116,12 @@ public struct SessionsListView: View {
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .overlay {
-            if store.sessions.isEmpty {
+            // Only display the no sessions text when we're 100% sure there aren't sessions (aka we've fetched)
+            if store.hasLoadedSessions && store.sessions.isEmpty {
                 ContentUnavailableView(
-                    "No Sessions",
+                    "No sessions",
                     systemImage: "bubble.left.and.bubble.right",
-                    description: Text("This workspace has no sessions.")
+                    description: Text("This workspace has no sessions. Is this not impossible?")
                 )
                 .foregroundStyle(.theme(.textPrimary))
                 .font(.theme(.body))

@@ -6,6 +6,29 @@ import Testing
 
 @MainActor
 struct SessionsListTests {
+    @Test("Successful initial load reveals the empty state")
+    func successfulInitialLoad() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let workspace = try makeWorkspace()
+            let store = TestStore(initialState: SessionsList.State(workspace: workspace)) {
+                SessionsList()
+            } withDependencies: {
+                $0.desktopClient.fetchSessions = { workspaceID in
+                    #expect(workspaceID == workspace.id)
+                    return []
+                }
+            }
+
+            await store.send(.task)
+
+            await store.receive(\.loadSessionsSucceeded) {
+                $0.hasLoadedSessions = true
+            }
+        }
+    }
+
     @Test("When refresh fails to load sessions, an alert is presented")
     func refreshFailsToLoadSessions() async throws {
         try await withDependencies {
