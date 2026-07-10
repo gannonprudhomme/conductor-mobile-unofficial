@@ -82,7 +82,7 @@ fn start_mobile_api_server() {
                 get(get_workspace_session_messages),
             );
 
-        let listener = match tokio::net::TcpListener::bind("127.0.0.1:3768").await {
+        let listener = match tokio::net::TcpListener::bind("0.0.0.0:3768").await {
             Ok(listener) => listener,
             Err(error) => {
                 eprintln!("Could not bind mobile API server: {error}");
