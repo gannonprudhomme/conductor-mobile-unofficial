@@ -14,6 +14,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ConductorFoundation", targets: ["ConductorFoundation"]),
+        .library(name: "ConductorChat", targets: ["ConductorChat"]),
         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
         .library(name: "ConductorData", targets: ["ConductorData"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
@@ -33,6 +34,17 @@ let package = Package(
         .target(
             name: "ConductorFoundation",
             path: "Foundations/ConductorFoundation/Sources",
+            swiftSettings: swiftSettings
+        ),
+        .target(
+            name: "ConductorChat",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "SQLiteData", package: "sqlite-data"),
+                "ConductorData",
+                "ConductorDesign",
+            ],
+            path: "ConductorChat/Sources",
             swiftSettings: swiftSettings
         ),
         .target(
@@ -81,6 +93,7 @@ let package = Package(
             name: "ConductorMain",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                "ConductorChat",
                 "ConductorSessions",
                 "ConductorWorkspaces",
             ],

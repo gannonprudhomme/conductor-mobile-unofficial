@@ -4,6 +4,7 @@ import Foundation
 
 @DependencyClient
 public struct DesktopClient: Sendable {
+    public var fetchMessages: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> [Message]
     public var fetchSessions: @Sendable (_ workspaceID: String) async throws -> [Session]
     public var fetchWorkspaces: @Sendable () async throws -> [Workspace]
     public var fetchRepositories: @Sendable () async throws -> [Repository]
@@ -31,6 +32,14 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
 extension DesktopClient: DependencyKey {
     public static var liveValue: Self {
         Self(
+            fetchMessages: { workspaceID, sessionID in
+                try await fetch(
+                    [Message].self,
+                    from: URL(
+                        string: "\(baseURL)/workspaces/\(workspaceID)/sessions/\(sessionID)/messages"
+                    )!
+                )
+            },
             fetchSessions: { workspaceID in
                 try await fetch(
                     [Session].self,

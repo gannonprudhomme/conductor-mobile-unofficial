@@ -124,6 +124,38 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Create session messages") { db in
+        try #sql(
+            """
+            CREATE TABLE "session_messages" (
+              "id" TEXT PRIMARY KEY,
+              "session_id" TEXT,
+              "role" TEXT,
+              "content" TEXT,
+              "created_at" TEXT NOT NULL DEFAULT (datetime('now')),
+              "sent_at" TEXT,
+              "full_message" TEXT,
+              "cancelled_at" TEXT,
+              "model" TEXT,
+              "sdk_message_id" TEXT,
+              "last_assistant_message_id" TEXT,
+              "turn_id" TEXT,
+              "is_resumable_message" INTEGER,
+              "queue_order" INTEGER,
+              "sender_id" TEXT
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "session_messages_session_id_created_at"
+            ON "session_messages" ("session_id", "created_at");
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }

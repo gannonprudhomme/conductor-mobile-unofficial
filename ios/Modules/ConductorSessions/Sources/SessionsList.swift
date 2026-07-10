@@ -33,6 +33,7 @@ public struct SessionsList: Sendable {
         case loadSessionsFailed(String)
         case loadSessionsSucceeded
         case refresh
+        case sessionTapped(Session)
         case task
 
         public enum Alert: Equatable { }
@@ -46,7 +47,17 @@ public struct SessionsList: Sendable {
     public var body: some ReducerOf<Self> {
         Reduce { state, action in
             switch action {
-            case .alert:
+            case .task, .refresh:
+                return .run { [workspaceID = state.workspace.id] send in
+                    do {
+                        try await loadSessions(workspaceID: workspaceID)
+                        await send(.loadSessionsSucceeded)
+                    } catch {
+                        await send(.loadSessionsFailed(error.localizedDescription))
+                    }
+                }
+
+            case .alert, .sessionTapped:
                 return .none
 
             case let .loadSessionsFailed(message):
@@ -56,17 +67,6 @@ public struct SessionsList: Sendable {
             case .loadSessionsSucceeded:
                 state.hasLoadedSessions = true
                 return .none
-
-            case .refresh, .task:
-                let workspaceID = state.workspace.id
-                return .run { send in
-                    do {
-                        try await loadSessions(workspaceID: workspaceID)
-                        await send(.loadSessionsSucceeded)
-                    } catch {
-                        await send(.loadSessionsFailed(error.localizedDescription))
-                    }
-                }
             }
         }
         .ifLet(\.$alert, action: \.alert)
@@ -108,9 +108,11 @@ public struct SessionsListView: View {
 
     public var body: some View {
         List(store.sessions) { session in
-            SessionRow(session: session)
-                .listRowBackground(Color.theme(.background))
-                .listRowSeparator(.hidden)
+            SessionRow(session: session) {
+                store.send(.sessionTapped(session))
+            }
+            .listRowBackground(Color.theme(.background))
+            .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
@@ -140,27 +142,32 @@ public struct SessionsListView: View {
 
     private struct SessionRow: View {
         let session: Session
+        let action: () -> Void
         @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
-            Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(session.displayTitle)
-                        .font(.theme(.body))
-                        .foregroundStyle(.theme(.textPrimary))
-                    Text(session.debugSubtitle)
-                        .font(.theme(.footnote))
+            Button(action: action) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(session.displayTitle)
+                            .font(.theme(.body))
+                            .foregroundStyle(.theme(.textPrimary))
+                        Text(session.debugSubtitle)
+                            .font(.theme(.footnote))
+                            .foregroundStyle(.theme(.textSecondary))
+                            .lineLimit(1)
+                    }
+                } icon: {
+                    Image(uiImage: Lucide.messageSquare)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: iconSize, height: iconSize)
                         .foregroundStyle(.theme(.textSecondary))
-                        .lineLimit(1)
                 }
-            } icon: {
-                Image(uiImage: Lucide.messageSquare)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: iconSize, height: iconSize)
-                    .foregroundStyle(.theme(.textSecondary))
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         }
     }
 }

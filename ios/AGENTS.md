@@ -53,6 +53,12 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Use the Composable Architecture for feature state/actions/reducers.
 - Use modern TCA: `@Reducer`, `@ObservableState`, `StoreOf`, scoped stores, and
   no legacy `ViewStore`/`WithViewStore`.
+- Handle `.task` first in reducer action switches.
+- Capture feature state needed by an effect directly in the `.run` capture
+  list, e.g. `.run { [id = state.id] send in ... }`.
+- When a feature has multiple mutually exclusive presentations, such as an
+  alert and a sheet, model them with one `@Presents var destination` and a
+  nested `@Reducer enum Destination`.
 - Use Point-Free Dependencies for controllable dependencies and previews.
 - Use Swift Navigation helpers for navigation and presentation once flows exist.
 - Use SQLiteData and StructuredQueries-style schema/query APIs for persistence.

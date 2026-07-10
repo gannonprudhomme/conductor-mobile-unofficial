@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import ConductorChat
 import ConductorSessions
 import ConductorWorkspaces
 import SwiftUI
@@ -7,6 +8,7 @@ import SwiftUI
 public struct Main {
     @Reducer
     public enum Path {
+        case chat(Chat)
         case sessions(SessionsList)
     }
 
@@ -37,6 +39,10 @@ public struct Main {
                 state.path.append(.sessions(SessionsList.State(workspace: workspace)))
                 return .none
 
+            case let .path(.element(id: _, action: .sessions(.sessionTapped(session)))):
+                state.path.append(.chat(Chat.State(session: session)))
+                return .none
+
             case .path, .workspaces:
                 return .none
             }
@@ -61,6 +67,9 @@ public struct MainView: View {
             )
         } destination: { store in
             switch store.case {
+            case let .chat(store):
+                ChatView(store: store)
+
             case let .sessions(store):
                 SessionsListView(store: store)
             }

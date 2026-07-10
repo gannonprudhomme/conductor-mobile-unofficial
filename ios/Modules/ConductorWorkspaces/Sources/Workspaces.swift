@@ -58,6 +58,15 @@ public struct Workspaces: Sendable {
     public var body: some ReducerOf<Self> {
         Reduce { state, action in
             switch action {
+            case .task, .refresh:
+                return .run { send in
+                    do {
+                        try await loadWorkspaces()
+                    } catch {
+                        await send(.loadWorkspacesFailed(error.localizedDescription))
+                    }
+                }
+
             case .alert, .workspaceTapped:
                 return .none
 
@@ -68,15 +77,6 @@ public struct Workspaces: Sendable {
             case let .repositoryFilterButtonTapped(repositoryID):
                 state.$selectedRepositoryID.withLock { $0 = repositoryID }
                 return reloadWorkspaces(state)
-
-            case .task, .refresh:
-                return .run { send in
-                    do {
-                        try await loadWorkspaces()
-                    } catch {
-                        await send(.loadWorkspacesFailed(error.localizedDescription))
-                    }
-                }
 
             case let .sortButtonTapped(sort):
                 state.$sort.withLock { $0 = sort }

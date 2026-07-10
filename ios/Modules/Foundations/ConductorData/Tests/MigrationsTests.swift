@@ -15,9 +15,13 @@ struct MigrationsTests {
         let repositories = try database.read { db in
             try Repository.fetchCount(db)
         }
+        let messages = try database.read { db in
+            try Message.fetchCount(db)
+        }
 
         #expect(workspaces == 0)
         #expect(sessions == 0)
         #expect(repositories == 0)
+        #expect(messages == 0)
     }
 }
