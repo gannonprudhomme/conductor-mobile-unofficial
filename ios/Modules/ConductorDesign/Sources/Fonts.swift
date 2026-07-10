@@ -4,6 +4,7 @@ import SwiftUI
 public enum ThemeFontStyle {
     case body
     case footnote
+    case inlineToolbarTitle
     case title
 
     var size: CGFloat {
@@ -12,6 +13,8 @@ public enum ThemeFontStyle {
             16
         case .footnote:
             13
+        case .inlineToolbarTitle:
+            16
         case .title:
             28
         }
@@ -23,6 +26,8 @@ public enum ThemeFontStyle {
             .body
         case .footnote:
             .footnote
+        case .inlineToolbarTitle:
+            .body
         case .title:
             .title
         }

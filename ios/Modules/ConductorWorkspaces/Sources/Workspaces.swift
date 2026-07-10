@@ -1,5 +1,6 @@
 import ComposableArchitecture
 import ConductorData
+import ConductorDesign
 import Foundation
 import LucideIcons
 import SQLiteData
@@ -98,6 +99,8 @@ public struct WorkspacesView: View {
                     .listRowSeparator(.hidden)
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(.theme(.background))
             .overlay {
                 if store.workspaces.isEmpty {
                     ContentUnavailableView(
@@ -105,10 +108,11 @@ public struct WorkspacesView: View {
                         systemImage: "rectangle.stack",
                         description: Text("Pair with Conductor on your Mac to see workspaces here.")
                     )
+                    .foregroundStyle(.theme(.textPrimary))
+                    .font(.theme(.body))
                 }
             }
-            .navigationTitle("Workspaces")
-            .navigationBarTitleDisplayMode(.inline)
+            .themedNavigationTitle("Workspaces")
             .refreshable {
                 await store.send(.refresh).finish()
             }
@@ -132,8 +136,11 @@ public struct WorkspacesView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: iconSize, height: iconSize)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.theme(.textSecondary))
             }
+            .foregroundStyle(.theme(.textPrimary))
+            .font(.theme(.body))
+            .listRowBackground(Color.theme(.background))
         }
     }
 }
