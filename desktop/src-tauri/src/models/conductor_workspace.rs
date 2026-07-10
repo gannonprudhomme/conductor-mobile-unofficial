@@ -66,7 +66,13 @@ impl ConductorWorkspace {
                     branch,
                     created_at,
                     updated_at,
-                    unread,
+                    EXISTS (
+                        SELECT 1
+                        FROM sessions
+                        WHERE sessions.workspace_id = workspaces.id
+                          AND sessions.unread_count > 0
+                          AND COALESCE(sessions.is_hidden, 0) = 0
+                    ) AS unread,
                     placeholder_branch_name,
                     state,
                     initialization_parent_branch,

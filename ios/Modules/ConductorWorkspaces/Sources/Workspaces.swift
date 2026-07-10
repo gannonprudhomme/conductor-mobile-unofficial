@@ -186,10 +186,14 @@ public struct WorkspacesView: View {
 
         var body: some View {
             Button(action: action) {
-                HStack {
+                HStack(spacing: 0) {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.workspace.displayBranchName)
+                                .foregroundStyle(
+                                    .theme(isUnread ? .textPrimary : .textSecondary)
+                                )
+                                .fontWeight(isUnread ? .semibold : .regular)
                             Text(item.repositoryDisplayName)
                                 .font(.theme(.footnote))
                                 .foregroundStyle(.theme(.textSecondary))
@@ -208,7 +212,7 @@ public struct WorkspacesView: View {
                                 .foregroundStyle(.theme(.textSecondary))
                         }
                     }
-                    Spacer()
+                    Spacer(minLength: 16)
                     Image(uiImage: Lucide.chevronRight)
                         .renderingMode(.template)
                         .resizable()
@@ -221,6 +225,10 @@ public struct WorkspacesView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+        }
+
+        private var isUnread: Bool {
+            (item.workspace.unread ?? 0) > 0
         }
     }
 
