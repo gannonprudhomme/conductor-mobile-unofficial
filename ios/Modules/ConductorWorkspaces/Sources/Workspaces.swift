@@ -195,12 +195,18 @@ public struct WorkspacesView: View {
                                 .foregroundStyle(.theme(.textSecondary))
                         }
                     } icon: {
-                        Image(uiImage: Lucide.gitBranch)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: iconSize, height: iconSize)
-                            .foregroundStyle(.theme(.textSecondary))
+                        if item.workspace.isWorking {
+                            ProgressView()
+                                .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
+                                .frame(width: iconSize, height: iconSize)
+                        } else {
+                            Image(uiImage: Lucide.gitBranch)
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: iconSize, height: iconSize)
+                                .foregroundStyle(.theme(.textSecondary))
+                        }
                     }
                     Spacer()
                     Image(uiImage: Lucide.chevronRight)

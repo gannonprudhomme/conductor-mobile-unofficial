@@ -42,7 +42,8 @@ extension Workspace {
         userSetWorkspaceName: Int? = nil,
         watcherUserIDs: String? = nil,
         workspaceName: String? = nil,
-        workspacePath: String? = nil
+        workspacePath: String? = nil,
+        isWorking: Bool = false
     ) -> Self {
         Self(
             id: id,
@@ -83,7 +84,8 @@ extension Workspace {
             userSetWorkspaceName: userSetWorkspaceName,
             watcherUserIDs: watcherUserIDs,
             workspaceName: workspaceName,
-            workspacePath: workspacePath
+            workspacePath: workspacePath,
+            isWorking: isWorking
         )
     }
 }

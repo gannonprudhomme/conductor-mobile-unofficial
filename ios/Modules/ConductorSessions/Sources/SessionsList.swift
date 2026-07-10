@@ -158,12 +158,18 @@ public struct SessionsListView: View {
                             .lineLimit(1)
                     }
                 } icon: {
-                    Image(uiImage: Lucide.messageSquare)
-                        .renderingMode(.template)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: iconSize, height: iconSize)
-                        .foregroundStyle(.theme(.textSecondary))
+                    if session.status == .working {
+                        ProgressView()
+                            .progressViewStyle(.conductor(phaseSeed: session.id))
+                            .frame(width: iconSize, height: iconSize)
+                    } else {
+                        Image(uiImage: Lucide.messageSquare)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: iconSize, height: iconSize)
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
                 }
                 .contentShape(Rectangle())
             }
@@ -183,7 +189,8 @@ public struct SessionsListView: View {
             {
               "id": "workspace-1",
               "created_at": "2026-07-09 00:00:00",
-              "updated_at": "2026-07-09 00:00:00"
+              "updated_at": "2026-07-09 00:00:00",
+              "is_working": false
             }
             """.utf8
         )

@@ -84,7 +84,8 @@ private func makeWorkspace() throws -> Workspace {
             {
               "id": "workspace-1",
               "created_at": "2026-07-09 00:00:00",
-              "updated_at": "2026-07-09 00:00:00"
+              "updated_at": "2026-07-09 00:00:00",
+              "is_working": false
             }
             """.utf8
         )

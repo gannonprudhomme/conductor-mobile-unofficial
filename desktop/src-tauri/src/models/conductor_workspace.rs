@@ -22,6 +22,7 @@ pub struct ConductorWorkspace {
     initialization_files_copied: Option<i64>,
     initialization_log_path: Option<String>,
     initialization_parent_branch: Option<String>,
+    is_working: bool,
     intended_target_branch: Option<String>,
     linked_directory_paths: Option<String>,
     linked_workspace_ids: Option<String>,
@@ -96,7 +97,13 @@ impl ConductorWorkspace {
                     creator_client_id,
                     organization_id,
                     assignee_user_id,
-                    watcher_user_ids
+                    watcher_user_ids,
+                    EXISTS (
+                        SELECT 1
+                        FROM sessions
+                        WHERE sessions.workspace_id = workspaces.id
+                          AND sessions.status = 'working'
+                    ) AS is_working
                 FROM workspaces
                 ORDER BY updated_at desc
                 limit 200
@@ -136,6 +143,7 @@ impl ConductorWorkspace {
             initialization_files_copied: row.get("initialization_files_copied")?,
             initialization_log_path: row.get("initialization_log_path")?,
             initialization_parent_branch: row.get("initialization_parent_branch")?,
+            is_working: row.get("is_working")?,
             intended_target_branch: row.get("intended_target_branch")?,
             linked_directory_paths: row.get("linked_directory_paths")?,
             linked_workspace_ids: row.get("linked_workspace_ids")?,

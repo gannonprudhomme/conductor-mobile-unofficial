@@ -80,6 +80,8 @@ public struct Workspace: Codable, Hashable, Identifiable, Sendable {
     public var workspaceName: String?
     @Column("workspace_path")
     public var workspacePath: String?
+    @Column("CUSTOM_is_working")
+    public var isWorking = false
 }
 
 extension Workspace {
@@ -141,6 +143,7 @@ extension Workspace {
         case initializationFilesCopied = "initialization_files_copied"
         case initializationLogPath = "initialization_log_path"
         case initializationParentBranch = "initialization_parent_branch"
+        case isWorking = "is_working"
         case intendedTargetBranch = "intended_target_branch"
         case linkedDirectoryPaths = "linked_directory_paths"
         case linkedWorkspaceIDs = "linked_workspace_ids"

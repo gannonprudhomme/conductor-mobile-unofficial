@@ -42,7 +42,8 @@ struct WorkspaceQueriesTests {
                         id: "w1",
                         createdAt: first,
                         repositoryID: "repo-1",
-                        updatedAt: third
+                        updatedAt: third,
+                        isWorking: true
                     )
                 }
                 .execute(db)
@@ -89,6 +90,7 @@ struct WorkspaceQueriesTests {
         }
 
         expectNoDifference(filteredByRepository.map(\.workspace.id), ["w1", "w2"])
+        expectNoDifference(filteredByRepository.first?.workspace.isWorking, true)
         expectNoDifference(filteredByRepository.first?.repository?.name, "TrialSongs")
         expectNoDifference(sortedByCreation.map(\.workspace.id), ["w3", "w2", "w1"])
     }

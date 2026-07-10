@@ -3,6 +3,26 @@ import Foundation
 import Testing
 
 struct WorkspaceTests {
+    @Test("Workspace activity decodes with the workspace")
+    func activityDecoding() throws {
+        let workspace = try JSONDecoder.conductor.decode(
+            Workspace.self,
+            from: Data(
+                """
+                {
+                  "id": "workspace-1",
+                  "created_at": "2026-07-09 00:00:00",
+                  "updated_at": "2026-07-09 00:00:00",
+                  "is_working": true
+                }
+                """.utf8
+            )
+        )
+
+        #expect(workspace.id == "workspace-1")
+        #expect(workspace.isWorking)
+    }
+
     @Test("Workspace state decoding keeps known and unknown values")
     func stateDecodingKeepsKnownAndUnknownValues() throws {
         let archived = try JSONDecoder.conductor.decode(
@@ -13,6 +33,7 @@ struct WorkspaceTests {
                   "id": "workspace-1",
                   "created_at": "2026-07-09 00:00:00",
                   "updated_at": "2026-07-09 00:00:00",
+                  "is_working": false,
                   "state": "archived"
                 }
                 """.utf8
@@ -29,6 +50,7 @@ struct WorkspaceTests {
                   "id": "workspace-2",
                   "created_at": "2026-07-09 00:00:00",
                   "updated_at": "2026-07-09 00:00:00",
+                  "is_working": false,
                   "state": "waiting_on_moonlight"
                 }
                 """.utf8

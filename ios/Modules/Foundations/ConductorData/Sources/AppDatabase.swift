@@ -156,6 +156,16 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Add custom working state to workspaces") { db in
+        try #sql(
+            """
+            ALTER TABLE "workspaces"
+            ADD COLUMN "CUSTOM_is_working" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 0;
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }
