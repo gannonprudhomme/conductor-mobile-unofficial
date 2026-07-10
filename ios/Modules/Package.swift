@@ -52,6 +52,8 @@ let package = Package(
             name: "ConductorDesign",
             dependencies: [
                 .product(name: "Lottie", package: "lottie-spm"),
+                .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                "ConductorData",
             ],
             path: "ConductorDesign/Sources",
             resources: [

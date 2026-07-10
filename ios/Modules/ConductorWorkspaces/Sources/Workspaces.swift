@@ -141,7 +141,10 @@ public struct WorkspacesView: View {
 
     public var body: some View {
         List(store.workspaces) { item in
-            WorkspaceRow(item: item) {
+            WorkspaceRow(
+                item: item,
+                showsRepositoryIcon: store.selectedRepositoryID == nil
+            ) {
                 store.send(.workspaceTapped(item.workspace))
             }
             .listRowBackground(Color.theme(.background))
@@ -180,38 +183,37 @@ public struct WorkspacesView: View {
 
     private struct WorkspaceRow: View {
         let item: WorkspaceWithRepository
+        let showsRepositoryIcon: Bool
         let action: () -> Void
         @ScaledMetric(relativeTo: .body) private var chevronSize = 16
         @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
             Button(action: action) {
-                HStack(spacing: 0) {
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.workspace.displayBranchName)
-                                .foregroundStyle(
-                                    .theme(isUnread ? .textPrimary : .textSecondary)
-                                )
-                                .fontWeight(isUnread ? .semibold : .regular)
-                            Text(item.repositoryDisplayName)
-                                .font(.theme(.footnote))
-                                .foregroundStyle(.theme(.textSecondary))
-                        }
-                    } icon: {
-                        if item.workspace.isWorking {
-                            ProgressView()
-                                .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
-                                .frame(width: iconSize, height: iconSize)
+                HStack(spacing: 12) {
+                    if showsRepositoryIcon {
+                        if let repository = item.repository {
+                            RepositoryIcon(repository: repository, size: iconSize)
                         } else {
-                            Image(uiImage: Lucide.gitBranch)
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: iconSize, height: iconSize)
-                                .foregroundStyle(.theme(.textSecondary))
+                            RepositoryIcon(iconName: nil, avatarURL: nil, size: iconSize)
                         }
                     }
+                    if item.workspace.isWorking {
+                        ProgressView()
+                            .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
+                            .frame(width: iconSize, height: iconSize)
+                    } else {
+                        Image(uiImage: Lucide.gitBranch)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: iconSize, height: iconSize)
+                            .foregroundStyle(.theme(.textSecondary))
+                            .accessibilityHidden(true)
+                    }
+                    Text(item.workspace.displayBranchName)
+                        .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
+                        .fontWeight(isUnread ? .semibold : .regular)
                     Spacer(minLength: 16)
                     Image(uiImage: Lucide.chevronRight)
                         .renderingMode(.template)

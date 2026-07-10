@@ -31,7 +31,7 @@ struct RepositoryTests {
                   "custom_prompt_rename_branch": null,
                   "conductor_config": null,
                   "custom_prompt_general": null,
-                  "icon": null,
+                  "icon": "monitor",
                   "hidden": 0,
                   "custom_prompt_fix_errors": null,
                   "custom_prompt_resolve_merge_conflicts": null,
@@ -49,6 +49,31 @@ struct RepositoryTests {
         #expect(repository.runScriptMode == "concurrent")
         #expect(repository.storageVersion == 3)
         #expect(repository.hidden == 0)
+        #expect(repository.icon == "monitor")
+    }
+
+    @Test("Repository derives GitHub owner avatars from common remote URL formats")
+    func githubOwnerAvatarURL() {
+        let remoteURLs = [
+            "https://github.com/acme/conductor-mobile.git",
+            "git@github.com:acme/conductor-mobile.git",
+            "ssh://git@github.com/acme/conductor-mobile.git",
+            "https://gitlab.com/acme/conductor-mobile.git",
+            nil,
+        ]
+
+        expectNoDifference(
+            remoteURLs.map {
+                Repository.preview(remoteURL: $0).githubOwnerAvatarURL?.absoluteString
+            },
+            [
+                "https://github.com/acme.png?size=128",
+                "https://github.com/acme.png?size=128",
+                "https://github.com/acme.png?size=128",
+                nil,
+                nil,
+            ]
+        )
     }
 
     @Test("All repositories are stably sorted by name")

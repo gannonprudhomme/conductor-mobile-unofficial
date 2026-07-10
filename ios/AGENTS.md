@@ -34,6 +34,11 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Put feature state/actions/reducers/views in feature modules such as
   `ConductorWorkspaces`.
 - Use SwiftUI all the way down.
+- Keep the first `if`/`guard` condition on the same line as the keyword and the
+  opening brace on the same line as the final condition. Do not put a bare
+  `if`/`guard` or opening brace on its own line.
+- Prefer `if` and `switch` expressions when their branches select a value, such
+  as `let owner = if ...`, instead of assigning to the value in each branch.
 - Use the `ConductorDesign` theme for all colors and fonts: `.theme(_:)`
   (`ThemeColorStyle`/`ThemeFontStyle`), e.g. `.foregroundStyle(.theme(.textPrimary))`,
   `.background(.theme(.background))`, `.font(.theme(.body))`. Never use Apple's
