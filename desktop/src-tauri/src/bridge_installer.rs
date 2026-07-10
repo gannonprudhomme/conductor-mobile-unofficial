@@ -76,21 +76,29 @@ pub fn install_bridge() -> Result<(), String> {
         return Err("There is no conductor-runtime file!".to_string());
     }
 
-    // If the `conductor-runtime` IS our bridge then we don't want to copt it
-    // thus if it's the original one move it from conductor-runtime -> conductor-runtime.real
+    // Only back up Conductor's original runtime, never our wrapper.
     let is_conductor_runtime_our_bridge_proxy =
         is_file_our_bridge_runtime(&conductor_paths.application_bundle_runtime_path)?;
     if !is_conductor_runtime_our_bridge_proxy {
-        // Move it from conductor-runtime -> conductor-runtime.real
+        // Overwriting `.real` would modify an inode that a running sidecar may
+        // still have mapped. Stage a new inode beside it, then atomically swap
+        // the path so running processes keep the old file and new launches use
+        // the replacement.
+        let staged_runtime_real_path = conductor_paths
+            .application_support_runtime_real_path
+            .with_extension("real.installing");
+
         fs::copy(
             &conductor_paths.application_bundle_runtime_path,
+            &staged_runtime_real_path,
+        )
+        .map_err(|error| format!("Failed to stage conductor-runtime.real with error: {error}"))?;
+
+        fs::rename(
+            &staged_runtime_real_path,
             &conductor_paths.application_support_runtime_real_path,
         )
-        .map_err(|error| {
-            format!(
-                "Failed to move conductor-runtime -> conductor-runtime.real with error: {error}"
-            )
-        })?;
+        .map_err(|error| format!("Failed to install conductor-runtime.real with error: {error}"))?;
     }
 
     // Copy in the Javascript file into the conductor internal directory (for the script to call it)
