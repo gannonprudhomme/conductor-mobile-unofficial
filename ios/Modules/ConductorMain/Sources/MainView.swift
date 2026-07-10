@@ -35,8 +35,15 @@ public struct Main {
         }
         Reduce { state, action in
             switch action {
-            case let .workspaces(.workspaceTapped(workspace)):
-                state.path.append(.sessions(SessionsList.State(workspace: workspace)))
+            case let .workspaces(.workspaceTapped(item)):
+                state.path.append(
+                    .sessions(
+                        SessionsList.State(
+                            workspace: item.workspace,
+                            repository: item.repository
+                        )
+                    )
+                )
                 return .none
 
             case let .path(.element(id: _, action: .sessions(.sessionTapped(session)))):

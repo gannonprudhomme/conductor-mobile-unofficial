@@ -7,6 +7,7 @@ pub struct ConductorSession {
     workspace_id: String,
     title: String,
     agent_type: String,
+    is_hidden: bool,
 
     created_at: String,
     updated_at: String,
@@ -44,6 +45,7 @@ impl ConductorSession {
                     workspace_id,
                     title,
                     agent_type,
+                    is_hidden,
                     created_at,
                     updated_at,
                     last_user_message_at,
@@ -87,6 +89,7 @@ impl ConductorSession {
             workspace_id: row.get("workspace_id")?,
             title: row.get("title")?,
             agent_type: row.get("agent_type")?,
+            is_hidden: row.get("is_hidden")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             last_user_message_at: row.get("last_user_message_at")?,

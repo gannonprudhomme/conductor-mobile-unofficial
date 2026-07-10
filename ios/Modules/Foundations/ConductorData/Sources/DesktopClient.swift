@@ -113,7 +113,7 @@ public extension JSONDecoder {
     }
 }
 
-private extension Date {
+extension Date {
     static func conductorDate(from string: String) -> Date? {
         // The desktop service forwards Conductor's timestamp TEXT columns without normalizing
         // them. They contain both ISO 8601 values and SQLite datetime('now') values formatted as

@@ -14,12 +14,21 @@ struct MainTests {
             try $0.bootstrapDatabase()
         } operation: {
             let workspace = Workspace.preview(branch: "add-sessions-screen")
+            let repository = Repository.preview()
+            let item = WorkspaceWithRepository(workspace: workspace, repository: repository)
             let store = TestStore(initialState: Main.State()) {
                 Main()
             }
 
-            await store.send(.workspaces(.workspaceTapped(workspace))) {
-                $0.path.append(.sessions(SessionsList.State(workspace: workspace)))
+            await store.send(.workspaces(.workspaceTapped(item))) {
+                $0.path.append(
+                    .sessions(
+                        SessionsList.State(
+                            workspace: workspace,
+                            repository: repository
+                        )
+                    )
+                )
             }
         }
     }
@@ -30,13 +39,22 @@ struct MainTests {
             try $0.bootstrapDatabase()
         } operation: {
             let workspace = Workspace.preview(branch: "add-chat-screen")
+            let repository = Repository.preview()
+            let item = WorkspaceWithRepository(workspace: workspace, repository: repository)
             let session = try makeSession(workspaceID: workspace.id)
             let store = TestStore(initialState: Main.State()) {
                 Main()
             }
 
-            await store.send(.workspaces(.workspaceTapped(workspace))) {
-                $0.path.append(.sessions(SessionsList.State(workspace: workspace)))
+            await store.send(.workspaces(.workspaceTapped(item))) {
+                $0.path.append(
+                    .sessions(
+                        SessionsList.State(
+                            workspace: workspace,
+                            repository: repository
+                        )
+                    )
+                )
             }
             await store.send(
                 .path(
@@ -62,6 +80,7 @@ private func makeSession(workspaceID: String) throws -> Session {
               "workspace_id": "\(workspaceID)",
               "title": "Chat",
               "agent_type": "codex",
+              "is_hidden": false,
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
               "status": "idle",

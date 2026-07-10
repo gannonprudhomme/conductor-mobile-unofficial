@@ -239,6 +239,7 @@ private extension Message {
               "workspace_id": "workspace-1",
               "title": "Chat",
               "agent_type": "codex",
+              "is_hidden": false,
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
               "status": "idle",

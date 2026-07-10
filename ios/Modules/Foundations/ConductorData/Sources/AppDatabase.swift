@@ -68,6 +68,7 @@ public func appDatabase() throws -> any DatabaseWriter {
               "workspace_id" TEXT NOT NULL,
               "title" TEXT NOT NULL,
               "agent_type" TEXT NOT NULL,
+              "is_hidden" INTEGER NOT NULL DEFAULT 0,
               "created_at" TEXT NOT NULL,
               "updated_at" TEXT NOT NULL,
               "last_user_message_at" TEXT,

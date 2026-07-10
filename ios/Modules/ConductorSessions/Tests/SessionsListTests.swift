@@ -1,6 +1,7 @@
 import ComposableArchitecture
 import ConductorData
 import Foundation
+import SQLiteData
 @testable import ConductorSessions
 import Testing
 
@@ -36,6 +37,35 @@ struct SessionsListTests {
         }
     }
 
+    @Test("Archived sessions destination is seeded and dismissed")
+    func archivedSessionsDestination() async throws {
+        let workspace = try makeWorkspace()
+        let session = try makeSession(workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { session }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(initialState: SessionsList.State(workspace: workspace)) {
+                SessionsList()
+            }
+
+            await store.send(.archivedSessionsButtonTapped) {
+                $0.destination = .archivedSessions(
+                    ArchivedSessions.State(
+                        workspaceID: workspace.id,
+                        sessions: [session]
+                    )
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
     @Test("When refresh fails to load sessions, an alert is presented")
     func refreshFailsToLoadSessions() async throws {
         try await withDependencies {
@@ -54,7 +84,9 @@ struct SessionsListTests {
             await store.send(.refresh)
 
             await store.receive(\.loadSessionsFailed) {
-                $0.alert = .failedToLoadSessions(message: TestError().localizedDescription)
+                $0.destination = .alert(
+                    .failedToLoadSessions(message: TestError().localizedDescription)
+                )
             }
         }
     }
@@ -79,12 +111,38 @@ struct SessionsListTests {
             let task = await store.send(.task)
 
             await store.receive(\.loadSessionsFailed) {
-                $0.alert = .failedToLoadSessions(message: TestError().localizedDescription)
+                $0.destination = .alert(
+                    .failedToLoadSessions(message: TestError().localizedDescription)
+                )
             }
 
             await task.cancel()
         }
     }
+}
+
+private func makeSession(workspaceID: String) throws -> Session {
+    try JSONDecoder().decode(
+        Session.self,
+        from: Data(
+            """
+            {
+              "id": "session-1",
+              "workspace_id": "\(workspaceID)",
+              "title": "Archived session",
+              "agent_type": "claude",
+              "is_hidden": true,
+              "created_at": "2026-07-09 00:00:00",
+              "updated_at": "2026-07-09 01:00:00",
+              "status": "idle",
+              "model": "sonnet",
+              "unread_count": 0,
+              "freshly_compacted": 0,
+              "context_token_count": 0
+            }
+            """.utf8
+        )
+    )
 }
 
 private func makeWorkspace() throws -> Workspace {

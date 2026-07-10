@@ -43,7 +43,7 @@ public struct Workspaces: Sendable {
         case refresh
         case sortButtonTapped(WorkspaceWithRepository.Sort)
         case task
-        case workspaceTapped(Workspace)
+        case workspaceTapped(WorkspaceWithRepository)
 
         public enum Alert: Equatable {
         }
@@ -160,7 +160,7 @@ public struct WorkspacesView: View {
                 item: item,
                 showsRepositoryIcon: store.selectedRepositoryID == nil
             ) {
-                store.send(.workspaceTapped(item.workspace))
+                store.send(.workspaceTapped(item))
             }
             .listRowBackground(Color.theme(.background))
             .listRowSeparator(.hidden)
@@ -216,6 +216,7 @@ public struct WorkspacesView: View {
                     if item.workspace.isWorking {
                         ProgressView()
                             .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
+                            .tint(.theme(.textSecondary))
                             .frame(width: iconSize, height: iconSize)
                     } else {
                         Image(uiImage: Lucide.gitBranch)
@@ -293,6 +294,7 @@ public struct WorkspacesView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: iconSize, height: iconSize)
+                    .foregroundStyle(.theme(.textPrimary))
             }
             .accessibilityLabel("Filter workspaces")
         }

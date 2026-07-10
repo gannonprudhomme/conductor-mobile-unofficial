@@ -34,6 +34,23 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Put feature state/actions/reducers/views in feature modules such as
   `ConductorWorkspaces`.
 - Use SwiftUI all the way down.
+- Within SwiftUI result-builder closures, place a blank line between sibling
+  view declarations. Keep each view's modifier chain together without blank
+  lines.
+- Indent modifiers beneath the view they modify, including row modifiers inside
+  `List` and `ForEach` closures.
+- For incrementing or decrementing numeric text, prefer
+  `.contentTransition(.numericText(value:))` and animate value changes unless
+  that transition would misrepresent the content.
+- For a raw sheet or full-screen-cover dismissal control, use
+  `Button(role: .close)` inside a `ToolbarItem` with `.cancellationAction`
+  placement.
+- Every app-level `ProgressView` must use `.progressViewStyle(.conductor(...))`
+  and an explicit themed color. Never use the platform-default progress style
+  directly in app UI.
+- Give toolbar titles and primary toolbar icons an explicit
+  `.foregroundStyle(.theme(.textPrimary))`. Never rely on the system toolbar
+  tint for app toolbar content.
 - Keep the first `if`/`guard` condition on the same line as the keyword and the
   opening brace on the same line as the final condition. Do not put a bare
   `if`/`guard` or opening brace on its own line.

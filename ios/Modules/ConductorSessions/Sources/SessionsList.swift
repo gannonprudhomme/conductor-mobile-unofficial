@@ -10,33 +10,56 @@ import SwiftUI
 public struct SessionsList: Sendable {
     @ObservableState
     public struct State: Equatable {
-        @Presents public var alert: AlertState<Action.Alert>?
+        @Presents public var destination: Destination.State?
         public var hasLoadedSessions = false
+        public let repository: Repository?
         public let workspace: Workspace
 
-        @FetchAll(Session.none)
-        public var sessions
+        @FetchAll public var activeSessions: [Session]
+        @FetchAll public var archivedSessions: [Session]
 
-        public init(workspace: Workspace) {
+        public init(workspace: Workspace, repository: Repository? = nil) {
+            self.repository = repository
             self.workspace = workspace
-            self._sessions = FetchAll(
+            self._activeSessions = FetchAll(
                 Session
-                    .where { $0.workspaceID.eq(workspace.id) }
+                    .where { $0.workspaceID.eq(workspace.id).and(!$0.isHidden) }
+                    .order { $0.updatedAt.desc() },
+                animation: .default
+            )
+            self._archivedSessions = FetchAll(
+                Session
+                    .where { $0.workspaceID.eq(workspace.id).and($0.isHidden) }
                     .order { $0.updatedAt.desc() },
                 animation: .default
             )
         }
+
+        public var repositoryDisplayName: String {
+            WorkspaceWithRepository(
+                workspace: workspace,
+                repository: repository
+            )
+            .repositoryDisplayName
+        }
+    }
+
+    @Reducer
+    public enum Destination {
+        case alert(AlertState<Alert>)
+        case archivedSessions(ArchivedSessions)
+
+        public enum Alert: Equatable { }
     }
 
     public enum Action {
-        case alert(PresentationAction<Alert>)
+        case archivedSessionsButtonTapped
+        case destination(PresentationAction<Destination.Action>)
         case loadSessionsFailed(String)
         case loadSessionsSucceeded
         case refresh
         case sessionTapped(Session)
         case task
-
-        public enum Alert: Equatable { }
     }
 
     @Dependency(\.continuousClock) var clock
@@ -56,11 +79,20 @@ public struct SessionsList: Sendable {
                     }
                 }
 
-            case .alert, .sessionTapped:
+            case .archivedSessionsButtonTapped:
+                state.destination = .archivedSessions(
+                    ArchivedSessions.State(
+                        workspaceID: state.workspace.id,
+                        sessions: state.archivedSessions
+                    )
+                )
+                return .none
+
+            case .destination, .sessionTapped:
                 return .none
 
             case let .loadSessionsFailed(message):
-                state.alert = .failedToLoadSessions(message: message)
+                state.destination = .alert(.failedToLoadSessions(message: message))
                 return .none
 
             case .loadSessionsSucceeded:
@@ -73,7 +105,7 @@ public struct SessionsList: Sendable {
                 }
             }
         }
-        .ifLet(\.$alert, action: \.alert)
+        .ifLet(\.$destination, action: \.destination)
     }
 
     private func refreshSessions(workspaceID: String, send: Send<Action>) async {
@@ -104,7 +136,9 @@ public struct SessionsList: Sendable {
     }
 }
 
-extension AlertState where Action == SessionsList.Action.Alert {
+extension SessionsList.Destination.State: Equatable { }
+
+extension AlertState where Action == SessionsList.Destination.Alert {
     static func failedToLoadSessions(message: String) -> Self {
         AlertState {
             TextState("Failed to load sessions")
@@ -116,25 +150,27 @@ extension AlertState where Action == SessionsList.Action.Alert {
 
 public struct SessionsListView: View {
     @Bindable var store: StoreOf<SessionsList>
+    @ScaledMetric(relativeTo: .footnote) private var repositoryIconSize = 13
+    @ScaledMetric(relativeTo: .body) private var toolbarIconSize = 20
 
     public init(store: StoreOf<SessionsList>) {
         self.store = store
     }
 
     public var body: some View {
-        List(store.sessions) { session in
+        List(store.activeSessions) { session in
             SessionRow(session: session) {
                 store.send(.sessionTapped(session))
             }
-            .listRowBackground(Color.theme(.background))
-            .listRowSeparator(.hidden)
+                .listRowBackground(Color.theme(.background))
+                .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .overlay {
             // Only display the no sessions text when we're 100% sure there aren't sessions (aka we've fetched)
-            if store.hasLoadedSessions && store.sessions.isEmpty {
+            if store.hasLoadedSessions && store.activeSessions.isEmpty {
                 ContentUnavailableView(
                     "No sessions",
                     systemImage: "bubble.left.and.bubble.right",
@@ -144,12 +180,52 @@ public struct SessionsListView: View {
                 .font(.theme(.body))
             }
         }
-        .themedNavigationTitle("Sessions")
+        .themedNavigationTitle(
+            verbatim: store.workspace.displayBranchName,
+            alignment: .leading
+        ) {
+            HStack(spacing: 4) {
+                if let repository = store.repository {
+                    RepositoryIcon(repository: repository, size: repositoryIconSize)
+                } else {
+                    RepositoryIcon(iconName: nil, avatarURL: nil, size: repositoryIconSize)
+                }
+
+                Text(verbatim: store.repositoryDisplayName)
+                    .lineLimit(1)
+            }
+        }
+        .toolbar {
+            if !store.archivedSessions.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        store.send(.archivedSessionsButtonTapped)
+                    } label: {
+                        Image(uiImage: Lucide.history)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: toolbarIconSize, height: toolbarIconSize)
+                            .foregroundStyle(.theme(.textPrimary))
+                    }
+                    .accessibilityLabel("Archived sessions")
+                }
+            }
+        }
         .refreshable {
             await store.send(.refresh).finish()
         }
         .background(.theme(.background))
-        .alert($store.scope(state: \.alert, action: \.alert))
+        .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
+        .sheet(
+            item: $store.scope(
+                state: \.destination?.archivedSessions,
+                action: \.destination.archivedSessions
+            )
+        ) { archivedSessionsStore in
+            ArchivedSessionsView(store: archivedSessionsStore)
+                .presentationDetents([.medium, .large])
+        }
         .task {
             await store.send(.task).finish()
         }
@@ -167,6 +243,8 @@ public struct SessionsListView: View {
                         Text(session.displayTitle)
                             .font(.theme(.body))
                             .foregroundStyle(.theme(.textPrimary))
+                            .lineLimit(1)
+
                         Text(session.debugSubtitle)
                             .font(.theme(.footnote))
                             .foregroundStyle(.theme(.textSecondary))
@@ -176,14 +254,10 @@ public struct SessionsListView: View {
                     if session.status == .working {
                         ProgressView()
                             .progressViewStyle(.conductor(phaseSeed: session.id))
+                            .tint(.theme(.textSecondary))
                             .frame(width: iconSize, height: iconSize)
                     } else {
-                        Image(uiImage: Lucide.messageSquare)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: iconSize, height: iconSize)
-                            .foregroundStyle(.theme(.textSecondary))
+                        AgentIcon(agentType: session.agentType, size: iconSize)
                     }
                 }
                 .contentShape(Rectangle())
@@ -213,7 +287,12 @@ public struct SessionsListView: View {
 
     NavigationStack {
         SessionsListView(
-            store: Store(initialState: SessionsList.State(workspace: workspace)) {
+            store: Store(
+                initialState: SessionsList.State(
+                    workspace: workspace,
+                    repository: .preview()
+                )
+            ) {
                 SessionsList()
             }
         )
