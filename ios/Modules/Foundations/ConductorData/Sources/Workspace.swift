@@ -14,7 +14,7 @@ public struct Workspace: Codable, Hashable, Identifiable, Sendable {
     public var bigTerminalMode: Int?
     public var branch: String?
     @Column("created_at")
-    public var createdAt: String
+    public var createdAt: Date
     @Column("creator_client_id")
     public var creatorClientID: String?
     @Column("creator_user_id")
@@ -69,7 +69,7 @@ public struct Workspace: Codable, Hashable, Identifiable, Sendable {
     public var state: State?
     public var unread: Int?
     @Column("updated_at")
-    public var updatedAt: String
+    public var updatedAt: Date
     @Column("user_set_branch_name")
     public var userSetBranchName: Int?
     @Column("user_set_workspace_name")

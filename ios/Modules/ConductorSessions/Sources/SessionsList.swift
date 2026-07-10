@@ -169,7 +169,7 @@ public struct SessionsListView: View {
     let _ = try! prepareDependencies {
         try $0.bootstrapDatabase()
     }
-    let workspace = try! JSONDecoder().decode(
+    let workspace = try! JSONDecoder.conductor.decode(
         Workspace.self,
         from: Data(
             """

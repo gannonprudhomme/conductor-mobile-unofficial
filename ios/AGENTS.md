@@ -57,6 +57,10 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Use Swift Navigation helpers for navigation and presentation once flows exist.
 - Use SQLiteData and StructuredQueries-style schema/query APIs for persistence.
   Avoid ad hoc SQLite access in SwiftUI views.
+- Always sort and filter SQLite-backed feature data in SQLiteData/StructuredQueries
+  queries, including dynamic `@FetchAll`/`@Fetch` reloads for active filters.
+  Never sort or filter those database results with computed Swift arrays in
+  feature state or views.
 - For externally-defined string states that are decoded, encoded, or persisted
   from Conductor, prefer `RawRepresentable` structs with static known values
   over Swift enums. This preserves unknown future values while still allowing

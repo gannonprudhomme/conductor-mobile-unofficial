@@ -89,6 +89,41 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Create repos") { db in
+        try #sql(
+            """
+            CREATE TABLE "repos" (
+              "id" TEXT PRIMARY KEY,
+              "remote_url" TEXT,
+              "name" TEXT,
+              "default_branch" TEXT DEFAULT 'main',
+              "root_path" TEXT,
+              "setup_script" TEXT,
+              "created_at" TEXT NOT NULL DEFAULT (datetime('now')),
+              "updated_at" TEXT NOT NULL DEFAULT (datetime('now')),
+              "storage_version" INTEGER DEFAULT 1,
+              "archive_script" TEXT,
+              "display_order" INTEGER DEFAULT 0,
+              "run_script" TEXT,
+              "run_script_mode" TEXT DEFAULT 'concurrent',
+              "remote" TEXT,
+              "custom_prompt_code_review" TEXT,
+              "custom_prompt_create_pr" TEXT,
+              "custom_prompt_rename_branch" TEXT,
+              "conductor_config" TEXT,
+              "custom_prompt_general" TEXT,
+              "icon" TEXT,
+              "hidden" INTEGER DEFAULT 0,
+              "custom_prompt_fix_errors" TEXT,
+              "custom_prompt_resolve_merge_conflicts" TEXT,
+              "file_include_globs" TEXT,
+              "spotlight_testing" INTEGER DEFAULT 0
+            );
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }

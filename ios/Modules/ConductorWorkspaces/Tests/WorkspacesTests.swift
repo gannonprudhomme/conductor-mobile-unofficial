@@ -6,6 +6,28 @@ import Testing
 
 @MainActor
 struct WorkspacesTests {
+    @Test("Workspace filters persist between state instances")
+    func filtersPersist() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            }
+
+            await store.send(.repositoryFilterButtonTapped("repo-1")) {
+                $0.$selectedRepositoryID.withLock { $0 = "repo-1" }
+            }
+            await store.send(.sortButtonTapped(.created)) {
+                $0.$sort.withLock { $0 = .created }
+            }
+
+            let restoredState = Workspaces.State()
+            #expect(restoredState.selectedRepositoryID == "repo-1")
+            #expect(restoredState.sort == .created)
+        }
+    }
+
     @Test("When refresh fails to load workspaces, an alert is presented")
     func refreshFailsToLoadWorkspaces() async throws {
         try await withDependencies {
@@ -17,6 +39,7 @@ struct WorkspacesTests {
                 $0.desktopClient.fetchWorkspaces = {
                     throw TestError()
                 }
+                $0.desktopClient.fetchRepositories = { [] }
             }
 
             await store.send(.refresh)
@@ -38,6 +61,7 @@ struct WorkspacesTests {
                 $0.desktopClient.fetchWorkspaces = {
                     throw TestError()
                 }
+                $0.desktopClient.fetchRepositories = { [] }
             }
 
             await store.send(.task)

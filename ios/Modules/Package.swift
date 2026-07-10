@@ -13,6 +13,7 @@ let package = Package(
         .iOS(.v26),
     ],
     products: [
+        .library(name: "ConductorFoundation", targets: ["ConductorFoundation"]),
         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
         .library(name: "ConductorData", targets: ["ConductorData"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
@@ -25,9 +26,15 @@ let package = Package(
         .package(url: "https://github.com/pointfreeco/swift-composable-architecture.git", exact: "1.25.5"),
         .package(url: "https://github.com/pointfreeco/swift-dependencies", from: "1.14.1"),
         .package(url: "https://github.com/pointfreeco/swift-navigation.git", from: "2.10.1"),
+        .package(url: "https://github.com/pointfreeco/swift-sharing", exact: "2.9.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax", exact: "603.0.2"),
     ],
     targets: [
+        .target(
+            name: "ConductorFoundation",
+            path: "Foundations/ConductorFoundation/Sources",
+            swiftSettings: swiftSettings
+        ),
         .target(
             name: "ConductorDesign",
             path: "ConductorDesign/Sources",
@@ -38,7 +45,9 @@ let package = Package(
             dependencies: [
                 .product(name: "Dependencies", package: "swift-dependencies"),
                 .product(name: "DependenciesMacros", package: "swift-dependencies"),
+                .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
+                "ConductorFoundation",
             ],
             path: "Foundations/ConductorData/Sources",
             swiftSettings: swiftSettings
@@ -60,6 +69,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
                 "ConductorDesign",
                 "ConductorData",

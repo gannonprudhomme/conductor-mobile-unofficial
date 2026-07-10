@@ -1,4 +1,4 @@
-use crate::models::{ConductorSession, ConductorWorkspace};
+use crate::models::{ConductorRepository, ConductorSession, ConductorWorkspace};
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use rusqlite::{Connection, OpenFlags, Result};
 use std::{path::PathBuf, time::Duration};
@@ -51,11 +51,19 @@ async fn get_workspaces() -> impl IntoResponse {
     }
 }
 
+async fn get_repositories() -> impl IntoResponse {
+    match ConductorRepository::load() {
+        Ok(repositories) => Ok(Json(repositories)),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+    }
+}
+
 fn start_mobile_api_server() {
     tauri::async_runtime::spawn(async {
         let app = Router::new()
             .route("/sessions", get(get_sessions))
             .route("/workspaces", get(get_workspaces))
+            .route("/repositories", get(get_repositories))
             .route(
                 "/workspaces/{workspace_id}/sessions",
                 get(get_workspace_sessions),

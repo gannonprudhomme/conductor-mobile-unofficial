@@ -77,7 +77,7 @@ struct SessionsListTests {
 }
 
 private func makeWorkspace() throws -> Workspace {
-    try JSONDecoder().decode(
+    try JSONDecoder.conductor.decode(
         Workspace.self,
         from: Data(
             """

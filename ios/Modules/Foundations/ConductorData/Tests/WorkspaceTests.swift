@@ -5,7 +5,7 @@ import Testing
 struct WorkspaceTests {
     @Test("Workspace state decoding keeps known and unknown values")
     func stateDecodingKeepsKnownAndUnknownValues() throws {
-        let archived = try JSONDecoder().decode(
+        let archived = try JSONDecoder.conductor.decode(
             Workspace.self,
             from: Data(
                 """
@@ -21,7 +21,7 @@ struct WorkspaceTests {
 
         #expect(archived.state == .archived)
 
-        let future = try JSONDecoder().decode(
+        let future = try JSONDecoder.conductor.decode(
             Workspace.self,
             from: Data(
                 """

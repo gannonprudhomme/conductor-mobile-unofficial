@@ -1,4 +1,8 @@
+import Foundation
+
 extension Workspace {
+    private static let defaultPreviewDate = Date(timeIntervalSince1970: 1_783_555_200)
+
     public static func preview(
         id: String = "workspace-1",
         activeSessionID: String? = nil,
@@ -6,7 +10,7 @@ extension Workspace {
         assigneeUserID: String? = nil,
         bigTerminalMode: Int? = nil,
         branch: String? = nil,
-        createdAt: String = "2026-07-09 00:00:00",
+        createdAt: Date? = nil,
         creatorClientID: String? = nil,
         creatorUserID: String? = nil,
         derivedStatus: String? = nil,
@@ -33,7 +37,7 @@ extension Workspace {
         setupLogPath: String? = nil,
         state: State? = .ready,
         unread: Int? = nil,
-        updatedAt: String = "2026-07-09 00:00:00",
+        updatedAt: Date? = nil,
         userSetBranchName: Int? = nil,
         userSetWorkspaceName: Int? = nil,
         watcherUserIDs: String? = nil,
@@ -47,7 +51,7 @@ extension Workspace {
             assigneeUserID: assigneeUserID,
             bigTerminalMode: bigTerminalMode,
             branch: branch,
-            createdAt: createdAt,
+            createdAt: createdAt ?? defaultPreviewDate,
             creatorClientID: creatorClientID,
             creatorUserID: creatorUserID,
             derivedStatus: derivedStatus,
@@ -74,7 +78,7 @@ extension Workspace {
             setupLogPath: setupLogPath,
             state: state,
             unread: unread,
-            updatedAt: updatedAt,
+            updatedAt: updatedAt ?? defaultPreviewDate,
             userSetBranchName: userSetBranchName,
             userSetWorkspaceName: userSetWorkspaceName,
             watcherUserIDs: watcherUserIDs,
