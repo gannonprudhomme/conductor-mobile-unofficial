@@ -64,7 +64,7 @@ extension DesktopClient: DependencyKey {
         )
     }
 
-    private static let baseURL = URL(string: "http://127.0.0.1:3768")!
+    private static let baseURL = URL(string: "http://192.168.0.32:3768")!
 
     private static func fetch<Value: Decodable & Sendable>(
         _ type: Value.Type,
