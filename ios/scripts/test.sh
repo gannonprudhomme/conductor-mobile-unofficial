@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TEST_DESTINATION="${TEST_DESTINATION:-platform=iOS Simulator,name=iPhone 17,OS=latest}"
+if [[ -z "${TEST_DESTINATION:-}" ]]; then
+  TEST_DESTINATION="$("$SCRIPT_DIR/worktree-sim.sh" destination)"
+  trap '"$SCRIPT_DIR/worktree-sim.sh" clean' EXIT
+fi
+
 TEST_SCHEMES=(
   ConductorDataTests
   ConductorWorkspacesTests

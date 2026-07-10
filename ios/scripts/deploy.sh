@@ -3,9 +3,10 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: deploy.sh <xcodebuild-destination> [--attach]
+Usage: deploy.sh [<xcodebuild-destination>] [--attach]
 
 Examples:
+  deploy.sh --attach
   deploy.sh id=22F507F3-FF8F-4909-BB21-ABDB8BB84AAA --attach
   deploy.sh 'platform=iOS Simulator,id=22F507F3-FF8F-4909-BB21-ABDB8BB84AAA'
 USAGE
@@ -13,6 +14,7 @@ USAGE
 
 DESTINATION=""
 ATTACH=false
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while (($#)); do
   case "$1" in
@@ -37,12 +39,9 @@ while (($#)); do
 done
 
 if [[ -z "$DESTINATION" ]]; then
-  echo "error: missing destination" >&2
-  usage >&2
-  exit 2
+  DESTINATION="$("$SCRIPT_DIR/worktree-sim.sh" destination)"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$IOS_DIR/.derivedData/deploy}"
 APP_NAME="ConductorMobile.app"
@@ -100,6 +99,7 @@ if [[ "$IS_SIMULATOR" == true ]]; then
   xcrun simctl bootstatus "$DEVICE_ID" -b
   open -a Simulator --args -CurrentDeviceUDID "$DEVICE_ID"
   xcrun simctl install "$DEVICE_ID" "$APP_PATH"
+  xcrun simctl launch "$DEVICE_ID" "$APP_BUNDLE_ID"
 
   if [[ "$ATTACH" == true ]]; then
     xcrun simctl spawn "$DEVICE_ID" log stream \

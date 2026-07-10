@@ -1,5 +1,14 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
+[scripts]
+archive = "mise run clean-sims"
+
+[scripts.run.run]
+available_in = ["local"]
+command = "mise run run"
+default = true
+icon = "play"
+
 [scripts.run.physical]
 available_in = ["local"]
 command = "mise -C ios run deploy -- id=00008140-000611C801F3001C --attach"

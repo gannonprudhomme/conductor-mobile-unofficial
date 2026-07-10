@@ -1,0 +1,15 @@
+[tasks.deploy]
+description = "Build, install, and launch the native iOS app"
+run = "mise -C ios run deploy -- \"$@\""
+
+[tasks.run]
+description = "Build, install, and launch the native iOS app on this worktree's simulator"
+run = "mise -C ios run run"
+
+[tasks.test]
+description = "Run native iOS module tests on this worktree's simulator"
+run = "mise -C ios run test"
+
+[tasks.clean-sims]
+description = "Delete this worktree's simulator"
+run = "mise -C ios run clean-sims"

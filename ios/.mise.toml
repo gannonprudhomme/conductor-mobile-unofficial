@@ -8,15 +8,24 @@ depends = ["gen"]
 run = "scripts/build.sh"
 
 [tasks.test]
-description = "Run native iOS module tests"
+description = "Run native iOS module tests on this worktree's simulator"
 depends = ["gen"]
 run = "scripts/test.sh"
 
 [tasks.deploy]
-description = "Build and install the native iOS app to a destination"
+description = "Build, install, and launch the native iOS app"
 depends = ["gen"]
 usage = '''
-arg "<destination>" help="xcodebuild destination, such as id=<UDID>"
+arg "[destination]" help="xcodebuild destination, such as id=<UDID>"
 flag "--attach" help="Stream simulator OS logs after installing"
 '''
-run = 'scripts/deploy.sh "${usage_destination}" ${usage_attach:+--attach}'
+run = 'scripts/deploy.sh ${usage_destination:+"${usage_destination}"} ${usage_attach:+--attach}'
+
+[tasks.run]
+description = "Build, install, and launch the native iOS app on this worktree's simulator"
+depends = ["gen"]
+run = "scripts/deploy.sh --attach"
+
+[tasks.clean-sims]
+description = "Delete this worktree's simulator"
+run = "scripts/worktree-sim.sh clean"
