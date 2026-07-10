@@ -39,6 +39,7 @@ public struct SessionsList: Sendable {
         public enum Alert: Equatable { }
     }
 
+    @Dependency(\.continuousClock) var clock
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
 
@@ -47,13 +48,11 @@ public struct SessionsList: Sendable {
     public var body: some ReducerOf<Self> {
         Reduce { state, action in
             switch action {
-            case .task, .refresh:
+            case .task:
                 return .run { [workspaceID = state.workspace.id] send in
-                    do {
-                        try await loadSessions(workspaceID: workspaceID)
-                        await send(.loadSessionsSucceeded)
-                    } catch {
-                        await send(.loadSessionsFailed(error.localizedDescription))
+                    await refreshSessions(workspaceID: workspaceID, send: send)
+                    for await _ in clock.timer(interval: .seconds(1)) {
+                        await refreshSessions(workspaceID: workspaceID, send: send)
                     }
                 }
 
@@ -67,9 +66,25 @@ public struct SessionsList: Sendable {
             case .loadSessionsSucceeded:
                 state.hasLoadedSessions = true
                 return .none
+
+            case .refresh:
+                return .run { [workspaceID = state.workspace.id] send in
+                    await refreshSessions(workspaceID: workspaceID, send: send)
+                }
             }
         }
         .ifLet(\.$alert, action: \.alert)
+    }
+
+    private func refreshSessions(workspaceID: String, send: Send<Action>) async {
+        do {
+            try await loadSessions(workspaceID: workspaceID)
+            await send(.loadSessionsSucceeded)
+        } catch is CancellationError {
+            return
+        } catch {
+            await send(.loadSessionsFailed(error.localizedDescription))
+        }
     }
 
     private func loadSessions(workspaceID: String) async throws {

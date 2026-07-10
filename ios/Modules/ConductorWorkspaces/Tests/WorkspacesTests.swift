@@ -50,25 +50,32 @@ struct WorkspacesTests {
         }
     }
 
-    @Test("When task fails to load workspaces, an alert is presented")
-    func taskFailsToLoadWorkspaces() async throws {
+    @Test("Workspaces poll every second")
+    func workspacesPollEverySecond() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
+            let clock = TestClock()
             let store = TestStore(initialState: Workspaces.State()) {
                 Workspaces()
             } withDependencies: {
+                $0.continuousClock = clock
                 $0.desktopClient.fetchWorkspaces = {
                     throw TestError()
                 }
                 $0.desktopClient.fetchRepositories = { [] }
             }
 
-            await store.send(.task)
+            let task = await store.send(.task)
 
             await store.receive(\.loadWorkspacesFailed) {
                 $0.alert = .failedToLoadWorkspaces(message: TestError().localizedDescription)
             }
+
+            await clock.advance(by: .seconds(1))
+            await store.receive(\.loadWorkspacesFailed)
+
+            await task.cancel()
         }
     }
 }

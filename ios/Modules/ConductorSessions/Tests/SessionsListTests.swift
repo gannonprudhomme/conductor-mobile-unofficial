@@ -6,26 +6,33 @@ import Testing
 
 @MainActor
 struct SessionsListTests {
-    @Test("Successful initial load reveals the empty state")
-    func successfulInitialLoad() async throws {
+    @Test("Sessions poll every second and a successful initial load reveals the empty state")
+    func sessionsPollEverySecond() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
+            let clock = TestClock()
             let workspace = try makeWorkspace()
             let store = TestStore(initialState: SessionsList.State(workspace: workspace)) {
                 SessionsList()
             } withDependencies: {
+                $0.continuousClock = clock
                 $0.desktopClient.fetchSessions = { workspaceID in
                     #expect(workspaceID == workspace.id)
                     return []
                 }
             }
 
-            await store.send(.task)
+            let task = await store.send(.task)
 
             await store.receive(\.loadSessionsSucceeded) {
                 $0.hasLoadedSessions = true
             }
+
+            await clock.advance(by: .seconds(1))
+            await store.receive(\.loadSessionsSucceeded)
+
+            await task.cancel()
         }
     }
 
@@ -57,21 +64,25 @@ struct SessionsListTests {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
+            let clock = TestClock()
             let workspace = try makeWorkspace()
             let store = TestStore(initialState: SessionsList.State(workspace: workspace)) {
                 SessionsList()
             } withDependencies: {
+                $0.continuousClock = clock
                 $0.desktopClient.fetchSessions = { workspaceID in
                     #expect(workspaceID == workspace.id)
                     throw TestError()
                 }
             }
 
-            await store.send(.task)
+            let task = await store.send(.task)
 
             await store.receive(\.loadSessionsFailed) {
                 $0.alert = .failedToLoadSessions(message: TestError().localizedDescription)
             }
+
+            await task.cancel()
         }
     }
 }

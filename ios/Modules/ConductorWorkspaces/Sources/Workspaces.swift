@@ -49,6 +49,7 @@ public struct Workspaces: Sendable {
         }
     }
 
+    @Dependency(\.continuousClock) var clock
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
 
@@ -58,12 +59,11 @@ public struct Workspaces: Sendable {
     public var body: some ReducerOf<Self> {
         Reduce { state, action in
             switch action {
-            case .task, .refresh:
+            case .task:
                 return .run { send in
-                    do {
-                        try await loadWorkspaces()
-                    } catch {
-                        await send(.loadWorkspacesFailed(error.localizedDescription))
+                    await refreshWorkspaces(send: send)
+                    for await _ in clock.timer(interval: .seconds(1)) {
+                        await refreshWorkspaces(send: send)
                     }
                 }
 
@@ -77,6 +77,11 @@ public struct Workspaces: Sendable {
             case let .repositoryFilterButtonTapped(repositoryID):
                 state.$selectedRepositoryID.withLock { $0 = repositoryID }
                 return reloadWorkspaces(state)
+
+            case .refresh:
+                return .run { send in
+                    await refreshWorkspaces(send: send)
+                }
 
             case let .sortButtonTapped(sort):
                 state.$sort.withLock { $0 = sort }
@@ -101,6 +106,16 @@ public struct Workspaces: Sendable {
             } catch {
                 await send(.loadWorkspacesFailed(error.localizedDescription))
             }
+        }
+    }
+
+    private func refreshWorkspaces(send: Send<Action>) async {
+        do {
+            try await loadWorkspaces()
+        } catch is CancellationError {
+            return
+        } catch {
+            await send(.loadWorkspacesFailed(error.localizedDescription))
         }
     }
 
