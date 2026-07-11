@@ -2,6 +2,11 @@
 description = "Generate the native iOS Xcode project"
 run = "scripts/gen.sh"
 
+[tasks.xcode]
+description = "Generate and open the native iOS workspace in Xcode"
+depends = ["gen"]
+run = "open ConductorMobile.xcworkspace"
+
 [tasks.build]
 description = "Build the native iOS app"
 depends = ["gen"]

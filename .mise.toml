@@ -6,6 +6,10 @@ run = "mise -C ios run deploy -- \"$@\""
 description = "Build, install, and launch the native iOS app on this worktree's simulator"
 run = "mise -C ios run run"
 
+[tasks.xcode]
+description = "Generate and open the native iOS workspace in Xcode"
+run = "mise -C ios run xcode"
+
 [tasks.test]
 description = "Run native iOS module tests on this worktree's simulator"
 run = "mise -C ios run test"
