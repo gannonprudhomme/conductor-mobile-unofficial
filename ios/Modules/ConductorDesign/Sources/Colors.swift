@@ -10,6 +10,10 @@ public enum ThemeColorStyle {
     case highlightForeground
     case input
     case muted
+    case sidebarMutedForeground
+    case statusDone
+    case statusInProgress
+    case statusInReview
     case textPrimary
     case textSecondary
 }
@@ -40,6 +44,18 @@ public extension ShapeStyle where Self == Color {
 
         case .muted:
             Color(red: 33.0 / 255.0, green: 30.0 / 255.0, blue: 28.0 / 255.0)
+
+        case .sidebarMutedForeground:
+            Color.white.opacity(0.6)
+
+        case .statusDone:
+            Color(red: 211.0 / 255.0, green: 177.0 / 255.0, blue: 160.0 / 255.0)
+
+        case .statusInProgress:
+            Color(red: 255.0 / 255.0, green: 213.0 / 255.0, blue: 0.0 / 255.0)
+
+        case .statusInReview:
+            Color(red: 44.0 / 255.0, green: 224.0 / 255.0, blue: 127.0 / 255.0)
 
         case .textSecondary:
             Color(red: 165.0 / 255.0, green: 160.0 / 255.0, blue: 156.0 / 255.0)

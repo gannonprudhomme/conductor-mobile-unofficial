@@ -26,6 +26,8 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Keep `ConductorMobile` as a thin app target. It should bootstrap dependencies
   and render `ConductorMain.MainView`.
 - Put app code in local Swift package modules under `ios/Modules`.
+- Begin every Swift file with the standard Xcode filename, module, and creator
+  comment header used by existing files.
 - Follow the MovieRating module shape: foundation modules under
   `ios/Modules/Foundations` and feature modules under `ios/Modules`.
 - Keep a single Swift package manifest at `ios/Modules/Package.swift` for all
@@ -65,6 +67,8 @@ The native iOS app lives here and is SwiftUI/TCA-first.
   previews with `.preferredColorScheme(.dark)`.
 - Use `@ScaledMetric` for manually sized SwiftUI images so image dimensions
   scale with Dynamic Type.
+- Never use `Spacer` to pin content in a layout. Set an explicit frame alignment
+  on the content or container instead.
 - When presenting runtime errors to users, use an alert title that states what
   failed in user terms, and put `error.localizedDescription` in the alert
   message/description.

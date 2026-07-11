@@ -1,4 +1,6 @@
+import ConductorFoundation
 import Foundation
+import IssueReporting
 import SQLiteData
 
 @Table("workspaces")
@@ -101,6 +103,44 @@ extension Workspace {
 }
 
 extension Workspace {
+    public struct Status: Hashable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let done = Self(rawValue: "done")
+        public static let inReview = Self(rawValue: "in-review")
+        public static let inProgress = Self(rawValue: "in-progress")
+        public static let backlog = Self(rawValue: "backlog")
+        public static let canceled = Self(rawValue: "canceled")
+
+        public static let displayOrder = [done, inReview, inProgress, backlog, canceled]
+
+        public var title: String {
+            switch self {
+            case .done: "Done"
+            case .inReview: "In review"
+            case .inProgress: "In progress"
+            case .backlog: "Backlog"
+            case .canceled: "Canceled"
+            default: rawValue
+            }
+        }
+    }
+
+    public var status: Status {
+        // Conductor's manual status is the user-assigned workflow state. Its derived status is the
+        // automatic fallback, so the manual value takes precedence when present.
+        guard let rawValue = manualStatus?.nilIfEmpty ?? derivedStatus?.nilIfEmpty
+        else {
+            reportIssue("Workspace \(id) has neither a manual nor derived status.")
+            return .inProgress
+        }
+        return Status(rawValue: rawValue)
+    }
+
     public var displayBranchName: String {
         let name = [branch, placeholderBranchName, workspaceName, directoryName]
             .compactMap { $0 }

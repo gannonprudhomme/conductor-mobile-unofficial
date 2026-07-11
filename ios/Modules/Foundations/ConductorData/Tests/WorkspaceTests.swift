@@ -1,5 +1,7 @@
 import ConductorData
+import CustomDump
 import Foundation
+import IssueReporting
 import Testing
 
 struct WorkspaceTests {
@@ -58,6 +60,29 @@ struct WorkspaceTests {
         )
 
         #expect(future.state?.rawValue == "waiting_on_moonlight")
+    }
+
+    @Test("Workspace status prefers manual status, then derived status")
+    func statusResolution() {
+        let workspaces = [
+            Workspace.preview(derivedStatus: "in-progress", manualStatus: "done"),
+            Workspace.preview(derivedStatus: "in-review", manualStatus: nil),
+            Workspace.preview(derivedStatus: "backlog", manualStatus: ""),
+            Workspace.preview(derivedStatus: "in-progress", manualStatus: "waiting-on-user"),
+        ]
+
+        expectNoDifference(
+            workspaces.map(\.status),
+            [.done, .inReview, .backlog, Workspace.Status(rawValue: "waiting-on-user")]
+        )
+        expectNoDifference(workspaces.last?.status.title, "waiting-on-user")
+    }
+
+    @Test("Workspace status reports missing source data and falls back to in progress")
+    func missingStatusReportsIssue() {
+        withExpectedIssue {
+            #expect(Workspace.preview(derivedStatus: nil, manualStatus: nil).status == .inProgress)
+        }
     }
 
     @Test("Workspace display branch names use Conductor sentence case")

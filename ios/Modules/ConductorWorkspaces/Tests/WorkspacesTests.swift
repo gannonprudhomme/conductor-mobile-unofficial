@@ -1,17 +1,22 @@
 import ComposableArchitecture
 import ConductorData
+import CustomDump
 import Foundation
+import SQLiteData
 @testable import ConductorWorkspaces
 import Testing
 
 @MainActor
 struct WorkspacesTests {
-    @Test("Workspace filters persist between state instances")
-    func filtersPersist() async throws {
+    @Test("Workspace display options persist between state instances")
+    func displayOptionsPersist() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
-            let store = TestStore(initialState: Workspaces.State()) {
+            let initialState = Workspaces.State()
+            initialState.$grouping.withLock { $0 = .project }
+            let store = TestStore(initialState: initialState) {
                 Workspaces()
             }
 
@@ -21,16 +26,128 @@ struct WorkspacesTests {
             await store.send(.sortButtonTapped(.created)) {
                 $0.$sort.withLock { $0 = .created }
             }
+            await store.finish()
+
+            let collapsedSectionIDs: Set<String> = [
+                "status:in-progress",
+                "project:repo-1",
+            ]
+            let collapsedState = Workspaces.State()
+            collapsedState.$collapsedSectionIDs.withLock { $0 = collapsedSectionIDs }
 
             let restoredState = Workspaces.State()
-            #expect(restoredState.selectedRepositoryID == "repo-1")
-            #expect(restoredState.sort == .created)
+            expectNoDifference(restoredState.collapsedSectionIDs, collapsedSectionIDs)
+            expectNoDifference(restoredState.grouping, .project)
+            expectNoDifference(restoredState.selectedRepositoryID, "repo-1")
+            expectNoDifference(restoredState.sort, .created)
+        }
+    }
+
+    @Test("Status sections retain Linear's known order and include empty sections")
+    func statusSections() {
+        let waiting = Workspace.Status(rawValue: "waiting-on-user")
+        let sections = Workspaces.State.sections(
+            groupedBy: .status,
+            workspaces: [
+                workspace(id: "done", status: .done),
+                workspace(id: "progress", status: .inProgress),
+                workspace(id: "backlog", status: .backlog),
+                workspace(id: "waiting", status: waiting),
+            ]
+        )
+
+        expectNoDifference(
+            sections.map(\.id),
+            Workspace.Status.displayOrder.map { "status:\($0.rawValue)" }
+                + ["status:\(waiting.rawValue)"]
+        )
+        expectNoDifference(
+            sections.map { $0.items.map(\.id) },
+            [["done"], [], ["progress"], ["backlog"], [], ["waiting"]]
+        )
+    }
+
+    @Test("Project sections coalesce noncontiguous workspace rows")
+    func projectSections() {
+        let firstRepository = Repository.preview(id: "repo-1", name: "First")
+        let secondRepository = Repository.preview(id: "repo-2", name: "Second")
+        let sections = Workspaces.State.sections(
+            groupedBy: .project,
+            workspaces: [
+                workspace(id: "first-1", repository: firstRepository),
+                workspace(id: "second", repository: secondRepository),
+                workspace(id: "first-2", repository: firstRepository),
+                workspace(id: "unknown", repositoryID: "missing-repo"),
+            ]
+        )
+
+        expectNoDifference(
+            sections.map(\.id),
+            ["project:repo-1", "project:repo-2", "project:missing-repo"]
+        )
+        expectNoDifference(
+            sections.map { $0.items.map(\.id) },
+            [["first-1", "first-2"], ["second"], ["unknown"]]
+        )
+        expectNoDifference(
+            sections.map { section in
+                guard case let .project(_, _, title) = section.groupByType else { return "" }
+                return title
+            },
+            ["First", "Second", "missing-repo"]
+        )
+    }
+
+    @Test("Grouping changes update sections through the reducer")
+    func groupingChangesUpdateSections() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Repository
+                    .insert { Repository.preview(id: "repo", name: "Conductor") }
+                    .execute(db)
+                try Workspace
+                    .insert {
+                        Workspace.preview(
+                            id: "workspace",
+                            derivedStatus: Workspace.Status.inProgress.rawValue,
+                            repositoryID: "repo"
+                        )
+                    }
+                    .execute(db)
+            }
+        } operation: {
+            let clock = TestClock()
+            let initialState = Workspaces.State()
+            let grouping = initialState.$grouping
+            let projectSections = Workspaces.State.sections(
+                groupedBy: .project,
+                workspaces: initialState.workspaces
+            )
+            let store = TestStore(initialState: initialState) {
+                Workspaces()
+            } withDependencies: {
+                $0.continuousClock = clock
+                $0.desktopClient.fetchRepositories = { [] }
+                $0.desktopClient.fetchWorkspaces = { [] }
+            }
+
+            let task = await store.send(.task)
+            grouping.withLock { $0 = .project }
+
+            await store.receive(\.groupingChanged, .project) {
+                $0.sections = projectSections
+            }
+
+            await task.cancel()
         }
     }
 
     @Test("When refresh fails to load workspaces, an alert is presented")
     func refreshFailsToLoadWorkspaces() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             let store = TestStore(initialState: Workspaces.State()) {
@@ -78,6 +195,22 @@ struct WorkspacesTests {
             await task.cancel()
         }
     }
+}
+
+private func workspace(
+    id: String,
+    status: Workspace.Status = .inProgress,
+    repository: Repository? = nil,
+    repositoryID: Repository.ID? = nil
+) -> WorkspaceWithRepository {
+    WorkspaceWithRepository(
+        workspace: .preview(
+            id: id,
+            derivedStatus: status.rawValue,
+            repositoryID: repository?.id ?? repositoryID
+        ),
+        repository: repository
+    )
 }
 
 private struct TestError: LocalizedError {

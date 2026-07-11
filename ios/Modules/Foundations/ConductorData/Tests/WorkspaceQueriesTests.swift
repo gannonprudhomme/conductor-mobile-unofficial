@@ -95,4 +95,103 @@ struct WorkspaceQueriesTests {
         expectNoDifference(sortedByCreation.map(\.workspace.id), ["w3", "w2", "w1"])
     }
 
+    @Test("Workspace query orders section groups and rows in SQLite")
+    func queryGroupingOrder() throws {
+        let database = try appDatabase()
+        let dates = (1...7).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+
+        try database.write { db in
+            try Repository
+                .insert { Repository.preview(id: "repo-z", displayOrder: 1, name: "Zeta") }
+                .execute(db)
+            try Repository
+                .insert { Repository.preview(id: "repo-a", displayOrder: 0, name: "Alpha") }
+                .execute(db)
+
+            let workspaces = [
+                Workspace.preview(
+                    id: "done",
+                    derivedStatus: "done",
+                    repositoryID: "repo-z",
+                    updatedAt: dates[0]
+                ),
+                Workspace.preview(
+                    id: "review",
+                    derivedStatus: "in-review",
+                    repositoryID: "repo-a",
+                    updatedAt: dates[1]
+                ),
+                Workspace.preview(
+                    id: "progress-old",
+                    derivedStatus: "in-progress",
+                    repositoryID: "repo-z",
+                    updatedAt: dates[2]
+                ),
+                Workspace.preview(
+                    id: "backlog",
+                    derivedStatus: "backlog",
+                    repositoryID: "repo-a",
+                    updatedAt: dates[3]
+                ),
+                Workspace.preview(
+                    id: "canceled",
+                    derivedStatus: "canceled",
+                    repositoryID: "repo-z",
+                    updatedAt: dates[4]
+                ),
+                Workspace.preview(
+                    id: "progress-new",
+                    derivedStatus: "backlog",
+                    manualStatus: "in-progress",
+                    repositoryID: "repo-a",
+                    updatedAt: dates[5]
+                ),
+                Workspace.preview(
+                    id: "future",
+                    derivedStatus: "waiting-on-user",
+                    repositoryID: "missing-repo",
+                    updatedAt: dates[6]
+                ),
+            ]
+            for workspace in workspaces {
+                try Workspace.insert { workspace }.execute(db)
+            }
+        }
+
+        let groupedByStatus = try database.read { db in
+            try WorkspaceWithRepository
+                .all(sortedBy: .updated, groupedBy: .status)
+                .fetchAll(db)
+        }
+        let groupedByProject = try database.read { db in
+            try WorkspaceWithRepository
+                .all(sortedBy: .updated, groupedBy: .project)
+                .fetchAll(db)
+        }
+
+        expectNoDifference(
+            groupedByStatus.map(\.workspace.id),
+            [
+                "done",
+                "review",
+                "progress-new",
+                "progress-old",
+                "backlog",
+                "canceled",
+                "future",
+            ]
+        )
+        expectNoDifference(
+            groupedByProject.map(\.workspace.id),
+            [
+                "progress-new",
+                "backlog",
+                "review",
+                "canceled",
+                "progress-old",
+                "done",
+                "future",
+            ]
+        )
+    }
 }

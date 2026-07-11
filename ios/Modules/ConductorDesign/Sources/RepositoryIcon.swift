@@ -21,6 +21,14 @@ public struct RepositoryIcon: View {
         )
     }
 
+    public init(repository: Repository?, size: CGFloat) {
+        self.init(
+            iconName: repository?.icon,
+            avatarURL: repository?.githubOwnerAvatarURL,
+            size: size
+        )
+    }
+
     public var body: some View {
         Group {
             if let iconName, !iconName.isEmpty, let icon = UIImage(lucideId: iconName) {
