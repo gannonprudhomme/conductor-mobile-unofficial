@@ -92,7 +92,7 @@ private struct ThemedNavigationTitleContent<Subtitle: View>: View {
                 .lineLimit(1)
 
             subtitle
-                .font(.theme(.footnote))
+                .font(.theme(.small))
                 .foregroundStyle(.theme(.textSecondary))
         }
     }
@@ -107,7 +107,7 @@ private struct ThemedNavigationTitleContent<Subtitle: View>: View {
                 .lineLimit(1)
 
             Text(verbatim: "A")
-                .font(.theme(.footnote))
+                .font(.theme(.small))
         }
         .opacity(0)
         .accessibilityHidden(true)

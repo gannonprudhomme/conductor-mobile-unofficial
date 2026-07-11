@@ -246,7 +246,7 @@ public struct SessionsListView: View {
                             .lineLimit(1)
 
                         Text(session.debugSubtitle)
-                            .font(.theme(.footnote))
+                            .font(.theme(.small))
                             .foregroundStyle(.theme(.textSecondary))
                             .lineLimit(1)
                     }

@@ -40,6 +40,7 @@ public struct ConductorProgressViewStyle: ProgressViewStyle {
 public extension ProgressViewStyle where Self == ConductorProgressViewStyle {
     static var conductor: Self { Self() }
 
+    /// Really just exists so we can prevent having a bunch of these be synchronized on the `Workspaces` list view
     static func conductor(phaseSeed: some Hashable) -> Self {
         Self(phaseSeed: phaseSeed)
     }

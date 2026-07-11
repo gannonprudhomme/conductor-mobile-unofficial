@@ -2,6 +2,7 @@ import ComposableArchitecture
 import ConductorData
 import ConductorDesign
 import Foundation
+import LucideIcons
 import SQLiteData
 import SwiftUI
 
@@ -9,9 +10,10 @@ import SwiftUI
 public struct Chat: Sendable {
     @ObservableState
     public struct State: Equatable {
-        @Presents public var destination: Destination.State?
-        @FetchAll public var messages: [Message]
+        @Presents var destination: Destination.State?
+        @FetchAll var messages: [Message]
         public let session: Session
+        public var turns: [Turn]? = nil
 
         public init(session: Session) {
             self.session = session
@@ -19,7 +21,12 @@ public struct Chat: Sendable {
                 wrappedValue: [],
                 Message
                     .where { $0.sessionID.eq(session.id) }
-                    .order { $0.createdAt.asc() },
+                    .order {
+                        (
+                            $0.sentAt.asc(nulls: .last),
+                            $0.createdAt
+                        )
+                    },
                 animation: .default
             )
         }
@@ -28,7 +35,6 @@ public struct Chat: Sendable {
     @Reducer
     public enum Destination {
         case alert(AlertState<Alert>)
-        @ReducerCaseIgnored case message(Message)
 
         public enum Alert: Equatable { }
     }
@@ -37,7 +43,7 @@ public struct Chat: Sendable {
         case task
         case destination(PresentationAction<Destination.Action>)
         case loadMessagesFailed(String)
-        case messageTapped(Message)
+        case messagesUpdated([Message])
     }
 
     @Dependency(\.continuousClock) var clock
@@ -50,7 +56,7 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
-                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                let pollMessages: Effect<Action> = .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
                     await refreshMessages(
                         workspaceID: workspaceID,
                         sessionID: sessionID,
@@ -64,23 +70,34 @@ public struct Chat: Sendable {
                         )
                     }
                 }
-
-            case .destination:
+                
+                return .merge(
+                    pollMessages,
+                    .publisher {
+                        state.$messages
+                            .publisher
+                            .map(Action.messagesUpdated)
+                    }
+                )
+                
+            case .messagesUpdated(let messages):
+                withAnimation {
+                    state.turns = Turn.parse(messages: messages)
+                }
                 return .none
 
             case let .loadMessagesFailed(message):
                 state.destination = .alert(.failedToLoadMessages(message: message))
                 return .none
 
-            case let .messageTapped(message):
-                state.destination = .message(message)
+            case .destination:
                 return .none
             }
         }
         .ifLet(\.$destination, action: \.destination)
     }
 
-    private func refreshMessages(
+    @concurrent private func refreshMessages(
         workspaceID: String,
         sessionID: String,
         send: Send<Action>
@@ -97,7 +114,8 @@ public struct Chat: Sendable {
         }
     }
 
-    private func loadMessages(workspaceID: String, sessionID: String) async throws {
+    // Do it off the mian thread!
+    @concurrent private func loadMessages(workspaceID: String, sessionID: String) async throws {
         let messages = try await desktopClient.fetchMessages(workspaceID, sessionID)
         guard !messages.isEmpty else { return }
 
@@ -123,6 +141,7 @@ extension AlertState where Action == Chat.Destination.Alert {
 public struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
+    @State private var screenWidth: CGFloat = 400
 
     public init(store: StoreOf<Chat>) {
         self.store = store
@@ -130,30 +149,28 @@ public struct ChatView: View {
 
     public var body: some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(store.messages) { message in
-                    MessageRow(message: message) {
-                        store.send(.messageTapped(message))
-                    }
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                }
+            LazyVStack(spacing: 8) {
+                ChatRows(turns: store.turns ?? [], screenWidth: screenWidth)
+                    .padding(.horizontal, 16)
             }
             .scrollTargetLayout()
+        }
+        .overlay {
+            if store.turns == nil { // Maybe empty too, idk
+                ProgressView()
+                    .progressViewStyle(.conductor)
+                    .frame(width: 32, height: 32)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+        .readSize { size in
+            screenWidth = size.width
         }
         .scrollPosition($scrollPosition)
         .defaultScrollAnchor(.bottom)
         .background(.theme(.background))
-        .overlay {
-            if store.messages.isEmpty {
-                EmptyChatView()
-            }
-        }
         .themedNavigationTitle(verbatim: store.session.displayTitle)
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
-        .sheet(item: $store.scope(state: \.destination?.message, action: \.destination.message)) { messageStore in
-            MessageSheet(message: messageStore.withState { $0 })
-        }
         .onChange(of: store.messages.last?.id) { _, messageID in
             messagesChanged(messageID: messageID)
         }
@@ -181,83 +198,63 @@ public struct ChatView: View {
             .font(.theme(.body))
         }
     }
-
-    private struct MessageRow: View {
-        let message: Message
-        let action: () -> Void
-
+    
+    private struct ChatRows: View {
+        let turns: [Turn]
+        let screenWidth: CGFloat
+        
         var body: some View {
-            Button(action: action) {
-                Text(message.previewContent)
-                    .font(.theme(.body))
-                    .foregroundStyle(.theme(.textPrimary))
-                    .lineLimit(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+            ForEach(turns) { turn in
+                ForEach(turn.rows) { row in
+                    makeRow(row)
+                }
             }
-            .buttonStyle(.plain)
         }
-    }
-
-    private struct MessageSheet: View {
-        let message: Message
-
-        var body: some View {
-            ScrollView {
-                Text(message.fullContent)
-                    .font(.theme(.body))
-                    .foregroundStyle(.theme(.textPrimary))
+        
+        @ViewBuilder
+        func makeRow(_ row: Turn.Row) -> some View {
+            switch row {
+            case .humanMessageRow(let humanMessageRow):
+                HumanMessageRowView(row: humanMessageRow, screenWidth: screenWidth)
+            case .assistantMessage(let assistantMessage):
+                makeAssistantMessage(assistantMessage)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
             }
-            .background(.theme(.background))
-            .presentationDragIndicator(.visible)
+        }
+        
+        @ViewBuilder
+        private func makeAssistantMessage(_ assistantMessage: Turn.Row.AssistantMessage) -> some View {
+            switch assistantMessage {
+            case .text(_, let content):
+                Text(content)
+            case .toolCall(_, let toolCall):
+                ToolCallRowView(toolCall: toolCall)
+            case .error(_, let message):
+                Text("Error: \(message)")
+                    .foregroundStyle(.theme(.destructive))
+            }
         }
     }
 }
 
-private extension Message {
-    var fullContent: String {
-        fullMessage ?? content ?? ""
-    }
-
-    var previewContent: String {
-        content ?? fullMessage ?? ""
-    }
-}
-
+#if DEBUG
 #Preview {
+    let content = try! DiscussPaginationPerformancePreviewContent()
     let _ = try! prepareDependencies {
         try $0.bootstrapDatabase()
+        try $0.defaultDatabase.write { db in
+            try Message.upsert { content.messages }
+                .execute(db)
+        }
+        $0.desktopClient.fetchMessages = { _, _ in [] }
     }
-    let session = try! JSONDecoder().decode(
-        Session.self,
-        from: Data(
-            """
-            {
-              "id": "session-1",
-              "workspace_id": "workspace-1",
-              "title": "Chat",
-              "agent_type": "codex",
-              "is_hidden": false,
-              "created_at": "2026-07-09 00:00:00",
-              "updated_at": "2026-07-09 00:00:00",
-              "status": "idle",
-              "model": "gpt-5",
-              "unread_count": 0,
-              "freshly_compacted": 0,
-              "context_token_count": 0
-            }
-            """.utf8
-        )
-    )
-
     NavigationStack {
         ChatView(
-            store: Store(initialState: Chat.State(session: session)) {
+            store: Store(initialState: Chat.State(session: content.session)) {
                 Chat()
             }
         )
     }
     .preferredColorScheme(.dark)
 }
+#endif

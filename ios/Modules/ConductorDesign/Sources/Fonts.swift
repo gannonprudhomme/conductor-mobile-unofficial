@@ -3,33 +3,39 @@ import SwiftUI
 
 public enum ThemeFontStyle {
     case body
-    case footnote
+    case small
+    case extraSmall
     case inlineToolbarTitle
     case title
 
-    var size: CGFloat {
+    public var size: CGFloat {
         switch self {
-        case .body:
-            16
-        case .footnote:
-            13
-        case .inlineToolbarTitle:
-            16
-        case .title:
-            28
+        case .extraSmall: 12
+        case .small: 14
+        case .body: 16
+        case .inlineToolbarTitle: 16
+        case .title: 28
         }
     }
 
-    var textStyle: Font.TextStyle {
+    // TODO: Likely need to revisit these mappings
+    // Not sure if context or size is what should be mapped
+    public var textStyle: Font.TextStyle {
         switch self {
-        case .body:
-            .body
-        case .footnote:
-            .footnote
-        case .inlineToolbarTitle:
-            .body
-        case .title:
-            .title
+        case .extraSmall: .footnote
+        case .body: .body
+        case .small: .footnote
+        case .inlineToolbarTitle: .body
+        case .title: .title
+        }
+    }
+
+    var fontName: String {
+        switch self {
+        case .code:
+            "GeistMono-Regular"
+        default:
+            "Geist-Regular"
         }
     }
 }
@@ -48,7 +54,7 @@ public extension Font {
 
     static func theme(_ style: ThemeFontStyle) -> Font {
         .custom(
-            "Geist-Regular",
+            style.fontName,
             size: style.size,
             relativeTo: style.textStyle
         )
