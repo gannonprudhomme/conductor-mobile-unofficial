@@ -34,7 +34,7 @@ struct ChatPreviewContent {
         for (index, turn) in Self.turns.enumerated() {
             builder.append(turn: turn, number: index + 1)
         }
-        self.messages = try JSONDecoder().decode(
+        self.messages = try JSONDecoder.conductor.decode(
             [Message].self,
             from: JSONEncoder().encode(builder.rows)
         )

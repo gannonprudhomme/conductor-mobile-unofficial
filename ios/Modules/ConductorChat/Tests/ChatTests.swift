@@ -115,7 +115,7 @@ struct ChatTests {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let message = try JSONDecoder().decode(
+            let message = try JSONDecoder.conductor.decode(
                 Message.self,
                 from: Data(
                     """
@@ -175,7 +175,7 @@ private func makeMessage(
     sessionID: String,
     createdAt: String
 ) throws -> Message {
-    try JSONDecoder().decode(
+    try JSONDecoder.conductor.decode(
         Message.self,
         from: Data(
             """

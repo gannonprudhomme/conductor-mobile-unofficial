@@ -1,3 +1,4 @@
+import Foundation
 import SQLiteData
 
 @Table("session_messages")
@@ -8,9 +9,9 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var role: Role?
     public var content: String?
     @Column("created_at")
-    public var createdAt: String
+    public var createdAt: Date
     @Column("sent_at")
-    public var sentAt: String?
+    public var sentAt: Date?
     @Column("full_message")
     public var fullMessage: String?
     @Column("cancelled_at")

@@ -8,7 +8,7 @@ import Testing
 struct TurnTests {
     @Test("A complete real database turn becomes human and assistant rows")
     func completeRealTurn() throws {
-        let messages = try JSONDecoder().decode(
+        let messages = try JSONDecoder.conductor.decode(
             [Message].self,
             from: Data(Self.completeTurnJSON.utf8)
         )
@@ -264,7 +264,7 @@ private func makeStoredMessage(
     content: String,
     turnID: String
 ) throws -> Message {
-    try JSONDecoder().decode(
+    try JSONDecoder.conductor.decode(
         Message.self,
         from: JSONEncoder().encode(
             StoredMessageFixture(id: id, role: role, content: content, turnID: turnID)

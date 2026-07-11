@@ -5,7 +5,7 @@ import Testing
 struct MessageTests {
     @Test("Message decoding preserves unknown roles and nullable fields")
     func decoding() throws {
-        let message = try JSONDecoder().decode(
+        let message = try JSONDecoder.conductor.decode(
             Message.self,
             from: Data(
                 """
@@ -33,6 +33,8 @@ struct MessageTests {
         #expect(message.id == "message-1")
         #expect(message.role == .assistant)
         #expect(message.content == "On it.")
+        #expect(message.createdAt == Date(timeIntervalSince1970: 1_783_555_200))
+        #expect(message.sentAt == Date(timeIntervalSince1970: 1_783_555_201))
         #expect(message.turnID == "turn-1")
         #expect(message.queueOrder == 1)
         #expect(message.senderID == nil)
