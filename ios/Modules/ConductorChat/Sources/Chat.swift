@@ -239,7 +239,7 @@ public struct ChatView: View {
 
 #if DEBUG
 #Preview {
-    let content = try! DiscussPaginationPerformancePreviewContent()
+    let content = try! ChatPreviewContent()
     let _ = try! prepareDependencies {
         try $0.bootstrapDatabase()
         try $0.defaultDatabase.write { db in
