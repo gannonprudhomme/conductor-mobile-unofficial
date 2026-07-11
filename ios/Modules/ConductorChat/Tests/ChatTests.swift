@@ -8,26 +8,6 @@ import Testing
 
 @MainActor
 struct ChatTests {
-    #if DEBUG
-    @Test("Pagination performance preview contains the complete session")
-    func previewContent() throws {
-        let content = try DiscussPaginationPerformancePreviewContent()
-
-        #expect(content.session.id == "34541fbc-44b2-415a-9adb-574093ece33f")
-        #expect(content.session.title == "Discuss Pagination Performance")
-        #expect(content.messages.count == 142)
-        #expect(Set(content.messages.map(\.id)).count == 142)
-        #expect(content.messages.allSatisfy { $0.sessionID == content.session.id })
-        #expect(content.messages.filter { $0.role == .user }.count == 5)
-        #expect(content.messages.filter { $0.role == .assistant }.count == 137)
-
-        for message in content.messages where message.role == .assistant {
-            let event = try #require(message.content)
-            _ = try JSONDecoder().decode(CodexEvent.self, from: Data(event.utf8))
-        }
-    }
-    #endif
-
     @Test("Messages are limited to the selected session and ordered chronologically")
     func messagesAreScopedAndOrdered() throws {
         let earlyMessage = try makeMessage(

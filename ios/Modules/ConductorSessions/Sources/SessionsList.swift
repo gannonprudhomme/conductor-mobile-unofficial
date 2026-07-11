@@ -263,6 +263,7 @@ public struct SessionsListView: View {
                 }
                 .labelStyle(.conductorStandard)
                 .labeledContentStyle(.conductorStandard)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

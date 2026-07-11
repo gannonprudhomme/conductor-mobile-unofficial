@@ -129,6 +129,11 @@ public enum CodexEvent: Decodable, Equatable {
         // public let type: EventType // Don't need it
         public let sessionID: String?
         public let message: UserMessage
+
+        private enum CodingKeys: String, CodingKey {
+            case sessionID = "session_id"
+            case message
+        }
         
         public struct UserMessage: Decodable, Hashable, Sendable {
             // public let role: Role
