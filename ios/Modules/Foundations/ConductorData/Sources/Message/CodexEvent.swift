@@ -1,4 +1,5 @@
 //
+//  CodexEvent.swift
 //  ConductorModules
 //
 //  Created by Gannon Prudomme on 7/10/26.
@@ -56,17 +57,20 @@ public enum CodexEvent: Decodable, Equatable {
     }
     
     public struct AssistantEvent: Decodable, Hashable, Sendable {
-        public let sessionID: String?
+        // public let type: EventType
+        // public let sessionID: String?
         public let message: AssistantMessage
         
         /// `Message.content(parsed).message`
         public struct AssistantMessage: Decodable, Hashable, Sendable {
+            // public let role: Role // Doubt we need this, it's the same thing as the `type`
             public let content: [AssistantMessageContent]
             
             public enum AssistantMessageContent: Decodable, Hashable, Sendable {
                 case text(TextBlock)
                 case thinking(ThinkingBlock)
                 case toolUse(ToolUseBlock)
+                // TODO: This makes me wonder if we should be doing the struct approach? but idk
                 case unknown([String: JSONValue])
                 
                 public init(from decoder: any Decoder) throws {
@@ -86,14 +90,18 @@ public enum CodexEvent: Decodable, Equatable {
                 }
                 
                 public struct TextBlock: Codable, Hashable, Sendable {
+                    // public let type: AssistantMessageContentType
                     public let text: String
                 }
                 
                 public struct ThinkingBlock: Codable, Hashable, Sendable {
+                    // public let type: AssistantMessageContentType
                     public let thinking: String
                 }
                 
                 public struct ToolUseBlock: Codable, Hashable, Sendable/*, Identifiable*/ {
+                    // public let type: AssistantMessageContentType
+                    
                     /// `id` is important! It is used to match up with a `user` (aka environment) `ToolResultBlock.toolUseID`
                     /// Aka to match usage of a tool -> result of the tool
                     public let id: String
@@ -118,10 +126,12 @@ public enum CodexEvent: Decodable, Equatable {
     }
     
     public struct UserEvent: Decodable, Hashable, Sendable {
+        // public let type: EventType // Don't need it
         public let sessionID: String?
         public let message: UserMessage
         
         public struct UserMessage: Decodable, Hashable, Sendable {
+            // public let role: Role
             public let content: [UserMessageContent]
             
             public enum UserMessageContent: Decodable, Hashable, Sendable {
@@ -141,11 +151,13 @@ public enum CodexEvent: Decodable, Equatable {
                 }
 
                 public struct ToolResultBlock: Codable, Hashable, Sendable {
+                    // public let type: UserMessageContentType
                     public let toolUseID: String
                     public let content: String
                     public let isError: Bool
                     
                     private enum CodingKeys: String, CodingKey {
+                        // case type
                         case toolUseID = "tool_use_id"
                         case content
                         case isError = "is_error"
@@ -203,8 +215,10 @@ public enum CodexEvent: Decodable, Equatable {
     */
     
     public struct ResultEvent: Decodable, Hashable, Sendable {
+        // public let type: EventType
         public let sessionID: String?
         public let usage: Usage
+        // public let conductorSDKMetadata: JSONValue
         
         public struct Usage: Codable, Hashable, Sendable {
             public let inputTokens: Int
@@ -224,7 +238,9 @@ public enum CodexEvent: Decodable, Equatable {
         }
     }
     
+    // TODO: Feel like there's a better way to represent this (e.g. an enum), but might be better for the layer above (reducer)
     public struct ErrorEvent: Decodable, Hashable, Sendable {
+        // public let type: EventType
         public let sessionID: String?
         public let content: String
         public let errorInfo: JSONValue?
@@ -232,6 +248,7 @@ public enum CodexEvent: Decodable, Equatable {
         public let willRetry: Bool?
         
         private enum CodingKeys: String, CodingKey {
+            // case type
             case sessionID = "session_id"
             case content
             case errorInfo
@@ -239,6 +256,19 @@ public enum CodexEvent: Decodable, Equatable {
             case willRetry
         }
     }
+    
+    /*
+    public struct Role: RawRepresentable, Codable, Hashable, Sendable {
+        public let rawValue: String
+        
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+        
+        public static let assistant = Self(rawValue: "assistant")
+        public static let user = Self(rawValue: "user")
+    }
+     */
 }
 
 public enum JSONValue: Codable, Hashable, Sendable {

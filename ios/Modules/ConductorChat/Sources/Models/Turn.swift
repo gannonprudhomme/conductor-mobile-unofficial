@@ -118,8 +118,8 @@ public struct Turn: Identifiable, Equatable {
                         
                     case "Edit":
                         guard let filePath = input.string(for: "file_path"),
-                              let oldString = input.string(for: "old_path"),
-                              let newString = input.string(for: "new_path'")
+                              let oldString = input.string(for: "old_string"),
+                              let newString = input.string(for: "new_string")
                         else {
                             self = unknown
                             return

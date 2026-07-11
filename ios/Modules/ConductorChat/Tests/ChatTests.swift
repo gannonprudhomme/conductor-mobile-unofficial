@@ -23,7 +23,7 @@ struct ChatTests {
 
         for message in content.messages where message.role == .assistant {
             let event = try #require(message.content)
-            _ = try JSONSerialization.jsonObject(with: Data(event.utf8))
+            _ = try JSONDecoder().decode(CodexEvent.self, from: Data(event.utf8))
         }
     }
     #endif
@@ -63,23 +63,105 @@ struct ChatTests {
         }
     }
 
-    @Test("Selecting and dismissing a message controls the sheet")
-    func messageSelectionControlsSheet() async throws {
+    @Test("Task polls the selected session and observes stored messages")
+    func task() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let message = try makeMessage(
-                id: "message-1",
-                sessionID: "session-1",
-                createdAt: "2026-07-09 01:00:00"
+            let clock = TestClock()
+            let requestCount = LockIsolated(0)
+
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.continuousClock = clock
+                $0.desktopClient.fetchMessages = { workspaceID, sessionID in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+
+                    let count = requestCount.withValue {
+                        $0 += 1
+                        return $0
+                    }
+                    if count == 1 {
+                        return []
+                    }
+                    throw TestError()
+                }
+            }
+
+            let task = await store.send(.task)
+
+            await store.receive(\.messagesUpdated) {
+                $0.turns = []
+            }
+            #expect(requestCount.value == 1)
+
+            await clock.advance(by: .seconds(1))
+            await store.receive(\.loadMessagesFailed) {
+                $0.destination = .alert(
+                    .failedToLoadMessages(message: TestError().localizedDescription)
+                )
+            }
+            #expect(requestCount.value == 2)
+
+            await task.cancel()
+        }
+    }
+
+    @Test("Messages updated parses turns")
+    func messagesUpdated() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let message = try JSONDecoder().decode(
+                Message.self,
+                from: Data(
+                    """
+                    {
+                      "id": "human-1",
+                      "session_id": "session-1",
+                      "role": "user",
+                      "content": "Hello",
+                      "created_at": "2026-07-09 01:00:00",
+                      "turn_id": "turn-1"
+                    }
+                    """.utf8
+                )
             )
             let session = try makeSession()
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
-            await store.send(.messageTapped(message)) {
-                $0.destination = .message(message)
+            await store.send(.messagesUpdated([message])) {
+                $0.turns = [
+                    Turn(
+                        id: "turn-1",
+                        rows: [
+                            .humanMessageRow(.init(id: "human-1", content: "Hello")),
+                        ]
+                    ),
+                ]
+            }
+        }
+    }
+
+    @Test("Load failure presents an alert that destination dismissal clears")
+    func loadMessagesFailedAndDestinationDismissed() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(.loadMessagesFailed("The service is unavailable.")) {
+                $0.destination = .alert(
+                    .failedToLoadMessages(message: "The service is unavailable.")
+                )
             }
             await store.send(.destination(.dismiss)) {
                 $0.destination = nil
@@ -131,4 +213,10 @@ private func makeSession() throws -> Session {
             """.utf8
         )
     )
+}
+
+private struct TestError: LocalizedError {
+    var errorDescription: String? {
+        "Something went wrong."
+    }
 }
