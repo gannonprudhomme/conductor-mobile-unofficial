@@ -16,27 +16,13 @@ dist/
 dist-ssr/
 *.local
 
-# Expo
-.expo/
-web-build/
-*.tsbuildinfo
-/mobile/expo-env.d.ts
-/mobile/example/
-/mobile/ios/
-/mobile/android/
-
 # Native credentials and generated files
-.kotlin/
 *.orig.*
-*.jks
 *.p8
 *.p12
 *.key
 *.mobileprovision
 *.pem
-
-# Metro
-.metro-health-check*
 
 # Tauri and Rust
 /desktop/src-tauri/target/
