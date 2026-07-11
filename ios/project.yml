@@ -57,9 +57,6 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        UIAppFonts:
-          - Geist[wght].ttf
-          - GeistMono[wght].ttf
     dependencies:
       - package: ConductorModules
         product: ConductorDesign

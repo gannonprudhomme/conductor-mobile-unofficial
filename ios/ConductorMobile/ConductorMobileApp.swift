@@ -12,8 +12,6 @@ struct ConductorMobileApp: App {
     }
 
     init() {
-        Font.registerThemeFonts()
-
         try! prepareDependencies {
             try $0.bootstrapDatabase()
         }
