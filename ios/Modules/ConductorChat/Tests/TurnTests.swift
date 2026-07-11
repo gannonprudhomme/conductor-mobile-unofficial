@@ -6,6 +6,19 @@ import Testing
 
 @Suite("Turn parsing")
 struct TurnTests {
+    @Test("Human messages find file-reference labels")
+    @MainActor
+    func humanMessageFileReferences() {
+        let references = HumanMessageRowView.fileReferences(
+            in: "Review @⟦Transcript.md⟧(.context%2Fattachments%2Fabc%2FTranscript.md), @⟦Added.swift +10-12⟧(.context%2Fattachments%2Fcomments%2Fadded.md), and @⟦Removed.swift -10⟧(.context%2Fattachments%2Fcomments%2Fremoved.md)."
+        )
+
+        expectNoDifference(
+            references.map(\.label),
+            ["Transcript.md", "Added.swift", "Removed.swift"]
+        )
+    }
+
     @Test("A complete real database turn becomes human and assistant rows")
     func completeRealTurn() throws {
         let messages = try JSONDecoder.conductor.decode(
