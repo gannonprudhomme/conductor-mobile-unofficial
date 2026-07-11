@@ -9,6 +9,11 @@ command = "mise run run"
 default = true
 icon = "play"
 
+[scripts.run.physical]
+available_in = ["local"]
+command = "mise -C ios run deploy -- id=00008140-000611C801F3001C --attach"
+icon = "smartphone"
+
 [scripts.run.xcode]
 available_in = ["local"]
 command = "mise -C ios run xcode"
