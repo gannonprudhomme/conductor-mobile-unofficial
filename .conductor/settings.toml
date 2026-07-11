@@ -18,3 +18,8 @@ icon = "smartphone"
 available_in = ["local"]
 command = "mise -C ios run xcode"
 icon = "hammer"
+
+[scripts.run.tauri]
+available_in = ["local"]
+command = "mise run tauri"
+icon = "monitor"
