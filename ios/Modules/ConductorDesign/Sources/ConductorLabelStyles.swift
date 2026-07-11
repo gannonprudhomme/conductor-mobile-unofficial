@@ -34,7 +34,9 @@ public struct ConductorStandardLabeledContentStyle: LabeledContentStyle {
 
             Spacer(minLength: 12)
 
-            configuration.content
+            HStack(spacing: 12) {
+                configuration.content
+            }
         }
     }
 }

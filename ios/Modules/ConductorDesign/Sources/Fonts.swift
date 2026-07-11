@@ -5,11 +5,13 @@ public enum ThemeFontStyle {
     case body
     case small
     case extraSmall
+    case extraExtraSmall
     case inlineToolbarTitle
     case title
 
     public var size: CGFloat {
         switch self {
+        case .extraExtraSmall: 11
         case .extraSmall: 12
         case .small: 14
         case .body: 16
@@ -22,6 +24,7 @@ public enum ThemeFontStyle {
     // Not sure if context or size is what should be mapped
     public var textStyle: Font.TextStyle {
         switch self {
+        case .extraExtraSmall: .caption2
         case .extraSmall: .footnote
         case .body: .body
         case .small: .footnote

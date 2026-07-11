@@ -367,23 +367,15 @@ public struct WorkspacesView: View {
         let groupByType: Workspaces.State.WorkspaceSection.GroupByType
         let count: Int
         let isExpanded: Bool
-        @ScaledMetric(relativeTo: .body) private var disclosureIconSize = 12
+        @ScaledMetric(relativeTo: .body) private var disclosureIconSize = 16
 
         var body: some View {
-            HStack(spacing: 8) {
-                switch groupByType {
-                case let .status(status):
-                    StatusSectionHeader(
-                        status: status,
-                        count: count
-                    )
-
-                case let .project(_, repository, title):
-                    ProjectSectionHeader(
-                        repository: repository,
-                        title: title,
-                        count: count
-                    )
+            LabeledContent {
+                if !isExpanded {
+                    Text(count, format: .number)
+                        .font(.theme(.extraExtraSmall))
+                        .foregroundStyle(.theme(.textSecondary))
+                        .contentTransition(.numericText(value: Double(count)))
                 }
 
                 Image(uiImage: Lucide.chevronDown)
@@ -393,8 +385,19 @@ public struct WorkspacesView: View {
                     .frame(width: disclosureIconSize, height: disclosureIconSize)
                     .foregroundStyle(.theme(.sidebarMutedForeground))
                     .rotationEffect(.degrees(isExpanded ? 0 : -90))
+            } label: {
+                switch groupByType {
+                case let .status(status):
+                    StatusSectionHeader(status: status)
+
+                case let .project(_, repository, title):
+                    ProjectSectionHeader(
+                        repository: repository,
+                        title: title
+                    )
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .labeledContentStyle(.conductorStandard)
             .contentShape(.rect)
         }
     }
@@ -424,22 +427,14 @@ public struct WorkspacesView: View {
 
     private struct StatusSectionHeader: View {
         let status: Workspace.Status
-        let count: Int
         @ScaledMetric(relativeTo: .body) private var iconSize = 13.2
 
         var body: some View {
             Label {
-                HStack(alignment: .firstTextBaseline, spacing: 12) { // optically the number's alignment looks weird w/o this
-                    Text(status.title)
-                        .font(.theme(.body))
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.theme(.textPrimary))
-
-                    Text(count, format: .number)
-                        .font(.theme(.extraSmall))
-                        .foregroundStyle(.theme(.textSecondary))
-                        .contentTransition(.numericText(value: Double(count)))
-                }
+                Text(status.title)
+                    .font(.theme(.body))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.theme(.textPrimary))
             } icon: {
                 // Lucide has no exact match for Conductor's status glyphs, so use
                 // normalized SVGs to keep every status icon the same visual size.
@@ -453,19 +448,12 @@ public struct WorkspacesView: View {
     private struct ProjectSectionHeader: View {
         let repository: Repository?
         let title: String
-        let count: Int
         @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
             Label {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(title)
-                        .font(.theme(.body))
-
-                    Text(count, format: .number)
-                        .font(.theme(.extraSmall))
-                        .contentTransition(.numericText(value: Double(count)))
-                }
+                Text(title)
+                    .font(.theme(.body))
             } icon: {
                 RepositoryIcon(repository: repository, size: iconSize)
             }
@@ -479,47 +467,37 @@ public struct WorkspacesView: View {
         let item: WorkspaceWithRepository
         let showsRepositoryIcon: Bool
         let action: () -> Void
-        @ScaledMetric(relativeTo: .body) private var chevronSize = 16
         @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
             Button(action: action) {
-                LabeledContent {
-                    Image(uiImage: Lucide.chevronRight)
-                        .renderingMode(.template)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: chevronSize, height: chevronSize)
-                        .foregroundStyle(.theme(.textSecondary))
-                } label: {
-                    Label {
-                        Text(item.workspace.displayBranchName)
-                            .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
-                            .fontWeight(isUnread ? .semibold : .regular)
-                            .lineLimit(1)
-                    } icon: {
-                        if showsRepositoryIcon {
-                            RepositoryIcon(repository: item.repository, size: iconSize)
-                        }
+                Label {
+                    Text(item.workspace.displayBranchName)
+                        .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
+                        .fontWeight(isUnread ? .semibold : .regular)
+                        .lineLimit(1)
+                } icon: {
+                    if showsRepositoryIcon {
+                        RepositoryIcon(repository: item.repository, size: iconSize)
+                    }
 
-                        if item.workspace.isWorking {
-                            ProgressView()
-                                .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
-                                .tint(.theme(.textSecondary))
-                                .frame(width: iconSize, height: iconSize)
-                        } else {
-                            Image(uiImage: Lucide.gitBranch)
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: iconSize, height: iconSize)
-                                .foregroundStyle(.theme(.textSecondary))
-                                .accessibilityHidden(true)
-                        }
+                    if item.workspace.isWorking {
+                        ProgressView()
+                            .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
+                            .tint(.theme(.textSecondary))
+                            .frame(width: iconSize, height: iconSize)
+                    } else {
+                        Image(uiImage: Lucide.gitBranch)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: iconSize, height: iconSize)
+                            .foregroundStyle(.theme(.textSecondary))
+                            .accessibilityHidden(true)
                     }
                 }
                 .labelStyle(.conductorStandard)
-                .labeledContentStyle(.conductorStandard)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(.theme(.textPrimary))
                 .font(.theme(.body))
                 .contentShape(Rectangle())
