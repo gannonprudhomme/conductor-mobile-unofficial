@@ -141,7 +141,6 @@ extension AlertState where Action == Chat.Destination.Alert {
 public struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
-    @State private var screenWidth: CGFloat = 400
 
     public init(store: StoreOf<Chat>) {
         self.store = store
@@ -150,7 +149,7 @@ public struct ChatView: View {
     public var body: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
-                ChatRows(turns: store.turns ?? [], screenWidth: screenWidth)
+                ChatRows(turns: store.turns ?? [])
                     .padding(.horizontal, 16)
             }
             .scrollTargetLayout()
@@ -162,9 +161,6 @@ public struct ChatView: View {
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
-        }
-        .readSize { size in
-            screenWidth = size.width
         }
         .scrollPosition($scrollPosition)
         .defaultScrollAnchor(.bottom)
@@ -201,7 +197,6 @@ public struct ChatView: View {
     
     private struct ChatRows: View {
         let turns: [Turn]
-        let screenWidth: CGFloat
         
         var body: some View {
             ForEach(turns) { turn in
@@ -215,7 +210,7 @@ public struct ChatView: View {
         func makeRow(_ row: Turn.Row) -> some View {
             switch row {
             case .humanMessageRow(let humanMessageRow):
-                HumanMessageRowView(row: humanMessageRow, screenWidth: screenWidth)
+                HumanMessageRowView(row: humanMessageRow)
             case .assistantMessage(let assistantMessage):
                 makeAssistantMessage(assistantMessage)
                     .frame(maxWidth: .infinity, alignment: .leading)

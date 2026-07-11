@@ -9,8 +9,9 @@ import LucideIcons
 import SwiftUI
 
 struct HumanMessageRowView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     let row: Turn.Row.HumanMessageRow
-    let screenWidth: CGFloat
     
     var body: some View {
         Text(row.content)
@@ -22,7 +23,13 @@ struct HumanMessageRowView: View {
                 Color.theme(.highlight),
                 in: .rect(cornerRadius: 26)
             )
-            .frame(maxWidth: screenWidth * 0.75, alignment: .trailing)
+            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in
+                if dynamicTypeSize.isAccessibilitySize {
+                    width
+                } else {
+                    width * 0.75
+                }
+            }
             .frame(maxWidth: .infinity, alignment: .trailing)
             .contextMenu {
                 Button {
@@ -43,32 +50,25 @@ struct HumanMessageRowView: View {
 }
 
 #Preview {
-    @Previewable @State var screenWidth: CGFloat = 0
-    
     ScrollView {
         VStack(spacing: 8) {
             HumanMessageRowView(
                 row: Turn.Row.HumanMessageRow(
                     id: "1234",
                     content: "Content"
-                ),
-                screenWidth: screenWidth
+                )
             )
             
             HumanMessageRowView(
                 row: Turn.Row.HumanMessageRow(
                     id: "12345",
                     content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
-                ),
-                screenWidth: screenWidth
+                )
             )
         }
         .padding()
     }
     .scrollContentBackground(.hidden)
     .background(.theme(.background))
-    .readSize { size in
-        screenWidth = size.width
-    }
     .preferredColorScheme(.dark)
 }
