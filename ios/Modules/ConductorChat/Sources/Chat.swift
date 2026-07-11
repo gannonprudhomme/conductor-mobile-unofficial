@@ -230,10 +230,12 @@ public struct ChatView: View {
         @ViewBuilder
         private func makeAssistantMessage(_ assistantMessage: Turn.Row.AssistantMessage) -> some View {
             switch assistantMessage {
-            case .text(_, let content):
+            case .text(_, let content, let isMostRecentTextInTurn):
                 Text(content)
+                    .foregroundStyle(.theme(isMostRecentTextInTurn ? .textPrimary : .textSecondary))
             case .toolCall(_, let toolCall):
                 ToolCallRowView(toolCall: toolCall)
+                    .foregroundStyle(.theme(.textPrimary))
             case .error(_, let message):
                 Text("Error: \(message)")
                     .foregroundStyle(.theme(.destructive))

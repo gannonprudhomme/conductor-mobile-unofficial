@@ -28,7 +28,8 @@ struct TurnTests {
                         .assistantMessage(
                             .text(
                                 messageID: "10d56140-7118-450e-b59d-b476803688da",
-                                content: "Ready."
+                                content: "Ready.",
+                                isMostRecentTextInTurn: true
                             )
                         ),
                     ]
@@ -61,15 +62,58 @@ struct TurnTests {
                     id: "turn-a",
                     rows: [
                         .humanMessageRow(.init(id: "human-a", content: "First")),
-                        .assistantMessage(.text(messageID: "assistant-a", content: "Answer first")),
+                        .assistantMessage(
+                            .text(messageID: "assistant-a", content: "Answer first", isMostRecentTextInTurn: true)
+                        ),
                     ]
                 ),
                 Turn(
                     id: "turn-b",
                     rows: [
                         .humanMessageRow(.init(id: "human-b", content: "Second")),
-                        .assistantMessage(.text(messageID: "assistant-b", content: "Answer second")),
+                        .assistantMessage(
+                            .text(messageID: "assistant-b", content: "Answer second", isMostRecentTextInTurn: true)
+                        ),
                     ]
+                ),
+            ]
+        )
+    }
+
+    @Test("Only the most recent text row in each turn is marked as most recent")
+    func mostRecentText() throws {
+        let messages = try [
+            makeEventMessage(
+                id: "first-text",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"First"}]}}"#,
+                turnID: "turn-1"
+            ),
+            makeEventMessage(
+                id: "tool",
+                event: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"File.swift"}}]}}"#,
+                turnID: "turn-1"
+            ),
+            makeEventMessage(
+                id: "latest-text",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Latest"}]}}"#,
+                turnID: "turn-1"
+            ),
+        ]
+
+        expectNoDifference(
+            Turn.parse(messages: messages).first?.rows,
+            [
+                .assistantMessage(
+                    .text(messageID: "first-text", content: "First", isMostRecentTextInTurn: false)
+                ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "tool",
+                        toolCall: .readFile(toolUseID: "tool-1", filePath: "File.swift")
+                    )
+                ),
+                .assistantMessage(
+                    .text(messageID: "latest-text", content: "Latest", isMostRecentTextInTurn: true)
                 ),
             ]
         )

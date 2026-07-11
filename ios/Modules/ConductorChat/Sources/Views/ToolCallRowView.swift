@@ -31,7 +31,6 @@ struct ToolCallRowView: View {
                     .frame(width: iconSize, height: iconSize)
             }
         }
-        .foregroundStyle(.theme(.textPrimary))
         .lineLimit(1)
         .labelStyle(ToolCallLabelStyle())
         .labeledContentStyle(ToolCallLabeledContentStyle())
@@ -292,6 +291,7 @@ private func lineDiffCounts(
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .foregroundStyle(.theme(.textSecondary))
         .padding()
     }
     .background(.theme(.background))

@@ -38,13 +38,13 @@ public struct Turn: Identifiable, Equatable {
         }
         
         enum AssistantMessage: Equatable, Identifiable {
-            case text(messageID: String, content: String)
+            case text(messageID: String, content: String, isMostRecentTextInTurn: Bool)
             case toolCall(messageID: String, toolCall: ToolCall)
             case error(messageID: String, message: String)
             
             var id: String {
                 switch self {
-                case let .text(messageID, _),
+                case let .text(messageID, _, _),
                      let .toolCall(messageID, _),
                      let .error(messageID, _):
                     messageID
@@ -165,22 +165,22 @@ extension Turn {
                 reportIssue("message.content was nil for \(message)")
                 return nil
             }
-            
+
             switch role {
             case .user:
                 let row = Turn.Row.HumanMessageRow(id: message.id, content: content)
-                
+
                 return (turnID: turnID, row: Turn.Row.humanMessageRow(row))
             case .assistant:
                 do {
                     let codexEvent: CodexEvent = try JSONDecoder().decode(CodexEvent.self, from: Data(content.utf8))
-                    
+
                     let row: Turn.Row.AssistantMessage? = switch codexEvent {
                     case .assistant(let assistantEvent):
                         if let firstContent = assistantEvent.message.content.first {
                             switch firstContent {
                             case .text(let textBlock):
-                                .text(messageID: message.id, content: textBlock.text)
+                                .text(messageID: message.id, content: textBlock.text, isMostRecentTextInTurn: true)
                             case .thinking(let thinkingBlock):
                                 nil
                             case .toolUse(let toolUseBlock):
@@ -195,7 +195,7 @@ extension Turn {
                         nil
                     case .system:
                         nil
-                    case .result(let resultEvent):
+                    case .result:
                         nil
                     case .error(let errorEvent):
                         .error(messageID: message.id, message: errorEvent.content)
@@ -219,14 +219,33 @@ extension Turn {
         
         var turns: [Turn] = []
         var indexByTurnID: [String: Int] = [:]
+        var mostRecentTextRowIndexByTurnID: [String: Int] = [:]
 
         for (turnID, row) in turnRows {
+            let turnIndex: Int
             if let index = indexByTurnID[turnID] {
-                turns[index].rows.append(row)
+                turnIndex = index
             } else {
-                indexByTurnID[turnID] = turns.count
-                turns.append(Turn(id: turnID, rows: [row]))
+                turnIndex = turns.count
+                indexByTurnID[turnID] = turnIndex
+                turns.append(Turn(id: turnID, rows: []))
             }
+
+            // Store whether each text row is the turn's most recent so rendering remains O(1),
+            // even for large turns. Tool calls and errors do not affect which text is most recent.
+            if case .assistantMessage(.text) = row {
+                if let previousRowIndex = mostRecentTextRowIndexByTurnID[turnID],
+                   case let .assistantMessage(.text(messageID, content, _)) = turns[turnIndex].rows[previousRowIndex] {
+                    turns[turnIndex].rows[previousRowIndex] = .assistantMessage(
+                        .text(messageID: messageID, content: content, isMostRecentTextInTurn: false)
+                    )
+                }
+
+                // The row is appended below, so its index is the current row count.
+                mostRecentTextRowIndexByTurnID[turnID] = turns[turnIndex].rows.count
+            }
+
+            turns[turnIndex].rows.append(row)
         }
 
         return turns
