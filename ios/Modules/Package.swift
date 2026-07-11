@@ -51,6 +51,8 @@ let package = Package(
         .target(
             name: "ConductorDesign",
             dependencies: [
+                .product(name: "Dependencies", package: "swift-dependencies"),
+                .product(name: "DependenciesMacros", package: "swift-dependencies"),
                 .product(name: "Lottie", package: "lottie-spm"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 "ConductorData",

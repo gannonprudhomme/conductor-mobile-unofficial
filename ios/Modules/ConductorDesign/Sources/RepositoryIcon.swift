@@ -38,7 +38,7 @@ public struct RepositoryIcon: View {
                     .scaledToFit()
                     .foregroundStyle(.theme(.textSecondary))
             } else if iconName == nil, let avatarURL {
-                AsyncImage(url: avatarURL) { phase in
+                CachedAsyncImage(url: avatarURL) { phase in
                     if let image = phase.image {
                         image
                             .resizable()

@@ -81,6 +81,20 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorDataTests
         PRODUCT_NAME: $(TARGET_NAME)
+  ConductorDesignTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/ConductorDesign/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorDesign
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorDesignTests
+        PRODUCT_NAME: $(TARGET_NAME)
   ConductorWorkspacesTests:
     type: bundle.unit-test
     platform: iOS
@@ -152,6 +166,13 @@ schemes:
     test:
       targets:
         - ConductorDataTests
+  ConductorDesignTests:
+    build:
+      targets:
+        ConductorDesignTests: test
+    test:
+      targets:
+        - ConductorDesignTests
   ConductorWorkspacesTests:
     build:
       targets:

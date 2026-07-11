@@ -36,6 +36,8 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Put feature state/actions/reducers/views in feature modules such as
   `ConductorWorkspaces`.
 - Use SwiftUI all the way down.
+- For remote images, always use `CachedAsyncImage` from `ConductorDesign`.
+  Never use SwiftUI's `AsyncImage` directly.
 - Within SwiftUI result-builder closures, place a blank line between sibling
   view declarations. Keep each view's modifier chain together without blank
   lines.
