@@ -25,10 +25,6 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: ConductorMobile
-      - path: ConductorMobile/Fonts/Geist[wght].ttf
-        buildPhase: resources
-      - path: ConductorMobile/Fonts/GeistMono[wght].ttf
-        buildPhase: resources
     info:
       path: ConductorMobile/Info.plist
       properties:

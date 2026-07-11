@@ -50,7 +50,7 @@ public extension Font {
     // runs only once when the first theme font is requested.
     private static let themeFontsRegistration: Void = {
         for fontFilename in ["Geist[wght].ttf", "GeistMono[wght].ttf"] {
-            guard let url = Bundle.main.url(forResource: fontFilename, withExtension: nil) else {
+            guard let url = Bundle.module.url(forResource: fontFilename, withExtension: nil) else {
                 assertionFailure("Missing bundled font: \(fontFilename)")
                 continue
             }

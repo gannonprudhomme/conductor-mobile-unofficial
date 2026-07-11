@@ -58,6 +58,7 @@ let package = Package(
             path: "ConductorDesign/Sources",
             resources: [
                 .process("Assets.xcassets"),
+                .process("Fonts"),
             ],
             swiftSettings: swiftSettings
         ),
