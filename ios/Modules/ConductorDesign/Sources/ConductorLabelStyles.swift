@@ -8,7 +8,7 @@
 import SwiftUI
 
 public struct ConductorSmallLabelStyle: LabelStyle {
-    public init() { }
+    fileprivate init() { }
 
     public func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 8) {
@@ -23,8 +23,24 @@ public extension LabelStyle where Self == ConductorSmallLabelStyle {
     static var conductorSmall: Self { Self() }
 }
 
+public struct ConductorExtraSmallLabelStyle: LabelStyle {
+    fileprivate init() { }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            configuration.icon
+
+            configuration.title
+        }
+    }
+}
+
+public extension LabelStyle where Self == ConductorExtraSmallLabelStyle {
+    static var conductorExtraSmall: Self { Self() }
+}
+
 public struct ConductorStandardLabelStyle: LabelStyle {
-    public init() { }
+    fileprivate init() { }
 
     public func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 12) {
@@ -42,7 +58,7 @@ public extension LabelStyle where Self == ConductorStandardLabelStyle {
 }
 
 public struct ConductorStandardLabeledContentStyle: LabeledContentStyle {
-    public init() { }
+    fileprivate init() { }
 
     public func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 0) {
