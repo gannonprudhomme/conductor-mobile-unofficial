@@ -140,6 +140,7 @@ extension AlertState where Action == Chat.Destination.Alert {
 
 public struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
+    @State private var isBottomMarkerVisible = true
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
     public init(store: StoreOf<Chat>) {
@@ -151,6 +152,12 @@ public struct ChatView: View {
             LazyVStack(spacing: 8) {
                 ChatRows(turns: store.turns ?? [])
                     .padding(.horizontal, 16)
+
+                Color.clear
+                    .frame(height: 1)
+                    .onScrollVisibilityChange { isVisible in
+                        isBottomMarkerVisible = isVisible
+                    }
             }
             .scrollTargetLayout()
         }
@@ -163,12 +170,13 @@ public struct ChatView: View {
             }
         }
         .scrollPosition($scrollPosition)
-        .defaultScrollAnchor(.bottom)
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .alignment)
         .background(.theme(.background))
         .themedNavigationTitle(verbatim: store.session.displayTitle)
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
-        .onChange(of: store.messages.last?.id) { _, messageID in
-            messagesChanged(messageID: messageID)
+        .onChange(of: store.turns) { previousTurns, turns in
+            turnsChanged(from: previousTurns, to: turns)
         }
         .task {
             await store.send(.task).finish()
@@ -176,10 +184,12 @@ public struct ChatView: View {
         .preferredColorScheme(.dark)
     }
 
-    private func messagesChanged(messageID: Message.ID?) {
-        guard let messageID else { return }
+    private func turnsChanged(from previousTurns: [Turn]?, to turns: [Turn]?) {
+        let isInitialLoad = (previousTurns?.isEmpty ?? true) && turns?.isEmpty == false
+        guard isInitialLoad || isBottomMarkerVisible else { return }
+
         withAnimation {
-            scrollPosition.scrollTo(id: messageID, anchor: .bottom)
+            scrollPosition.scrollTo(edge: .bottom)
         }
     }
 
