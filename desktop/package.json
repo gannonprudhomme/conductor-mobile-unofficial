@@ -8,7 +8,7 @@
     "build": "pnpm build:sidecar-proxy && tsc && vite build",
     "build:sidecar-proxy": "tsc -p sidecar-proxy/tsconfig.json",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "./scripts/tauri.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
