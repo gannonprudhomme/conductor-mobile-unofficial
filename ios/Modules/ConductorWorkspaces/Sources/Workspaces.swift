@@ -428,11 +428,7 @@ public struct WorkspacesView: View {
         @ScaledMetric(relativeTo: .body) private var iconSize = 13.2
 
         var body: some View {
-            HStack(spacing: 12) {
-                // Lucide has no exact match for Conductor's status glyphs, so use
-                // normalized SVGs to keep every status icon the same visual size.
-                LinearStatusIcon(status: status, size: iconSize)
-
+            Label {
                 HStack(alignment: .firstTextBaseline, spacing: 12) { // optically the number's alignment looks weird w/o this
                     Text(status.title)
                         .font(.theme(.body))
@@ -444,7 +440,12 @@ public struct WorkspacesView: View {
                         .foregroundStyle(.theme(.textSecondary))
                         .contentTransition(.numericText(value: Double(count)))
                 }
+            } icon: {
+                // Lucide has no exact match for Conductor's status glyphs, so use
+                // normalized SVGs to keep every status icon the same visual size.
+                LinearStatusIcon(status: status, size: iconSize)
             }
+            .labelStyle(.conductorStandard)
             .textCase(nil)
         }
     }
@@ -456,9 +457,7 @@ public struct WorkspacesView: View {
         @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
-            HStack(spacing: 12) {
-                RepositoryIcon(repository: repository, size: iconSize)
-
+            Label {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(title)
                         .font(.theme(.body))
@@ -467,7 +466,10 @@ public struct WorkspacesView: View {
                         .font(.theme(.extraSmall))
                         .contentTransition(.numericText(value: Double(count)))
                 }
+            } icon: {
+                RepositoryIcon(repository: repository, size: iconSize)
             }
+            .labelStyle(.conductorStandard)
             .foregroundStyle(.theme(.textSecondary))
             .textCase(nil)
         }
@@ -482,39 +484,42 @@ public struct WorkspacesView: View {
 
         var body: some View {
             Button(action: action) {
-                HStack(spacing: 12) {
-                    if showsRepositoryIcon {
-                        RepositoryIcon(repository: item.repository, size: iconSize)
-                    }
-
-                    if item.workspace.isWorking {
-                        ProgressView()
-                            .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
-                            .tint(.theme(.textSecondary))
-                            .frame(width: iconSize, height: iconSize)
-                    } else {
-                        Image(uiImage: Lucide.gitBranch)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: iconSize, height: iconSize)
-                            .foregroundStyle(.theme(.textSecondary))
-                            .accessibilityHidden(true)
-                    }
-
-                    Text(item.workspace.displayBranchName)
-                        .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
-                        .fontWeight(isUnread ? .semibold : .regular)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
+                LabeledContent {
                     Image(uiImage: Lucide.chevronRight)
                         .renderingMode(.template)
                         .resizable()
                         .scaledToFit()
                         .frame(width: chevronSize, height: chevronSize)
                         .foregroundStyle(.theme(.textSecondary))
+                } label: {
+                    Label {
+                        Text(item.workspace.displayBranchName)
+                            .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
+                            .fontWeight(isUnread ? .semibold : .regular)
+                            .lineLimit(1)
+                    } icon: {
+                        if showsRepositoryIcon {
+                            RepositoryIcon(repository: item.repository, size: iconSize)
+                        }
+
+                        if item.workspace.isWorking {
+                            ProgressView()
+                                .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
+                                .tint(.theme(.textSecondary))
+                                .frame(width: iconSize, height: iconSize)
+                        } else {
+                            Image(uiImage: Lucide.gitBranch)
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: iconSize, height: iconSize)
+                                .foregroundStyle(.theme(.textSecondary))
+                                .accessibilityHidden(true)
+                        }
+                    }
                 }
+                .labelStyle(.conductorStandard)
+                .labeledContentStyle(.conductorStandard)
                 .foregroundStyle(.theme(.textPrimary))
                 .font(.theme(.body))
                 .contentShape(Rectangle())

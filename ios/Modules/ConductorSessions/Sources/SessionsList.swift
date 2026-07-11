@@ -235,34 +235,41 @@ public struct SessionsListView: View {
         let session: Session
         let action: () -> Void
         @ScaledMetric(relativeTo: .body) private var iconSize = 20
+        @ScaledMetric(relativeTo: .body) private var unreadIndicatorSize = 10
 
         var body: some View {
             Button(action: action) {
-                Label {
-                    VStack(alignment: .leading, spacing: 2) {
+                LabeledContent {
+                    if isUnread {
+                        UnreadIcon(size: unreadIndicatorSize)
+                    }
+                } label: {
+                    Label {
                         Text(session.displayTitle)
                             .font(.theme(.body))
-                            .foregroundStyle(.theme(.textPrimary))
+                            .fontWeight(isUnread ? .semibold : .regular)
+                            .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
                             .lineLimit(1)
-
-                        Text(session.debugSubtitle)
-                            .font(.theme(.small))
-                            .foregroundStyle(.theme(.textSecondary))
-                            .lineLimit(1)
-                    }
-                } icon: {
-                    if session.status == .working {
-                        ProgressView()
-                            .progressViewStyle(.conductor(phaseSeed: session.id))
-                            .tint(.theme(.textSecondary))
-                            .frame(width: iconSize, height: iconSize)
-                    } else {
-                        AgentIcon(agentType: session.agentType, size: iconSize)
+                    } icon: {
+                        if session.status == .working {
+                            ProgressView()
+                                .progressViewStyle(.conductor(phaseSeed: session.id))
+                                .tint(.theme(.textSecondary))
+                                .frame(width: iconSize, height: iconSize)
+                        } else {
+                            AgentIcon(agentType: session.agentType, size: iconSize)
+                        }
                     }
                 }
+                .labelStyle(.conductorStandard)
+                .labeledContentStyle(.conductorStandard)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+        }
+
+        private var isUnread: Bool {
+            session.unreadCount > 0
         }
     }
 }

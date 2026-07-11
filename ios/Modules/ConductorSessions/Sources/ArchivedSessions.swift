@@ -89,6 +89,8 @@ struct ArchivedSessionsView: View {
                     AgentIcon(agentType: session.agentType, size: iconSize)
                 }
             }
+            .labelStyle(.conductorStandard)
+            .labeledContentStyle(.conductorStandard)
         }
     }
 }
