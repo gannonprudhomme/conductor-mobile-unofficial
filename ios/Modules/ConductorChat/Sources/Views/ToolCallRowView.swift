@@ -11,9 +11,6 @@ import SwiftUI
 import LucideIcons
 
 struct ToolCallRowView: View {
-    @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
-    private var iconSize: CGFloat = ThemeFontStyle.small.size
-    
     let toolCall: Turn.Row.AssistantMessage.ToolCall
     
     var body: some View {
@@ -25,10 +22,7 @@ struct ToolCallRowView: View {
                     Text(title)
                 }
             } icon: {
-                Image(uiImage: lucideIcon)
-                    .renderingMode(.template)
-                    .resizable()
-                    .frame(width: iconSize, height: iconSize)
+                LucideIcon(lucideIcon, style: .small)
             }
         }
         .lineLimit(1)

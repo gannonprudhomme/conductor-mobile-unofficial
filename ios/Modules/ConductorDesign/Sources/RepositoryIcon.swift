@@ -3,39 +3,59 @@ import LucideIcons
 import SwiftUI
 
 public struct RepositoryIcon: View {
+    @ScaledMetric private var scaledSize: CGFloat
+
     private let iconName: String?
     private let avatarURL: URL?
     private let size: CGFloat
+    private let textStyle: Font.TextStyle
 
-    public init(iconName: String?, avatarURL: URL?, size: CGFloat) {
+    public init(
+        iconName: String?,
+        avatarURL: URL?,
+        size: CGFloat,
+        relativeTo textStyle: Font.TextStyle
+    ) {
         self.iconName = iconName
         self.avatarURL = avatarURL
         self.size = size
-    }
-
-    public init(repository: Repository, size: CGFloat) {
-        self.init(
-            iconName: repository.icon,
-            avatarURL: repository.githubOwnerAvatarURL,
-            size: size
+        self.textStyle = textStyle
+        self._scaledSize = ScaledMetric(
+            wrappedValue: size,
+            relativeTo: textStyle
         )
     }
 
-    public init(repository: Repository?, size: CGFloat) {
+    public init(
+        repository: Repository,
+        size: CGFloat,
+        relativeTo textStyle: Font.TextStyle
+    ) {
+        self.init(
+            iconName: repository.icon,
+            avatarURL: repository.githubOwnerAvatarURL,
+            size: size,
+            relativeTo: textStyle
+        )
+    }
+
+    public init(
+        repository: Repository?,
+        size: CGFloat,
+        relativeTo textStyle: Font.TextStyle
+    ) {
         self.init(
             iconName: repository?.icon,
             avatarURL: repository?.githubOwnerAvatarURL,
-            size: size
+            size: size,
+            relativeTo: textStyle
         )
     }
 
     public var body: some View {
         Group {
             if let iconName, !iconName.isEmpty, let icon = UIImage(lucideId: iconName) {
-                Image(uiImage: icon)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
+                LucideIcon(icon, size: size, relativeTo: textStyle)
                     .foregroundStyle(.theme(.textSecondary))
             } else if iconName == nil, let avatarURL {
                 CachedAsyncImage(url: avatarURL) { phase in
@@ -43,7 +63,7 @@ public struct RepositoryIcon: View {
                         image
                             .resizable()
                             .scaledToFill()
-                            .clipShape(.rect(cornerRadius: size / 5))
+                            .clipShape(.rect(cornerRadius: scaledSize / 5))
                     } else {
                         fallbackIcon
                     }
@@ -52,15 +72,12 @@ public struct RepositoryIcon: View {
                 fallbackIcon
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: scaledSize, height: scaledSize)
         .accessibilityHidden(true)
     }
 
     private var fallbackIcon: some View {
-        Image(uiImage: Lucide.folderGit2)
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
+        LucideIcon(Lucide.folderGit2, size: size, relativeTo: textStyle)
             .foregroundStyle(.theme(.textSecondary))
     }
 }

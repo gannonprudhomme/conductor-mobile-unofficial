@@ -150,8 +150,6 @@ extension AlertState where Action == SessionsList.Destination.Alert {
 
 public struct SessionsListView: View {
     @Bindable var store: StoreOf<SessionsList>
-    @ScaledMetric(relativeTo: .footnote) private var repositoryIconSize = 13
-    @ScaledMetric(relativeTo: .body) private var toolbarIconSize = 20
 
     public init(store: StoreOf<SessionsList>) {
         self.store = store
@@ -186,9 +184,9 @@ public struct SessionsListView: View {
         ) {
             HStack(spacing: 4) {
                 if let repository = store.repository {
-                    RepositoryIcon(repository: repository, size: repositoryIconSize)
+                    RepositoryIcon(repository: repository, size: 13, relativeTo: .footnote)
                 } else {
-                    RepositoryIcon(iconName: nil, avatarURL: nil, size: repositoryIconSize)
+                    RepositoryIcon(iconName: nil, avatarURL: nil, size: 13, relativeTo: .footnote)
                 }
 
                 Text(verbatim: store.repositoryDisplayName)
@@ -201,11 +199,7 @@ public struct SessionsListView: View {
                     Button {
                         store.send(.archivedSessionsButtonTapped)
                     } label: {
-                        Image(uiImage: Lucide.history)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: toolbarIconSize, height: toolbarIconSize)
+                        LucideIcon(Lucide.history, size: 20, relativeTo: .body)
                             .foregroundStyle(.theme(.textPrimary))
                     }
                     .accessibilityLabel("Archived sessions")
@@ -257,7 +251,7 @@ public struct SessionsListView: View {
                                 .tint(.theme(.textSecondary))
                                 .frame(width: iconSize, height: iconSize)
                         } else {
-                            AgentIcon(agentType: session.agentType, size: iconSize)
+                            AgentIcon(agentType: session.agentType, size: 20, relativeTo: .body)
                         }
                     }
                 }

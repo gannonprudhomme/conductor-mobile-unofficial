@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/10/26.
 //
 
+import ConductorDesign
 import LucideIcons
 import SwiftUI
 
@@ -39,8 +40,7 @@ struct HumanMessageRowView: View {
                         Text("Copy")
                             .foregroundStyle(.theme(.textPrimary))
                     } icon: {
-                        Image(uiImage: Lucide.copy)
-                            .renderingMode(.template)
+                        LucideIcon(Lucide.copy, style: .body)
                             .foregroundStyle(.theme(.textPrimary))
                     }
                 }

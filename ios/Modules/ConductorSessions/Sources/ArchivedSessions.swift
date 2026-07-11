@@ -59,8 +59,6 @@ struct ArchivedSessionsView: View {
 
     private struct ArchivedSessionRow: View {
         let session: Session
-        @ScaledMetric(relativeTo: .body) private var iconSize = 20
-
         var body: some View {
             LabeledContent {
                 if let updatedDate = session.updatedDate {
@@ -86,7 +84,7 @@ struct ArchivedSessionsView: View {
                         .foregroundStyle(.theme(.textPrimary))
                         .lineLimit(1)
                 } icon: {
-                    AgentIcon(agentType: session.agentType, size: iconSize)
+                    AgentIcon(agentType: session.agentType, size: 20, relativeTo: .body)
                 }
             }
             .labelStyle(.conductorStandard)

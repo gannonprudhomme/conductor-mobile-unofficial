@@ -5,41 +5,43 @@ import SwiftUI
 public struct AgentIcon: View {
     private let agentType: Session.AgentType
     private let size: CGFloat
+    private let textStyle: Font.TextStyle
 
-    public init(agentType: Session.AgentType, size: CGFloat) {
+    public init(
+        agentType: Session.AgentType,
+        size: CGFloat,
+        relativeTo textStyle: Font.TextStyle
+    ) {
         self.agentType = agentType
         self.size = size
+        self.textStyle = textStyle
     }
 
     public var body: some View {
-        image
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            .frame(width: size, height: size)
+        LucideIcon(image, size: size, relativeTo: textStyle)
             .foregroundStyle(.theme(.textSecondary))
             .accessibilityLabel(Text(verbatim: agentType.displayName))
     }
 
-    private var image: Image {
+    private var image: UIImage {
         switch agentType {
         case .codex:
-            Image("OpenAI", bundle: .module)
+            UIImage(resource: .openAI)
         case .claude:
-            Image("Claude", bundle: .module)
+            UIImage(resource: .claude)
         default:
-            Image(uiImage: Lucide.bot)
+            Lucide.bot
         }
     }
 }
 
 #Preview {
     HStack(spacing: 24) {
-        AgentIcon(agentType: .codex, size: 24)
+        AgentIcon(agentType: .codex, size: 24, relativeTo: .body)
 
-        AgentIcon(agentType: .claude, size: 24)
+        AgentIcon(agentType: .claude, size: 24, relativeTo: .body)
 
-        AgentIcon(agentType: .init(rawValue: "unknown"), size: 24)
+        AgentIcon(agentType: .init(rawValue: "unknown"), size: 24, relativeTo: .body)
     }
     .padding()
     .background(.theme(.background))

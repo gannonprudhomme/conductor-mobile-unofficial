@@ -368,7 +368,6 @@ public struct WorkspacesView: View {
         let groupByType: Workspaces.State.WorkspaceSection.GroupByType
         let count: Int
         let isExpanded: Bool
-        @ScaledMetric(relativeTo: .body) private var disclosureIconSize = 16
 
         var body: some View {
             LabeledContent {
@@ -379,11 +378,7 @@ public struct WorkspacesView: View {
                         .contentTransition(.numericText(value: Double(count)))
                 }
 
-                Image(uiImage: Lucide.chevronDown)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: disclosureIconSize, height: disclosureIconSize)
+                LucideIcon(Lucide.chevronDown, style: .body)
                     .foregroundStyle(.theme(.sidebarMutedForeground))
                     .rotationEffect(.degrees(isExpanded ? 0 : -90))
             } label: {
@@ -449,14 +444,13 @@ public struct WorkspacesView: View {
     private struct ProjectSectionHeader: View {
         let repository: Repository?
         let title: String
-        @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
             Label {
                 Text(title)
                     .font(.theme(.body))
             } icon: {
-                RepositoryIcon(repository: repository, size: iconSize)
+                RepositoryIcon(repository: repository, size: 20, relativeTo: .body)
             }
             .labelStyle(.conductorStandard)
             .foregroundStyle(.theme(.textSecondary))
@@ -479,7 +473,7 @@ public struct WorkspacesView: View {
                         .lineLimit(1)
                 } icon: {
                     if showsRepositoryIcon {
-                        RepositoryIcon(repository: item.repository, size: iconSize)
+                        RepositoryIcon(repository: item.repository, size: 20, relativeTo: .body)
                     }
 
                     if item.workspace.isWorking {
@@ -488,13 +482,8 @@ public struct WorkspacesView: View {
                             .tint(.theme(.textSecondary))
                             .frame(width: iconSize, height: iconSize)
                     } else {
-                        Image(uiImage: Lucide.gitBranch)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: iconSize, height: iconSize)
+                        LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
                             .foregroundStyle(.theme(.textSecondary))
-                            .accessibilityHidden(true)
                     }
                 }
                 .labelStyle(.conductorStandard)
@@ -513,7 +502,6 @@ public struct WorkspacesView: View {
 
     private struct WorkspaceFilterMenu: View {
         @Bindable var store: StoreOf<Workspaces>
-        @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
         var body: some View {
             Menu {
@@ -565,11 +553,7 @@ public struct WorkspacesView: View {
                     }
                 }
             } label: {
-                Image(uiImage: Lucide.listFilter)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: iconSize, height: iconSize)
+                LucideIcon(Lucide.listFilter, size: 20, relativeTo: .body)
                     .foregroundStyle(.theme(.textPrimary))
             }
             .accessibilityLabel("Filter workspaces")
