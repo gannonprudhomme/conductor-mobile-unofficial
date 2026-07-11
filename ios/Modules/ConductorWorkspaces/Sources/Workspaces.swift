@@ -360,6 +360,7 @@ public struct WorkspacesView: View {
                 }
                 .buttonStyle(.plain)
             }
+            .sensoryFeedback(.selection, trigger: isExpanded)
         }
     }
 

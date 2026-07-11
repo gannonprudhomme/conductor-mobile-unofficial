@@ -44,6 +44,10 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - For incrementing or decrementing numeric text, prefer
   `.contentTransition(.numericText(value:))` and animate value changes unless
   that transition would misrepresent the content.
+- Keep sensory feedback data-driven whenever possible. Prefer triggering it
+  from the raw state that represents the interaction, with a condition when
+  needed; use a separately incremented trigger only when no meaningful state
+  change can drive the feedback.
 - For a raw sheet or full-screen-cover dismissal control, use
   `Button(role: .close)` inside a `ToolbarItem` with `.cancellationAction`
   placement.
