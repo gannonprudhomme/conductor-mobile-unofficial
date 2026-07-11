@@ -99,17 +99,22 @@ if [[ "$IS_SIMULATOR" == true ]]; then
   xcrun simctl bootstatus "$DEVICE_ID" -b
   open -a Simulator --args -CurrentDeviceUDID "$DEVICE_ID"
   xcrun simctl install "$DEVICE_ID" "$APP_PATH"
-  xcrun simctl launch "$DEVICE_ID" "$APP_BUNDLE_ID"
 
   if [[ "$ATTACH" == true ]]; then
-    xcrun simctl spawn "$DEVICE_ID" log stream \
-      --style compact \
-      --predicate "process == 'ConductorMobile' OR subsystem BEGINSWITH '$APP_BUNDLE_ID'"
+    xcrun simctl launch --console --terminate-running-process "$DEVICE_ID" "$APP_BUNDLE_ID"
+  else
+    xcrun simctl launch "$DEVICE_ID" "$APP_BUNDLE_ID"
   fi
 else
   xcrun devicectl device install app --device "$DEVICE_ID" "$APP_PATH"
 
   if [[ "$ATTACH" == true ]]; then
-    echo "warning: --attach only streams logs for simulators" >&2
+    xcrun devicectl device process launch \
+      --device "$DEVICE_ID" \
+      --console \
+      --terminate-existing \
+      "$APP_BUNDLE_ID"
+  else
+    xcrun devicectl device process launch --device "$DEVICE_ID" "$APP_BUNDLE_ID"
   fi
 fi

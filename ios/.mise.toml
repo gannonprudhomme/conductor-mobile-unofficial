@@ -17,7 +17,7 @@ description = "Build, install, and launch the native iOS app"
 depends = ["gen"]
 usage = '''
 arg "[destination]" help="xcodebuild destination, such as id=<UDID>"
-flag "--attach" help="Stream simulator OS logs after installing"
+flag "--attach" help="Attach the terminal to the app process after launching"
 '''
 run = 'scripts/deploy.sh ${usage_destination:+"${usage_destination}"} ${usage_attach:+--attach}'
 
