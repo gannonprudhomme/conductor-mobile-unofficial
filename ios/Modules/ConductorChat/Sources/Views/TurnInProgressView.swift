@@ -40,7 +40,7 @@ struct TurnInProgressView: View {
 
     static func elapsedTimeDescription(
         _ interval: TimeInterval,
-        showsTenths: Bool
+        showsTenths: Bool = true
     ) -> String {
         let precision = showsTenths ? 10 : 1
         let elapsed = max(0, Int(interval * Double(precision)))
