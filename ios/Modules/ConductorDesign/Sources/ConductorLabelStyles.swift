@@ -7,6 +7,22 @@
 
 import SwiftUI
 
+public struct ConductorSmallLabelStyle: LabelStyle {
+    public init() { }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.icon
+
+            configuration.title
+        }
+    }
+}
+
+public extension LabelStyle where Self == ConductorSmallLabelStyle {
+    static var conductorSmall: Self { Self() }
+}
+
 public struct ConductorStandardLabelStyle: LabelStyle {
     public init() { }
 

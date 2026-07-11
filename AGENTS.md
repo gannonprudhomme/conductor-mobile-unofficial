@@ -58,3 +58,7 @@ structure and document any new app, package, or service layout as it is added.
 Note that Conductor is a Tauri app using very similar stack to what we're using here (intentionally).
 Furthermore it exposes its dev tools / HTML inspector.
 As a result of this, if you want to know specifics you can give me a script to run in its console rather than guessing e.g. CSS values
+
+Conductor's local SQLite database is at
+`~/Library/Application Support/com.conductor.app/conductor.db`. Inspect it
+read-only with `sqlite3 -readonly "$HOME/Library/Application Support/com.conductor.app/conductor.db"`.

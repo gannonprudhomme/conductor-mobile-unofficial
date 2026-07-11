@@ -6,14 +6,18 @@ public enum ThemeFontStyle {
     case small
     case extraSmall
     case extraExtraSmall
+    /// Monospaced counterpart to ``small``.
+    case codeSmall
+    /// Monospaced counterpart to ``extraSmall``.
+    case codeExtraSmall
     case inlineToolbarTitle
     case title
 
     public var size: CGFloat {
         switch self {
         case .extraExtraSmall: 11
-        case .extraSmall: 12
-        case .small: 14
+        case .extraSmall, .codeExtraSmall: 12
+        case .small, .codeSmall: 14
         case .body: 16
         case .inlineToolbarTitle: 16
         case .title: 28
@@ -25,16 +29,19 @@ public enum ThemeFontStyle {
     public var textStyle: Font.TextStyle {
         switch self {
         case .extraExtraSmall: .caption2
-        case .extraSmall: .footnote
+        case .extraSmall, .codeExtraSmall: .footnote
         case .body: .body
-        case .small: .footnote
+        case .small, .codeSmall: .footnote
         case .inlineToolbarTitle: .body
         case .title: .title
         }
     }
 
     var fontName: String {
-        "Geist-Regular"
+        switch self {
+        case .codeSmall, .codeExtraSmall: "GeistMono-Regular"
+        default: "Geist-Regular"
+        }
     }
 }
 

@@ -12,12 +12,14 @@ struct TurnTests {
             [Message].self,
             from: Data(Self.completeTurnJSON.utf8)
         )
+        let startedAt = try #require(messages.first?.sentAt)
 
         expectNoDifference(
             Turn.parse(messages: messages),
             [
                 Turn(
                     id: "42a0e1cf-2f00-47fb-9f60-e3192a155ac4",
+                    startedAt: startedAt,
                     rows: [
                         .humanMessageRow(
                             .init(
@@ -54,12 +56,14 @@ struct TurnTests {
                 turnID: "turn-b"
             ),
         ]
+        let startedAt = try #require(messages.first?.createdAt)
 
         expectNoDifference(
             Turn.parse(messages: messages),
             [
                 Turn(
                     id: "turn-a",
+                    startedAt: startedAt,
                     rows: [
                         .humanMessageRow(.init(id: "human-a", content: "First")),
                         .assistantMessage(
@@ -69,6 +73,7 @@ struct TurnTests {
                 ),
                 Turn(
                     id: "turn-b",
+                    startedAt: startedAt,
                     rows: [
                         .humanMessageRow(.init(id: "human-b", content: "Second")),
                         .assistantMessage(
@@ -160,18 +165,56 @@ struct TurnTests {
                 turnID: turnID
             ),
         ]
+        let startedAt = try #require(messages.first?.createdAt)
 
         expectNoDifference(
             Turn.parse(messages: messages),
             [
                 Turn(
                     id: turnID,
+                    startedAt: startedAt,
                     rows: [
                         .humanMessageRow(.init(id: "human", content: "Run it")),
                         .assistantMessage(.error(messageID: "error", message: "aborted by user")),
                     ]
                 ),
             ]
+        )
+    }
+
+    @Test("Elapsed time matches Conductor's compact turn-row format")
+    @MainActor
+    func elapsedTimeDescription() {
+        #expect(TurnInProgressView.elapsedTimeDescription(4.29) == "4.2s")
+        #expect(TurnInProgressView.elapsedTimeDescription(364.29) == "6m, 4.2s")
+        #expect(TurnInProgressView.elapsedTimeDescription(3_664.29) == "1h, 1m, 4.2s")
+        #expect(
+            TurnInProgressView.elapsedTimeDescription(364.29, showsTenths: false)
+                == "6m, 4s"
+        )
+    }
+
+    @Test("The active turn gets a progress row in flattened presentation data")
+    func activeTurnProgressRow() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let turns = [
+            Turn(
+                id: "turn-1",
+                startedAt: startedAt,
+                rows: [.humanMessageRow(.init(id: "human-1", content: "Hello"))]
+            ),
+        ]
+
+        expectNoDifference(
+            turns.flattenedChatRows(activeTurnID: "turn-1"),
+            [
+                .humanMessageRow(.init(id: "human-1", content: "Hello")),
+                .turnInProgress(.init(id: "turn-1", startedAt: startedAt)),
+            ]
+        )
+        expectNoDifference(
+            turns.flattenedChatRows(activeTurnID: nil),
+            [.humanMessageRow(.init(id: "human-1", content: "Hello"))]
         )
     }
 

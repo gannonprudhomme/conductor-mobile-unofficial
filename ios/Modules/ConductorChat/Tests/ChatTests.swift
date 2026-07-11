@@ -75,6 +75,7 @@ struct ChatTests {
 
             await store.receive(\.messagesUpdated) {
                 $0.turns = []
+                $0.rows = []
             }
             #expect(requestCount.value == 1)
 
@@ -119,10 +120,27 @@ struct ChatTests {
                 $0.turns = [
                     Turn(
                         id: "turn-1",
+                        startedAt: message.createdAt,
                         rows: [
                             .humanMessageRow(.init(id: "human-1", content: "Hello")),
                         ]
                     ),
+                ]
+                $0.rows = [
+                    .humanMessageRow(.init(id: "human-1", content: "Hello")),
+                ]
+            }
+            await store.send(.sessionStatusChanged(.working)) {
+                $0.rows = [
+                    .humanMessageRow(.init(id: "human-1", content: "Hello")),
+                    .turnInProgress(
+                        .init(id: "turn-1", startedAt: message.createdAt)
+                    ),
+                ]
+            }
+            await store.send(.sessionStatusChanged(.idle)) {
+                $0.rows = [
+                    .humanMessageRow(.init(id: "human-1", content: "Hello")),
                 ]
             }
         }

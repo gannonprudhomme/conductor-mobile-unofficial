@@ -1,3 +1,4 @@
+import Combine
 import ComposableArchitecture
 import ConductorData
 import ConductorDesign
@@ -12,11 +13,28 @@ public struct Chat: Sendable {
     public struct State: Equatable {
         @Presents var destination: Destination.State?
         @FetchAll var messages: [Message]
-        public let session: Session
+
+        @FetchOne var session: Session
+        var rows: [Turn.Row]? = nil
         public var turns: [Turn]? = nil
 
+        mutating func updateRows(sessionStatus: Session.Status) {
+            guard let turns else {
+                rows = nil
+                return
+            }
+
+            rows = turns.flattenedChatRows(
+                activeTurnID: sessionStatus == .working ? turns.last?.id : nil
+            )
+        }
+
         public init(session: Session) {
-            self.session = session
+            self._session = FetchOne(
+                wrappedValue: session,
+                Session.find(session.id),
+                animation: .default
+            )
             self._messages = FetchAll(
                 wrappedValue: [],
                 Message
@@ -24,7 +42,8 @@ public struct Chat: Sendable {
                     .order {
                         (
                             $0.sentAt.asc(nulls: .last),
-                            $0.createdAt
+                            $0.createdAt,
+                            $0.id // IDs provide stable ordering when Conductor gives multiple messages identical timestamps.
                         )
                     },
                 animation: .default
@@ -44,6 +63,7 @@ public struct Chat: Sendable {
         case destination(PresentationAction<Destination.Action>)
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
+        case sessionStatusChanged(Session.Status)
     }
 
     @Dependency(\.continuousClock) var clock
@@ -76,14 +96,18 @@ public struct Chat: Sendable {
                     .publisher {
                         state.$messages
                             .publisher
+                            .removeDuplicates()
                             .map(Action.messagesUpdated)
                     }
                 )
                 
             case .messagesUpdated(let messages):
-                withAnimation {
-                    state.turns = Turn.parse(messages: messages)
-                }
+                state.turns = Turn.parse(messages: messages)
+                state.updateRows(sessionStatus: state.session.status)
+                return .none
+
+            case .sessionStatusChanged(let status):
+                state.updateRows(sessionStatus: status)
                 return .none
 
             case let .loadMessagesFailed(message):
@@ -150,8 +174,9 @@ public struct ChatView: View {
     public var body: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
-                ChatRows(turns: store.turns ?? [])
+                ChatRows(rows: store.rows ?? [])
                     .padding(.horizontal, 16)
+                    .padding(.top, 8)
 
                 Color.clear
                     .frame(height: 1)
@@ -162,9 +187,10 @@ public struct ChatView: View {
             .scrollTargetLayout()
         }
         .overlay {
-            if store.turns == nil { // Maybe empty too, idk
+            if store.turns == nil {
                 ProgressView()
                     .progressViewStyle(.conductor)
+                    .tint(.theme(.textSecondary))
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
@@ -178,6 +204,9 @@ public struct ChatView: View {
         .onChange(of: store.turns) { previousTurns, turns in
             turnsChanged(from: previousTurns, to: turns)
         }
+        .onChange(of: store.session.status) { _, status in
+            sessionStatusChanged(status)
+        }
         .task {
             await store.send(.task).finish()
         }
@@ -187,6 +216,15 @@ public struct ChatView: View {
     private func turnsChanged(from previousTurns: [Turn]?, to turns: [Turn]?) {
         let isInitialLoad = (previousTurns?.isEmpty ?? true) && turns?.isEmpty == false
         guard isInitialLoad || isBottomMarkerVisible else { return }
+
+        withAnimation {
+            scrollPosition.scrollTo(edge: .bottom)
+        }
+    }
+
+    private func sessionStatusChanged(_ status: Session.Status) {
+        store.send(.sessionStatusChanged(status))
+        guard status == .working, isBottomMarkerVisible else { return }
 
         withAnimation {
             scrollPosition.scrollTo(edge: .bottom)
@@ -206,13 +244,11 @@ public struct ChatView: View {
     }
     
     private struct ChatRows: View {
-        let turns: [Turn]
-        
+        let rows: [Turn.Row]
+
         var body: some View {
-            ForEach(turns) { turn in
-                ForEach(turn.rows) { row in
-                    makeRow(row)
-                }
+            ForEach(rows) { row in
+                makeRow(row)
             }
         }
         
@@ -224,6 +260,8 @@ public struct ChatView: View {
             case .assistantMessage(let assistantMessage):
                 makeAssistantMessage(assistantMessage)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            case .turnInProgress(let turnInProgress):
+                TurnInProgressView(row: turnInProgress)
             }
         }
         

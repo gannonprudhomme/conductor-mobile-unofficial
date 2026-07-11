@@ -32,22 +32,11 @@ struct ToolCallRowView: View {
             }
         }
         .lineLimit(1)
-        .labelStyle(ToolCallLabelStyle())
+        .labelStyle(.conductorSmall)
         .labeledContentStyle(ToolCallLabeledContentStyle())
         .font(.theme(.small))
     }
-    
-    struct ToolCallLabelStyle: LabelStyle {
-        func makeBody(configuration: Configuration) -> some View {
-            // TODO: SHould this be 12 or 8?
-            HStack(spacing: 8) {
-                configuration.icon
-                
-                configuration.title
-            }
-        }
-    }
-    
+
     struct ToolCallLabeledContentStyle: LabeledContentStyle {
         func makeBody(configuration: Configuration) -> some View {
             HStack(spacing: 8) {

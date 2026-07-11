@@ -16,11 +16,13 @@ import IssueReporting
 /// For more details on what I mean, see: https://wwdc.ai/2026/321
 public struct Turn: Identifiable, Equatable {
     public let id: String
+    let startedAt: Date
     var rows: [Row]
     
     enum Row: Identifiable, Equatable {
         case humanMessageRow(HumanMessageRow)
         case assistantMessage(AssistantMessage)
+        case turnInProgress(TurnInProgress)
 
         var id: String {
             switch self {
@@ -28,7 +30,14 @@ public struct Turn: Identifiable, Equatable {
                 "human:\(row.id)"
             case .assistantMessage(let row):
                 "assistant:\(row.id)"
+            case .turnInProgress(let row):
+                "turn-in-progress:\(row.id)"
             }
+        }
+
+        struct TurnInProgress: Identifiable, Equatable {
+            let id: Turn.ID
+            let startedAt: Date
         }
         
         struct HumanMessageRow: Identifiable, Equatable {
@@ -160,17 +169,19 @@ private extension Dictionary where Key == String, Value == JSONValue { /// aka `
 extension Turn {
     // TOOD: (Probably) Want to do this in parallel if possible
     public static func parse(messages: [Message]) -> [Turn] {
-        let turnRows: [(turnID: String, row: Turn.Row)] = messages.compactMap { message in
+        let turnRows: [(turnID: String, startedAt: Date, row: Turn.Row)] = messages.compactMap { message in
             guard let role = message.role, let content = message.content, let turnID = message.turnID else {
                 reportIssue("message.content was nil for \(message)")
                 return nil
             }
 
+            let startedAt = message.sentAt ?? message.createdAt
+
             switch role {
             case .user:
                 let row = Turn.Row.HumanMessageRow(id: message.id, content: content)
 
-                return (turnID: turnID, row: Turn.Row.humanMessageRow(row))
+                return (turnID: turnID, startedAt: startedAt, row: Turn.Row.humanMessageRow(row))
             case .assistant:
                 do {
                     let codexEvent: CodexEvent = try JSONDecoder().decode(CodexEvent.self, from: Data(content.utf8))
@@ -207,7 +218,7 @@ extension Turn {
                         return nil
                     }
 
-                    return (turnID: turnID, row: Turn.Row.assistantMessage(row))
+                    return (turnID: turnID, startedAt: startedAt, row: Turn.Row.assistantMessage(row))
                 } catch {
                     reportIssue("Couldn't decode CodexEvent with error: \(error)")
                     return nil
@@ -221,14 +232,14 @@ extension Turn {
         var indexByTurnID: [String: Int] = [:]
         var mostRecentTextRowIndexByTurnID: [String: Int] = [:]
 
-        for (turnID, row) in turnRows {
+        for (turnID, startedAt, row) in turnRows {
             let turnIndex: Int
             if let index = indexByTurnID[turnID] {
                 turnIndex = index
             } else {
                 turnIndex = turns.count
                 indexByTurnID[turnID] = turnIndex
-                turns.append(Turn(id: turnID, rows: []))
+                turns.append(Turn(id: turnID, startedAt: startedAt, rows: []))
             }
 
             // Store whether each text row is the turn's most recent so rendering remains O(1),
@@ -249,5 +260,25 @@ extension Turn {
         }
 
         return turns
+    }
+}
+
+extension Array where Element == Turn {
+    /// Flattens the turns into the single row collection consumed by `ChatRows`.
+    ///
+    /// The progress indicator is inserted here so each element in the lazy stack's
+    /// `ForEach` always produces exactly one view, including the active turn state.
+    func flattenedChatRows(activeTurnID: Turn.ID?) -> [Turn.Row] {
+        flatMap { turn in
+            if turn.id == activeTurnID {
+                turn.rows + [
+                    .turnInProgress(
+                        .init(id: turn.id, startedAt: turn.startedAt)
+                    ),
+                ]
+            } else {
+                turn.rows
+            }
+        }
     }
 }
