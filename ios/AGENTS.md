@@ -43,6 +43,12 @@ The native iOS app lives here and is SwiftUI/TCA-first.
   lines.
 - Indent modifiers beneath the view they modify, including row modifiers inside
   `List` and `ForEach` closures.
+- Use `EdgeInsets(vertical:horizontal:)` for paired vertical and horizontal
+  padding. Do not chain separate `.padding(.vertical, ...)` and
+  `.padding(.horizontal, ...)` modifiers.
+- When a background needs a shape, pass the style and shape directly to
+  `.background(_:in:)`, such as `.background(.theme(.highlight), in: .capsule)`.
+  Do not build a shape and call `.fill` inside a background closure.
 - For incrementing or decrementing numeric text, prefer
   `.contentTransition(.numericText(value:))` and animate value changes unless
   that transition would misrepresent the content.
@@ -73,8 +79,13 @@ The native iOS app lives here and is SwiftUI/TCA-first.
   previews with `.preferredColorScheme(.dark)`.
 - Use `@ScaledMetric` for manually sized SwiftUI images so image dimensions
   scale with Dynamic Type.
+- Annotate stored button action closures with `@MainActor`, such as
+  `let action: @MainActor () -> Void`.
 - Never use `Spacer` to pin content in a layout. Set an explicit frame alignment
   on the content or container instead.
+- Keep primary screen content mounted while showing full-screen loading or status
+  UI in an `.overlay`. Do not replace the screen with an `if`/`else` loading branch.
+    - This makes the animation from not loaded -> loaded more smooth
 - When presenting runtime errors to users, use an alert title that states what
   failed in user terms, and put `error.localizedDescription` in the alert
   message/description.
@@ -95,6 +106,8 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Use Swift Navigation helpers for navigation and presentation once flows exist.
 - Use SQLiteData and StructuredQueries-style schema/query APIs for persistence.
   Avoid ad hoc SQLite access in SwiftUI views.
+- Observe database-backed detail records with `@FetchOne`, seeded with the value
+  used for navigation, so workspace or repository updates refresh the detail UI.
 - Always sort and filter SQLite-backed feature data in SQLiteData/StructuredQueries
   queries, including dynamic `@FetchAll`/`@Fetch` reloads for active filters.
   Never sort or filter those database results with computed Swift arrays in

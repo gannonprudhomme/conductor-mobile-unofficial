@@ -124,20 +124,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorChatTests
         PRODUCT_NAME: $(TARGET_NAME)
-  ConductorSessionsTests:
-    type: bundle.unit-test
-    platform: iOS
-    deploymentTarget: "26.0"
-    sources:
-      - path: Modules/ConductorSessions/Tests
-    dependencies:
-      - package: ConductorModules
-        product: ConductorSessions
-    settings:
-      base:
-        GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorSessionsTests
-        PRODUCT_NAME: $(TARGET_NAME)
   ConductorMainTests:
     type: bundle.unit-test
     platform: iOS
@@ -181,13 +167,6 @@ schemes:
     test:
       targets:
         - ConductorWorkspacesTests
-  ConductorSessionsTests:
-    build:
-      targets:
-        ConductorSessionsTests: test
-    test:
-      targets:
-        - ConductorSessionsTests
   ConductorMainTests:
     build:
       targets:

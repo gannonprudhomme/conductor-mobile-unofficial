@@ -88,11 +88,15 @@ struct WorkspaceQueriesTests {
         let sortedByCreation = try database.read { db in
             try WorkspaceWithRepository.all(sortedBy: .created).fetchAll(db)
         }
+        let filteredByWorkspace = try database.read { db in
+            try WorkspaceWithRepository.all(workspaceID: "w2").fetchAll(db)
+        }
 
         expectNoDifference(filteredByRepository.map(\.workspace.id), ["w1", "w2"])
         expectNoDifference(filteredByRepository.first?.workspace.isWorking, true)
         expectNoDifference(filteredByRepository.first?.repository?.name, "TrialSongs")
         expectNoDifference(sortedByCreation.map(\.workspace.id), ["w3", "w2", "w1"])
+        expectNoDifference(filteredByWorkspace.map(\.workspace.id), ["w2"])
     }
 
     @Test("Workspace query orders section groups and rows in SQLite")

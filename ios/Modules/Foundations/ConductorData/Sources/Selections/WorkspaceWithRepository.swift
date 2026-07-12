@@ -41,6 +41,7 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
     }
 
     public static func all(
+        workspaceID: Workspace.ID? = nil,
         repositoryID: Repository.ID? = nil,
         sortedBy sort: Sort = .updated,
         groupedBy grouping: Grouping = .status
@@ -50,6 +51,10 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
 
         if let repositoryID {
             query = query.where { $0.repositoryID.eq(repositoryID) }
+        }
+
+        if let workspaceID {
+            query = query.where { $0.id.eq(workspaceID) }
         }
 
         return query

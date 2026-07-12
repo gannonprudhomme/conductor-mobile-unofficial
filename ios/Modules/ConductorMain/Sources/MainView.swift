@@ -1,15 +1,13 @@
 import ComposableArchitecture
 import ConductorChat
-import ConductorSessions
 import ConductorWorkspaces
 import SwiftUI
 
 @Reducer
-public struct Main {
+public struct Main: Sendable {
     @Reducer
     public enum Path {
-        case chat(Chat)
-        case sessions(SessionsList)
+        case workspaceChat(WorkspaceChat)
     }
 
     @ObservableState
@@ -37,17 +35,10 @@ public struct Main {
             switch action {
             case let .workspaces(.workspaceTapped(item)):
                 state.path.append(
-                    .sessions(
-                        SessionsList.State(
-                            workspace: item.workspace,
-                            repository: item.repository
-                        )
+                    .workspaceChat(
+                        WorkspaceChat.State(workspaceWithRepository: item)
                     )
                 )
-                return .none
-
-            case let .path(.element(id: _, action: .sessions(.sessionTapped(session)))):
-                state.path.append(.chat(Chat.State(session: session)))
                 return .none
 
             case .path, .workspaces:
@@ -74,11 +65,8 @@ public struct MainView: View {
             )
         } destination: { store in
             switch store.case {
-            case let .chat(store):
-                ChatView(store: store)
-
-            case let .sessions(store):
-                SessionsListView(store: store)
+            case let .workspaceChat(store):
+                WorkspaceChatView(store: store)
             }
         }
     }

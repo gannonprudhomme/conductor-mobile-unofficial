@@ -13,7 +13,6 @@ TEST_SCHEMES=(
   ConductorChatTests
   ConductorDataTests
   ConductorDesignTests
-  ConductorSessionsTests
   ConductorWorkspacesTests
   ConductorMainTests
 )

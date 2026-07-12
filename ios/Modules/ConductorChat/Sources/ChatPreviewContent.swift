@@ -2,32 +2,18 @@
 import ConductorData
 import Foundation
 
-struct ChatPreviewContent {
+struct ChatPreviewContent: Sendable {
     let messages: [Message]
     let session: Session
 
     init() throws {
-        self.session = try JSONDecoder().decode(
-            Session.self,
-            from: Data(
-                """
-                {
-                  "id": "preview-session",
-                  "workspace_id": "preview-workspace",
-                  "title": "Fix weather card conditions",
-                  "agent_type": "codex",
-                  "is_hidden": false,
-                  "created_at": "2026-06-25T09:30:00.000Z",
-                  "updated_at": "2026-06-25T09:31:39.000Z",
-                  "last_user_message_at": "2026-06-25T09:31:28.000Z",
-                  "status": "idle",
-                  "model": "gpt-5",
-                  "unread_count": 0,
-                  "freshly_compacted": 0,
-                  "context_token_count": 18420
-                }
-                """.utf8
-            )
+        self.session = .preview(
+            id: "preview-session",
+            workspaceID: "preview-workspace",
+            title: "Fix weather card conditions",
+            updatedAt: "2026-06-25T09:31:39.000Z",
+            lastUserMessageAt: "2026-06-25T09:31:28.000Z",
+            contextTokenCount: 18420
         )
 
         var builder = TranscriptBuilder()
@@ -37,6 +23,42 @@ struct ChatPreviewContent {
         self.messages = try JSONDecoder.conductor.decode(
             [Message].self,
             from: JSONEncoder().encode(builder.rows)
+        )
+    }
+
+    static func shortMessages(
+        for session: Session,
+        userMessage: String,
+        assistantMessage: String
+    ) throws -> [Message] {
+        let turnID = "\(session.id)-preview-turn"
+        let rows = [
+            MessageFixture(
+                id: "\(session.id)-preview-user-message",
+                sessionID: session.id,
+                role: "user",
+                content: userMessage,
+                createdAt: session.createdAt,
+                sentAt: session.createdAt,
+                model: nil,
+                sdkMessageID: nil,
+                turnID: turnID
+            ),
+            MessageFixture(
+                id: "\(session.id)-preview-assistant-message",
+                sessionID: session.id,
+                role: "assistant",
+                content: assistantTextEvent(assistantMessage, sessionID: session.id),
+                createdAt: session.updatedAt,
+                sentAt: session.updatedAt,
+                model: session.model,
+                sdkMessageID: "\(session.id)-preview-sdk-message",
+                turnID: turnID
+            ),
+        ]
+        return try JSONDecoder.conductor.decode(
+            [Message].self,
+            from: JSONEncoder().encode(rows)
         )
     }
 }
@@ -503,9 +525,12 @@ private struct MessageFixture: Encodable {
     }
 }
 
-private func assistantTextEvent(_ text: String) -> String {
+private func assistantTextEvent(
+    _ text: String,
+    sessionID: Session.ID = "preview-session"
+) -> String {
     """
-    {"type":"assistant","session_id":"preview-session","message":{"role":"assistant","content":[{"type":"text","text":\(json(text))}]}}
+    {"type":"assistant","session_id":\(json(sessionID)),"message":{"role":"assistant","content":[{"type":"text","text":\(json(text))}]}}
     """
 }
 

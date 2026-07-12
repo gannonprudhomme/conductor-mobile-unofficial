@@ -80,11 +80,7 @@ struct ChatTests {
             #expect(requestCount.value == 1)
 
             await clock.advance(by: .seconds(1))
-            await store.receive(\.loadMessagesFailed) {
-                $0.destination = .alert(
-                    .failedToLoadMessages(message: TestError().localizedDescription)
-                )
-            }
+            await store.receive(\.loadMessagesFailed)
             #expect(requestCount.value == 2)
 
             await task.cancel()
@@ -142,27 +138,6 @@ struct ChatTests {
                 $0.rows = [
                     .humanMessageRow(.init(id: "human-1", content: "Hello")),
                 ]
-            }
-        }
-    }
-
-    @Test("Load failure presents an alert that destination dismissal clears")
-    func loadMessagesFailedAndDestinationDismissed() async throws {
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = try makeSession()
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            }
-
-            await store.send(.loadMessagesFailed("The service is unavailable.")) {
-                $0.destination = .alert(
-                    .failedToLoadMessages(message: "The service is unavailable.")
-                )
-            }
-            await store.send(.destination(.dismiss)) {
-                $0.destination = nil
             }
         }
     }

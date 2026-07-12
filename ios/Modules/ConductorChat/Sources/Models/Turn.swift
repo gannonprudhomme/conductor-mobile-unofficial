@@ -14,8 +14,8 @@ import IssueReporting
 ///
 /// E.g. handling conditionals in the data layer (here) instead of in a `View`
 /// For more details on what I mean, see: https://wwdc.ai/2026/321
-public struct Turn: Identifiable, Equatable {
-    public let id: String
+struct Turn: Identifiable, Equatable {
+    let id: String
     let startedAt: Date
     var rows: [Row]
     
@@ -168,7 +168,7 @@ private extension Dictionary where Key == String, Value == JSONValue { /// aka `
 
 extension Turn {
     // TOOD: (Probably) Want to do this in parallel if possible
-    public static func parse(messages: [Message]) -> [Turn] {
+    static func parse(messages: [Message]) -> [Turn] {
         let turnRows: [(turnID: String, startedAt: Date, row: Turn.Row)] = messages.compactMap { message in
             guard let role = message.role, let content = message.content, let turnID = message.turnID else {
                 reportIssue("message.content was nil for \(message)")

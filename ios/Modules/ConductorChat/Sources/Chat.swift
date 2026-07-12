@@ -7,16 +7,17 @@ import LucideIcons
 import SQLiteData
 import SwiftUI
 
+/// Note: this is always embedded in ``WorkspaceChat``, never solo
+/// i.e. this doesn't own its nav bar
 @Reducer
 public struct Chat: Sendable {
     @ObservableState
     public struct State: Equatable {
-        @Presents var destination: Destination.State?
         @FetchAll var messages: [Message]
 
         @FetchOne var session: Session
         var rows: [Turn.Row]? = nil
-        public var turns: [Turn]? = nil
+        var turns: [Turn]? = nil
 
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
@@ -29,7 +30,7 @@ public struct Chat: Sendable {
             )
         }
 
-        public init(session: Session) {
+        init(session: Session) {
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -49,18 +50,13 @@ public struct Chat: Sendable {
                 animation: .default
             )
         }
-    }
 
-    @Reducer
-    public enum Destination {
-        case alert(AlertState<Alert>)
-
-        public enum Alert: Equatable { }
+        /// Read by ``WorkspaceChat`` for the animation/identity of this reducer + view
+        var sessionID: Session.ID { session.id }
     }
 
     public enum Action {
         case task
-        case destination(PresentationAction<Destination.Action>)
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
         case sessionStatusChanged(Session.Status)
@@ -70,7 +66,7 @@ public struct Chat: Sendable {
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
 
-    public init() { }
+    init() { }
 
     public var body: some ReducerOf<Self> {
         Reduce { state, action in
@@ -110,15 +106,10 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: status)
                 return .none
 
-            case let .loadMessagesFailed(message):
-                state.destination = .alert(.failedToLoadMessages(message: message))
-                return .none
-
-            case .destination:
+            case .loadMessagesFailed:
                 return .none
             }
         }
-        .ifLet(\.$destination, action: \.destination)
     }
 
     @concurrent private func refreshMessages(
@@ -150,28 +141,16 @@ public struct Chat: Sendable {
     }
 }
 
-extension Chat.Destination.State: Equatable { }
-
-extension AlertState where Action == Chat.Destination.Alert {
-    static func failedToLoadMessages(message: String) -> Self {
-        AlertState {
-            TextState("Failed to load messages")
-        } message: {
-            TextState(message)
-        }
-    }
-}
-
-public struct ChatView: View {
+struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
     @State private var isBottomMarkerVisible = true
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
-    public init(store: StoreOf<Chat>) {
+    init(store: StoreOf<Chat>) {
         self.store = store
     }
 
-    public var body: some View {
+    var body: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
                 ChatRows(rows: store.rows ?? [])
@@ -199,15 +178,13 @@ public struct ChatView: View {
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(.bottom, for: .alignment)
         .background(.theme(.background))
-        .themedNavigationTitle(verbatim: store.session.displayTitle)
-        .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .onChange(of: store.turns) { previousTurns, turns in
             turnsChanged(from: previousTurns, to: turns)
         }
         .onChange(of: store.session.status) { _, status in
             sessionStatusChanged(status)
         }
-        .task {
+        .task(id: store.session.id) {
             await store.send(.task).finish()
         }
         .preferredColorScheme(.dark)
