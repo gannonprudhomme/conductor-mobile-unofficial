@@ -28,7 +28,7 @@ public struct WorkspaceChat: Sendable {
         /// and updated active_session from the remote.
         ///
         /// However we want to prevent that from overriding a local switch from the user
-        var shouldPreferRemoteActiveSession = true
+        var hasUserSelectedSession = false
 
         @FetchAll public var activeSessions: [Session]
         @FetchAll public var archivedSessions: [Session]
@@ -120,9 +120,8 @@ public struct WorkspaceChat: Sendable {
                     afterLoading: sessions,
                     currentChat: state.chat,
                     workspaceActiveSessionID: state.workspace.activeSessionID,
-                    shouldPreferRemoteActiveSession: state.shouldPreferRemoteActiveSession
+                    hasUserSelectedSession: state.hasUserSelectedSession
                 )
-                state.shouldPreferRemoteActiveSession = false
                 return .none
 
             case let .loadSessionsResponse(.failure(error)):
@@ -142,7 +141,7 @@ public struct WorkspaceChat: Sendable {
 
             case let .sessionButtonTapped(session):
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
-                state.shouldPreferRemoteActiveSession = false
+                state.hasUserSelectedSession = true
                 guard state.chat?.sessionID != session.id else { return .none }
                 state.chat = Chat.State(session: session)
                 return .none
@@ -166,12 +165,12 @@ public struct WorkspaceChat: Sendable {
         afterLoading sessions: [Session],
         currentChat: Chat.State?,
         workspaceActiveSessionID: Session.ID?,
-        shouldPreferRemoteActiveSession: Bool
+        hasUserSelectedSession: Bool
     ) -> Chat.State? {
         let activeSessions = sessions.filter { !$0.isHidden } // Archived sessions are displayed separately and cannot remain selected in the chat.
-        if !shouldPreferRemoteActiveSession,
+        if hasUserSelectedSession,
            let currentChat,
-           activeSessions.contains(where: { $0.id == currentChat.sessionID }) {
+            activeSessions.contains(where: { $0.id == currentChat.sessionID }) {
             // Preserve a reconciled or explicit selection instead of resetting it on every poll.
             return currentChat
         } else {
@@ -180,6 +179,9 @@ public struct WorkspaceChat: Sendable {
                 ?? activeSessions.max { /// Fallback to the most recently updated session
                     ($0.updatedDate ?? .distantPast) < ($1.updatedDate ?? .distantPast)
                 }
+            // Avoid rebuilding the current chat on every poll when the selected session has not changed.
+            let canReuseCurrentChat = session?.id == currentChat?.sessionID
+            guard !canReuseCurrentChat else { return currentChat }
             return session.map(Chat.State.init)
         }
     }

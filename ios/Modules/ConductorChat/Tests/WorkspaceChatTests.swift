@@ -69,7 +69,46 @@ struct WorkspaceChatTests {
             #expect(store.state.chat?.sessionID == cachedFallback.id)
 
             await store.send(.loadSessionsResponse(.success([cachedFallback, activeSession]))) {
-                $0.shouldPreferRemoteActiveSession = false
+                $0.chat = Chat.State(session: activeSession)
+            }
+        }
+    }
+
+    @Test("Automatic selection follows workspace active-session updates")
+    func automaticSelectionFollowsWorkspaceActiveSession() async throws {
+        let cachedSession = try makeSession(id: "cached", workspaceID: "workspace-1")
+        let activeSession = try makeSession(id: "active", workspaceID: "workspace-1")
+        let cachedWorkspace = Workspace.preview(activeSessionID: cachedSession.id)
+        let updatedWorkspace = Workspace.preview(activeSessionID: activeSession.id)
+        let database = try appDatabase()
+
+        try await database.write { db in
+            try Workspace.upsert { cachedWorkspace }.execute(db)
+            try Session.upsert { cachedSession }.execute(db)
+        }
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: cachedWorkspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.loadSessionsResponse(.success([cachedSession, activeSession])))
+
+            try await database.write { db in
+                try Workspace.upsert { updatedWorkspace }.execute(db)
+            }
+            try await store.state.$workspaceWithRepository.load()
+
+            await store.send(.loadSessionsResponse(.success([cachedSession, activeSession]))) {
                 $0.chat = Chat.State(session: activeSession)
             }
         }
@@ -99,7 +138,7 @@ struct WorkspaceChatTests {
             }
 
             await store.send(.sessionButtonTapped(cachedFallback)) {
-                $0.shouldPreferRemoteActiveSession = false
+                $0.hasUserSelectedSession = true
             }
             await store.send(.loadSessionsResponse(.success([activeSession, cachedFallback])))
         }
@@ -128,10 +167,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession]))) {
-                $0.shouldPreferRemoteActiveSession = false
-            }
+            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
             await store.send(.sessionButtonTapped(selectedSession)) {
+                $0.hasUserSelectedSession = true
                 $0.chat = Chat.State(session: selectedSession)
             }
             await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
@@ -176,10 +214,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession]))) {
-                $0.shouldPreferRemoteActiveSession = false
-            }
+            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
             await store.send(.sessionButtonTapped(selectedSession)) {
+                $0.hasUserSelectedSession = true
                 $0.chat = Chat.State(session: selectedSession)
             }
             await store.send(
@@ -226,9 +263,7 @@ struct WorkspaceChatTests {
 
             let task = await store.send(.task)
 
-            await store.receive(\.loadSessionsResponse.success) {
-                $0.shouldPreferRemoteActiveSession = false
-            }
+            await store.receive(\.loadSessionsResponse.success)
 
             await clock.advance(by: .seconds(1))
             await store.receive(\.loadSessionsResponse.success)
@@ -260,10 +295,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.loadSessionsResponse(.success([selectedSession, activeSession]))) {
-                $0.shouldPreferRemoteActiveSession = false
-            }
+            await store.send(.loadSessionsResponse(.success([selectedSession, activeSession])))
             await store.send(.sessionButtonTapped(selectedSession)) {
+                $0.hasUserSelectedSession = true
                 $0.chat = Chat.State(session: selectedSession)
             }
             await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
