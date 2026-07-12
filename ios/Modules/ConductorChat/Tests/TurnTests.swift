@@ -200,7 +200,7 @@ struct TurnTests {
     func elapsedTimeDescription() {
         #expect(TurnInProgressView.elapsedTimeDescription(4.29) == "4.2s")
         #expect(TurnInProgressView.elapsedTimeDescription(364.29) == "6m, 4.2s")
-        #expect(TurnInProgressView.elapsedTimeDescription(3_664.29) == "1h, 1m, 4.2s")
+        #expect(TurnInProgressView.elapsedTimeDescription(5_969.29) == "99m, 29.2s")
         #expect(
             TurnInProgressView.elapsedTimeDescription(364.29, showsTenths: false)
                 == "6m, 4s"

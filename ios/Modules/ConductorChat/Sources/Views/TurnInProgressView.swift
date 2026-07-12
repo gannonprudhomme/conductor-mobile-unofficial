@@ -44,9 +44,7 @@ struct TurnInProgressView: View {
     ) -> String {
         let precision = showsTenths ? 10 : 1
         let elapsed = max(0, Int(interval * Double(precision)))
-        let secondsPerHour = 60 * 60
-        let hours = elapsed / (secondsPerHour * precision)
-        let minutes = elapsed / (60 * precision) % 60
+        let minutes = elapsed / (60 * precision)
         let seconds = elapsed / precision % 60
         let secondsDescription = if showsTenths {
             "\(seconds).\(elapsed % precision)s"
@@ -54,9 +52,7 @@ struct TurnInProgressView: View {
             "\(seconds)s"
         }
 
-        return if hours > 0 {
-            "\(hours)h, \(minutes)m, \(secondsDescription)"
-        } else if minutes > 0 {
+        return if minutes > 0 {
             "\(minutes)m, \(secondsDescription)"
         } else {
             secondsDescription
