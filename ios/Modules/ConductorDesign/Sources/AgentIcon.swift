@@ -1,4 +1,12 @@
-import ConductorData
+//
+//  AgentIcon.swift
+//  ConductorDesign
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
+import SharedConductorData
+import ConductorMobileData
 import LucideIcons
 import SwiftUI
 

@@ -1,6 +1,6 @@
 //
 //  SwiftUIView.swift
-//  ConductorModules
+//  ConductorChat
 //
 //  Created by Gannon Prudomme on 7/10/26.
 //

@@ -2,6 +2,7 @@
 
 [scripts]
 archive = "mise run clean-sims"
+run_mode = "nonconcurrent"
 
 [scripts.run.run]
 available_in = ["local"]
@@ -23,3 +24,8 @@ icon = "hammer"
 available_in = ["local"]
 command = "mise run tauri"
 icon = "monitor"
+
+[scripts.run.server]
+available_in = ["local"]
+command = "mise run server dev"
+icon = "server"

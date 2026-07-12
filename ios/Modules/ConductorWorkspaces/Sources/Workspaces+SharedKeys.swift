@@ -1,11 +1,11 @@
 //
 //  Workspaces+SharedKeys.swift
-//  ConductorModules
+//  ConductorWorkspaces
 //
 //  Created by Gannon Prudomme on 7/10/26.
 //
 
-import ConductorData
+import ConductorMobileData
 import Foundation
 import Sharing
 import SwiftUI
@@ -15,6 +15,15 @@ extension WorkspaceWithRepository.Grouping {
         switch self {
         case .status: "Status"
         case .project: "Project"
+        }
+    }
+}
+
+extension WorkspaceWithRepository.Sort {
+    var title: LocalizedStringKey {
+        switch self {
+        case .updated: "Updated"
+        case .created: "Created"
         }
     }
 }

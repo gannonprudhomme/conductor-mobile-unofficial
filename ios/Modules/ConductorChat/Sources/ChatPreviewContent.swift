@@ -1,5 +1,12 @@
+//
+//  ChatPreviewContent.swift
+//  ConductorChat
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 #if DEBUG
-import ConductorData
+import SharedConductorData
 import Foundation
 
 struct ChatPreviewContent: Sendable {

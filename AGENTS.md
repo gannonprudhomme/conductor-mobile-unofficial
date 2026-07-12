@@ -12,6 +12,22 @@ two planned pieces:
 The native app lives in `ios/`. Follow `ios/AGENTS.md` for iOS-specific build,
 module, architecture, and dependency rules.
 
+## Shared Swift modules
+
+Swift modules used by both iOS and desktop live in the standalone package under
+`shared/`. Shared database records must match Conductor's actual schema; keep
+mobile persistence, computed mobile state, UI, and lifecycle code in the iOS
+package.
+
+Begin every Swift file, including shared and desktop-server files, with the
+standard Xcode filename, module, and creator comment header used by existing
+files. The `// swift-tools-version:` declaration remains the first line of each
+Swift package manifest.
+
+Keep each Swift test file scoped to exactly one production source file, and name
+the test file after that source. Never combine tests for multiple production
+source files into one test file.
+
 ## Teaching-first collaboration
 
 The user is learning this stack as an experienced iOS engineer. They know Swift,

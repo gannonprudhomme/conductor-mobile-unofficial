@@ -28,11 +28,14 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Put app code in local Swift package modules under `ios/Modules`.
 - Begin every Swift file with the standard Xcode filename, module, and creator
   comment header used by existing files.
-- Follow the MovieRating module shape: foundation modules under
-  `ios/Modules/Foundations` and feature modules under `ios/Modules`.
-- Keep a single Swift package manifest at `ios/Modules/Package.swift` for all
-  iOS modules.
-- Put persistence, SQLiteData schema, and migrations in `ConductorData`.
+- Keep iOS-only feature and design modules under `ios/Modules`. Put modules
+  shared with the desktop server in the root `shared/` package.
+- Keep the iOS package manifest at `ios/Modules/Package.swift` and the shared
+  package manifest at `shared/Package.swift`.
+- Put records shared with the desktop server in `shared/SharedConductorData`. Those
+  records must match Conductor's actual database schema.
+- Put the mobile database, migrations, client, mobile-only state, previews, and
+  app queries in `Foundations/ConductorMobileData`.
 - Put feature state/actions/reducers/views in feature modules such as
   `ConductorWorkspaces`.
 - Use SwiftUI all the way down.

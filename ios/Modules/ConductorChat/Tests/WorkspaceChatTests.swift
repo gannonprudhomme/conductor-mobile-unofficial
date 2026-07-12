@@ -6,7 +6,8 @@
 //
 
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
+import ConductorMobileData
 import Foundation
 import SQLiteData
 @testable import ConductorChat

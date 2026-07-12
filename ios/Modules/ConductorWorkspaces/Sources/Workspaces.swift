@@ -1,7 +1,15 @@
+//
+//  Workspaces.swift
+//  ConductorWorkspaces
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import Combine
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
 import ConductorDesign
+import ConductorMobileData
 import Foundation
 import LucideIcons
 import Sharing
@@ -249,17 +257,22 @@ public struct Workspaces: Sendable {
     private func loadWorkspaces() async throws {
         async let fetchedWorkspaces = desktopClient.fetchWorkspaces()
         async let fetchedRepositories = desktopClient.fetchRepositories()
-        let (workspaces, repositories) = try await (fetchedWorkspaces, fetchedRepositories)
+        let (workspaceSnapshots, repositories) = try await (fetchedWorkspaces, fetchedRepositories)
 
         try await database.write { db in
-            for repository in repositories {
-                try Repository.upsert { repository }
-                    .execute(db)
+            try Repository.upsert { repositories }
+                .execute(db)
+            try Workspace.upsert { workspaceSnapshots.map(\.workspace) }
+                .execute(db)
+            try MobileWorkspaceState.upsert {
+                workspaceSnapshots.map {
+                    MobileWorkspaceState(
+                        workspaceID: $0.workspace.id,
+                        isWorking: $0.isWorking
+                    )
+                }
             }
-            for workspace in workspaces {
-                try Workspace.upsert { workspace }
-                    .execute(db)
-            }
+                .execute(db)
         }
     }
 }
@@ -478,7 +491,7 @@ public struct WorkspacesView: View {
                         RepositoryIcon(repository: item.repository, size: 20, relativeTo: .body)
                     }
 
-                    if item.workspace.isWorking {
+                    if item.isWorking {
                         ProgressView()
                             .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
                             .tint(.theme(.textSecondary))

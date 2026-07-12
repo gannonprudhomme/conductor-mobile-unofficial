@@ -13,14 +13,14 @@ let package = Package(
         .iOS(.v26),
     ],
     products: [
-        .library(name: "ConductorFoundation", targets: ["ConductorFoundation"]),
         .library(name: "ConductorChat", targets: ["ConductorChat"]),
         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
-        .library(name: "ConductorData", targets: ["ConductorData"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
+        .library(name: "ConductorMobileData", targets: ["ConductorMobileData"]),
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
     ],
     dependencies: [
+        .package(name: "ConductorShared", path: "../../shared"),
         .package(url: "https://github.com/airbnb/lottie-spm.git", exact: "4.6.0"),
         .package(url: "https://github.com/JakubMazur/lucide-icons-swift", exact: "1.23.0"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
@@ -32,17 +32,25 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "ConductorFoundation",
-            path: "Foundations/ConductorFoundation/Sources",
+            name: "ConductorMobileData",
+            dependencies: [
+                .product(name: "SharedConductorData", package: "ConductorShared"),
+                .product(name: "ConductorFoundation", package: "ConductorShared"),
+                .product(name: "Dependencies", package: "swift-dependencies"),
+                .product(name: "DependenciesMacros", package: "swift-dependencies"),
+                .product(name: "SQLiteData", package: "sqlite-data"),
+            ],
+            path: "Foundations/ConductorMobileData/Sources",
             swiftSettings: swiftSettings
         ),
         .target(
             name: "ConductorChat",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
-                "ConductorData",
+                "ConductorMobileData",
                 "ConductorDesign",
             ],
             path: "ConductorChat/Sources",
@@ -53,9 +61,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Dependencies", package: "swift-dependencies"),
                 .product(name: "DependenciesMacros", package: "swift-dependencies"),
+                .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "Lottie", package: "lottie-spm"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
-                "ConductorData",
+                "ConductorMobileData",
             ],
             path: "ConductorDesign/Sources",
             resources: [
@@ -65,26 +74,15 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .target(
-            name: "ConductorData",
-            dependencies: [
-                .product(name: "Dependencies", package: "swift-dependencies"),
-                .product(name: "DependenciesMacros", package: "swift-dependencies"),
-                .product(name: "Sharing", package: "swift-sharing"),
-                .product(name: "SQLiteData", package: "sqlite-data"),
-                "ConductorFoundation",
-            ],
-            path: "Foundations/ConductorData/Sources",
-            swiftSettings: swiftSettings
-        ),
-        .target(
             name: "ConductorWorkspaces",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
+                "ConductorMobileData",
                 "ConductorDesign",
-                "ConductorData",
             ],
             path: "ConductorWorkspaces/Sources",
             swiftSettings: swiftSettings

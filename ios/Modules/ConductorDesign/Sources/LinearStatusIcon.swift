@@ -1,11 +1,11 @@
 //
 //  LinearStatusIcon.swift
-//  ConductorModules
+//  ConductorDesign
 //
 //  Created by Gannon Prudomme on 7/10/26.
 //
 
-import ConductorData
+import SharedConductorData
 import SwiftUI
 
 public struct LinearStatusIcon: View {

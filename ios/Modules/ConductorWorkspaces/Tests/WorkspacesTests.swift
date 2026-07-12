@@ -1,5 +1,13 @@
+//
+//  WorkspacesTests.swift
+//  ConductorWorkspacesTests
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
+import ConductorMobileData
 import CustomDump
 import Foundation
 import SQLiteData
@@ -107,14 +115,16 @@ struct WorkspacesTests {
                 try Repository
                     .insert { Repository.preview(id: "repo", name: "Conductor") }
                     .execute(db)
-                try Workspace
-                    .insert {
-                        Workspace.preview(
-                            id: "workspace",
-                            derivedStatus: Workspace.Status.inProgress.rawValue,
-                            repositoryID: "repo"
-                        )
-                    }
+                let workspace = Workspace.preview(
+                    id: "workspace",
+                    derivedStatus: Workspace.Status.inProgress.rawValue,
+                    repositoryID: "repo"
+                )
+                try Workspace.insert { workspace }
+                    .execute(db)
+                try MobileWorkspaceState.insert {
+                    MobileWorkspaceState(workspaceID: workspace.id, isWorking: false)
+                }
                     .execute(db)
             }
         } operation: {

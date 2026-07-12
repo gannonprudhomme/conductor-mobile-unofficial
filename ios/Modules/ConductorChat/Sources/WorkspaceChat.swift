@@ -6,8 +6,9 @@
 //
 
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
 import ConductorDesign
+import ConductorMobileData
 import Foundation
 import LucideIcons
 import SQLiteData

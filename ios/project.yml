@@ -6,6 +6,8 @@ options:
   minimumXcodeGenVersion: "2.45.0"
   xcodeVersion: "26.5"
 packages:
+  ConductorShared:
+    path: ../shared
   ConductorModules:
     path: Modules
 settings:
@@ -56,6 +58,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
     dependencies:
       - package: ConductorModules
+        product: ConductorMobileData
+      - package: ConductorModules
         product: ConductorDesign
       - package: ConductorModules
         product: ConductorMain
@@ -68,19 +72,35 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile
         PRODUCT_NAME: $(TARGET_NAME)
         TARGETED_DEVICE_FAMILY: "1,2"
-  ConductorDataTests:
+  SharedConductorDataTests:
     type: bundle.unit-test
     platform: iOS
     deploymentTarget: "26.0"
     sources:
-      - path: Modules/Foundations/ConductorData/Tests
+      - path: ../shared/SharedConductorData/Tests
     dependencies:
-      - package: ConductorModules
-        product: ConductorData
+      - package: ConductorShared
+        product: SharedConductorData
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorDataTests
+        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.SharedConductorDataTests
+        PRODUCT_NAME: $(TARGET_NAME)
+  ConductorMobileDataTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/Foundations/ConductorMobileData/Tests
+    dependencies:
+      - package: ConductorShared
+        product: SharedConductorData
+      - package: ConductorModules
+        product: ConductorMobileData
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorMobileDataTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorDesignTests:
     type: bundle.unit-test
@@ -146,13 +166,20 @@ schemes:
     test:
       targets:
         - ConductorChatTests
-  ConductorDataTests:
+  SharedConductorDataTests:
     build:
       targets:
-        ConductorDataTests: test
+        SharedConductorDataTests: test
     test:
       targets:
-        - ConductorDataTests
+        - SharedConductorDataTests
+  ConductorMobileDataTests:
+    build:
+      targets:
+        ConductorMobileDataTests: test
+    test:
+      targets:
+        - ConductorMobileDataTests
   ConductorDesignTests:
     build:
       targets:

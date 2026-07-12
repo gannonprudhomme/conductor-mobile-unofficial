@@ -1,3 +1,10 @@
+//
+//  EdgeInsets+Extensions.swift
+//  ConductorDesign
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import SwiftUI
 
 public extension EdgeInsets {

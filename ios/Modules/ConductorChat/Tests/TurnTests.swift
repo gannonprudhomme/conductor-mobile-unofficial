@@ -1,4 +1,12 @@
-import ConductorData
+//
+//  TurnTests.swift
+//  ConductorChatTests
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
+import SharedConductorData
+import ConductorMobileData
 import CustomDump
 import Foundation
 @testable import ConductorChat

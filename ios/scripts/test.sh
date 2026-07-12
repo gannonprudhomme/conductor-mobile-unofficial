@@ -11,7 +11,8 @@ fi
 
 TEST_SCHEMES=(
   ConductorChatTests
-  ConductorDataTests
+  SharedConductorDataTests
+  ConductorMobileDataTests
   ConductorDesignTests
   ConductorWorkspacesTests
   ConductorMainTests

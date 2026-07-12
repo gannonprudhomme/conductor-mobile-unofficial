@@ -6,7 +6,8 @@
 //
 
 #if DEBUG
-import ConductorData
+import SharedConductorData
+import ConductorMobileData
 
 struct WorkspaceChatPreviewContent: Sendable {
     let messages: [Message]

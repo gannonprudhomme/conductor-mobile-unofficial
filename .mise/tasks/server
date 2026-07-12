@@ -1,0 +1,22 @@
+#!/bin/sh
+#MISE description="Build and run only the Swift mobile server"
+
+set -eu
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+
+case "${1:-}" in
+  "")
+    export CONDUCTOR_MOBILE_SERVER_PORT=3768
+    cd "$root/desktop"
+    exec swift run --package-path SwiftServer conductor-mobile-server
+    ;;
+  dev)
+    cd "$root"
+    exec mise watch server --restart --watch desktop/SwiftServer --watch shared --exts swift
+    ;;
+  *)
+    echo "Usage: mise run server [dev]" >&2
+    exit 2
+    ;;
+esac

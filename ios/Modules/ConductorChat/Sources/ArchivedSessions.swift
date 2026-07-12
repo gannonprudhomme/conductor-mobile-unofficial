@@ -1,6 +1,14 @@
+//
+//  ArchivedSessions.swift
+//  ConductorChat
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
 import ConductorDesign
+import ConductorMobileData
 import Foundation
 import SQLiteData
 import SwiftUI

@@ -1,7 +1,15 @@
+//
+//  Chat.swift
+//  ConductorChat
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import Combine
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
 import ConductorDesign
+import ConductorMobileData
 import Foundation
 import LucideIcons
 import SQLiteData

@@ -1,5 +1,13 @@
+//
+//  ChatTests.swift
+//  ConductorChatTests
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import ComposableArchitecture
-import ConductorData
+import SharedConductorData
+import ConductorMobileData
 import CustomDump
 import Foundation
 import SQLiteData
@@ -9,7 +17,7 @@ import Testing
 @MainActor
 struct ChatTests {
     @Test("Messages are limited to the selected session and ordered chronologically")
-    func messagesAreScopedAndOrdered() throws {
+    func messagesAreScopedAndOrdered() async throws {
         let earlyMessage = try makeMessage(
             id: "early",
             sessionID: "session-1",
@@ -26,7 +34,7 @@ struct ChatTests {
             createdAt: "2026-07-09 00:00:00"
         )
 
-        try withDependencies {
+        try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { db in
                 try Message.upsert { lateMessage }.execute(db)
@@ -35,6 +43,7 @@ struct ChatTests {
             }
         } operation: {
             let state = Chat.State(session: try makeSession())
+            try await state.$messages.load()
 
             expectNoDifference(
                 state.messages,

@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm build:sidecar-proxy && tsc && vite build",
+    "build": "pnpm build:sidecar-proxy && pnpm build:swift-server && tsc && vite build",
     "build:sidecar-proxy": "tsc -p sidecar-proxy/tsconfig.json",
+    "build:swift-server": "./scripts/build-swift-server.sh release",
+    "build:swift-server:debug": "./scripts/build-swift-server.sh debug",
     "preview": "vite preview",
     "tauri": "./scripts/tauri.sh"
   },

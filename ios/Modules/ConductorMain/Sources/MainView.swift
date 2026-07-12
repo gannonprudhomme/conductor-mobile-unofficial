@@ -1,3 +1,10 @@
+//
+//  MainView.swift
+//  ConductorMain
+//
+//  Created by Gannon Prudomme on 7/12/26.
+//
+
 import ComposableArchitecture
 import ConductorChat
 import ConductorWorkspaces

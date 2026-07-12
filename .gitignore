@@ -12,6 +12,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Build output
+.build/
 dist/
 dist-ssr/
 *.local
@@ -27,6 +28,8 @@ dist-ssr/
 # Tauri and Rust
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/schemas
+/desktop/src-tauri/binaries/*
+!/desktop/src-tauri/binaries/.gitignore
 
 # Local env files
 .env*.local

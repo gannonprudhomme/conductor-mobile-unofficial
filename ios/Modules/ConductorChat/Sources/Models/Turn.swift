@@ -1,12 +1,13 @@
 //
 //  Turn.swift
-//  ConductorModules
+//  ConductorChat
 //
 //  Created by Gannon Prudomme on 7/10/26.
 //
 
 import Foundation
-import ConductorData
+import SharedConductorData
+import ConductorMobileData
 import IssueReporting
 
 /// This is solely a representation for UI / displaying in chat,
