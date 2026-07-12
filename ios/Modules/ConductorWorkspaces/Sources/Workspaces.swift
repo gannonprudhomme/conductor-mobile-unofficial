@@ -318,9 +318,11 @@ public struct WorkspacesView: View {
         }
         .themedNavigationTitle("Workspaces")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .bottomBar) {
                 WorkspaceFilterMenu(store: store)
             }
+
+            ToolbarSpacer(.flexible, placement: .bottomBar)
         }
         .refreshable {
             await store.send(.refresh).finish()
@@ -503,7 +505,17 @@ public struct WorkspacesView: View {
     private struct WorkspaceFilterMenu: View {
         @Bindable var store: StoreOf<Workspaces>
 
+        private var selectedRepositoryName: String? {
+            guard let selectedRepositoryID = store.selectedRepositoryID else {
+                return nil
+            }
+            return store.repositories.first { $0.id == selectedRepositoryID }?.displayName
+                ?? selectedRepositoryID
+        }
+
         var body: some View {
+            let repositoryName = selectedRepositoryName
+
             Menu {
                 Menu("Group by") {
                     Picker(
@@ -553,10 +565,64 @@ public struct WorkspacesView: View {
                     }
                 }
             } label: {
-                LucideIcon(Lucide.listFilter, size: 20, relativeTo: .body)
-                    .foregroundStyle(.theme(.textPrimary))
+                WorkspaceFilterMenuLabel(repositoryName: repositoryName)
             }
             .accessibilityLabel("Filter workspaces")
+            .accessibilityValue(
+                repositoryName.map { "Grouped by \($0)" } ?? "All repositories"
+            )
+        }
+    }
+
+    private struct WorkspaceFilterMenuLabel: View {
+        let repositoryName: String?
+        @ScaledMetric(relativeTo: .body) private var activeIconPadding = 10
+        @ScaledMetric(relativeTo: .body) private var iconSize = 20
+
+        var body: some View {
+            let isRepositoryFilterActive = repositoryName != nil
+            // Mail's active filter capsule reaches farther into the toolbar's leading inset.
+            // Widen its drawing bounds, then report the normal width to keep the glyph centered.
+            let iconBoundsWidth = isRepositoryFilterActive
+                ? iconSize + activeIconPadding / 2
+                : iconSize
+            let iconLayoutWidth = isRepositoryFilterActive
+                ? iconSize + activeIconPadding * 2
+                : iconSize
+
+            HStack(spacing: 8) {
+                LucideIcon(Lucide.listFilter, size: 20, relativeTo: .body)
+                    .frame(width: iconBoundsWidth)
+                    .foregroundStyle(
+                        Color.theme(
+                            isRepositoryFilterActive ? .background : .textPrimary
+                        )
+                    )
+                    .padding(isRepositoryFilterActive ? activeIconPadding : 0)
+                    .background(
+                        Color.theme(.accent)
+                            .opacity(isRepositoryFilterActive ? 1 : 0),
+                        in: .capsule
+                    )
+                    .frame(
+                        width: iconLayoutWidth,
+                        alignment: .trailing
+                    )
+
+                if let repositoryName {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Grouped by")
+                            .foregroundStyle(.theme(.textPrimary))
+                        Text(repositoryName)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.theme(.accent))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .font(.theme(.small))
+                    .frame(maxWidth: 160, alignment: .leading)
+                }
+            }
         }
     }
 }

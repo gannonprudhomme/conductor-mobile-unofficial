@@ -1,6 +1,8 @@
 import SwiftUI
 
 public enum ThemeColorStyle {
+    /// Matches Conductor's `--link-foreground` and `--border-highlight` CSS variables.
+    case accent
     case background
     case destructive
     case foreground
@@ -21,6 +23,9 @@ public enum ThemeColorStyle {
 public extension ShapeStyle where Self == Color {
     static func theme(_ style: ThemeColorStyle) -> Self {
         switch style {
+        case .accent:
+            Color(red: 204.0 / 255.0, green: 166.0 / 255.0, blue: 148.0 / 255.0)
+
         case .background:
             Color(red: 20.0 / 255.0, green: 17.0 / 255.0, blue: 16.0 / 255.0)
 
