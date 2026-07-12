@@ -21,7 +21,6 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "ConductorShared", path: "../../shared"),
-        .package(url: "https://github.com/airbnb/lottie-spm.git", exact: "4.6.0"),
         .package(url: "https://github.com/JakubMazur/lucide-icons-swift", exact: "1.23.0"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
         .package(url: "https://github.com/pointfreeco/swift-composable-architecture.git", exact: "1.25.5"),
@@ -62,7 +61,6 @@ let package = Package(
                 .product(name: "Dependencies", package: "swift-dependencies"),
                 .product(name: "DependenciesMacros", package: "swift-dependencies"),
                 .product(name: "SharedConductorData", package: "ConductorShared"),
-                .product(name: "Lottie", package: "lottie-spm"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 "ConductorMobileData",
             ],
