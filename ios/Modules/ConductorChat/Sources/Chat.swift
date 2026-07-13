@@ -110,7 +110,6 @@ public struct Chat: Sendable {
         case binding(BindingAction<State>)
     }
 
-    @Dependency(\.continuousClock) var clock
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
 
@@ -123,7 +122,7 @@ public struct Chat: Sendable {
             switch action {
             case .task:
                 return .merge(
-                    pollMessages(state),
+                    observeMessages(state),
                     .publisher {
                         state.$messages
                             .publisher
@@ -164,7 +163,11 @@ public struct Chat: Sendable {
                 state.isMessageSendInFlight = true
                 return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
                     let result = await Result {
-                        try await desktopClient.sendMessage(workspaceID, sessionID, message)
+                        try await desktopClient.sendMessage(
+                            workspaceID: workspaceID,
+                            sessionID: sessionID,
+                            message: message
+                        )
                         return message
                     }
 
@@ -207,7 +210,10 @@ public struct Chat: Sendable {
                         .stopSessionResponse(
                             sessionID: sessionID,
                             result: await Result {
-                                try await desktopClient.stopSession(workspaceID, sessionID)
+                                try await desktopClient.stopSession(
+                                    workspaceID: workspaceID,
+                                    sessionID: sessionID
+                                )
                             }
                         )
                     )
@@ -229,7 +235,7 @@ public struct Chat: Sendable {
         }
     }
 
-    private func pollMessages(_ state: State) -> Effect<Action> {
+    private func observeMessages(_ state: State) -> Effect<Action> {
         .run {
             [
                 previousMessages = Set(state.messages),
@@ -237,62 +243,29 @@ public struct Chat: Sendable {
                 workspaceID = state.session.workspaceID,
             ] send in
             var previousMessages = previousMessages
-            guard let messages = await refreshMessages(
-                workspaceID: workspaceID,
-                sessionID: sessionID,
-                previousMessages: previousMessages,
-                send: send
-            ) else {
-                return
-            }
-            previousMessages = messages
-
-            for await _ in clock.timer(interval: .seconds(1)) {
-                guard let messages = await refreshMessages(
+            await WebSocketHelpers.observe {
+                desktopClient.observeMessages(
                     workspaceID: workspaceID,
-                    sessionID: sessionID,
-                    previousMessages: previousMessages,
-                    send: send
-                ) else {
-                    return
-                }
-                previousMessages = messages
+                    sessionID: sessionID
+                )
+            } onValue: { messages in
+                // We store the previous messages for the next time we get a response to avoid processing duplicates
+                // Eventually we'll do a diff system to avoid having to do this
+                previousMessages = try await loadMessages(
+                    messages,
+                    previousMessages: previousMessages
+                )
+            } onFailure: { error in
+                Logger.chat.error("Failed to load messages: \(error)")
+                await send(.loadMessagesFailed(error.localizedDescription))
             }
-        }
-    }
-
-    @concurrent private func refreshMessages(
-        workspaceID: String,
-        sessionID: String,
-        previousMessages: Set<Message>,
-        send: Send<Action>
-    ) async -> Set<Message>? {
-        do {
-            return try await loadMessages(
-                workspaceID: workspaceID,
-                sessionID: sessionID,
-                previousMessages: previousMessages
-            )
-        } catch is CancellationError {
-            return nil
-        } catch {
-            guard !Task.isCancelled else {
-                return nil
-            }
-            Logger.chat.error("Failed to load messages: \(error)")
-            await send(.loadMessagesFailed(error.localizedDescription))
-            // Preserve the last successful snapshot after a recoverable failure so the polling
-            // loop can retry in one second without treating every existing message as new.
-            return previousMessages
         }
     }
 
     @concurrent private func loadMessages(
-        workspaceID: String,
-        sessionID: String,
+        _ messages: [Message],
         previousMessages: Set<Message>
     ) async throws -> Set<Message> {
-        let messages = try await desktopClient.fetchMessages(workspaceID, sessionID)
         guard !messages.isEmpty else {
             return previousMessages
         }
@@ -506,7 +479,11 @@ struct ChatView: View {
             try Message.upsert { content.messages }
                 .execute(db)
         }
-        $0.desktopClient.fetchMessages = { _, _ in [] }
+        $0.desktopClient.observeMessages = { _, _ in
+            AsyncThrowingStream { continuation in
+                continuation.yield([])
+            }
+        }
     }
     NavigationStack {
         ChatView(

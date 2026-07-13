@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/11/26.
 //
 
+import Combine
 import ComposableArchitecture
 import SharedConductorData
 import ConductorDesign
@@ -81,6 +82,7 @@ public struct WorkspaceChat: Sendable {
     }
 
     public enum Action {
+        case activeSessionIDChanged(Session.ID?)
         case archivedSessionsButtonTapped
         case chat(Chat.Action)
         case destination(PresentationAction<Destination.Action>)
@@ -89,7 +91,6 @@ public struct WorkspaceChat: Sendable {
         case task
     }
 
-    @Dependency(\.continuousClock) var clock
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
 
@@ -99,12 +100,28 @@ public struct WorkspaceChat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
-                return .run { [workspaceID = state.workspace.id] send in
-                    await refreshSessions(workspaceID: workspaceID, send: send)
-                    for await _ in clock.timer(interval: .seconds(1)) {
-                        await refreshSessions(workspaceID: workspaceID, send: send)
-                    }
-                }
+                let workspace = state.$workspaceWithRepository
+                // The workspace and sessions arrive through independent sockets. Reconcile when
+                // either one changes so an active-session-only update cannot leave chat stale.
+                return .merge(
+                    .publisher {
+                        workspace.publisher
+                            .map(\.workspace.activeSessionID)
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.activeSessionIDChanged)
+                    },
+                    observeSessions(workspaceID: state.workspace.id)
+                )
+
+            case let .activeSessionIDChanged(activeSessionID):
+                state.chat = Self.selectedChat(
+                    afterReceiving: state.activeSessions,
+                    currentChat: state.chat,
+                    workspaceActiveSessionID: activeSessionID,
+                    hasUserSelectedSession: state.hasUserSelectedSession
+                )
+                return .none
 
             case .archivedSessionsButtonTapped:
                 state.destination = .archivedSessions(
@@ -117,7 +134,7 @@ public struct WorkspaceChat: Sendable {
 
             case let .loadSessionsResponse(.success(sessions)):
                 state.chat = Self.selectedChat(
-                    afterLoading: sessions,
+                    afterReceiving: sessions,
                     currentChat: state.chat,
                     workspaceActiveSessionID: state.workspace.activeSessionID,
                     hasUserSelectedSession: state.hasUserSelectedSession
@@ -160,7 +177,9 @@ public struct WorkspaceChat: Sendable {
             case let .sessionButtonTapped(session):
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
                 state.hasUserSelectedSession = true
-                guard state.chat?.sessionID != session.id else { return .none }
+                guard state.chat?.sessionID != session.id else {
+                    return .none
+                }
                 state.chat = Chat.State(session: session)
                 return .none
 
@@ -175,12 +194,12 @@ public struct WorkspaceChat: Sendable {
         .ifLet(\.$destination, action: \.destination)
     }
 
-    /// Reconciles the selected chat after each session refresh.
+    /// Reconciles the selected chat after session or workspace updates.
     ///
-    /// Session polling can remove, archive, or add sessions while this screen is open. The
-    /// current chat therefore has to be checked against each response before it is kept.
+    /// Sessions can be removed, archived, or added while the workspace's active session can
+    /// change independently. The current chat therefore has to be checked after either update.
     private static func selectedChat(
-        afterLoading sessions: [Session],
+        afterReceiving sessions: [Session],
         currentChat: Chat.State?,
         workspaceActiveSessionID: Session.ID?,
         hasUserSelectedSession: Bool
@@ -189,7 +208,7 @@ public struct WorkspaceChat: Sendable {
         if hasUserSelectedSession,
            let currentChat,
             activeSessions.contains(where: { $0.id == currentChat.sessionID }) {
-            // Preserve a reconciled or explicit selection instead of resetting it on every poll.
+            // Preserve a reconciled or explicit selection instead of resetting it on every snapshot.
             return currentChat
         } else {
             // Prefer Conductor's active session, then fall back to the most recently updated session.
@@ -197,40 +216,35 @@ public struct WorkspaceChat: Sendable {
                 ?? activeSessions.max { /// Fallback to the most recently updated session
                     ($0.updatedDate ?? .distantPast) < ($1.updatedDate ?? .distantPast)
                 }
-            // Avoid rebuilding the current chat on every poll when the selected session has not changed.
+            // Avoid rebuilding the current chat when the selected session has not changed.
             let canReuseCurrentChat = session?.id == currentChat?.sessionID
-            guard !canReuseCurrentChat else { return currentChat }
+            guard !canReuseCurrentChat else {
+                return currentChat
+            }
             return session.map(Chat.State.init)
         }
     }
 
-    @concurrent private func refreshSessions(workspaceID: String, send: Send<Action>) async {
-        do {
-            let sessions = try await loadSessions(workspaceID: workspaceID)
-            await send(.loadSessionsResponse(.success(sessions)))
-        } catch is CancellationError {
-            return
-        } catch {
-            await send(.loadSessionsResponse(.failure(error)))
-        }
-    }
+    private func observeSessions(workspaceID: String) -> Effect<Action> {
+        .run { send in
+            await WebSocketHelpers.observe {
+                desktopClient.observeSessions(workspaceID: workspaceID)
+            } onValue: { sessions in
+                try await database.write { db in
+                    try Session
+                        .where { $0.workspaceID.eq(workspaceID) }
+                        .delete()
+                        .execute(db)
 
-    @concurrent private func loadSessions(workspaceID: String) async throws -> [Session] {
-        let sessions = try await desktopClient.fetchSessions(workspaceID)
+                    try Session.upsert { sessions }
+                        .execute(db)
+                }
 
-        try await database.write { db in
-            try Session
-                .where { $0.workspaceID.eq(workspaceID) }
-                .delete()
-                .execute(db)
-
-            for session in sessions {
-                try Session.upsert { session }
-                    .execute(db)
+                await send(.loadSessionsResponse(.success(sessions)))
+            } onFailure: { error in
+                await send(.loadSessionsResponse(.failure(error)))
             }
         }
-
-        return sessions
     }
 }
 
@@ -453,9 +467,17 @@ public struct WorkspaceChatView: View {
             try Session.upsert { content.sessions }.execute(db)
             try Message.upsert { content.messages }.execute(db)
         }
-        $0.desktopClient.fetchSessions = { _ in content.sessions }
-        $0.desktopClient.fetchMessages = { _, sessionID in
-            content.messages.filter { $0.sessionID == sessionID }
+        $0.desktopClient.observeSessions = { _ in
+            AsyncThrowingStream { continuation in
+                continuation.yield(content.sessions)
+            }
+        }
+        $0.desktopClient.observeMessages = { _, sessionID in
+            AsyncThrowingStream { continuation in
+                continuation.yield(
+                    content.messages.filter { $0.sessionID == sessionID }
+                )
+            }
         }
     }
 

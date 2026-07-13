@@ -88,31 +88,49 @@ struct ChatTests {
         }
     }
 
-    @Test("Task polls the selected session and observes stored messages")
+    @Test("Task observes the selected session, reconnects after failure, and cancels")
     func task() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
             let clock = TestClock()
-            let requestCount = LockIsolated(0)
-
+            let (firstStream, firstContinuation) = AsyncThrowingStream<
+                [Message],
+                any Error
+            >.makeStream()
+            let (secondStream, secondContinuation) = AsyncThrowingStream<
+                [Message],
+                any Error
+            >.makeStream()
+            let connectionCount = LockIsolated(0)
             let session = try makeSession()
+            let secondConnectionCancelled = LockIsolated(false)
+            secondContinuation.onTermination = { termination in
+                guard case .cancelled = termination else {
+                    return
+                }
+
+                secondConnectionCancelled.setValue(true)
+            }
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
                 $0.continuousClock = clock
-                $0.desktopClient.fetchMessages = { workspaceID, sessionID in
+                $0.desktopClient.observeMessages = { workspaceID, sessionID in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
 
-                    let count = requestCount.withValue {
+                    let count = connectionCount.withValue {
                         $0 += 1
                         return $0
                     }
-                    if count == 1 {
-                        return []
+                    return switch count {
+                    case 1:
+                        firstStream
+
+                    default:
+                        secondStream
                     }
-                    throw TestError()
                 }
             }
 
@@ -124,13 +142,17 @@ struct ChatTests {
             #expect(try #require(store.state.turns).isEmpty)
             #expect(try #require(store.state.rows).isEmpty)
             #expect(store.state.displayedContentRevision == 1)
-            #expect(requestCount.value == 1)
+            #expect(connectionCount.value == 1)
+
+            firstContinuation.finish(throwing: TestError())
+            await store.receive(\.loadMessagesFailed)
+            #expect(connectionCount.value == 1)
 
             await clock.advance(by: .seconds(1))
-            await store.receive(\.loadMessagesFailed)
-            #expect(requestCount.value == 2)
+            #expect(connectionCount.value == 2)
 
             await task.cancel()
+            #expect(secondConnectionCancelled.value)
         }
     }
 
@@ -164,24 +186,21 @@ struct ChatTests {
         var mutableUpdatedEarlyMessage = earlyMessage
         mutableUpdatedEarlyMessage.content = "Updated early message"
         let updatedEarlyMessage = mutableUpdatedEarlyMessage
-        let clock = TestClock()
-        let (firstPollGate, firstPollContinuation) = AsyncStream.makeStream(of: Void.self)
-        let requestCount = LockIsolated(0)
+        var mutableUpdatedLateMessage = lateMessage
+        mutableUpdatedLateMessage.content = "Updated late message"
+        let updatedLateMessage = mutableUpdatedLateMessage
+        let (stream, continuation) = AsyncThrowingStream<
+            [Message],
+            any Error
+        >.makeStream()
         let store = TestStore(initialState: Chat.State(session: session)) {
             Chat()
         } withDependencies: {
-            $0.continuousClock = clock
             $0.defaultDatabase = database
-            $0.desktopClient.fetchMessages = { _, _ in
-                switch requestCount.withValue({ $0 += 1; return $0 }) {
-                case 1:
-                    for await _ in firstPollGate { break }
-                    return [lateMessage, updatedEarlyMessage]
-                case 2:
-                    return [updatedEarlyMessage, lateMessage]
-                default:
-                    throw TestError()
-                }
+            $0.desktopClient.observeMessages = { workspaceID, sessionID in
+                #expect(workspaceID == session.workspaceID)
+                #expect(sessionID == session.id)
+                return stream
             }
         }
 
@@ -199,8 +218,8 @@ struct ChatTests {
                 .init(id: "late", content: "Message late"),
             ]
         )
-        firstPollContinuation.yield()
-        firstPollContinuation.finish()
+
+        continuation.yield([lateMessage, updatedEarlyMessage])
         await store.receive(\.messagesUpdated) {
             $0.displayedContentRevision += 1
         }
@@ -215,13 +234,21 @@ struct ChatTests {
         )
         #expect(store.state.displayedContentRevision == 2)
 
-        await clock.advance(by: .seconds(1))
-        #expect(requestCount.value == 2)
-        #expect(store.state.displayedContentRevision == 2)
-
-        await clock.advance(by: .seconds(1))
-        await store.receive(\.loadMessagesFailed)
-        #expect(requestCount.value == 3)
+        continuation.yield([updatedEarlyMessage, lateMessage])
+        continuation.yield([updatedEarlyMessage, updatedLateMessage])
+        await store.receive(\.messagesUpdated) {
+            $0.displayedContentRevision += 1
+        }
+        try expectHumanPresentationCaches(
+            store.state,
+            turnID: "turn-1",
+            startedAt: earlyMessage.createdAt,
+            messages: [
+                .init(id: "early", content: "Updated early message"),
+                .init(id: "late", content: "Updated late message"),
+            ]
+        )
+        #expect(store.state.displayedContentRevision == 3)
 
         let storedMessages = try await database.read { db in
             try Message
@@ -229,10 +256,10 @@ struct ChatTests {
                 .order { ($0.createdAt, $0.id) }
                 .fetchAll(db)
         }
-        expectNoDifference(storedMessages, [updatedEarlyMessage, lateMessage])
+        expectNoDifference(storedMessages, [updatedEarlyMessage, updatedLateMessage])
         #expect(
             try await database.write { $0.totalChangesCount }
-                == baselineChangeCount + 2
+                == baselineChangeCount + 4
         )
 
         await task.cancel()

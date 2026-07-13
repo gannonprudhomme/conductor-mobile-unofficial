@@ -133,7 +133,10 @@ struct WorkspacesTests {
                     .execute(db)
             }
         } operation: {
-            let clock = TestClock()
+            let (stream, _) = AsyncThrowingStream<
+                WorkspaceListSnapshot,
+                any Error
+            >.makeStream()
             let initialState = Workspaces.State()
             let grouping = initialState.$grouping
             let projectSections = Workspaces.State.sections(
@@ -143,9 +146,7 @@ struct WorkspacesTests {
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
-                $0.continuousClock = clock
-                $0.desktopClient.fetchRepositories = { [] }
-                $0.desktopClient.fetchWorkspaces = { [] }
+                $0.desktopClient.observeWorkspaces = { stream }
             }
 
             let task = await store.send(.task)
@@ -159,55 +160,104 @@ struct WorkspacesTests {
         }
     }
 
-    @Test("When refresh fails to load workspaces, an alert is presented")
-    func refreshFailsToLoadWorkspaces() async throws {
+    @Test("Workspace snapshots stream, reconnect after failure, and cancel with the task")
+    func workspaceSnapshotsStreamReconnectAndCancel() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
-            let store = TestStore(initialState: Workspaces.State()) {
-                Workspaces()
-            } withDependencies: {
-                $0.desktopClient.fetchWorkspaces = {
-                    throw TestError()
-                }
-                $0.desktopClient.fetchRepositories = { [] }
-            }
-
-            await store.send(.refresh)
-
-            await store.receive(\.loadWorkspacesFailed) {
-                $0.alert = .failedToLoadWorkspaces(error: TestError())
-            }
-        }
-    }
-
-    @Test("Workspaces poll every second")
-    func workspacesPollEverySecond() async throws {
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
             let clock = TestClock()
+            let repository = Repository.preview(id: "repository", name: "Conductor")
+            let workspace = Workspace.preview(
+                id: "workspace",
+                derivedStatus: Workspace.Status.inProgress.rawValue,
+                repositoryID: repository.id
+            )
+            var updatedWorkspace = workspace
+            updatedWorkspace.derivedStatus = Workspace.Status.done.rawValue
+            let firstSnapshot = WorkspaceListSnapshot(
+                repositories: [repository],
+                workspaces: [WorkspaceSnapshot(workspace: workspace, isWorking: false)]
+            )
+            let secondSnapshot = WorkspaceListSnapshot(
+                repositories: [repository],
+                workspaces: [WorkspaceSnapshot(workspace: updatedWorkspace, isWorking: true)]
+            )
+            let firstExpectedWorkspace = WorkspaceWithRepository(
+                workspace: workspace,
+                repository: repository,
+                mobileState: MobileWorkspaceState(workspaceID: workspace.id, isWorking: false)
+            )
+            let secondExpectedWorkspace = WorkspaceWithRepository(
+                workspace: updatedWorkspace,
+                repository: repository,
+                mobileState: MobileWorkspaceState(workspaceID: workspace.id, isWorking: true)
+            )
+            let (firstStream, firstContinuation) = AsyncThrowingStream<
+                WorkspaceListSnapshot,
+                any Error
+            >.makeStream()
+            let (secondStream, secondContinuation) = AsyncThrowingStream<
+                WorkspaceListSnapshot,
+                any Error
+            >.makeStream()
+            let connectionCount = LockIsolated(0)
+            let secondConnectionCancelled = LockIsolated(false)
+            secondContinuation.onTermination = { termination in
+                guard case .cancelled = termination else {
+                    return
+                }
+
+                secondConnectionCancelled.setValue(true)
+            }
             let store = TestStore(initialState: Workspaces.State()) {
                 Workspaces()
             } withDependencies: {
                 $0.continuousClock = clock
-                $0.desktopClient.fetchWorkspaces = {
-                    throw TestError()
+                $0.desktopClient.observeWorkspaces = {
+                    let count = connectionCount.withValue {
+                        $0 += 1
+                        return $0
+                    }
+                    return switch count {
+                    case 1:
+                        firstStream
+
+                    default:
+                        secondStream
+                    }
                 }
-                $0.desktopClient.fetchRepositories = { [] }
             }
 
             let task = await store.send(.task)
 
+            firstContinuation.yield(firstSnapshot)
+            await store.receive(\.workspacesChanged) {
+                $0.sections = Workspaces.State.sections(
+                    groupedBy: .status,
+                    workspaces: [firstExpectedWorkspace]
+                )
+            }
+            #expect(connectionCount.value == 1)
+
+            firstContinuation.finish(throwing: TestError())
             await store.receive(\.loadWorkspacesFailed) {
                 $0.alert = .failedToLoadWorkspaces(error: TestError())
             }
+            #expect(connectionCount.value == 1)
 
             await clock.advance(by: .seconds(1))
-            await store.receive(\.loadWorkspacesFailed)
+            secondContinuation.yield(secondSnapshot)
+            await store.receive(\.workspacesChanged) {
+                $0.sections = Workspaces.State.sections(
+                    groupedBy: .status,
+                    workspaces: [secondExpectedWorkspace]
+                )
+            }
+            #expect(connectionCount.value == 2)
 
             await task.cancel()
+            #expect(secondConnectionCancelled.value)
         }
     }
 
@@ -230,8 +280,6 @@ struct WorkspacesTests {
                 Workspaces()
             } withDependencies: {
                 $0.date.now = now
-                $0.desktopClient.fetchRepositories = { [] }
-                $0.desktopClient.fetchWorkspaces = { [] }
                 $0.desktopClient.setWorkspacePinned = { workspaceID, pinned in
                     requests.withValue { $0.append("pinned:\(workspaceID):\(pinned)") }
                 }

@@ -33,12 +33,6 @@ extension Repository {
 }
 
 extension Session {
-    static var mostRecentlyUpdated: some SelectStatement<(), Session, ()> {
-        Session
-            .order { $0.updatedAt.desc() }
-            .limit(200)
-    }
-
     static func all(
         forWorkspaceID workspaceID: String
     ) -> some SelectStatement<(), Session, ()> {

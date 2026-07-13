@@ -10,7 +10,7 @@ import SharedConductorData
 import SQLiteData
 
 enum ConductorDatabase {
-    static func open(at url: URL) throws -> any DatabaseWriter {
+    static func open(at url: URL) throws -> DatabaseQueue {
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
         configuration.prepareDatabase { database in

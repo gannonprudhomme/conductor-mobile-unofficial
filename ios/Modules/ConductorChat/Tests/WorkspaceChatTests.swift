@@ -107,46 +107,6 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("Automatic selection follows workspace active-session updates")
-    func automaticSelectionFollowsWorkspaceActiveSession() async throws {
-        let cachedSession = try makeSession(id: "cached", workspaceID: "workspace-1")
-        let activeSession = try makeSession(id: "active", workspaceID: "workspace-1")
-        let cachedWorkspace = Workspace.preview(activeSessionID: cachedSession.id)
-        let updatedWorkspace = Workspace.preview(activeSessionID: activeSession.id)
-        let database = try appDatabase()
-
-        try await database.write { db in
-            try Workspace.upsert { cachedWorkspace }.execute(db)
-            try Session.upsert { cachedSession }.execute(db)
-        }
-
-        try await withDependencies {
-            $0.defaultDatabase = database
-        } operation: {
-            let store = TestStore(
-                initialState: WorkspaceChat.State(
-                    workspaceWithRepository: WorkspaceWithRepository(
-                        workspace: cachedWorkspace,
-                        repository: nil
-                    )
-                )
-            ) {
-                WorkspaceChat()
-            }
-
-            await store.send(.loadSessionsResponse(.success([cachedSession, activeSession])))
-
-            try await database.write { db in
-                try Workspace.upsert { updatedWorkspace }.execute(db)
-            }
-            try await store.state.$workspaceWithRepository.load()
-
-            await store.send(.loadSessionsResponse(.success([cachedSession, activeSession]))) {
-                $0.chat = Chat.State(session: activeSession)
-            }
-        }
-    }
-
     @Test("A user selection before the first load is preserved")
     func userSelectionBeforeFirstLoadIsPreserved() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -177,8 +137,8 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("Later polls preserve a valid selection")
-    func laterPollsPreserveValidSelection() async throws {
+    @Test("Later snapshots preserve a valid selection")
+    func laterSnapshotsPreserveValidSelection() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
         let selectedSession = try makeSession(id: "selected", workspaceID: workspace.id)
@@ -265,18 +225,28 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("Sessions poll every second")
-    func sessionsPollEverySecond() async throws {
+    @Test("Session snapshots update through one connection")
+    func sessionSnapshotsUpdateThroughOneConnection() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let replacement = try makeSession(
+            id: "replacement",
+            workspaceID: workspace.id,
+            updatedAt: "2026-07-09 02:00:00"
+        )
+        let database = try appDatabase()
+        try await database.write { db in
+            try Session.upsert { session }.execute(db)
+        }
 
         try await withDependencies {
-            try $0.bootstrapDatabase()
-            try $0.defaultDatabase.write { db in
-                try Session.upsert { session }.execute(db)
-            }
+            $0.defaultDatabase = database
         } operation: {
-            let clock = TestClock()
+            let (stream, continuation) = AsyncThrowingStream<
+                [Session],
+                any Error
+            >.makeStream()
+            let connectionCount = LockIsolated(0)
             let store = TestStore(
                 initialState: WorkspaceChat.State(
                     workspaceWithRepository: WorkspaceWithRepository(
@@ -287,19 +257,31 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.continuousClock = clock
-                $0.desktopClient.fetchSessions = { workspaceID in
+                $0.desktopClient.observeSessions = { workspaceID in
                     #expect(workspaceID == workspace.id)
-                    return [session]
+                    connectionCount.withValue { $0 += 1 }
+                    return stream
                 }
             }
 
             let task = await store.send(.task)
 
+            continuation.yield([session])
             await store.receive(\.loadSessionsResponse.success)
 
-            await clock.advance(by: .seconds(1))
-            await store.receive(\.loadSessionsResponse.success)
+            continuation.yield([replacement])
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.chat = Chat.State(session: replacement)
+            }
+            #expect(connectionCount.value == 1)
+
+            let storedSessionIDs = try await database.read { db in
+                try Session
+                    .where { $0.workspaceID.eq(workspace.id) }
+                    .fetchAll(db)
+                    .map(\.id)
+            }
+            #expect(storedSessionIDs == [replacement.id])
 
             await task.cancel()
         }
@@ -594,8 +576,8 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("When task fails to load sessions, an alert is presented")
-    func taskFailsToLoadSessions() async throws {
+    @Test("Session observation presents failures, retries, and cancels its connection")
+    func sessionObservationRetriesAndCancels() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
 
@@ -606,6 +588,23 @@ struct WorkspaceChatTests {
             }
         } operation: {
             let clock = TestClock()
+            let (firstStream, firstContinuation) = AsyncThrowingStream<
+                [Session],
+                any Error
+            >.makeStream()
+            let (secondStream, secondContinuation) = AsyncThrowingStream<
+                [Session],
+                any Error
+            >.makeStream()
+            let connectionCount = LockIsolated(0)
+            let secondConnectionCancelled = LockIsolated(false)
+            secondContinuation.onTermination = { termination in
+                guard case .cancelled = termination else {
+                    return
+                }
+
+                secondConnectionCancelled.setValue(true)
+            }
             let store = TestStore(
                 initialState: WorkspaceChat.State(
                     workspaceWithRepository: WorkspaceWithRepository(
@@ -617,21 +616,39 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             } withDependencies: {
                 $0.continuousClock = clock
-                $0.desktopClient.fetchSessions = { workspaceID in
+                $0.desktopClient.observeSessions = { workspaceID in
                     #expect(workspaceID == workspace.id)
-                    throw TestError()
+                    let count = connectionCount.withValue {
+                        $0 += 1
+                        return $0
+                    }
+                    return switch count {
+                    case 1:
+                        firstStream
+
+                    default:
+                        secondStream
+                    }
                 }
             }
 
             let task = await store.send(.task)
 
+            firstContinuation.finish(throwing: TestError())
             await store.receive(\.loadSessionsResponse.failure) {
                 $0.destination = .alert(
                     .failedToLoadSessions(message: TestError().localizedDescription)
                 )
             }
+            #expect(connectionCount.value == 1)
+
+            await clock.advance(by: .seconds(1))
+            secondContinuation.yield([activeSession])
+            await store.receive(\.loadSessionsResponse.success)
+            #expect(connectionCount.value == 2)
 
             await task.cancel()
+            #expect(secondConnectionCancelled.value)
         }
     }
 }

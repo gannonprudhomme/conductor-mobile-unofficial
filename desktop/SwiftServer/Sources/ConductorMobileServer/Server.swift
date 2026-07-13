@@ -5,9 +5,10 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
-import SharedConductorData
 import Foundation
 import Hummingbird
+import HummingbirdWebSocket
+import SharedConductorData
 import SQLiteData
 
 public enum Server {
@@ -28,26 +29,20 @@ public enum Server {
     }
 
     static func makeApplication( // only non-private for tests
-        database: any DatabaseWriter,
-        port: Int = 3768
+        database: DatabaseQueue,
+        port: Int = 3768,
+        allowedOrigin: String? = nil
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
+        let webSocketRouter = Router(context: RequestContext.self)
 
-        router.get("/sessions") { _, _ in
-            try await database.read { database in
-                try Session.mostRecentlyUpdated.fetchAll(database)
-            }
-        }
-
-        router.get("/workspaces") { _, _ in
-            try await database.read { database in
-                try WorkspaceSnapshot.mostRecentlyUpdated.fetchAll(database)
-            }
-        }
-
-        router.get("/repositories") { _, _ in
-            try await database.read { database in
-                try Repository.orderedByDisplayOrder.fetchAll(database)
+        let shouldUpgradeToWebSocket: @Sendable (Request, RequestContext) async throws -> RouterShouldUpgrade = { request, _ in
+            if originIsAllowed(request, allowedOrigin: allowedOrigin) {
+                // Accept the HTTP-to-WebSocket switch and start the matching route handler.
+                .upgrade()
+            } else {
+                // Keep the connection as HTTP; the WebSocket route handler never starts.
+                .dontUpgrade
             }
         }
 
@@ -60,6 +55,10 @@ public enum Server {
         }
 
         router.patch("/workspaces/{workspaceID}") { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
             return try await WorkspaceRoute.patch(
                 request: request,
                 context: context,
@@ -67,32 +66,75 @@ public enum Server {
             )
         }
 
-        router.get("/workspaces/{workspaceID}/sessions") { _, context in
-            let workspaceID = try context.parameters.require("workspaceID")
-            return try await database.read { database in
-                try Session.all(forWorkspaceID: workspaceID).fetchAll(database)
+        webSocketRouter.ws("/workspaces", shouldUpgrade: shouldUpgradeToWebSocket) { inbound, outbound, _ in
+            try await streamSnapshots(
+                inbound: inbound,
+                outbound: outbound,
+                database: database
+            ) {
+                try await database.read { database in
+                    try WorkspaceListSnapshot(
+                        repositories: Repository.orderedByDisplayOrder.fetchAll(database),
+                        workspaces: WorkspaceSnapshot.mostRecentlyUpdated.fetchAll(database)
+                    )
+                }
             }
         }
 
-        router.get("/workspaces/{workspaceID}/sessions/{sessionID}/messages") { _, context in
-            let workspaceID = try context.parameters.require("workspaceID")
-            let sessionID = try context.parameters.require("sessionID")
-            return try await database.read { database in
-                try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
-                    .fetchAll(database)
+        webSocketRouter.ws(
+            "/workspaces/{workspaceID}/sessions",
+            shouldUpgrade: shouldUpgradeToWebSocket
+        ) { inbound, outbound, context in
+            let workspaceID = try context.requestContext.parameters.require("workspaceID")
+            try await streamSnapshots(
+                inbound: inbound,
+                outbound: outbound,
+                database: database
+            ) {
+                try await database.read { database in
+                    try Session.all(forWorkspaceID: workspaceID).fetchAll(database)
+                }
             }
         }
 
+        webSocketRouter.ws(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages",
+            shouldUpgrade: shouldUpgradeToWebSocket
+        ) { inbound, outbound, context in
+            let workspaceID = try context.requestContext.parameters.require("workspaceID")
+            let sessionID = try context.requestContext.parameters.require("sessionID")
+            try await streamSnapshots(
+                inbound: inbound,
+                outbound: outbound,
+                database: database
+            ) {
+                try await database.read { database in
+                    try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
+                        .fetchAll(database)
+                }
+            }
+        }
+
+        // Apply the same browser boundary to commands. The native app sends no Origin, while
+        // browser JavaScript does, so an arbitrary webpage cannot mutate a workspace or session.
         router.post("/workspaces/{workspaceID}/sessions/{sessionID}/messages") { request, context in
-            try await MessageRoute.post(
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await MessageRoute.post(
                 request: request,
                 context: context,
                 database: database
             )
         }
 
-        router.post("/workspaces/{workspaceID}/sessions/{sessionID}/stop") { _, context in
-            try await StopRoute.post(
+        router.post("/workspaces/{workspaceID}/sessions/{sessionID}/stop") { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await StopRoute.post(
                 context: context,
                 database: database
             )
@@ -100,6 +142,7 @@ public enum Server {
 
         return Application(
             router: router,
+            server: .http1WebSocketUpgrade(webSocketRouter: webSocketRouter),
             configuration: .init(
                 address: .hostname("0.0.0.0", port: port),
                 serverName: "Conductor Mobile Server"
@@ -144,16 +187,88 @@ public enum Server {
         }
     }
 
-    /// Exists just to give it the custom JSONEncoder
-    struct RequestContext: Hummingbird.RequestContext {
+    private static func streamSnapshots<Snapshot>(
+        inbound: WebSocketInboundStream,
+        outbound: WebSocketOutboundWriter,
+        database: DatabaseQueue,
+        loadSnapshot: @escaping @Sendable () async throws -> Snapshot
+    ) async throws where Snapshot: Encodable & Equatable & Sendable {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Phone -> desktop: discard application data while waiting for close or failure.
+            group.addTask {
+                for try await _ in inbound {}
+            }
+
+            // Desktop -> phone: send current state immediately, then watch Conductor's database
+            // and push each changed route-specific snapshot.
+            group.addTask {
+                let encoder = JSONEncoder.conductor
+                var dataVersion = try readCurrentDataVersion(in: database)
+                var previousSnapshot = try await loadSnapshot()
+
+                // Every subscriber receives state immediately instead of waiting for a write.
+                try await outbound.writeTextMessage(
+                    String(decoding: try encoder.encode(previousSnapshot), as: UTF8.self)
+                )
+
+                while !Task.isCancelled {
+                    // SQLite has no cross-process asynchronous change notification to subscribe
+                    // to. Fifty milliseconds targets near-live UI updates while each socket does
+                    // at most about 20 inexpensive scalar PRAGMA reads per second. Full snapshots
+                    // are only loaded after that token changes.
+                    try await Task.sleep(for: .milliseconds(50))
+                    let nextDataVersion = try readCurrentDataVersion(in: database)
+
+                    let hasDatabaseChanged = nextDataVersion != dataVersion
+                    guard hasDatabaseChanged else {
+                        continue
+                    }
+
+                    dataVersion = nextDataVersion
+                    let snapshot = try await loadSnapshot()
+
+                    // data_version covers the whole database, so an unrelated table write can
+                    // wake this route. Only send when this route's actual snapshot changed.
+                    guard snapshot != previousSnapshot else {
+                        // No changes to the table(s) we're observing, ignore
+                        continue
+                    }
+
+                    try await outbound.writeTextMessage(
+                        String(decoding: try encoder.encode(snapshot), as: UTF8.self)
+                    )
+                    previousSnapshot = snapshot
+                }
+            }
+
+            // Return as soon as one direction closes or fails, then stop its surviving sibling.
+            defer { group.cancelAll() }
+            _ = try await group.next()
+        }
+    }
+
+    private static func readCurrentDataVersion(in database: DatabaseQueue) throws -> Int {
+        try database.read { database in
+            try #sql("PRAGMA data_version", as: Int.self).fetchOne(database) ?? 0
+        }
+    }
+
+    /// Requires an exact Origin match. Production passes `nil`, so optional equality
+    /// intentionally accepts only requests whose Origin header is absent.
+    private static func originIsAllowed(
+        _ request: Request,
+        allowedOrigin: String?
+    ) -> Bool {
+        request.headers[.origin] == allowedOrigin
+    }
+
+    struct RequestContext: Hummingbird.RequestContext, WebSocketRequestContext {
         var coreContext: CoreRequestContextStorage
+        let webSocket: WebSocketHandlerReference<Self>
 
         init(source: Source) {
             coreContext = .init(source: source)
-        }
-
-        var responseEncoder: JSONEncoder {
-            .conductor
+            webSocket = .init()
         }
     }
 

@@ -5,10 +5,11 @@
 //  Created by Gannon Prudomme on 7/13/26.
 //
 
+import Foundation
 import SQLiteData
 
-func testConductorDatabase() throws -> any DatabaseWriter {
-    let database = try DatabaseQueue()
+func testConductorDatabase(at url: URL? = nil) throws -> DatabaseQueue {
+    let database = try url.map { try DatabaseQueue(path: $0.path) } ?? DatabaseQueue()
     try database.write { database in
         try createTestConductorSchema(in: database)
     }

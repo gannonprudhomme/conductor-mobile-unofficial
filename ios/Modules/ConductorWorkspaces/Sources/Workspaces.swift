@@ -141,7 +141,6 @@ public struct Workspaces: Sendable {
         case groupingChanged(WorkspaceWithRepository.Grouping)
         case loadWorkspacesFailed(any Error)
         case repositoryFilterButtonTapped(String?)
-        case refresh
         case setWorkspacePinnedFailed(any Error)
         case setWorkspaceStatusFailed(any Error)
         case setWorkspaceUnreadFailed(any Error)
@@ -157,7 +156,6 @@ public struct Workspaces: Sendable {
         }
     }
 
-    @Dependency(\.continuousClock) var clock
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
@@ -186,12 +184,7 @@ public struct Workspaces: Sendable {
                             .dropFirst()
                             .map(Action.workspacesChanged)
                     },
-                    .run { send in
-                        await refreshWorkspaces(send: send)
-                        for await _ in clock.timer(interval: .seconds(1)) {
-                            await refreshWorkspaces(send: send)
-                        }
-                    }
+                    observeWorkspaces()
                 )
 
             case let .groupingChanged(grouping):
@@ -201,9 +194,6 @@ public struct Workspaces: Sendable {
                 )
                 return reloadWorkspaces(state)
 
-            case .alert, .workspaceTapped:
-                return .none
-
             case let .loadWorkspacesFailed(error):
                 state.alert = .failedToLoadWorkspaces(error: error)
                 return .none
@@ -211,11 +201,6 @@ public struct Workspaces: Sendable {
             case let .repositoryFilterButtonTapped(repositoryID):
                 state.$selectedRepositoryID.withLock { $0 = repositoryID }
                 return reloadWorkspaces(state)
-
-            case .refresh:
-                return .run { send in
-                    await refreshWorkspaces(send: send)
-                }
 
             case let .sortButtonTapped(sort):
                 state.$sort.withLock { $0 = sort }
@@ -293,6 +278,9 @@ public struct Workspaces: Sendable {
                         hasUnread
                     )
                 }
+
+            case .alert, .workspaceTapped:
+                return .none
             }
         }
         .ifLet(\.$alert, action: \.alert)
@@ -305,7 +293,6 @@ public struct Workspaces: Sendable {
         .run { send in
             do {
                 try await operation()
-                await refreshWorkspaces(send: send)
             } catch {
                 Logger.workspace.error("Failed to update workspace: \(error)")
                 await send(failure(error))
@@ -334,38 +321,33 @@ public struct Workspaces: Sendable {
         }
     }
 
-    private func refreshWorkspaces(send: Send<Action>) async {
-        do {
-            try await loadWorkspaces()
-        } catch is CancellationError {
-            return
-        } catch {
-            Logger.workspace.error("Failed to refresh workspaces: \(error)")
-            await send(.loadWorkspacesFailed(error))
-        }
-    }
+    private func observeWorkspaces() -> Effect<Action> {
+        .run { send in
+            await WebSocketHelpers.observe {
+                desktopClient.observeWorkspaces()
+            } onValue: { snapshot in
+                try await database.write { db in
+                    try Repository
+                        .upsert { snapshot.repositories }
+                        .execute(db)
+                    try Workspace
+                        .upsert { snapshot.workspaces.map(\.workspace) }
+                        .execute(db)
 
-    private func loadWorkspaces() async throws {
-        async let fetchedWorkspaces = desktopClient.fetchWorkspaces()
-        async let fetchedRepositories = desktopClient.fetchRepositories()
-        let (workspaceSnapshots, repositories) = try await (fetchedWorkspaces, fetchedRepositories)
-
-        try await database.write { db in
-            try Repository
-                .upsert { repositories }
-                .execute(db)
-            try Workspace
-                .upsert { workspaceSnapshots.map(\.workspace) }
-                .execute(db)
-            try MobileWorkspaceState.upsert {
-                workspaceSnapshots.map {
-                    MobileWorkspaceState(
-                        workspaceID: $0.workspace.id,
-                        isWorking: $0.isWorking
-                    )
+                    try MobileWorkspaceState.upsert {
+                        snapshot.workspaces.map {
+                            MobileWorkspaceState(
+                                workspaceID: $0.workspace.id,
+                                isWorking: $0.isWorking
+                            )
+                        }
+                    }
+                    .execute(db)
                 }
+            } onFailure: { error in
+                Logger.workspace.error("Failed to observe workspaces: \(error)")
+                await send(.loadWorkspacesFailed(error))
             }
-                .execute(db)
         }
     }
 }
@@ -456,14 +438,8 @@ public struct WorkspacesView: View {
 
             ToolbarSpacer(.flexible, placement: .bottomBar)
         }
-        .refreshable {
-            await store.send(.refresh).finish()
-        }
         .background(.theme(.background))
         .alert($store.scope(state: \.alert, action: \.alert))
-        .task {
-            await store.send(.task).finish()
-        }
         .preferredColorScheme(.dark)
     }
 

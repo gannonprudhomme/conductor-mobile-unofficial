@@ -12,10 +12,15 @@ import Foundation
 
 @DependencyClient
 public struct DesktopClient: Sendable {
-    public var fetchMessages: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> [Message]
-    public var fetchRepositories: @Sendable () async throws -> [Repository]
-    public var fetchSessions: @Sendable (_ workspaceID: String) async throws -> [Session]
-    public var fetchWorkspaces: @Sendable () async throws -> [WorkspaceSnapshot]
+    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
+        AsyncThrowingStream { $0.finish() }
+    }
+    public var observeSessions: @Sendable (_ workspaceID: String) -> AsyncThrowingStream<[Session], any Error> = { _ in
+        AsyncThrowingStream { $0.finish() }
+    }
+    public var observeWorkspaces: @Sendable () -> AsyncThrowingStream<WorkspaceListSnapshot, any Error> = {
+        AsyncThrowingStream { $0.finish() }
+    }
     public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Void
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
@@ -44,72 +49,54 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
 
 extension DesktopClient: DependencyKey {
     public static var liveValue: Self {
-        Self(
-            fetchMessages: { workspaceID, sessionID in
-                try await fetch(
-                    [Message].self,
-                    // GET /workspaces/{workspaceID}/sessions/{sessionID}/messages
-                    from: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
-                )
-            },
-            fetchRepositories: {
-                try await fetch(
-                    [Repository].self,
-                    from: baseURL.appending(path: "repositories")
-                )
-            },
-            fetchSessions: { workspaceID in
-                try await fetch(
-                    [Session].self,
-                    // GET /workspaces/{workspaceID}/sessions
-                    from: baseURL
-                        .appending(path: "workspaces")
-                        .appending(path: workspaceID)
-                        .appending(path: "sessions")
-                )
-            },
-            fetchWorkspaces: {
-                try await fetch(
-                    [WorkspaceSnapshot].self,
-                    from: baseURL.appending(path: "workspaces")
-                )
-            },
-            sendMessage: { workspaceID, sessionID, message in
-                try await post(
-                    ["message": message],
-                    to: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
-                )
-            },
-            setWorkspacePinned: { workspaceID, pinned in
-                try await patch(
-                    WorkspacePatchBody(pinned: pinned),
-                    at: workspaceURL(workspaceID: workspaceID)
-                )
-            },
-            setWorkspaceStatus: { workspaceID, status in
-                try await patch(
-                    WorkspacePatchBody(status: status.rawValue),
-                    at: workspaceURL(workspaceID: workspaceID)
-                )
-            },
-            setWorkspaceUnread: { workspaceID, unread in
-                try await patch(
-                    WorkspacePatchBody(unread: unread),
-                    at: workspaceURL(workspaceID: workspaceID)
-                )
-            },
-            stopSession: { workspaceID, sessionID in
-                try await post(
-                    [String: String](),
-                    // POST /workspaces/{workspaceID}/sessions/{sessionID}/stop
-                    to: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
-                        .appending(path: "stop")
-                )
-            }
-        )
+        Self { workspaceID, sessionID in
+            observe(
+                [Message].self,
+                at: messagesWebSocketURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
+        } observeSessions: { workspaceID in
+            observe(
+                [Session].self,
+                at: sessionsWebSocketURL(workspaceID: workspaceID)
+            )
+        } observeWorkspaces: {
+            observe(
+                WorkspaceListSnapshot.self,
+                at: workspacesWebSocketURL
+            )
+        } sendMessage: { workspaceID, sessionID, message in
+            try await post(
+                ["message": message],
+                to: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
+        } setWorkspacePinned: { workspaceID, pinned in
+            try await patch(
+                WorkspacePatchBody(pinned: pinned),
+                at: workspaceURL(workspaceID: workspaceID)
+            )
+        } setWorkspaceStatus: { workspaceID, status in
+            try await patch(
+                WorkspacePatchBody(status: status.rawValue),
+                at: workspaceURL(workspaceID: workspaceID)
+            )
+        } setWorkspaceUnread: { workspaceID, unread in
+            try await patch(
+                WorkspacePatchBody(unread: unread),
+                at: workspaceURL(workspaceID: workspaceID)
+            )
+        } stopSession: { workspaceID, sessionID in
+            try await post(
+                [String: String](),
+                // POST /workspaces/{workspaceID}/sessions/{sessionID}/stop
+                to: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: "stop")
+            )
+        }
     }
 
-    private static let baseURL = URL(string: "http://192.168.0.32:3768")!
+    static let desktopServerAddress = "192.168.0.32:3768"
+
+    private static let baseURL = URL(string: "http://\(desktopServerAddress)")!
 
     // POST /workspaces/{workspaceID}/sessions/{sessionID}/messages
     private static func messagesURL(workspaceID: String, sessionID: String) -> URL {
@@ -132,24 +119,18 @@ extension DesktopClient: DependencyKey {
             .appending(path: workspaceID)
     }
 
-    private static func fetch<Value: Decodable & Sendable>(
-        _ type: Value.Type,
-        from url: URL
-    ) async throws -> Value {
-        let (data, response) = try await URLSession.shared.data(from: url)
+    private static func post<Body: Encodable>(
+        _ body: Body,
+        to url: URL
+    ) async throws {
+        @Dependency(\.urlSession) var urlSession
 
-        try validateSuccessfulHTTPResponse(response, data: data)
-
-        return try JSONDecoder.conductor.decode(type, from: data)
-    }
-
-    private static func post<Body: Encodable>(_ body: Body, to url: URL) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 
@@ -174,12 +155,14 @@ extension DesktopClient: DependencyKey {
         _ body: Body,
         at url: URL
     ) async throws {
+        @Dependency(\.urlSession) var urlSession
+
         var request = URLRequest(url: url)
         request.httpMethod = "PATCH"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 }

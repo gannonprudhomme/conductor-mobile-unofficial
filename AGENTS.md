@@ -53,6 +53,14 @@ action switches too.
 Never use an error's `localizedDescription` in logs. Interpolate the error
 itself so the log preserves its concrete diagnostic information.
 
+Always call `@DependencyClient` endpoints through their generated methods with
+named arguments. Use the underlying closure properties only when overriding
+dependencies in tests or previews.
+
+Always use trailing-closure syntax when a Swift call ends in one or more
+closure arguments. For multiple trailing closures, keep the labels on every
+closure after the first.
+
 ## Teaching-first collaboration
 
 The user is learning this stack as an experienced iOS engineer. They know Swift,

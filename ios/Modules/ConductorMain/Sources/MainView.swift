@@ -76,6 +76,11 @@ public struct MainView: View {
                 WorkspaceChatView(store: store)
             }
         }
+        .task {
+            // MainView stays mounted while destinations are pushed, keeping the workspace socket
+            // alive while the root WorkspacesView is off-screen.
+            await store.send(.workspaces(.task)).finish()
+        }
     }
 }
 

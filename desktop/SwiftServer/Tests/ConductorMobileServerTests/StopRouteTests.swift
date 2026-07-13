@@ -72,7 +72,7 @@ struct StopRouteTests {
     }
 }
 
-private func stopRouteDatabase() throws -> any DatabaseWriter {
+private func stopRouteDatabase() throws -> DatabaseQueue {
     let database = try DatabaseQueue()
     try database.write { database in
         try database.execute(
