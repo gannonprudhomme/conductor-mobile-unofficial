@@ -36,24 +36,20 @@ struct TurnTests {
         let startedAt = try #require(messages.first?.sentAt)
 
         expectNoDifference(
-            Turn.parse(messages: messages),
+            Turn.parse(messages: messages).map(\.testProjection),
             [
-                Turn(
+                TurnProjection(
                     id: "42a0e1cf-2f00-47fb-9f60-e3192a155ac4",
                     startedAt: startedAt,
                     rows: [
-                        .humanMessageRow(
-                            .init(
-                                id: "42a0e1cf-2f00-47fb-9f60-e3192a155ac4",
-                                content: "test"
-                            )
+                        .humanMessage(
+                            id: "42a0e1cf-2f00-47fb-9f60-e3192a155ac4",
+                            content: "test"
                         ),
-                        .assistantMessage(
-                            .text(
-                                messageID: "10d56140-7118-450e-b59d-b476803688da",
-                                content: "Ready.",
-                                isMostRecentTextInTurn: true
-                            )
+                        .assistantText(
+                            messageID: "10d56140-7118-450e-b59d-b476803688da",
+                            renderedChunks: ["Ready."],
+                            isMostRecentTextInTurn: true
                         ),
                     ]
                 ),
@@ -80,25 +76,29 @@ struct TurnTests {
         let startedAt = try #require(messages.first?.createdAt)
 
         expectNoDifference(
-            Turn.parse(messages: messages),
+            Turn.parse(messages: messages).map(\.testProjection),
             [
-                Turn(
+                TurnProjection(
                     id: "turn-a",
                     startedAt: startedAt,
                     rows: [
-                        .humanMessageRow(.init(id: "human-a", content: "First")),
-                        .assistantMessage(
-                            .text(messageID: "assistant-a", content: "Answer first", isMostRecentTextInTurn: true)
+                        .humanMessage(id: "human-a", content: "First"),
+                        .assistantText(
+                            messageID: "assistant-a",
+                            renderedChunks: ["Answer first"],
+                            isMostRecentTextInTurn: true
                         ),
                     ]
                 ),
-                Turn(
+                TurnProjection(
                     id: "turn-b",
                     startedAt: startedAt,
                     rows: [
-                        .humanMessageRow(.init(id: "human-b", content: "Second")),
-                        .assistantMessage(
-                            .text(messageID: "assistant-b", content: "Answer second", isMostRecentTextInTurn: true)
+                        .humanMessage(id: "human-b", content: "Second"),
+                        .assistantText(
+                            messageID: "assistant-b",
+                            renderedChunks: ["Answer second"],
+                            isMostRecentTextInTurn: true
                         ),
                     ]
                 ),
@@ -127,22 +127,181 @@ struct TurnTests {
         ]
 
         expectNoDifference(
-            Turn.parse(messages: messages).first?.rows,
+            Turn.parse(messages: messages).first?.rows.map(\.testProjection),
             [
-                .assistantMessage(
-                    .text(messageID: "first-text", content: "First", isMostRecentTextInTurn: false)
+                .assistantText(
+                    messageID: "first-text",
+                    renderedChunks: ["First"],
+                    isMostRecentTextInTurn: false
                 ),
-                .assistantMessage(
-                    .toolCall(
-                        messageID: "tool",
-                        toolCall: .readFile(toolUseID: "tool-1", filePath: "File.swift")
-                    )
+                .assistantToolCall(
+                    messageID: "tool",
+                    toolCall: .readFile(toolUseID: "tool-1", filePath: "File.swift")
                 ),
-                .assistantMessage(
-                    .text(messageID: "latest-text", content: "Latest", isMostRecentTextInTurn: true)
+                .assistantText(
+                    messageID: "latest-text",
+                    renderedChunks: ["Latest"],
+                    isMostRecentTextInTurn: true
                 ),
             ]
         )
+    }
+
+    @Test("Assistant Markdown is parsed into its stable presentation row")
+    func assistantMarkdownContent() throws {
+        let message = try makeEventMessage(
+            id: "markdown",
+            event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Use **Markdown**."}]}}"#,
+            turnID: "turn-1"
+        )
+        let row = try #require(Turn.parse(messages: [message]).first?.rows.first)
+        guard case let .assistantMessage(.text(_, content, _)) = row else {
+            Issue.record("Expected an assistant text row")
+            return
+        }
+
+        let chunk = try #require(content.chunks.first)
+        #expect(content.chunks.count == 1)
+        #expect(chunk.id == 0)
+        #expect(chunk.markdown.renderPlainText() == "Use Markdown.")
+    }
+
+    @Test("Changed assistant Markdown replaces reusable presentation content")
+    func changedAssistantMarkdownReplacesReusableContent() throws {
+        let initialMessage = try makeEventMessage(
+            id: "markdown",
+            event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Before"}]}}"#,
+            turnID: "turn-1"
+        )
+        let updatedMessage = try makeEventMessage(
+            id: "markdown",
+            event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"After **update**"}]}}"#,
+            turnID: "turn-1"
+        )
+        let initialTurns = Turn.parse(messages: [initialMessage])
+        let updatedRow = try #require(
+            Turn.parse(messages: [updatedMessage], reusing: initialTurns).first?.rows.first
+        )
+        guard case let .assistantMessage(.text(_, content, _)) = updatedRow else {
+            Issue.record("Expected an assistant text row")
+            return
+        }
+
+        #expect(try #require(content.chunks.first).markdown.renderPlainText() == "After update")
+    }
+
+    @Test("Unchanged assistant Markdown reuses parsed presentation content")
+    func unchangedAssistantMarkdownReusesPresentationContent() throws {
+        let message = try makeEventMessage(
+            id: "markdown",
+            event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Reuse **this**"}]}}"#,
+            turnID: "turn-1"
+        )
+        let initialTurns = Turn.parse(messages: [message])
+        let initialRow = try #require(initialTurns.first?.rows.first)
+        let reusedRow = try #require(
+            Turn.parse(messages: [message], reusing: initialTurns).first?.rows.first
+        )
+        guard case let .assistantMessage(.text(_, initialContent, _)) = initialRow,
+              case let .assistantMessage(.text(_, reusedContent, _)) = reusedRow else {
+            Issue.record("Expected assistant text rows")
+            return
+        }
+
+        let sharesParsedChunkStorage = initialContent.chunks.withUnsafeBufferPointer { initial in
+            reusedContent.chunks.withUnsafeBufferPointer { reused in
+                initial.baseAddress == reused.baseAddress
+            }
+        }
+        #expect(sharesParsedChunkStorage)
+        #expect(try #require(reusedContent.chunks.first).markdown.renderPlainText() == "Reuse this")
+    }
+
+    @Test("Detached Markdown chunks preserve reference resolution")
+    func assistantMarkdownReferenceDefinitions() throws {
+        let introduction = "Intro " + String(repeating: "a", count: 2_474)
+        let content = Turn.Row.AssistantMessage.TextContent(
+            introduction + "\n\n" + """
+            Read [documentation][docs].
+
+            [docs]: https://example.com
+            """
+        )
+
+        try #require(content.chunks.count == 2)
+        #expect(
+            content.chunks[1].markdown.renderMarkdown().contains(
+                "[documentation](https://example.com)"
+            )
+        )
+    }
+
+    @Test("Markdown chunk boundaries preserve collapsed margins")
+    func assistantMarkdownChunkSpacing() {
+        typealias Spacing = Turn.Row.AssistantMessage.TextContent.Chunk.Spacing
+        let oversizedParagraph = String(repeating: "a", count: 2_001)
+        let spacing: ([String]) -> [Spacing] = {
+            Turn.Row.AssistantMessage.TextContent(
+                $0.joined(separator: "\n\n")
+            ).chunks.map(\.spacingBefore)
+        }
+
+        expectNoDifference(
+            spacing([oversizedParagraph, oversizedParagraph]),
+            [.none, .standard]
+        )
+        expectNoDifference(
+            spacing([oversizedParagraph, "## Heading", oversizedParagraph]),
+            [.none, .heading, .standard]
+        )
+        expectNoDifference(
+            spacing([oversizedParagraph, "---", oversizedParagraph]),
+            [.none, .thematicBreak, .thematicBreak]
+        )
+
+        expectNoDifference(
+            [Spacing.none, .standard, .heading, .thematicBreak].map {
+                $0.additionalTopPadding(rootFontSize: 16, existingSpacing: 16)
+            },
+            [0, 0, 8, 16]
+        )
+    }
+
+    @Test("Assistant Markdown chunks become stable outer lazy-stack rows")
+    func flattenedMarkdownChunks() {
+        let source = (1...3)
+            .map { String($0) + String(repeating: "a", count: 699) }
+            .joined(separator: "\n\n")
+        let turns = [
+            Turn(
+                id: "turn-1",
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                rows: [
+                    .assistantMessage(
+                        .text(
+                            messageID: "assistant-1",
+                            content: .init(source),
+                            isMostRecentTextInTurn: true
+                        )
+                    ),
+                ]
+            ),
+        ]
+        let rows = turns.flattenedChatRows(activeTurnID: nil)
+
+        expectNoDifference(
+            rows.map(\.id),
+            [
+                "assistant:assistant-1:chunk:0",
+                "assistant:assistant-1:chunk:1",
+            ]
+        )
+        #expect(rows.allSatisfy {
+            guard case .assistantTextChunk(_, _, let isMostRecentTextInTurn) = $0 else {
+                return false
+            }
+            return isMostRecentTextInTurn
+        })
     }
 
     @Test("Protocol-only events are ignored and errors become visible rows")
@@ -189,14 +348,14 @@ struct TurnTests {
         let startedAt = try #require(messages.first?.createdAt)
 
         expectNoDifference(
-            Turn.parse(messages: messages),
+            Turn.parse(messages: messages).map(\.testProjection),
             [
-                Turn(
+                TurnProjection(
                     id: turnID,
                     startedAt: startedAt,
                     rows: [
-                        .humanMessageRow(.init(id: "human", content: "Run it")),
-                        .assistantMessage(.error(messageID: "error", message: "aborted by user")),
+                        .humanMessage(id: "human", content: "Run it"),
+                        .assistantError(messageID: "error", message: "aborted by user"),
                     ]
                 ),
             ]
@@ -226,16 +385,18 @@ struct TurnTests {
             ),
         ]
 
+        let activeRows = turns.flattenedChatRows(activeTurnID: "turn-1")
+        expectNoDifference(activeRows.map(\.id), ["human:human-1", "turn-in-progress:turn-1"])
+        guard case let .turnInProgress(progress) = activeRows.last else {
+            Issue.record("Expected a turn progress row")
+            return
+        }
+        #expect(progress.id == "turn-1")
+        #expect(progress.startedAt == startedAt)
+
         expectNoDifference(
-            turns.flattenedChatRows(activeTurnID: "turn-1"),
-            [
-                .humanMessageRow(.init(id: "human-1", content: "Hello")),
-                .turnInProgress(.init(id: "turn-1", startedAt: startedAt)),
-            ]
-        )
-        expectNoDifference(
-            turns.flattenedChatRows(activeTurnID: nil),
-            [.humanMessageRow(.init(id: "human-1", content: "Hello"))]
+            turns.flattenedChatRows(activeTurnID: nil).map(\.id),
+            ["human:human-1"]
         )
     }
 
@@ -309,9 +470,9 @@ struct TurnTests {
         }
 
         expectNoDifference(
-            Turn.parse(messages: messages).first?.rows,
+            Turn.parse(messages: messages).first?.rows.map(\.testProjection),
             fixtures.map {
-                .assistantMessage(.toolCall(messageID: $0.id, toolCall: $0.expected))
+                .assistantToolCall(messageID: $0.id, toolCall: $0.expected)
             }
         )
     }
@@ -343,20 +504,70 @@ struct TurnTests {
         }
 
         expectNoDifference(
-            Turn.parse(messages: messages).first?.rows,
+            Turn.parse(messages: messages).first?.rows.map(\.testProjection),
             fixtures.map {
-                .assistantMessage(
-                    .toolCall(
-                        messageID: $0.id,
-                        toolCall: .unknown(
-                            toolUseID: "tool-\($0.id)",
-                            name: $0.name,
-                            input: $0.expectedInput
-                        )
+                .assistantToolCall(
+                    messageID: $0.id,
+                    toolCall: .unknown(
+                        toolUseID: "tool-\($0.id)",
+                        name: $0.name,
+                        input: $0.expectedInput
                     )
                 )
             }
         )
+    }
+}
+
+private struct TurnProjection: Equatable {
+    let id: String
+    let startedAt: Date
+    let rows: [TurnRowProjection]
+}
+
+private enum TurnRowProjection: Equatable {
+    case humanMessage(id: String, content: String)
+    case assistantText(
+        messageID: String,
+        renderedChunks: [String],
+        isMostRecentTextInTurn: Bool
+    )
+    case assistantToolCall(
+        messageID: String,
+        toolCall: Turn.Row.AssistantMessage.ToolCall
+    )
+    case assistantError(messageID: String, message: String)
+}
+
+private extension Turn {
+    var testProjection: TurnProjection {
+        TurnProjection(
+            id: id,
+            startedAt: startedAt,
+            rows: rows.map(\.testProjection)
+        )
+    }
+}
+
+private extension Turn.Row {
+    var testProjection: TurnRowProjection {
+        switch self {
+        case .humanMessageRow(let row):
+            .humanMessage(id: row.id, content: row.content)
+        case .assistantMessage(let message):
+            switch message {
+            case let .text(messageID, content, isMostRecentTextInTurn):
+                .assistantText(
+                    messageID: messageID,
+                    renderedChunks: content.chunks.map { $0.markdown.renderPlainText() },
+                    isMostRecentTextInTurn: isMostRecentTextInTurn
+                )
+            case let .toolCall(messageID, toolCall):
+                .assistantToolCall(messageID: messageID, toolCall: toolCall)
+            case let .error(messageID, message):
+                .assistantError(messageID: messageID, message: message)
+            }
+        }
     }
 }
 

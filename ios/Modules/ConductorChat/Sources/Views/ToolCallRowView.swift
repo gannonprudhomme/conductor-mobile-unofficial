@@ -132,25 +132,17 @@ private struct FileTagView: View {
     
     var body: some View {
         Text(fileName)
-            .monospaced()
             .lineLimit(1)
-             .padding(EdgeInsets(vertical: 4, horizontal: 8))
-//            .padding(EdgeInsets(vertical: 2, horizontal: 6))
+            .font(.theme(.codeSmall))
+            .padding(EdgeInsets(vertical: 4, horizontal: 8))
+            .foregroundStyle(.theme(.textPrimary))
             .overlay {
-                // RoundedRectangle(cornerRadius: 26)
-                 RoundedRectangle(cornerRadius: 12)
-//                Capsule()
+                RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(
                         Color.theme(.input),
                         lineWidth: 1
                     )
             }
-        /*
-            .overlay {
-                RoundedRectangle(cornerRadius: 26)
-                    .border
-            }
-         */
     }
 }
 

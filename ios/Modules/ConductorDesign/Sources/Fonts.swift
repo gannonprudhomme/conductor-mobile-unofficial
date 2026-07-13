@@ -44,7 +44,7 @@ public enum ThemeFontStyle {
         }
     }
 
-    var fontName: String {
+    public var fontName: String {
         switch self {
         case .codeSmall, .codeExtraSmall: "GeistMono-Regular"
         default: "Geist-Regular"

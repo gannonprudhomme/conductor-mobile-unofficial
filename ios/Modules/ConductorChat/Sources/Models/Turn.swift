@@ -9,32 +9,21 @@ import Foundation
 import SharedConductorData
 import ConductorMobileData
 import IssueReporting
+import MarkdownUI
 
 /// This is solely a representation for UI / displaying in chat,
 /// Thus it is structured in a way which plays to the strengths of a `LazyVStack`.
 ///
 /// E.g. handling conditionals in the data layer (here) instead of in a `View`
 /// For more details on what I mean, see: https://wwdc.ai/2026/321
-struct Turn: Identifiable, Equatable {
+struct Turn: Identifiable {
     let id: String
     let startedAt: Date
     var rows: [Row]
     
-    enum Row: Identifiable, Equatable {
+    enum Row {
         case humanMessageRow(HumanMessageRow)
         case assistantMessage(AssistantMessage)
-        case turnInProgress(TurnInProgress)
-
-        var id: String {
-            switch self {
-            case .humanMessageRow(let row):
-                "human:\(row.id)"
-            case .assistantMessage(let row):
-                "assistant:\(row.id)"
-            case .turnInProgress(let row):
-                "turn-in-progress:\(row.id)"
-            }
-        }
 
         struct TurnInProgress: Identifiable, Equatable {
             let id: Turn.ID
@@ -47,17 +36,106 @@ struct Turn: Identifiable, Equatable {
             let content: String
         }
         
-        enum AssistantMessage: Equatable, Identifiable {
-            case text(messageID: String, content: String, isMostRecentTextInTurn: Bool)
+        enum AssistantMessage {
+            case text(messageID: String, content: TextContent, isMostRecentTextInTurn: Bool)
             case toolCall(messageID: String, toolCall: ToolCall)
             case error(messageID: String, message: String)
-            
-            var id: String {
-                switch self {
-                case let .text(messageID, _, _),
-                     let .toolCall(messageID, _),
-                     let .error(messageID, _):
-                    messageID
+
+            /// Parsed when an assistant message's source changes, then reused by later snapshots.
+            struct TextContent {
+                /// Retained only to decide whether the next snapshot can reuse these parsed chunks.
+                private let source: String
+                let chunks: [Chunk]
+
+                init(_ source: String) {
+                    self.source = source
+                    let parsedChunks = MarkdownBlockParser.calculateRenderChunks(forMarkdown: source)
+
+                    self.chunks = parsedChunks.enumerated().map { id, chunk in
+                        Chunk(
+                            id: id,
+                            source: chunk.source,
+                            spacingBefore: Self.spacing(
+                                before: id,
+                                chunks: parsedChunks
+                            )
+                        )
+                    }
+                }
+
+                /// Reuses the already-renderable chunks from the previous database snapshot
+                /// when this message's Markdown source is unchanged. Each changed snapshot
+                /// contains the full chat history, so reparsing every unchanged message would
+                /// turn one new message into work proportional to all historical Markdown.
+                /// A changed source still goes through the normal parsing initializer.
+                init(_ source: String, reusing previous: Self?) {
+                    if let previous, previous.source == source {
+                        self = previous
+                    } else {
+                        self.init(source)
+                    }
+                }
+
+                struct Chunk: Identifiable {
+                    let id: Int
+                    let markdown: MarkdownContent
+                    let spacingBefore: Spacing
+
+                    init(id: Int, source: String, spacingBefore: Spacing) {
+                        self.id = id
+                        self.markdown = MarkdownContent(source)
+                        self.spacingBefore = spacingBefore
+                    }
+
+                    /// The original Markdown margin that must be reconstructed before this chunk.
+                    /// Splitting one Markdown document into separate lazy rows prevents MarkdownUI
+                    /// from applying its normal margin across the chunk boundary.
+                    enum Spacing: Equatable {
+                        case none
+                        case standard
+                        case heading
+                        case thematicBreak
+
+                        /// Returns only the padding not already supplied by the outer lazy stack.
+                        /// For example, a 1.5-em heading margin at a 16-point root font is 24 points.
+                        /// If the stack already provides 16 points, this returns 8.
+                        func additionalTopPadding(
+                            rootFontSize: CGFloat,
+                            existingSpacing: CGFloat
+                        ) -> CGFloat {
+                            let marginMultiplier: CGFloat = switch self {
+                            case .none: 0
+                            case .standard: 1
+                            case .heading: 1.5
+                            case .thematicBreak: 2
+                            }
+
+                            return max(
+                                0,
+                                (rootFontSize * marginMultiplier).rounded() - existingSpacing
+                            )
+                        }
+                    }
+                }
+
+                // Calculate spacing for two chunks combined to each other
+                private static func spacing(
+                    before index: Int,
+                    chunks: [MarkdownBlockParser.Chunk]
+                ) -> Chunk.Spacing {
+                    guard index > 0 else {
+                        return .none
+                    }
+
+                    // A thematic break has MarkdownUI's largest surrounding margin (2 em).
+                    // A heading starts with 1.5 em, while every other boundary uses 1 em.
+                    if chunks[index].firstBlockKind == .thematicBreak || chunks[index - 1].lastBlockKind == .thematicBreak {
+                        return .thematicBreak
+                    } else if chunks[index].firstBlockKind == .heading {
+                        return .heading
+                    } else {
+                        return .standard
+                    }
                 }
             }
             
@@ -170,6 +248,24 @@ private extension Dictionary where Key == String, Value == JSONValue { /// aka `
 extension Turn {
     // TOOD: (Probably) Want to do this in parallel if possible
     static func parse(messages: [Message]) -> [Turn] {
+        parse(messages: messages, reusing: [])
+    }
+
+    static func parse(
+        messages: [Message],
+        reusing previousTurns: [Turn]
+    ) -> [Turn] {
+        let reusableTextContentByMessageID: [String: Row.AssistantMessage.TextContent] =
+            previousTurns.reduce(into: [:]) { result, turn in
+                for row in turn.rows {
+                    guard case let .assistantMessage(.text(messageID, content, _)) = row else {
+                        continue
+                    }
+
+                    result[messageID] = content
+                }
+            }
+
         let turnRows: [(turnID: String, startedAt: Date, row: Turn.Row)] = messages.compactMap { message in
             guard let role = message.role, let content = message.content, let turnID = message.turnID else {
                 reportIssue("message.content was nil for \(message)")
@@ -192,7 +288,14 @@ extension Turn {
                         if let firstContent = assistantEvent.message.content.first {
                             switch firstContent {
                             case .text(let textBlock):
-                                .text(messageID: message.id, content: textBlock.text, isMostRecentTextInTurn: true)
+                                .text(
+                                    messageID: message.id,
+                                    content: .init(
+                                        textBlock.text,
+                                        reusing: reusableTextContentByMessageID[message.id]
+                                    ),
+                                    isMostRecentTextInTurn: true
+                                )
                             case .thinking(let thinkingBlock):
                                 nil
                             case .toolUse(let toolUseBlock):
@@ -264,21 +367,81 @@ extension Turn {
     }
 }
 
+/// One physical row in the outer `LazyVStack`.
+///
+/// `Turn.Row` preserves the logical message structure, where one assistant text message
+/// owns every Markdown chunk. `DisplayedChatRow` is the flattened rendering structure: it expands
+/// those chunks into separate rows so SwiftUI can create them lazily near the viewport.
+enum DisplayedChatRow: Identifiable {
+    case humanMessage(Turn.Row.HumanMessageRow)
+    case assistantTextChunk(
+        messageID: String,
+        chunk: Turn.Row.AssistantMessage.TextContent.Chunk,
+        isMostRecentTextInTurn: Bool
+    )
+    case assistantToolCall(messageID: String, toolCall: Turn.Row.AssistantMessage.ToolCall)
+    case assistantError(messageID: String, message: String)
+    case turnInProgress(Turn.Row.TurnInProgress)
+
+    var id: String {
+        switch self {
+        case .humanMessage(let row):
+            "human:\(row.id)"
+        case let .assistantTextChunk(messageID, chunk, _):
+            "assistant:\(messageID):chunk:\(chunk.id)"
+        case let .assistantToolCall(messageID, _),
+             let .assistantError(messageID, _):
+            "assistant:\(messageID)"
+        case .turnInProgress(let row):
+            "turn-in-progress:\(row.id)"
+        }
+    }
+}
+
+enum ChatRowLayout {
+    static let stackSpacing: CGFloat = 8
+    static let rowTopPadding: CGFloat = 8
+    static let horizontalPadding: CGFloat = 16
+    static let interRowSpacing = stackSpacing + rowTopPadding
+}
+
 extension Array where Element == Turn {
-    /// Flattens the turns into the single row collection consumed by `ChatRows`.
+    /// Flattens the turns and assistant Markdown chunks into the rows consumed by `ChatRows`.
     ///
     /// The progress indicator is inserted here so each element in the lazy stack's
     /// `ForEach` always produces exactly one view, including the active turn state.
-    func flattenedChatRows(activeTurnID: Turn.ID?) -> [Turn.Row] {
+    func flattenedChatRows(activeTurnID: Turn.ID?) -> [DisplayedChatRow] {
         flatMap { turn in
-            if turn.id == activeTurnID {
-                turn.rows + [
+            let rows = turn.rows.flatMap { row -> [DisplayedChatRow] in
+                switch row {
+                case .humanMessageRow(let row):
+                    [.humanMessage(row)]
+                case .assistantMessage(let message):
+                    switch message {
+                    case let .text(messageID, content, isMostRecentTextInTurn):
+                        content.chunks.map {
+                            .assistantTextChunk(
+                                messageID: messageID,
+                                chunk: $0,
+                                isMostRecentTextInTurn: isMostRecentTextInTurn
+                            )
+                        }
+                    case let .toolCall(messageID, toolCall):
+                        [.assistantToolCall(messageID: messageID, toolCall: toolCall)]
+                    case let .error(messageID, message):
+                        [.assistantError(messageID: messageID, message: message)]
+                    }
+                }
+            }
+
+            return if turn.id == activeTurnID {
+                rows + [
                     .turnInProgress(
                         .init(id: turn.id, startedAt: turn.startedAt)
                     ),
                 ]
             } else {
-                turn.rows
+                rows
             }
         }
     }

@@ -11,7 +11,6 @@ import SharedConductorData
 import ConductorDesign
 import ConductorMobileData
 import Foundation
-import LucideIcons
 import Logging
 import SQLiteData
 import SwiftUI
@@ -24,10 +23,10 @@ public struct Chat: Sendable {
     public struct State: Equatable {
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
-
         var messageDraft = ""
         var isMessageSendInFlight = false
-        var rows: [Turn.Row]? = nil
+        var displayedContentRevision = 0
+        var rows: [DisplayedChatRow]? = nil
         var turns: [Turn]? = nil
 
         mutating func updateRows(sessionStatus: Session.Status) {
@@ -57,9 +56,18 @@ public struct Chat: Sendable {
                             $0.createdAt,
                             $0.id // IDs provide stable ordering when Conductor gives multiple messages identical timestamps.
                         )
-                    },
-                animation: .default
+                    }
             )
+        }
+
+        /// `turns` and `rows` are derived presentation caches. `session` captures status-driven
+        /// changes, while the revision records when message-driven rebuilding of both completes.
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.messages == rhs.messages
+                && lhs.session == rhs.session
+                && lhs.messageDraft == rhs.messageDraft
+                && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
+                && lhs.displayedContentRevision == rhs.displayedContentRevision
         }
 
         /// Read by ``WorkspaceChat`` for the animation/identity of this reducer + view
@@ -88,23 +96,8 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
-                let pollMessages: Effect<Action> = .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
-                    await refreshMessages(
-                        workspaceID: workspaceID,
-                        sessionID: sessionID,
-                        send: send
-                    )
-                    for await _ in clock.timer(interval: .seconds(1)) {
-                        await refreshMessages(
-                            workspaceID: workspaceID,
-                            sessionID: sessionID,
-                            send: send
-                        )
-                    }
-                }
-                
                 return .merge(
-                    pollMessages,
+                    pollMessages(state),
                     .publisher {
                         state.$messages
                             .publisher
@@ -114,8 +107,12 @@ public struct Chat: Sendable {
                 )
 
             case .messagesUpdated(let messages):
-                state.turns = Turn.parse(messages: messages)
+                state.turns = Turn.parse(
+                    messages: messages,
+                    reusing: state.turns ?? []
+                )
                 state.updateRows(sessionStatus: state.session.status)
+                state.displayedContentRevision += 1
                 return .none
 
             case .sessionStatusChanged(let status):
@@ -158,39 +155,90 @@ public struct Chat: Sendable {
         }
     }
 
-    @concurrent private func refreshMessages(
-        workspaceID: String,
-        sessionID: String,
-        send: Send<Action>
-    ) async {
-        do {
-            try await loadMessages(
+    private func pollMessages(_ state: State) -> Effect<Action> {
+        .run {
+            [
+                previousMessages = Set(state.messages),
+                sessionID = state.session.id,
+                workspaceID = state.session.workspaceID,
+            ] send in
+            var previousMessages = previousMessages
+            guard let messages = await refreshMessages(
                 workspaceID: workspaceID,
-                sessionID: sessionID
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            Logger.chat.error("Failed to load messages: \(error)")
-            await send(.loadMessagesFailed(error.localizedDescription))
+                sessionID: sessionID,
+                previousMessages: previousMessages,
+                send: send
+            ) else {
+                return
+            }
+            previousMessages = messages
+
+            for await _ in clock.timer(interval: .seconds(1)) {
+                guard let messages = await refreshMessages(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID,
+                    previousMessages: previousMessages,
+                    send: send
+                ) else {
+                    return
+                }
+                previousMessages = messages
+            }
         }
     }
 
-    // Do it off the mian thread!
-    @concurrent private func loadMessages(workspaceID: String, sessionID: String) async throws {
+    @concurrent private func refreshMessages(
+        workspaceID: String,
+        sessionID: String,
+        previousMessages: Set<Message>,
+        send: Send<Action>
+    ) async -> Set<Message>? {
+        do {
+            return try await loadMessages(
+                workspaceID: workspaceID,
+                sessionID: sessionID,
+                previousMessages: previousMessages
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            guard !Task.isCancelled else {
+                return nil
+            }
+            Logger.chat.error("Failed to load messages: \(error)")
+            await send(.loadMessagesFailed(error.localizedDescription))
+            // Preserve the last successful snapshot after a recoverable failure so the polling
+            // loop can retry in one second without treating every existing message as new.
+            return previousMessages
+        }
+    }
+
+    @concurrent private func loadMessages(
+        workspaceID: String,
+        sessionID: String,
+        previousMessages: Set<Message>
+    ) async throws -> Set<Message> {
         let messages = try await desktopClient.fetchMessages(workspaceID, sessionID)
-        guard !messages.isEmpty else { return }
+        guard !messages.isEmpty else {
+            return previousMessages
+        }
+
+        let newMessages = Set(messages)
+        guard newMessages != previousMessages else {
+            return previousMessages
+        }
 
         try await database.write { db in
             try Message.upsert { messages }
                 .execute(db)
         }
+        return newMessages
     }
 }
 
 struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
-    @State private var isBottomMarkerVisible = true
+    @State private var scrollState = ScrollState()
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
     init(store: StoreOf<Chat>) {
@@ -199,15 +247,17 @@ struct ChatView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 8) {
+            LazyVStack(spacing: ChatRowLayout.stackSpacing) {
                 ChatRows(rows: store.rows ?? [])
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
 
                 Color.clear
                     .frame(height: 1)
                     .onScrollVisibilityChange { isVisible in
-                        isBottomMarkerVisible = isVisible
+                        guard scrollState.isBottomMarkerVisible != isVisible else {
+                            return
+                        }
+
+                        scrollState.isBottomMarkerVisible = isVisible
                     }
             }
             .scrollTargetLayout()
@@ -237,8 +287,8 @@ struct ChatView: View {
                 store.send(.sendButtonTapped)
             }
         }
-        .onChange(of: store.turns) { previousTurns, turns in
-            turnsChanged(from: previousTurns, to: turns)
+        .onChange(of: store.displayedContentRevision) {
+            displayedContentRevisionChanged()
         }
         .onChange(of: store.session.status) { _, status in
             sessionStatusChanged(status)
@@ -249,21 +299,55 @@ struct ChatView: View {
         .preferredColorScheme(.dark)
     }
 
-    private func turnsChanged(from previousTurns: [Turn]?, to turns: [Turn]?) {
-        let isInitialLoad = (previousTurns?.isEmpty ?? true) && turns?.isEmpty == false
-        guard isInitialLoad || isBottomMarkerVisible else { return }
+    private func displayedContentRevisionChanged() {
+        switch scrollState.displayedContentChanged(hasRows: store.rows?.isEmpty == false) {
+        case .initial:
+            withAnimation(nil) {
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+        case .subsequent:
+            withAnimation(.default) {
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+        case .none:
+            return
+        }
+    }
+
+    private func sessionStatusChanged(_ status: Session.Status) {
+        store.send(.sessionStatusChanged(status))
+        guard status == .working, scrollState.isBottomMarkerVisible else {
+            return
+        }
 
         withAnimation {
             scrollPosition.scrollTo(edge: .bottom)
         }
     }
 
-    private func sessionStatusChanged(_ status: Session.Status) {
-        store.send(.sessionStatusChanged(status))
-        guard status == .working, isBottomMarkerVisible else { return }
+    @MainActor
+    final class ScrollState {
+        var hasDisplayedContent = false
+        var isBottomMarkerVisible = true
 
-        withAnimation {
-            scrollPosition.scrollTo(edge: .bottom)
+        enum DisplayedContentScroll: Equatable {
+            case none
+            case initial
+            case subsequent
+        }
+
+        func displayedContentChanged(hasRows: Bool) -> DisplayedContentScroll {
+            guard hasRows else {
+                return .none
+            }
+
+            let isInitialLoad = !hasDisplayedContent
+            hasDisplayedContent = true
+            guard isInitialLoad || isBottomMarkerVisible else {
+                return .none
+            }
+
+            return isInitialLoad ? .initial : .subsequent
         }
     }
 
@@ -278,41 +362,42 @@ struct ChatView: View {
             .font(.theme(.body))
         }
     }
-    
+
     private struct ChatRows: View {
-        let rows: [Turn.Row]
+        let rows: [DisplayedChatRow]
 
         var body: some View {
             ForEach(rows) { row in
-                makeRow(row)
+                ChatRowView(row: row)
+                    .padding(.horizontal, ChatRowLayout.horizontalPadding)
+                    .padding(.top, ChatRowLayout.rowTopPadding)
             }
         }
-        
-        @ViewBuilder
-        func makeRow(_ row: Turn.Row) -> some View {
+    }
+
+    private struct ChatRowView: View {
+        let row: DisplayedChatRow
+
+        var body: some View {
             switch row {
-            case .humanMessageRow(let humanMessageRow):
-                HumanMessageRowView(row: humanMessageRow)
-            case .assistantMessage(let assistantMessage):
-                makeAssistantMessage(assistantMessage)
+            case .humanMessage(let message):
+                HumanMessageRowView(row: message)
+            case let .assistantTextChunk(_, chunk, isMostRecentTextInTurn):
+                AssistantMessageTextView(
+                    chunk: chunk,
+                    isMostRecentTextInTurn: isMostRecentTextInTurn
+                )
                     .frame(maxWidth: .infinity, alignment: .leading)
-            case .turnInProgress(let turnInProgress):
-                TurnInProgressView(row: turnInProgress)
-            }
-        }
-        
-        @ViewBuilder
-        private func makeAssistantMessage(_ assistantMessage: Turn.Row.AssistantMessage) -> some View {
-            switch assistantMessage {
-            case .text(_, let content, let isMostRecentTextInTurn):
-                Text(content)
-                    .foregroundStyle(.theme(isMostRecentTextInTurn ? .textPrimary : .textSecondary))
-            case .toolCall(_, let toolCall):
+            case .assistantToolCall(_, let toolCall):
                 ToolCallRowView(toolCall: toolCall)
                     .foregroundStyle(.theme(.textPrimary))
-            case .error(_, let message):
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .assistantError(_, let message):
                 Text("Error: \(message)")
                     .foregroundStyle(.theme(.destructive))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .turnInProgress(let row):
+                TurnInProgressView(row: row)
             }
         }
     }
