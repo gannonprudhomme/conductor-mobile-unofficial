@@ -9,6 +9,7 @@ import ComposableArchitecture
 import SharedConductorData
 import ConductorMobileData
 import CustomDump
+import Dependencies
 import Foundation
 import SQLiteData
 @testable import ConductorWorkspaces
@@ -99,7 +100,9 @@ struct WorkspacesTests {
         )
         expectNoDifference(
             sections.map { section in
-                guard case let .project(_, _, title) = section.groupByType else { return "" }
+                guard case let .project(_, _, title) = section.groupByType else {
+                    return ""
+                }
                 return title
             },
             ["First", "Second", "missing-repo"]
@@ -120,11 +123,13 @@ struct WorkspacesTests {
                     derivedStatus: Workspace.Status.inProgress.rawValue,
                     repositoryID: "repo"
                 )
-                try Workspace.insert { workspace }
+                try Workspace
+                    .insert { workspace }
                     .execute(db)
-                try MobileWorkspaceState.insert {
-                    MobileWorkspaceState(workspaceID: workspace.id, isWorking: false)
-                }
+                try MobileWorkspaceState
+                    .insert {
+                        MobileWorkspaceState(workspaceID: workspace.id, isWorking: false)
+                    }
                     .execute(db)
             }
         } operation: {
@@ -172,7 +177,7 @@ struct WorkspacesTests {
             await store.send(.refresh)
 
             await store.receive(\.loadWorkspacesFailed) {
-                $0.alert = .failedToLoadWorkspaces(message: TestError().localizedDescription)
+                $0.alert = .failedToLoadWorkspaces(error: TestError())
             }
         }
     }
@@ -196,13 +201,116 @@ struct WorkspacesTests {
             let task = await store.send(.task)
 
             await store.receive(\.loadWorkspacesFailed) {
-                $0.alert = .failedToLoadWorkspaces(message: TestError().localizedDescription)
+                $0.alert = .failedToLoadWorkspaces(error: TestError())
             }
 
             await clock.advance(by: .seconds(1))
             await store.receive(\.loadWorkspacesFailed)
 
             await task.cancel()
+        }
+    }
+
+    @Test("Workspace context menu actions call the desktop service")
+    func workspaceContextMenuActions() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let requests = LockIsolated<[String]>([])
+            let item = workspace(id: "workspace", status: .inProgress)
+            let now = Date(timeIntervalSince1970: 1_783_555_200)
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.date.now = now
+                $0.desktopClient.fetchRepositories = { [] }
+                $0.desktopClient.fetchWorkspaces = { [] }
+                $0.desktopClient.setWorkspacePinned = { workspaceID, pinned in
+                    requests.withValue { $0.append("pinned:\(workspaceID):\(pinned)") }
+                }
+                $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    requests.withValue {
+                        $0.append("status:\(workspaceID):\(status.rawValue)")
+                    }
+                }
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, unread in
+                    requests.withValue { $0.append("unread:\(workspaceID):\(unread)") }
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item))
+            await store.finish()
+
+            await store.send(.workspaceStatusButtonTapped(item, .done))
+            await store.finish()
+
+            await store.send(.workspaceUnreadButtonTapped(item))
+            await store.finish()
+
+            let fetchedWorkspace = try await database.read { db in
+                try Workspace
+                    .find(item.id)
+                    .fetchOne(db)
+            }
+            let updatedWorkspace = try #require(fetchedWorkspace)
+            expectNoDifference(updatedWorkspace.pinnedAt, now.ISO8601Format())
+            expectNoDifference(updatedWorkspace.manualStatus, Workspace.Status.done.rawValue)
+            expectNoDifference(updatedWorkspace.unread, 1)
+            expectNoDifference(
+                requests.value,
+                [
+                    "pinned:workspace:true",
+                    "status:workspace:done",
+                    "unread:workspace:true",
+                ]
+            )
+        }
+    }
+
+    @Test("Workspace update failures present an alert")
+    func workspaceUpdateFailure() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let item = workspace(id: "workspace")
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_555_200)
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    throw TestError()
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item))
+
+            await store.receive(\.setWorkspacePinnedFailed) {
+                $0.alert = .failedToUpdateWorkspacePin(
+                    error: TestError()
+                )
+            }
+
+            let fetchedWorkspace = try await database.read { db in
+                try Workspace
+                    .find(item.id)
+                    .fetchOne(db)
+            }
+            let updatedWorkspace = try #require(fetchedWorkspace)
+            #expect(updatedWorkspace.pinnedAt != nil)
         }
     }
 }

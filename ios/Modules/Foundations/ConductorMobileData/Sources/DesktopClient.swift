@@ -17,6 +17,9 @@ public struct DesktopClient: Sendable {
     public var fetchSessions: @Sendable (_ workspaceID: String) async throws -> [Session]
     public var fetchWorkspaces: @Sendable () async throws -> [WorkspaceSnapshot]
     public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Void
+    public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
+    public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
+    public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ unread: Bool) async throws -> Void
     public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
 }
 
@@ -77,6 +80,24 @@ extension DesktopClient: DependencyKey {
                     to: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
                 )
             },
+            setWorkspacePinned: { workspaceID, pinned in
+                try await patch(
+                    WorkspacePatchBody(pinned: pinned),
+                    at: workspaceURL(workspaceID: workspaceID)
+                )
+            },
+            setWorkspaceStatus: { workspaceID, status in
+                try await patch(
+                    WorkspacePatchBody(status: status.rawValue),
+                    at: workspaceURL(workspaceID: workspaceID)
+                )
+            },
+            setWorkspaceUnread: { workspaceID, unread in
+                try await patch(
+                    WorkspacePatchBody(unread: unread),
+                    at: workspaceURL(workspaceID: workspaceID)
+                )
+            },
             stopSession: { workspaceID, sessionID in
                 try await post(
                     [String: String](),
@@ -103,6 +124,12 @@ extension DesktopClient: DependencyKey {
             .appending(path: workspaceID)
             .appending(path: "sessions")
             .appending(path: sessionID)
+    }
+
+    private static func workspaceURL(workspaceID: String) -> URL {
+        baseURL
+            .appending(path: "workspaces")
+            .appending(path: workspaceID)
     }
 
     private static func fetch<Value: Decodable & Sendable>(
@@ -142,6 +169,25 @@ extension DesktopClient: DependencyKey {
             )
         }
     }
+
+    private static func patch<Body: Encodable & Sendable>(
+        _ body: Body,
+        at url: URL
+    ) async throws {
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.httpBody = try JSONEncoder().encode(body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateSuccessfulHTTPResponse(response, data: data)
+    }
+}
+
+private struct WorkspacePatchBody: Encodable, Sendable {
+    var pinned: Bool? = nil
+    var status: String? = nil
+    var unread: Bool? = nil
 }
 
 public extension DesktopClient {

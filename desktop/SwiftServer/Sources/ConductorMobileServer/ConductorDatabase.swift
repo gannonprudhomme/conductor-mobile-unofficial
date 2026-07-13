@@ -6,17 +6,26 @@
 //
 
 import Foundation
+import SharedConductorData
 import SQLiteData
 
 enum ConductorDatabase {
-    static func open(at url: URL) throws -> any DatabaseReader {
+    static func open(at url: URL) throws -> any DatabaseWriter {
         var configuration = Configuration()
-        configuration.readonly = true
+        configuration.busyMode = .timeout(5)
         configuration.prepareDatabase { database in
-            // SQLite's query_only pragma makes every pooled connection reject writes. It is a second
-            // guard in case this database is ever opened with a less restrictive configuration.
-            try #sql("PRAGMA query_only = ON").execute(database)
+            // Execute typed, zero-row queries so opening fails if Conductor's expected tables or
+            // columns are missing without reading any records.
+            _ = try Workspace.limit(0).fetchAll(database)
+            _ = try Session.limit(0).fetchAll(database)
+            _ = try Repository.limit(0).fetchAll(database)
+            _ = try Message.limit(0).fetchAll(database)
         }
-        return try DatabasePool(path: url.path, configuration: configuration)
+        // DatabasePool opens read connections with SQLITE_OPEN_READONLY, which conflicts with
+        // mode=rw. Keep a queue so a missing Conductor database fails instead of being created.
+        return try DatabaseQueue(
+            path: url.absoluteString + "?mode=rw",
+            configuration: configuration
+        )
     }
 }

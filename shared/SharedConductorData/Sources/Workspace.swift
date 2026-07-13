@@ -172,7 +172,9 @@ public struct Workspace: Codable, Hashable, Identifiable, Sendable {
 }
 
 extension Workspace {
-    public struct Status: Hashable, RawRepresentable, Sendable {
+    public struct Status: Hashable, Identifiable, RawRepresentable, Sendable {
+        public var id: String { rawValue }
+
         public var rawValue: String
 
         public init(rawValue: String) {

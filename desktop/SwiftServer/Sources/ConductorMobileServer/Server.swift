@@ -28,7 +28,7 @@ public enum Server {
     }
 
     static func makeApplication( // only non-private for tests
-        database: any DatabaseReader,
+        database: any DatabaseWriter,
         port: Int = 3768
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
@@ -53,6 +53,14 @@ public enum Server {
 
         router.get("/repositories/{repositoryID}/icon") { request, context in
             try await IconRoute.response(
+                request: request,
+                context: context,
+                database: database
+            )
+        }
+
+        router.patch("/workspaces/{workspaceID}") { request, context in
+            return try await WorkspaceRoute.patch(
                 request: request,
                 context: context,
                 database: database
@@ -148,4 +156,5 @@ public enum Server {
             .conductor
         }
     }
+
 }

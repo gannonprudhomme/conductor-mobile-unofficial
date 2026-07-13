@@ -28,6 +28,21 @@ Keep each Swift test file scoped to exactly one production source file, and name
 the test file after that source. Never combine tests for multiple production
 source files into one test file.
 
+Prefer compile-time types in Swift code and tests. Seed database tests with
+concrete records using `.init(...)` or `.preview(...)` and execute typed
+StructuredQueries statements instead of inserting or fetching records with raw
+SQL.
+
+Use StructuredQueries for Swift database reads and writes. Reserve raw SQL for
+schema setup and migrations, or for the smallest localized `#sql` fragment when
+StructuredQueries cannot express an operation directly.
+
+Keep short, simple StructuredQueries statements on one line. When a query spans
+multiple lines, put the table and each chained query operation on separate lines.
+
+Name Boolean values as questions or predicates, using prefixes such as `is`,
+`has`, `can`, or `should`.
+
 Never put a Swift `guard` statement and its exit on one line. Use a multiline
 `else` body, even when it only contains a single `return` or `throw`.
 

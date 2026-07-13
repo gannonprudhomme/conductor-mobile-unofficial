@@ -25,6 +25,7 @@ public enum ThemeColorStyle {
     case statusInReview
     case textPrimary
     case textSecondary
+    case unread
 }
 
 public extension ShapeStyle where Self == Color {
@@ -60,7 +61,7 @@ public extension ShapeStyle where Self == Color {
         case .sidebarMutedForeground:
             Color.white.opacity(0.6)
 
-        case .statusDone:
+        case .statusDone, .unread:
             Color(red: 211.0 / 255.0, green: 177.0 / 255.0, blue: 160.0 / 255.0)
 
         case .statusInProgress:

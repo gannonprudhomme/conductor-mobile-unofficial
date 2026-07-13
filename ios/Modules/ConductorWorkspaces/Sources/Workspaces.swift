@@ -139,13 +139,19 @@ public struct Workspaces: Sendable {
     public enum Action {
         case alert(PresentationAction<Alert>)
         case groupingChanged(WorkspaceWithRepository.Grouping)
-        case loadWorkspacesFailed(String)
+        case loadWorkspacesFailed(any Error)
         case repositoryFilterButtonTapped(String?)
         case refresh
+        case setWorkspacePinnedFailed(any Error)
+        case setWorkspaceStatusFailed(any Error)
+        case setWorkspaceUnreadFailed(any Error)
         case sortButtonTapped(WorkspaceWithRepository.Sort)
         case task
         case workspacesChanged([WorkspaceWithRepository])
+        case workspacePinnedButtonTapped(WorkspaceWithRepository)
+        case workspaceStatusButtonTapped(WorkspaceWithRepository, Workspace.Status)
         case workspaceTapped(WorkspaceWithRepository)
+        case workspaceUnreadButtonTapped(WorkspaceWithRepository)
 
         public enum Alert: Equatable {
         }
@@ -153,6 +159,7 @@ public struct Workspaces: Sendable {
 
     @Dependency(\.continuousClock) var clock
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
     public init() {
@@ -197,8 +204,8 @@ public struct Workspaces: Sendable {
             case .alert, .workspaceTapped:
                 return .none
 
-            case let .loadWorkspacesFailed(message):
-                state.alert = .failedToLoadWorkspaces(message: message)
+            case let .loadWorkspacesFailed(error):
+                state.alert = .failedToLoadWorkspaces(error: error)
                 return .none
 
             case let .repositoryFilterButtonTapped(repositoryID):
@@ -214,15 +221,96 @@ public struct Workspaces: Sendable {
                 state.$sort.withLock { $0 = sort }
                 return reloadWorkspaces(state)
 
+            case let .setWorkspacePinnedFailed(error):
+                state.alert = .failedToUpdateWorkspacePin(error: error)
+                return .none
+
+            case let .setWorkspaceStatusFailed(error):
+                state.alert = .failedToUpdateWorkspaceStatus(error: error)
+                return .none
+
+            case let .setWorkspaceUnreadFailed(error):
+                state.alert = .failedToUpdateWorkspaceUnreadStatus(error: error)
+                return .none
+
             case let .workspacesChanged(workspaces):
                 state.sections = State.sections(
                     groupedBy: state.grouping,
                     workspaces: workspaces
                 )
                 return .none
+
+            case let .workspacePinnedButtonTapped(item):
+                let pinned = item.workspace.pinnedAt == nil
+                let pinnedAt = pinned ? now.ISO8601Format() : nil
+
+                return updateWorkspace(failure: Action.setWorkspacePinnedFailed) {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update {
+                                $0.pinnedAt = pinnedAt
+                            }
+                            .execute(db)
+                    }
+                    try await desktopClient.setWorkspacePinned(
+                        item.id,
+                        pinned
+                    )
+                }
+
+            case let .workspaceStatusButtonTapped(item, status):
+                guard item.workspace.status != status else {
+                    return .none
+                }
+
+                return updateWorkspace(failure: Action.setWorkspaceStatusFailed) {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update {
+                                $0.manualStatus = #bind(status.rawValue)
+                            }
+                            .execute(db)
+                    }
+                    try await desktopClient.setWorkspaceStatus(item.id, status)
+                }
+
+            case let .workspaceUnreadButtonTapped(item):
+                let hasUnread = (item.workspace.unread ?? 0) == 0
+
+                return updateWorkspace(failure: Action.setWorkspaceUnreadFailed) {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update {
+                                $0.unread = #bind(hasUnread ? 1 : 0)
+                            }
+                            .execute(db)
+                    }
+                    try await desktopClient.setWorkspaceUnread(
+                        item.id,
+                        hasUnread
+                    )
+                }
             }
         }
         .ifLet(\.$alert, action: \.alert)
+    }
+
+    private func updateWorkspace(
+        failure: @escaping @Sendable (any Error) -> Action,
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) -> Effect<Action> {
+        .run { send in
+            do {
+                try await operation()
+                await refreshWorkspaces(send: send)
+            } catch {
+                Logger.workspace.error("Failed to update workspace: \(error)")
+                await send(failure(error))
+            }
+        }
     }
 
     private func reloadWorkspaces(_ state: State) -> Effect<Action> {
@@ -241,7 +329,7 @@ public struct Workspaces: Sendable {
                 try await workspaces.load(query, animation: .default)
             } catch {
                 Logger.workspace.error("Failed to reload workspaces: \(error)")
-                await send(.loadWorkspacesFailed(error.localizedDescription))
+                await send(.loadWorkspacesFailed(error))
             }
         }
     }
@@ -253,7 +341,7 @@ public struct Workspaces: Sendable {
             return
         } catch {
             Logger.workspace.error("Failed to refresh workspaces: \(error)")
-            await send(.loadWorkspacesFailed(error.localizedDescription))
+            await send(.loadWorkspacesFailed(error))
         }
     }
 
@@ -263,9 +351,11 @@ public struct Workspaces: Sendable {
         let (workspaceSnapshots, repositories) = try await (fetchedWorkspaces, fetchedRepositories)
 
         try await database.write { db in
-            try Repository.upsert { repositories }
+            try Repository
+                .upsert { repositories }
                 .execute(db)
-            try Workspace.upsert { workspaceSnapshots.map(\.workspace) }
+            try Workspace
+                .upsert { workspaceSnapshots.map(\.workspace) }
                 .execute(db)
             try MobileWorkspaceState.upsert {
                 workspaceSnapshots.map {
@@ -281,11 +371,35 @@ public struct Workspaces: Sendable {
 }
 
 extension AlertState where Action == Workspaces.Action.Alert {
-    static func failedToLoadWorkspaces(message: String) -> Self {
+    static func failedToLoadWorkspaces(error: any Error) -> Self {
         AlertState {
             TextState("Failed to load workspaces")
         } message: {
-            TextState(message)
+            TextState(error.localizedDescription)
+        }
+    }
+
+    static func failedToUpdateWorkspacePin(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to update workspace pin")
+        } message: {
+            TextState(error.localizedDescription)
+        }
+    }
+
+    static func failedToUpdateWorkspaceStatus(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to update workspace status")
+        } message: {
+            TextState(error.localizedDescription)
+        }
+    }
+
+    static func failedToUpdateWorkspaceUnreadStatus(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to update workspace unread status")
+        } message: {
+            TextState(error.localizedDescription)
         }
     }
 }
@@ -309,8 +423,8 @@ public struct WorkspacesView: View {
                         && store.selectedRepositoryID == nil,
                     isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
                         .animation(.default)
-                ) {
-                    store.send(.workspaceTapped($0))
+                ) { item, action in
+                    workspaceRowAction(action, item: item)
                 }
             }
         }
@@ -351,13 +465,32 @@ public struct WorkspacesView: View {
         .preferredColorScheme(.dark)
     }
 
+    private func workspaceRowAction(
+        _ action: WorkspaceRowAction,
+        item: WorkspaceWithRepository
+    ) {
+        switch action {
+        case .open:
+            store.send(.workspaceTapped(item))
+
+        case let .setStatus(status):
+            store.send(.workspaceStatusButtonTapped(item, status))
+
+        case .togglePinned:
+            store.send(.workspacePinnedButtonTapped(item))
+
+        case .toggleUnread:
+            store.send(.workspaceUnreadButtonTapped(item))
+        }
+    }
+
     private struct WorkspaceSectionView: View {
         let section: Workspaces.State.WorkspaceSection
         let showsRepositoryIcon: Bool
 
         @Binding var isExpanded: Bool
 
-        let action: (WorkspaceWithRepository) -> Void
+        let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
 
         var body: some View {
             Section(isExpanded: $isExpanded) {
@@ -419,15 +552,15 @@ public struct WorkspacesView: View {
     private struct WorkspaceRows: View {
         let items: [WorkspaceWithRepository]
         let showsRepositoryIcon: Bool
-        let action: (WorkspaceWithRepository) -> Void
+        let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
 
         var body: some View {
             ForEach(items) { item in
                 WorkspaceRow(
                     item: item,
                     showsRepositoryIcon: showsRepositoryIcon
-                ) {
-                    action(item)
+                ) { rowAction in
+                    action(item, rowAction)
                 }
                 .padding(.leading, 12)
                 .listRowInsets(
@@ -473,48 +606,6 @@ public struct WorkspacesView: View {
             .labelStyle(.conductorStandard)
             .foregroundStyle(.theme(.textSecondary))
             .textCase(nil)
-        }
-    }
-
-    private struct WorkspaceRow: View {
-        let item: WorkspaceWithRepository
-        let showsRepositoryIcon: Bool
-        let action: () -> Void
-        @ScaledMetric(relativeTo: .body) private var iconSize = 20
-
-        var body: some View {
-            Button(action: action) {
-                Label {
-                    Text(item.workspace.displayBranchName)
-                        .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
-                        .fontWeight(isUnread ? .semibold : .regular)
-                        .lineLimit(1)
-                } icon: {
-                    if showsRepositoryIcon {
-                        RepositoryIcon(repository: item.repository, size: 20, relativeTo: .body)
-                    }
-
-                    if item.isWorking {
-                        ProgressView()
-                            .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
-                            .tint(.theme(.textSecondary))
-                            .frame(width: iconSize, height: iconSize)
-                    } else {
-                        LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
-                            .foregroundStyle(.theme(.textSecondary))
-                    }
-                }
-                .labelStyle(.conductorStandard)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(.theme(.textPrimary))
-                .font(.theme(.body))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-
-        private var isUnread: Bool {
-            (item.workspace.unread ?? 0) > 0
         }
     }
 
@@ -573,7 +664,14 @@ public struct WorkspacesView: View {
                             store.send(.sortButtonTapped(sort))
                         } label: {
                             if store.sort == sort {
-                                Label(sort.title, systemImage: "checkmark")
+                                Label {
+                                    Text(sort.title)
+                                } icon: {
+                                    ColoredMenuImage(
+                                        Lucide.check,
+                                        color: .theme(.textPrimary)
+                                    )
+                                }
                             } else {
                                 Text(sort.title)
                             }

@@ -16,7 +16,7 @@ public struct UnreadIcon: View {
 
     public var body: some View {
         Circle()
-            .fill(.theme(.statusDone))
+            .fill(.theme(.unread))
             .frame(width: size, height: size)
             .accessibilityLabel("Unread")
     }
