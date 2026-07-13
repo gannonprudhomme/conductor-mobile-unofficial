@@ -1,3 +1,6 @@
+[shell_alias]
+mr = "mise run"
+
 [tasks.deploy]
 description = "Build, install, and launch the native iOS app"
 run = "mise -C ios run deploy -- \"$@\""

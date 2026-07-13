@@ -11,12 +11,16 @@ case "${1:-}" in
     cd "$root/desktop"
     exec swift run --package-path SwiftServer conductor-mobile-server
     ;;
+  build)
+    cd "$root"
+    exec swift build --package-path desktop/SwiftServer
+    ;;
   dev)
     cd "$root"
     exec mise watch server --restart --watch desktop/SwiftServer --watch shared --exts swift
     ;;
   *)
-    echo "Usage: mise run server [dev]" >&2
+    echo "Usage: mise run server [build|dev]" >&2
     exit 2
     ;;
 esac
