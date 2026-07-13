@@ -259,9 +259,8 @@ public struct WorkspaceChatView: View {
         Group {
             if let chatStore = store.scope(state: \.chat, action: \.chat) {
                 ChatView(store: chatStore)
-                    // Treat each session as distinct content so switching runs the transition.
+                    // Treat each session as distinct content so view-local scroll state resets.
                     .id(chatStore.sessionID)
-                    .transition(.opacity)
             } else {
                 ProgressView()
                     .progressViewStyle(.conductor)
@@ -270,9 +269,6 @@ public struct WorkspaceChatView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
-        // Animate only the chat replacement when the selected session changes.
-        // We animate the *effects* of selections, not the selections themsleves
-        .animation(.default, value: store.chat?.sessionID)
         .themedNavigationTitle(
             verbatim: store.workspace.displayBranchName,
             alignment: .leading
@@ -314,8 +310,6 @@ public struct WorkspaceChatView: View {
             ) { session in
                 store.send(.sessionButtonTapped(session))
             }
-            // Update the selected glass tint immediately while the chat transitions above.
-            .animation(nil, value: store.chat?.sessionID)
         }
         .background(.theme(.background))
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
