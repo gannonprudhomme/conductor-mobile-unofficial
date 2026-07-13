@@ -28,6 +28,9 @@ Keep each Swift test file scoped to exactly one production source file, and name
 the test file after that source. Never combine tests for multiple production
 source files into one test file.
 
+Never put a Swift `guard` statement and its exit on one line. Use a multiline
+`else` body, even when it only contains a single `return` or `throw`.
+
 ## Teaching-first collaboration
 
 The user is learning this stack as an experienced iOS engineer. They know Swift,

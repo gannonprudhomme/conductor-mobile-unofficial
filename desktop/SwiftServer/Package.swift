@@ -18,6 +18,7 @@ let package = Package(
     dependencies: [
         .package(name: "ConductorShared", path: "../../shared"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", exact: "2.25.0"),
+        .package(url: "https://github.com/pointfreeco/swift-dependencies", exact: "1.14.1"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
     ],
     targets: [
@@ -25,6 +26,8 @@ let package = Package(
             name: "ConductorMobileServer",
             dependencies: [
                 .product(name: "SharedConductorData", package: "ConductorShared"),
+                .product(name: "Dependencies", package: "swift-dependencies"),
+                .product(name: "DependenciesMacros", package: "swift-dependencies"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
             ],

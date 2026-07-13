@@ -58,6 +58,7 @@ interface MessageInput {
 }
 
 interface JsonRpcRequest {
+  jsonrpc: "2.0";
   id: string;
   method: "query";
   params: JsonObject;
@@ -421,6 +422,7 @@ function buildQueryRequest(input: MessageInput): JsonRpcRequest {
   const messageId = optionalString(input.messageId) ?? randomUUID();
 
   return {
+    jsonrpc: "2.0",
     id: optionalString(input.rpcId) ?? `mobile-query-${randomUUID()}`,
     method: "query",
     params: {

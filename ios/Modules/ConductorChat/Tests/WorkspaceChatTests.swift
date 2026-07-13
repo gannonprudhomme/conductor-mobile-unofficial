@@ -416,6 +416,41 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("When chat fails to send a message, an alert is presented and dismissed")
+    func chatFailsToSendMessage() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(.sendMessageResponse(.failure(TestError())))
+            ) {
+                $0.destination = .alert(
+                    .failedToSendMessage(message: TestError().localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
     @Test("When task fails to load sessions, an alert is presented")
     func taskFailsToLoadSessions() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")

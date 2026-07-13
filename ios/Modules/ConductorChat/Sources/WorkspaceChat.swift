@@ -134,6 +134,12 @@ public struct WorkspaceChat: Sendable {
                 state.destination = .alert(.failedToLoadMessages(message: message))
                 return .none
 
+            case let .chat(.sendMessageResponse(.failure(error))):
+                state.destination = .alert(
+                    .failedToSendMessage(message: error.localizedDescription)
+                )
+                return .none
+
             case .refresh:
                 return .run { [workspaceID = state.workspace.id] send in
                     await refreshSessions(workspaceID: workspaceID, send: send)
@@ -230,6 +236,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     static func failedToLoadSessions(message: String) -> Self {
         AlertState {
             TextState("Failed to load sessions")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToSendMessage(message: String) -> Self {
+        AlertState {
+            TextState("Failed to send message")
         } message: {
             TextState(message)
         }

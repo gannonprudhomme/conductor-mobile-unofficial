@@ -99,6 +99,9 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - Use the Composable Architecture for feature state/actions/reducers.
 - Use modern TCA: `@Reducer`, `@ObservableState`, `StoreOf`, scoped stores, and
   no legacy `ViewStore`/`WithViewStore`.
+- For feature-owned SwiftUI bindings, conform the action to `BindableAction`, add
+  `case binding(BindingAction<State>)`, include `BindingReducer()` in the reducer,
+  and bind with `$store.property`. Never derive bindings with `.sending`.
 - Handle `.task` first in reducer action switches.
 - Capture feature state needed by an effect directly in the `.run` capture
   list, e.g. `.run { [id = state.id] send in ... }`.

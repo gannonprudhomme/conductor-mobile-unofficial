@@ -22,8 +22,10 @@ public struct Chat: Sendable {
     @ObservableState
     public struct State: Equatable {
         @FetchAll var messages: [Message]
-
         @FetchOne var session: Session
+
+        var messageDraft = ""
+        var isMessageSendInFlight = false
         var rows: [Turn.Row]? = nil
         var turns: [Turn]? = nil
 
@@ -63,11 +65,14 @@ public struct Chat: Sendable {
         var sessionID: Session.ID { session.id }
     }
 
-    public enum Action {
+    public enum Action: BindableAction {
         case task
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
+        case sendButtonTapped
+        case sendMessageResponse(Result<String, any Error>)
         case sessionStatusChanged(Session.Status)
+        case binding(BindingAction<State>)
     }
 
     @Dependency(\.continuousClock) var clock
@@ -77,6 +82,8 @@ public struct Chat: Sendable {
     init() { }
 
     public var body: some ReducerOf<Self> {
+        BindingReducer()
+
         Reduce { state, action in
             switch action {
             case .task:
@@ -104,7 +111,7 @@ public struct Chat: Sendable {
                             .map(Action.messagesUpdated)
                     }
                 )
-                
+
             case .messagesUpdated(let messages):
                 state.turns = Turn.parse(messages: messages)
                 state.updateRows(sessionStatus: state.session.status)
@@ -114,7 +121,37 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: status)
                 return .none
 
-            case .loadMessagesFailed:
+            case .sendButtonTapped:
+                let message = state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !message.isEmpty, !state.isMessageSendInFlight else {
+                    return .none
+                }
+
+                state.isMessageSendInFlight = true
+                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                    let result = await Result {
+                        try await desktopClient.sendMessage(workspaceID, sessionID, message)
+                        return message
+                    }
+
+                    await send(.sendMessageResponse(result))
+                }
+
+            case let .sendMessageResponse(result):
+                state.isMessageSendInFlight = false
+                switch result {
+                case let .success(message):
+                    if state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines) == message {
+                        state.messageDraft = ""
+                    }
+
+                case .failure:
+                    // Send errors are displayed by the parent ``WorkspaceChat``.
+                    break
+                }
+                return .none
+
+            case .binding, .loadMessagesFailed:
                 return .none
             }
         }
@@ -183,9 +220,21 @@ struct ChatView: View {
             }
         }
         .scrollPosition($scrollPosition)
+        .scrollDismissesKeyboard(.interactively)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(.bottom, for: .alignment)
-        .background(.theme(.background))
+        .background {
+            Color.theme(.background)
+                .ignoresSafeArea()
+        }
+        .safeAreaBar(edge: .bottom) {
+            ChatTextField(
+                text: $store.messageDraft,
+                isSendInFlight: store.isMessageSendInFlight
+            ) {
+                store.send(.sendButtonTapped)
+            }
+        }
         .onChange(of: store.turns) { previousTurns, turns in
             turnsChanged(from: previousTurns, to: turns)
         }

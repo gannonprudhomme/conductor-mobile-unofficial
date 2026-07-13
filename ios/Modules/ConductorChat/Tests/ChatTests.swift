@@ -150,6 +150,59 @@ struct ChatTests {
             }
         }
     }
+    @Test("Sending a message clears the message draft after the desktop accepts it")
+    func messageSendSucceeds() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    #expect(message == "Please run the tests.")
+                }
+            }
+
+            await store.send(.binding(.set(\.messageDraft, "  Please run the tests.  "))) {
+                $0.messageDraft = "  Please run the tests.  "
+            }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.receive(\.sendMessageResponse.success) {
+                $0.messageDraft = ""
+                $0.isMessageSendInFlight = false
+            }
+        }
+    }
+
+    @Test("A send failure keeps the message draft")
+    func messageSendFails() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            var state = Chat.State(session: session)
+            state.messageDraft = "Please try this again."
+            let store = TestStore(initialState: state) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _ in
+                    throw TestError()
+                }
+            }
+
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.receive(\.sendMessageResponse.failure) {
+                $0.isMessageSendInFlight = false
+            }
+        }
+    }
 }
 
 private func makeMessage(

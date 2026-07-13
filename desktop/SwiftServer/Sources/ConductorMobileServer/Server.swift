@@ -67,6 +67,14 @@ public enum Server {
             }
         }
 
+        router.post("/workspaces/{workspaceID}/sessions/{sessionID}/messages") { request, context in
+            try await MessageRoute.post(
+                request: request,
+                context: context,
+                database: database
+            )
+        }
+
         return Application(
             router: router,
             configuration: .init(
