@@ -273,8 +273,7 @@ struct ChatView: View {
         }
         .scrollPosition($scrollPosition)
         .scrollDismissesKeyboard(.interactively)
-        .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.bottom, for: .alignment)
+        .defaultScrollAnchor(.bottom)
         .background {
             Color.theme(.background)
                 .ignoresSafeArea()
@@ -303,6 +302,11 @@ struct ChatView: View {
         switch scrollState.displayedContentChanged(hasRows: store.rows?.isEmpty == false) {
         case .initial:
             withAnimation(nil) {
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+            
+            Task { // TODO: Not convinced this helps but it doesn't hurt
+                await Task.yield()
                 scrollPosition.scrollTo(edge: .bottom)
             }
         case .subsequent:
