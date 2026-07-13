@@ -379,43 +379,6 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("When refresh fails to load sessions, an alert is presented")
-    func refreshFailsToLoadSessions() async throws {
-        let workspace = try makeWorkspace(activeSessionID: "active")
-        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-            try $0.defaultDatabase.write { db in
-                try Session.upsert { activeSession }.execute(db)
-            }
-        } operation: {
-            let store = TestStore(
-                initialState: WorkspaceChat.State(
-                    workspaceWithRepository: WorkspaceWithRepository(
-                        workspace: workspace,
-                        repository: nil
-                    )
-                )
-            ) {
-                WorkspaceChat()
-            } withDependencies: {
-                $0.desktopClient.fetchSessions = { workspaceID in
-                    #expect(workspaceID == workspace.id)
-                    throw TestError()
-                }
-            }
-
-            await store.send(.refresh)
-
-            await store.receive(\.loadSessionsResponse.failure) {
-                $0.destination = .alert(
-                    .failedToLoadSessions(message: TestError().localizedDescription)
-                )
-            }
-        }
-    }
-
     @Test("When chat fails to load messages, an alert is presented and dismissed")
     func chatFailsToLoadMessages() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")

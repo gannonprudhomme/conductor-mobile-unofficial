@@ -85,7 +85,6 @@ public struct WorkspaceChat: Sendable {
         case chat(Chat.Action)
         case destination(PresentationAction<Destination.Action>)
         case loadSessionsResponse(Result<[Session], any Error>)
-        case refresh
         case sessionButtonTapped(Session)
         case task
     }
@@ -142,11 +141,6 @@ public struct WorkspaceChat: Sendable {
                     .failedToSendMessage(message: error.localizedDescription)
                 )
                 return .none
-
-            case .refresh:
-                return .run { [workspaceID = state.workspace.id] send in
-                    await refreshSessions(workspaceID: workspaceID, send: send)
-                }
 
             case let .sessionButtonTapped(session):
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
@@ -322,9 +316,6 @@ public struct WorkspaceChatView: View {
             }
             // Update the selected glass tint immediately while the chat transitions above.
             .animation(nil, value: store.chat?.sessionID)
-        }
-        .refreshable {
-            await store.send(.refresh).finish()
         }
         .background(.theme(.background))
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
