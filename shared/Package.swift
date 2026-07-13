@@ -18,11 +18,15 @@ let package = Package(
         .library(name: "SharedConductorData", targets: ["SharedConductorData"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-log", from: "1.14.0"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
     ],
     targets: [
         .target(
             name: "ConductorFoundation",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+            ],
             path: "ConductorFoundation/Sources",
             swiftSettings: swiftSettings
         ),

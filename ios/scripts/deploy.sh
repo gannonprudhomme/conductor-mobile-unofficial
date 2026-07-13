@@ -101,7 +101,8 @@ if [[ "$IS_SIMULATOR" == true ]]; then
   xcrun simctl install "$DEVICE_ID" "$APP_PATH"
 
   if [[ "$ATTACH" == true ]]; then
-    xcrun simctl launch --console --terminate-running-process "$DEVICE_ID" "$APP_BUNDLE_ID"
+    SIMCTL_CHILD_OS_ACTIVITY_DT_MODE=1 \
+      xcrun simctl launch --console --terminate-running-process "$DEVICE_ID" "$APP_BUNDLE_ID"
   else
     xcrun simctl launch "$DEVICE_ID" "$APP_BUNDLE_ID"
   fi
@@ -109,7 +110,7 @@ else
   xcrun devicectl device install app --device "$DEVICE_ID" "$APP_PATH"
 
   if [[ "$ATTACH" == true ]]; then
-    xcrun devicectl device process launch \
+    DEVICECTL_CHILD_OS_ACTIVITY_DT_MODE=1 xcrun devicectl device process launch \
       --device "$DEVICE_ID" \
       --console \
       --terminate-existing \

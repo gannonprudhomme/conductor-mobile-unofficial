@@ -12,6 +12,7 @@ import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
+import Logging
 import SQLiteData
 import SwiftUI
 
@@ -170,6 +171,7 @@ public struct Chat: Sendable {
         } catch is CancellationError {
             return
         } catch {
+            Logger.chat.error("Failed to load messages: \(error)")
             await send(.loadMessagesFailed(error.localizedDescription))
         }
     }

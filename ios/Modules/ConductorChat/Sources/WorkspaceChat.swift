@@ -11,6 +11,7 @@ import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
+import Logging
 import SQLiteData
 import SwiftUI
 
@@ -125,6 +126,7 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .loadSessionsResponse(.failure(error)):
+                Logger.chat.error("Failed to load sessions: \(error)")
                 state.destination = .alert(
                     .failedToLoadSessions(message: error.localizedDescription)
                 )
@@ -135,6 +137,7 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .chat(.sendMessageResponse(.failure(error))):
+                Logger.chat.error("Failed to send message: \(error)")
                 state.destination = .alert(
                     .failedToSendMessage(message: error.localizedDescription)
                 )

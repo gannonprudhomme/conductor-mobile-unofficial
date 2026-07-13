@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-log", from: "1.14.0"),
         .package(name: "ConductorShared", path: "../../shared"),
         .package(url: "https://github.com/JakubMazur/lucide-icons-swift", exact: "1.23.0"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
@@ -48,6 +49,7 @@ let package = Package(
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
                 "ConductorMobileData",
                 "ConductorDesign",
@@ -77,6 +79,7 @@ let package = Package(
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
                 "ConductorMobileData",

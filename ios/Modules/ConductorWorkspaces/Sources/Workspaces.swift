@@ -12,6 +12,7 @@ import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
+import Logging
 import Sharing
 import SQLiteData
 import SwiftUI
@@ -239,6 +240,7 @@ public struct Workspaces: Sendable {
                 )
                 try await workspaces.load(query, animation: .default)
             } catch {
+                Logger.workspace.error("Failed to reload workspaces: \(error)")
                 await send(.loadWorkspacesFailed(error.localizedDescription))
             }
         }
@@ -250,6 +252,7 @@ public struct Workspaces: Sendable {
         } catch is CancellationError {
             return
         } catch {
+            Logger.workspace.error("Failed to refresh workspaces: \(error)")
             await send(.loadWorkspacesFailed(error.localizedDescription))
         }
     }

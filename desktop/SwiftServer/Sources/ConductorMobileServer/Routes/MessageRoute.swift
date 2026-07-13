@@ -8,6 +8,7 @@
 import Dependencies
 import Foundation
 import Hummingbird
+import Logging
 import SharedConductorData
 import SQLiteData
 
@@ -44,6 +45,7 @@ enum MessageRoute {
                 )
             }
         } catch {
+            Logger.bridge.error("Failed to load message send context: \(error)")
             throw Error(
                 .internalServerError,
                 message: "Could not load message send context: \(error)"
@@ -69,11 +71,15 @@ enum MessageRoute {
                 )
             )
         } catch let error as SidecarBridgeClient.ResponseError {
+            Logger.bridge.error(
+                "Bridge request failed with status \(error.statusCode): \(error.message)"
+            )
             throw Error(
                 HTTPResponse.Status(code: error.statusCode),
                 message: error.message
             )
         } catch {
+            Logger.bridge.error("Failed to reach the Conductor sidecar bridge: \(error)")
             throw Error(
                 .badGateway,
                 message: "Could not reach the Conductor sidecar bridge: \(error)"

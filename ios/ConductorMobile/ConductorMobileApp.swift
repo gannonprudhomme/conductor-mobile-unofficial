@@ -7,9 +7,11 @@
 
 import ComposableArchitecture
 import ConductorDesign
+import ConductorFoundation
 import ConductorMain
 import ConductorMobileData
 import Dependencies
+import Logging
 import SwiftUI
 
 @main
@@ -19,6 +21,8 @@ struct ConductorMobileApp: App {
     }
 
     init() {
+        LoggingSystem.bootstrap(LoggingOSLog.init)
+
         try! prepareDependencies {
             try $0.bootstrapDatabase()
         }

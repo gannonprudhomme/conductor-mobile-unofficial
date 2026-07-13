@@ -5,18 +5,22 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import ConductorFoundation
 import ConductorMobileServer
 import Darwin
 import Foundation
+import Logging
 
 @main
 enum ConductorMobileServerMain {
     static func main() async {
+        LoggingSystem.bootstrap(LoggingOSLog.init)
+
         do {
             try await Server.run(databaseURL: databaseURL())
         } catch {
             FileHandle.standardError.write(
-                Data("conductor-mobile-server: \(error.localizedDescription)\n".utf8)
+                Data("conductor-mobile-server: \(error)\n".utf8)
             )
             Darwin.exit(EXIT_FAILURE)
         }

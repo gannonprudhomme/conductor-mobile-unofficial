@@ -10,6 +10,9 @@ packages:
     path: ../shared
   ConductorModules:
     path: Modules
+  SwiftLog:
+    url: https://github.com/apple/swift-log
+    from: 1.14.0
 settings:
   base:
     ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS: YES
@@ -57,12 +60,16 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
     dependencies:
+      - package: ConductorShared
+        product: ConductorFoundation
       - package: ConductorModules
         product: ConductorMobileData
       - package: ConductorModules
         product: ConductorDesign
       - package: ConductorModules
         product: ConductorMain
+      - package: SwiftLog
+        product: Logging
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: ConductorAppIcon

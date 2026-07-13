@@ -31,6 +31,9 @@ source files into one test file.
 Never put a Swift `guard` statement and its exit on one line. Use a multiline
 `else` body, even when it only contains a single `return` or `throw`.
 
+Never use an error's `localizedDescription` in logs. Interpolate the error
+itself so the log preserves its concrete diagnostic information.
+
 ## Teaching-first collaboration
 
 The user is learning this stack as an experienced iOS engineer. They know Swift,
