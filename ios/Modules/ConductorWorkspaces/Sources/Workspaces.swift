@@ -416,15 +416,17 @@ public struct WorkspacesView: View {
 
     public var body: some View {
         List {
-            ForEach(store.sections) { section in
-                WorkspaceSectionView(
-                    section: section,
-                    showsRepositoryIcon: store.grouping == .status
-                        && store.selectedRepositoryID == nil,
-                    isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
-                        .animation(.default)
-                ) { item, action in
-                    workspaceRowAction(action, item: item)
+            if !store.workspaces.isEmpty {
+                ForEach(store.sections) { section in
+                    WorkspaceSectionView(
+                        section: section,
+                        showsRepositoryIcon: store.grouping == .status
+                            && store.selectedRepositoryID == nil,
+                        isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
+                            .animation(.default)
+                    ) { item, action in
+                        workspaceRowAction(action, item: item)
+                    }
                 }
             }
         }
