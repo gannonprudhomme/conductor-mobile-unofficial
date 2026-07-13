@@ -122,6 +122,12 @@ extension DesktopClient: DependencyKey {
     }
 }
 
+public extension DesktopClient {
+    static func repositoryIconURL(for repository: Repository) -> URL {
+        URL(string: "\(baseURL)/repositories/\(repository.id)/icon")!
+    }
+}
+
 public extension DependencyValues {
     var desktopClient: DesktopClient {
         get { self[DesktopClient.self] }

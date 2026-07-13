@@ -14,38 +14,44 @@ public struct CachedAsyncImage<Content: View>: View {
 
     private let url: URL?
     private let scale: CGFloat
+    private let revalidatesCachedResponse: Bool
     private let transaction: Transaction
     private let content: (AsyncImagePhase) -> Content
 
     public init(
         url: URL?,
         scale: CGFloat = 1,
+        revalidatesCachedResponse: Bool = false,
         transaction: Transaction = Transaction(),
         @ViewBuilder content: @escaping (AsyncImagePhase) -> Content
     ) {
         self.url = url
         self.scale = scale
+        self.revalidatesCachedResponse = revalidatesCachedResponse
         self.transaction = transaction
         self.content = content
     }
 
     public var body: some View {
         content(phase)
-            .task(id: url) { await task() }
+            .task(id: url) {
+                await task()
+            }
     }
 
     private func task() async {
         phase = .empty
-        guard let url else { return }
+        guard let url else {
+            return
+        }
 
         do {
-            let data = try await Loader().data(
-                for: URLRequest(url: url)
+            let image = try await Loader().image(
+                for: URLRequest(url: url),
+                scale: scale,
+                revalidatesCachedResponse: revalidatesCachedResponse
             )
             try Task.checkCancellation()
-            guard let image = UIImage(data: data, scale: scale) else {
-                throw LoadingError.invalidImageData
-            }
 
             withTransaction(transaction) {
                 phase = .success(Image(uiImage: image))
@@ -61,28 +67,52 @@ public struct CachedAsyncImage<Content: View>: View {
         }
     }
 
-    private struct Loader {
+    struct Loader {
         @Dependency(\.urlCacheClient) private var urlCacheClient
         @Dependency(\.urlSession) private var urlSession
 
-        func data(for request: URLRequest) async throws -> Data {
-            if let response = urlCacheClient.cachedResponse(request) {
-                return response.data
+        func image(
+            for request: URLRequest,
+            scale: CGFloat,
+            revalidatesCachedResponse: Bool
+        ) async throws -> UIImage {
+            let cachedResponse = urlCacheClient.cachedResponse(request)
+            let cachedImage = cachedResponse.flatMap {
+                UIImage(data: $0.data, scale: scale)
+            }
+            if let cachedImage, !revalidatesCachedResponse {
+                return cachedImage
             }
 
-            let (data, response) = try await urlSession.data(for: request)
+            var networkRequest = request
+            if cachedResponse != nil {
+                networkRequest.cachePolicy = .reloadIgnoringLocalCacheData
+            }
+            if revalidatesCachedResponse, cachedImage != nil,
+                let response = cachedResponse?.response as? HTTPURLResponse,
+                let eTag = response.value(forHTTPHeaderField: "ETag") {
+                networkRequest.setValue(eTag, forHTTPHeaderField: "If-None-Match")
+            }
+
+            let (data, response) = try await urlSession.data(for: networkRequest)
             guard let response = response as? HTTPURLResponse else {
                 throw LoadingError.invalidResponse
             }
+            if response.statusCode == 304, let cachedImage {
+                return cachedImage
+            }
             guard 200..<300 ~= response.statusCode else {
                 throw LoadingError.invalidHTTPStatus(response.statusCode)
+            }
+            guard let image = UIImage(data: data, scale: scale) else {
+                throw LoadingError.invalidImageData
             }
 
             urlCacheClient.storeCachedResponse(
                 CachedURLResponse(response: response, data: data, storagePolicy: .allowed),
                 request
             )
-            return data
+            return image
         }
     }
 
@@ -94,8 +124,16 @@ public struct CachedAsyncImage<Content: View>: View {
 }
 
 public extension CachedAsyncImage {
-    init(url: URL?, scale: CGFloat = 1) where Content == Image {
-        self.init(url: url, scale: scale) { phase in
+    init(
+        url: URL?,
+        scale: CGFloat = 1,
+        revalidatesCachedResponse: Bool = false
+    ) where Content == Image {
+        self.init(
+            url: url,
+            scale: scale,
+            revalidatesCachedResponse: revalidatesCachedResponse
+        ) { phase in
             phase.image ?? Image(uiImage: UIImage())
         }
     }
@@ -103,10 +141,15 @@ public extension CachedAsyncImage {
     init<I: View, P: View>(
         url: URL?,
         scale: CGFloat = 1,
+        revalidatesCachedResponse: Bool = false,
         @ViewBuilder content: @escaping (Image) -> I,
         @ViewBuilder placeholder: @escaping () -> P
     ) where Content == _ConditionalContent<I, P> {
-        self.init(url: url, scale: scale) { phase in
+        self.init(
+            url: url,
+            scale: scale,
+            revalidatesCachedResponse: revalidatesCachedResponse
+        ) { phase in
             if let image = phase.image {
                 content(image)
             } else {

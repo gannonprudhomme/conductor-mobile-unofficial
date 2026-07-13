@@ -8,6 +8,7 @@
 @testable import ConductorMobileData
 import CustomDump
 import Foundation
+import SharedConductorData
 import Testing
 
 struct DesktopClientTests {
@@ -42,6 +43,20 @@ struct DesktopClientTests {
         expectNoDifference(
             dates,
             Array(repeating: Date(timeIntervalSince1970: 1_783_555_200), count: 3)
+        )
+    }
+
+    @Test("Repository icon URLs use the desktop icon endpoint")
+    func repositoryIconURL() {
+        let repository = Repository(
+            id: "repository-1",
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        expectNoDifference(
+            DesktopClient.repositoryIconURL(for: repository).absoluteString,
+            "http://192.168.0.32:3768/repositories/repository-1/icon"
         )
     }
 }

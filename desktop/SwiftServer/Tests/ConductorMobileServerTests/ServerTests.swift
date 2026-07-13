@@ -18,6 +18,15 @@ import Testing
 struct ServerTests {
     @Test("Mobile routes keep the existing paths and JSON contract")
     func routes() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let iconData = Data(
+            base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )!
+        try iconData.write(to: rootURL.appending(path: "favicon.png"))
+
         let database = try testConductorDatabase()
         try await database.write { db in
             try db.execute(
@@ -61,9 +70,12 @@ struct ServerTests {
                           '2026-07-09T00:00:02Z', '2026-07-09T00:00:03Z'
                         );
 
-                        INSERT INTO repos (id, created_at, updated_at)
-                        VALUES ('repository-1', '2026-07-09T00:00:02Z', '2026-07-09T00:00:03Z');
-                        """
+                        INSERT INTO repos (id, root_path, created_at, updated_at)
+                        VALUES (
+                          'repository-1', ?, '2026-07-09T00:00:02Z', '2026-07-09T00:00:03Z'
+                        );
+                        """,
+                    arguments: [rootURL.path]
                 )
             }
 
@@ -111,6 +123,16 @@ struct ServerTests {
                 )
                 #expect(object.first?["id"] as? String == "repository-1")
                 #expect((object.first?["created_at"] as? String)?.hasSuffix(".000Z") == true)
+            }
+
+            try await client.execute(
+                uri: "/repositories/repository-1/icon",
+                method: .get
+            ) { response in
+                #expect(response.status == .ok)
+                #expect(response.headers[.contentType] == "image/png")
+                #expect(response.headers[.eTag] != nil)
+                #expect(Data(response.body.readableBytesView) == iconData)
             }
         }
     }

@@ -51,6 +51,14 @@ public enum Server {
             }
         }
 
+        router.get("/repositories/{repositoryID}/icon") { request, context in
+            try await IconRoute.response(
+                request: request,
+                context: context,
+                database: database
+            )
+        }
+
         router.get("/workspaces/{workspaceID}/sessions") { _, context in
             let workspaceID = try context.parameters.require("workspaceID")
             return try await database.read { database in
