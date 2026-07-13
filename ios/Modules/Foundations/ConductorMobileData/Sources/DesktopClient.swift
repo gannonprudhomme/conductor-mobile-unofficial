@@ -17,6 +17,7 @@ public struct DesktopClient: Sendable {
     public var fetchSessions: @Sendable (_ workspaceID: String) async throws -> [Session]
     public var fetchWorkspaces: @Sendable () async throws -> [WorkspaceSnapshot]
     public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Void
+    public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
 }
 
 public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
@@ -44,6 +45,7 @@ extension DesktopClient: DependencyKey {
             fetchMessages: { workspaceID, sessionID in
                 try await fetch(
                     [Message].self,
+                    // GET /workspaces/{workspaceID}/sessions/{sessionID}/messages
                     from: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
                 )
             },
@@ -56,6 +58,7 @@ extension DesktopClient: DependencyKey {
             fetchSessions: { workspaceID in
                 try await fetch(
                     [Session].self,
+                    // GET /workspaces/{workspaceID}/sessions
                     from: baseURL
                         .appending(path: "workspaces")
                         .appending(path: workspaceID)
@@ -73,14 +76,33 @@ extension DesktopClient: DependencyKey {
                     ["message": message],
                     to: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
                 )
+            },
+            stopSession: { workspaceID, sessionID in
+                try await post(
+                    [String: String](),
+                    // POST /workspaces/{workspaceID}/sessions/{sessionID}/stop
+                    to: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+                        .appending(path: "stop")
+                )
             }
         )
     }
 
     private static let baseURL = URL(string: "http://192.168.0.32:3768")!
 
+    // POST /workspaces/{workspaceID}/sessions/{sessionID}/messages
     private static func messagesURL(workspaceID: String, sessionID: String) -> URL {
-        URL(string: "\(baseURL)/workspaces/\(workspaceID)/sessions/\(sessionID)/messages")!
+        sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+            .appending(path: "messages")
+    }
+
+    // POST /workspaces/{workspaceID}/sessions/{sessionID}
+    private static func sessionURL(workspaceID: String, sessionID: String) -> URL {
+        baseURL
+            .appending(path: "workspaces")
+            .appending(path: workspaceID)
+            .appending(path: "sessions")
+            .appending(path: sessionID)
     }
 
     private static func fetch<Value: Decodable & Sendable>(
@@ -123,6 +145,7 @@ extension DesktopClient: DependencyKey {
 }
 
 public extension DesktopClient {
+    // GET /repositories/{repositoryID}/icon
     static func repositoryIconURL(for repository: Repository) -> URL {
         URL(string: "\(baseURL)/repositories/\(repository.id)/icon")!
     }

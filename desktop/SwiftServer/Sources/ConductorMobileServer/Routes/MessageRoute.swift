@@ -18,11 +18,11 @@ enum MessageRoute {
         context: Server.RequestContext,
         database: any DatabaseReader
     ) async throws -> HTTPResponse.Status {
-        @Dependency(SidecarBridgeClient.self) var sidecarBridgeClient
+        @Dependency(\.sidecarBridgeClient) var sidecarBridgeClient
 
         let request = try await request.decode(as: SendMessageRequest.self, context: context)
         guard !request.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw Error(.badRequest, message: "Message cannot be empty.")
+            throw PlainTextResponseError(.badRequest, message: "Message cannot be empty.")
         }
         let workspaceID = try context.parameters.require("workspaceID")
         let sessionID = try context.parameters.require("sessionID")
@@ -46,17 +46,20 @@ enum MessageRoute {
             }
         } catch {
             Logger.bridge.error("Failed to load message send context: \(error)")
-            throw Error(
+            throw PlainTextResponseError(
                 .internalServerError,
                 message: "Could not load message send context: \(error)"
             )
         }
 
         guard let messageSendContext else {
-            throw Error(.notFound, message: "Session not found.")
+            throw PlainTextResponseError(.notFound, message: "Session not found.")
         }
         guard let workspacePath = messageSendContext.workspacePath else {
-            throw Error(.conflict, message: "The workspace is not available locally.")
+            throw PlainTextResponseError(
+                .conflict,
+                message: "The workspace is not available locally."
+            )
         }
 
         do {
@@ -74,40 +77,19 @@ enum MessageRoute {
             Logger.bridge.error(
                 "Bridge request failed with status \(error.statusCode): \(error.message)"
             )
-            throw Error(
+            throw PlainTextResponseError(
                 HTTPResponse.Status(code: error.statusCode),
                 message: error.message
             )
         } catch {
             Logger.bridge.error("Failed to reach the Conductor sidecar bridge: \(error)")
-            throw Error(
+            throw PlainTextResponseError(
                 .badGateway,
                 message: "Could not reach the Conductor sidecar bridge: \(error)"
             )
         }
 
         return .noContent
-    }
-
-    /// Hummingbird's `HTTPError` encodes its message as nested JSON. This type preserves the
-    /// mobile API's existing plain-text error body while still providing the correct HTTP status.
-    struct Error: HTTPResponseError {
-        let status: HTTPResponse.Status
-        let message: String
-
-        init(_ status: HTTPResponse.Status, message: String) {
-            self.status = status
-            self.message = message
-        }
-
-        func response(
-            from request: Request,
-            context: some Hummingbird.RequestContext
-        ) throws -> Response {
-            var response = message.response(from: request, context: context)
-            response.status = status
-            return response
-        }
     }
 
     @Selection

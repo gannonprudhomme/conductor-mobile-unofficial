@@ -9,11 +9,11 @@ import * as net from "node:net";
 import type { Server as NetServer, Socket } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const BRIDGE_MARKER = "FAKE_CONDUCTOR_BRIDGE_MARKER;v0.1";
 
 type JsonObject = Record<string, unknown>;
-type JsonBodyCallback = (body: MessageInput) => void;
 
 interface PendingResponse {
   response: ServerResponse;
@@ -57,11 +57,21 @@ interface MessageInput {
   personality?: unknown;
 }
 
+interface StopInput {
+  agentType?: unknown;
+  sessionId?: unknown;
+}
+
 interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: string;
-  method: "query";
+  method: "cancel" | "query";
   params: JsonObject;
+}
+
+interface InjectedHttpResponse {
+  status: number;
+  payload: unknown;
 }
 
 function main(): void {
@@ -76,6 +86,10 @@ function main(): void {
   installSignalHandlers(context);
   advertiseProxySocket(context);
   listen(context, proxyServer, controlServer);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
 }
 
 function createContext(args: string[], env: NodeJS.ProcessEnv): ProxyContext {
@@ -245,7 +259,16 @@ function routeControlRequest(
   }
 
   if (request.method === "POST" && request.url === "/message") {
-    readJsonBody(request, response, (body) => injectMessage(context, body, response));
+    readJsonBody<MessageInput>(request, response, (body) => {
+      injectRequest(context, body, response, buildQueryRequest);
+    });
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/stop") {
+    readJsonBody<StopInput>(request, response, (body) => {
+      injectRequest(context, body, response, buildCancelRequest);
+    });
     return;
   }
 
@@ -327,7 +350,8 @@ function forwardSidecarLine(context: ProxyContext, line: string): void {
 
     clearTimeout(pending.timer);
     context.pending.delete(pendingId);
-    writeJson(pending.response, 200, parsed);
+    const response = injectedHttpResponse(parsed);
+    writeJson(pending.response, response.status, response.payload);
     writeInfo(context);
     return;
   }
@@ -335,7 +359,12 @@ function forwardSidecarLine(context: ProxyContext, line: string): void {
   context.activeClient?.write(`${JSON.stringify(parsed)}\n`);
 }
 
-function injectMessage(context: ProxyContext, body: MessageInput, response: ServerResponse): void {
+function injectRequest<Input>(
+  context: ProxyContext,
+  body: Input,
+  response: ServerResponse,
+  buildRequest: (input: Input) => JsonRpcRequest,
+): void {
   const sidecar = context.activeSidecar;
   if (!sidecar || sidecar.destroyed) {
     writeJson(response, 503, { error: "No active sidecar connection" });
@@ -344,7 +373,7 @@ function injectMessage(context: ProxyContext, body: MessageInput, response: Serv
 
   let request: JsonRpcRequest;
   try {
-    request = buildQueryRequest(body);
+    request = buildRequest(body);
   } catch (error: unknown) {
     writeJson(response, 400, { error: errorMessage(error) });
     return;
@@ -450,10 +479,42 @@ function buildQueryRequest(input: MessageInput): JsonRpcRequest {
   };
 }
 
-function readJsonBody(
+export function buildCancelRequest(input: StopInput): JsonRpcRequest {
+  const sessionId = requiredNonEmptyString(input.sessionId, "sessionId");
+  const agentType = requiredNonEmptyString(input.agentType, "agentType");
+
+  return {
+    jsonrpc: "2.0",
+    id: `mobile-cancel-${randomUUID()}`,
+    method: "cancel",
+    params: {
+      type: "cancel",
+      id: sessionId,
+      agentType,
+      expectsTerminalResponse: true,
+    },
+  };
+}
+
+export function injectedHttpResponse(response: unknown): InjectedHttpResponse {
+  const error = jsonRpcErrorMessage(response);
+  if (error !== null) {
+    return {
+      status: 502,
+      payload: { error },
+    };
+  }
+
+  return {
+    status: 200,
+    payload: response,
+  };
+}
+
+function readJsonBody<Input>(
   request: IncomingMessage,
   response: ServerResponse,
-  callback: JsonBodyCallback,
+  callback: (body: Input) => void,
 ): void {
   let raw = "";
   request.setEncoding("utf8");
@@ -467,7 +528,7 @@ function readJsonBody(
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         throw new Error("Expected JSON object");
       }
-      callback(body);
+      callback(body as Input);
     } catch (error: unknown) {
       writeJson(response, 400, { error: errorMessage(error) });
     }
@@ -522,6 +583,26 @@ function jsonRpcId(value: unknown): string | null {
   return String((value as { id: unknown }).id);
 }
 
+function jsonRpcErrorMessage(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !Object.hasOwn(value, "error")) {
+    return null;
+  }
+
+  const error = (value as { error: unknown }).error;
+  if (typeof error === "string") {
+    return error;
+  }
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+  return "The Conductor sidecar rejected the request.";
+}
+
 function isNodeErrorWithCode(error: unknown, code: string): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === code);
 }
@@ -547,5 +628,3 @@ function optionalString(value: unknown): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
 }
-
-main();

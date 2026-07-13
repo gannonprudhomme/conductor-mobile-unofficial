@@ -15,16 +15,25 @@ struct ChatTextField: View {
 
     @Binding var text: String
     let isSendInFlight: Bool
+    let isStopInFlight: Bool
+    let isWorking: Bool
     let onSendTapped: @MainActor () -> Void
+    let onStopTapped: @MainActor () -> Void
 
     init(
         text: Binding<String>,
         isSendInFlight: Bool,
-        onSendTapped: @escaping @MainActor () -> Void
+        isStopInFlight: Bool,
+        isWorking: Bool,
+        onSendTapped: @escaping @MainActor () -> Void,
+        onStopTapped: @escaping @MainActor () -> Void
     ) {
         self._text = text
         self.isSendInFlight = isSendInFlight
+        self.isStopInFlight = isStopInFlight
+        self.isWorking = isWorking
         self.onSendTapped = onSendTapped
+        self.onStopTapped = onStopTapped
     }
 
     var body: some View {
@@ -63,9 +72,17 @@ struct ChatTextField: View {
             modelPicker
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            sendButton
+            SendStopButton(
+                text: text,
+                isSendInFlight: isSendInFlight,
+                isStopInFlight: isStopInFlight,
+                isWorking: isWorking,
+                onSendTapped: onSendTapped,
+                onStopTapped: onStopTapped
+            )
         }
         .frame(maxWidth: .infinity)
+        .animation(.default, value: isWorking)
     }
 
     private var modelPicker: some View {
@@ -83,40 +100,95 @@ struct ChatTextField: View {
         .font(.theme(.small))
     }
 
-    private var isSendButtonEnabled: Bool {
-        let hasNonWhitespaceCharacters = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private struct SendStopButton: View {
+        @ScaledMetric(relativeTo: .body) private var primaryActionIconSize = ThemeFontStyle.body.size
 
-        return hasNonWhitespaceCharacters && !isSendInFlight
-    }
-
-    private var sendButton: some View {
-        SendButton(onTap: onSendTapped)
-            .disabled(!isSendButtonEnabled)
-    }
-
-    private struct SendButton: View {
-        @Environment(\.isEnabled) var isEnabled
-        let onTap: @MainActor () -> Void
+        let text: String
+        let isSendInFlight: Bool
+        let isStopInFlight: Bool
+        let isWorking: Bool
+        let onSendTapped: @MainActor () -> Void
+        let onStopTapped: @MainActor () -> Void
 
         var body: some View {
-            Button {
-                onTap()
-            } label: {
+            Button(action: primaryAction) {
                 Label {
-                    Text("Send message")
+                    Text(isWorking ? "Stop agent" : "Send message")
                 } icon: {
-                    LucideIcon(Lucide.arrowUp, style: .body)
-                        .foregroundStyle(.theme(.background))
+                    if isPrimaryActionInFlight {
+                        // Intentionally use the platform spinner for this compact button.
+                        ProgressView()
+                    } else if isWorking {
+                        let rectSize = primaryActionIconSize / 1.5
+                        Rectangle()
+                            .fill(Color.theme(.textPrimary))
+                            .frame(width: rectSize, height: rectSize)
+                            .frame(width: primaryActionIconSize, height: primaryActionIconSize)
+                            .contentTransition(.opacity)
+                    } else {
+                        LucideIcon(Lucide.arrowUp, style: .body)
+                            .contentTransition(.opacity)
+                    }
                 }
                 .labelStyle(.iconOnly)
                 .font(.theme(.body))
+                .foregroundStyle(primaryActionForegroundStyle)
+                .tint(primaryActionForegroundStyle)
                 .padding(8)
             }
+            .disabled(!isPrimaryActionEnabled)
             .glassEffect(
-                .regular
-                    .tint(.theme(.foreground).opacity(isEnabled ? 1 : 0.5))
-                    .interactive(isEnabled)
+                isWorking
+                    ? .clear
+                        .tint(Color.clear)
+                        .interactive(isPrimaryActionEnabled)
+                    : .regular
+                        .tint(primaryActionTint)
+                        .interactive(isPrimaryActionEnabled)
             )
+            .overlay {
+                if isWorking {
+                    Circle()
+                        .strokeBorder(
+                            Color.theme(.textPrimary),
+                            lineWidth: 1
+                        )
+                }
+            }
+            .animation(.default, value: isWorking)
+            .animation(.default, value: isPrimaryActionInFlight)
+        }
+
+        private var hasSendableText: Bool {
+            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        private var isPrimaryActionEnabled: Bool {
+            !isPrimaryActionInFlight && (isWorking || hasSendableText)
+        }
+
+        private var isPrimaryActionInFlight: Bool {
+            isSendInFlight || isStopInFlight
+        }
+
+        private var primaryAction: @MainActor () -> Void {
+            isWorking ? onStopTapped : onSendTapped
+        }
+
+        private var primaryActionForegroundStyle: Color {
+            if isWorking {
+                Color.theme(.textPrimary)
+            } else {
+                Color.theme(.background)
+            }
+        }
+
+        private var primaryActionTint: Color {
+            if isWorking {
+                Color.clear
+            } else {
+                Color.theme(.foreground).opacity(isPrimaryActionEnabled ? 1 : 0.5)
+            }
         }
     }
 }
@@ -134,7 +206,14 @@ struct ChatTextField: View {
     .scrollContentBackground(.hidden)
     .background(.theme(.background))
     .safeAreaBar(edge: .bottom) {
-        ChatTextField(text: $text, isSendInFlight: false) { }
+        ChatTextField(
+            text: $text,
+            isSendInFlight: false,
+            isStopInFlight: false,
+            isWorking: true,
+            onSendTapped: { },
+            onStopTapped: { }
+        )
         .preferredColorScheme(.dark)
     }
     .scrollEdgeEffectStyle(.soft, for: .bottom)

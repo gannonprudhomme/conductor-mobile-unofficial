@@ -25,6 +25,7 @@ public struct Chat: Sendable {
         @FetchOne var session: Session
         var messageDraft = ""
         var isMessageSendInFlight = false
+        var isStopInFlight = false
         var displayedContentRevision = 0
         var rows: [DisplayedChatRow]? = nil
         var turns: [Turn]? = nil
@@ -67,10 +68,11 @@ public struct Chat: Sendable {
                 && lhs.session == rhs.session
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
+                && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.displayedContentRevision == rhs.displayedContentRevision
         }
 
-        /// Read by ``WorkspaceChat`` for the animation/identity of this reducer + view
+        /// Read by ``WorkspaceChat`` to track the selected session.
         var sessionID: Session.ID { session.id }
     }
 
@@ -79,8 +81,16 @@ public struct Chat: Sendable {
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
         case sendButtonTapped
-        case sendMessageResponse(Result<String, any Error>)
+        case sendMessageResponse(
+            sessionID: Session.ID,
+            result: Result<String, any Error>
+        )
         case sessionStatusChanged(Session.Status)
+        case stopButtonTapped
+        case stopSessionResponse(
+            sessionID: Session.ID,
+            result: Result<Void, any Error>
+        )
         case binding(BindingAction<State>)
     }
 
@@ -117,6 +127,9 @@ public struct Chat: Sendable {
 
             case .sessionStatusChanged(let status):
                 state.updateRows(sessionStatus: status)
+                if status != .working {
+                    state.isStopInFlight = false
+                }
                 return .none
 
             case .sendButtonTapped:
@@ -132,10 +145,21 @@ public struct Chat: Sendable {
                         return message
                     }
 
-                    await send(.sendMessageResponse(result))
+                    await send(
+                        .sendMessageResponse(
+                            sessionID: sessionID,
+                            result: result
+                        )
+                    )
                 }
 
-            case let .sendMessageResponse(result):
+            case let .sendMessageResponse(sessionID, result):
+                // Send requests intentionally survive session navigation, so a late response
+                // must not mutate the chat that replaced the request's originating session.
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
+
                 state.isMessageSendInFlight = false
                 switch result {
                 case let .success(message):
@@ -147,6 +171,33 @@ public struct Chat: Sendable {
                     // Send errors are displayed by the parent ``WorkspaceChat``.
                     break
                 }
+                return .none
+
+            case .stopButtonTapped:
+                guard state.session.status == .working, !state.isStopInFlight else {
+                    return .none
+                }
+
+                state.isStopInFlight = true
+                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                    await send(
+                        .stopSessionResponse(
+                            sessionID: sessionID,
+                            result: await Result {
+                                try await desktopClient.stopSession(workspaceID, sessionID)
+                            }
+                        )
+                    )
+                }
+
+            case let .stopSessionResponse(sessionID, _):
+                // Like sends, stop requests intentionally survive session navigation, so ignore
+                // responses for a session that has since been replaced.
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
+
+                state.isStopInFlight = false
                 return .none
 
             case .binding, .loadMessagesFailed:
@@ -281,10 +332,12 @@ struct ChatView: View {
         .safeAreaBar(edge: .bottom) {
             ChatTextField(
                 text: $store.messageDraft,
-                isSendInFlight: store.isMessageSendInFlight
-            ) {
-                store.send(.sendButtonTapped)
-            }
+                isSendInFlight: store.isMessageSendInFlight,
+                isStopInFlight: store.isStopInFlight,
+                isWorking: store.session.status == .working,
+                onSendTapped: { store.send(.sendButtonTapped) },
+                onStopTapped: { store.send(.stopButtonTapped) }
+            )
         }
         .onChange(of: store.displayedContentRevision) {
             displayedContentRevisionChanged()

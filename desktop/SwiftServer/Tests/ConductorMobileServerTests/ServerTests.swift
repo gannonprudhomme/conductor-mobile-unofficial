@@ -168,7 +168,7 @@ struct ServerTests {
         }
         let recorder = MessageRecorder()
         try await withDependencies {
-            $0[SidecarBridgeClient.self].sendMessage = { message in
+            $0.sidecarBridgeClient.sendMessage = { message in
                 await recorder.record(message)
             }
         } operation: {
@@ -203,7 +203,7 @@ struct ServerTests {
         let database = try testConductorDatabase()
         let recorder = MessageRecorder()
         try await withDependencies {
-            $0[SidecarBridgeClient.self].sendMessage = { message in
+            $0.sidecarBridgeClient.sendMessage = { message in
                 await recorder.record(message)
             }
         } operation: {

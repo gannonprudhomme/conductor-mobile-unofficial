@@ -12,6 +12,7 @@ import Testing
 
 @testable import ConductorMobileServer
 
+@Suite(.serialized)
 struct SidecarBridgeClientTests {
     @Test("Sidecar bridge requests use the proxy's JSON keys")
     func runtimeBridgeRequestBody() async throws {
@@ -67,6 +68,57 @@ struct SidecarBridgeClientTests {
                 "model": "gpt-5.5",
                 "sessionId": "session-1",
                 "workspaceId": "workspace-1",
+            ]
+        )
+    }
+
+    @Test("Stop requests use the proxy's stop endpoint and JSON keys")
+    func runtimeStopRequest() async throws {
+        let recordedRequest = Mutex<URLRequest?>(nil)
+        BridgeURLProtocol.handler.withLock {
+            $0 = { request in
+                recordedRequest.withLock { $0 = request }
+                return (
+                    HTTPURLResponse(
+                        url: try #require(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!,
+                    Data()
+                )
+            }
+        }
+        defer {
+            BridgeURLProtocol.handler.withLock { $0 = nil }
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BridgeURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        try await withDependencies {
+            $0.urlSession = urlSession
+        } operation: {
+            try await SidecarBridgeClient.liveValue.stopSession(
+                SidecarBridgeClient.RuntimeStopRequest(
+                    agentType: "codex",
+                    sessionID: "session-1"
+                )
+            )
+        }
+
+        let request = try #require(recordedRequest.withLock { $0 })
+        #expect(request.url?.path == "/stop")
+        let body = try #require(request.bodyData)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: body) as? [String: String]
+        )
+        #expect(
+            object == [
+                "agentType": "codex",
+                "sessionId": "session-1",
             ]
         )
     }

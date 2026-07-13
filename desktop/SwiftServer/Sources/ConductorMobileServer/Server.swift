@@ -83,6 +83,13 @@ public enum Server {
             )
         }
 
+        router.post("/workspaces/{workspaceID}/sessions/{sessionID}/stop") { _, context in
+            try await StopRoute.post(
+                context: context,
+                database: database
+            )
+        }
+
         return Application(
             router: router,
             configuration: .init(

@@ -12,6 +12,7 @@ import Foundation
 @DependencyClient
 struct SidecarBridgeClient: Sendable {
     var sendMessage: @Sendable (RuntimeMessageRequest) async throws -> Void
+    var stopSession: @Sendable (RuntimeStopRequest) async throws -> Void
 
     struct RuntimeMessageRequest: Encodable, Equatable, Sendable {
         let agentType: String
@@ -31,6 +32,16 @@ struct SidecarBridgeClient: Sendable {
         }
     }
 
+    struct RuntimeStopRequest: Encodable, Equatable, Sendable {
+        let agentType: String
+        let sessionID: String
+
+        private enum CodingKeys: String, CodingKey {
+            case agentType
+            case sessionID = "sessionId"
+        }
+    }
+
     struct ResponseError: Error, Sendable {
         let statusCode: Int
         let message: String
@@ -43,13 +54,31 @@ struct SidecarBridgeClient: Sendable {
 
 extension SidecarBridgeClient: DependencyKey {
     static var liveValue: Self {
-        Self { message in
-            try await post(
-                message,
-                to: URL(string: "http://127.0.0.1:49321/message")!,
-                timeoutInterval: 125
-            )
-        }
+        let baseURL = URL(string: "http://127.0.0.1:49321")!
+
+        return Self(
+            sendMessage: { message in
+                try await post(
+                    message,
+                    to: baseURL.appending(path: "message"),
+                    timeoutInterval: 125
+                )
+            },
+            stopSession: { request in
+                try await post(
+                    request,
+                    to: baseURL.appending(path: "stop"),
+                    timeoutInterval: 5
+                )
+            }
+        )
+    }
+}
+
+extension DependencyValues {
+    var sidecarBridgeClient: SidecarBridgeClient {
+        get { self[SidecarBridgeClient.self] }
+        set { self[SidecarBridgeClient.self] = newValue }
     }
 }
 

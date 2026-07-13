@@ -10,6 +10,7 @@
     "build:swift-server": "./scripts/build-swift-server.sh release",
     "build:swift-server:debug": "./scripts/build-swift-server.sh debug",
     "preview": "vite preview",
+    "test:sidecar-proxy": "pnpm build:sidecar-proxy && node --test sidecar-proxy/dist/runtime-proxy.test.mjs",
     "tauri": "./scripts/tauri.sh"
   },
   "dependencies": {

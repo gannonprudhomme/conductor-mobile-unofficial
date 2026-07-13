@@ -312,7 +312,7 @@ struct ChatTests {
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
             }
-            await store.receive(\.sendMessageResponse.success) {
+            await store.receive(\.sendMessageResponse) {
                 $0.messageDraft = ""
                 $0.isMessageSendInFlight = false
             }
@@ -338,8 +338,55 @@ struct ChatTests {
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
             }
-            await store.receive(\.sendMessageResponse.failure) {
+            await store.receive(\.sendMessageResponse) {
                 $0.isMessageSendInFlight = false
+            }
+        }
+    }
+
+    @Test("Stopping a working session re-enables Stop after acknowledgement")
+    func stopSessionSucceeds() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession(status: "working")
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.stopSession = { workspaceID, sessionID in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                }
+            }
+
+            await store.send(.stopButtonTapped) {
+                $0.isStopInFlight = true
+            }
+            await store.receive(\.stopSessionResponse) {
+                $0.isStopInFlight = false
+            }
+        }
+    }
+
+    @Test("A stop failure re-enables the stop button")
+    func stopSessionFails() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession(status: "working")
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.stopSession = { _, _ in
+                    throw TestError()
+                }
+            }
+
+            await store.send(.stopButtonTapped) {
+                $0.isStopInFlight = true
+            }
+            await store.receive(\.stopSessionResponse) {
+                $0.isStopInFlight = false
             }
         }
     }
@@ -366,7 +413,7 @@ private func makeMessage(
     )
 }
 
-private func makeSession() throws -> Session {
+private func makeSession(status: String = "idle") throws -> Session {
     try JSONDecoder().decode(
         Session.self,
         from: Data(
@@ -379,7 +426,7 @@ private func makeSession() throws -> Session {
               "is_hidden": false,
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
-              "status": "idle",
+              "status": "\(status)",
               "model": "gpt-5",
               "unread_count": 0,
               "freshly_compacted": 0,

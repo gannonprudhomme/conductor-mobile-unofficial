@@ -337,6 +337,108 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Selecting another session does not cancel a message send")
+    func sessionSelectionDoesNotCancelMessageSend() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+        let selectedSession = try makeSession(id: "selected", workspaceID: workspace.id)
+        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                    #expect(workspaceID == workspace.id)
+                    #expect(sessionID == activeSession.id)
+                    #expect(message == "Run the tests.")
+                    for await _ in responses {
+                        throw TestError()
+                    }
+                }
+            }
+
+            await store.send(.chat(.binding(.set(\.messageDraft, "Run the tests.")))) {
+                $0.chat?.messageDraft = "Run the tests."
+            }
+            await store.send(.chat(.sendButtonTapped)) {
+                $0.chat?.isMessageSendInFlight = true
+            }
+            await store.send(.sessionButtonTapped(selectedSession)) {
+                $0.hasUserSelectedSession = true
+                $0.chat = Chat.State(session: selectedSession)
+            }
+
+            responseContinuation.yield()
+            await store.receive(\.chat.sendMessageResponse)
+            responseContinuation.finish()
+            await store.finish()
+        }
+    }
+
+    @Test("Selecting another session does not cancel a stop request")
+    func sessionSelectionDoesNotCancelStopRequest() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(
+            id: "active",
+            workspaceID: workspace.id,
+            status: "working"
+        )
+        let selectedSession = try makeSession(id: "selected", workspaceID: workspace.id)
+        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.stopSession = { workspaceID, sessionID in
+                    #expect(workspaceID == workspace.id)
+                    #expect(sessionID == activeSession.id)
+                    for await _ in responses {
+                        throw TestError()
+                    }
+                }
+            }
+
+            await store.send(.chat(.stopButtonTapped)) {
+                $0.chat?.isStopInFlight = true
+            }
+            await store.send(.sessionButtonTapped(selectedSession)) {
+                $0.hasUserSelectedSession = true
+                $0.chat = Chat.State(session: selectedSession)
+            }
+
+            responseContinuation.yield()
+            await store.receive(\.chat.stopSessionResponse)
+            responseContinuation.finish()
+            await store.finish()
+        }
+    }
+
     @Test("Archived sessions destination is seeded and dismissed")
     func archivedSessionsDestination() async throws {
         let workspace = try makeWorkspace()
@@ -435,10 +537,55 @@ struct WorkspaceChatTests {
             }
 
             await store.send(
-                .chat(.sendMessageResponse(.failure(TestError())))
+                .chat(
+                    .sendMessageResponse(
+                        sessionID: activeSession.id,
+                        result: .failure(TestError())
+                    )
+                )
             ) {
                 $0.destination = .alert(
                     .failedToSendMessage(message: TestError().localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
+    @Test("When chat fails to stop a session, an alert is presented and dismissed")
+    func chatFailsToStopSession() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .stopSessionResponse(
+                        sessionID: activeSession.id,
+                        result: .failure(TestError())
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToStopSession(message: TestError().localizedDescription)
                 )
             }
             await store.send(.destination(.dismiss)) {
@@ -494,6 +641,7 @@ private func makeSession(
     workspaceID: String,
     isHidden: Bool = false,
     createdAt: String = "2026-07-09 00:00:00",
+    status: String = "idle",
     updatedAt: String = "2026-07-09 01:00:00"
 ) throws -> Session {
     try JSONDecoder().decode(
@@ -508,7 +656,7 @@ private func makeSession(
               "is_hidden": \(isHidden),
               "created_at": "\(createdAt)",
               "updated_at": "\(updatedAt)",
-              "status": "idle",
+              "status": "\(status)",
               "model": "sonnet",
               "unread_count": 0,
               "freshly_compacted": 0,

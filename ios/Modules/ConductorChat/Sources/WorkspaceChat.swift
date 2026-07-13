@@ -135,10 +135,25 @@ public struct WorkspaceChat: Sendable {
                 state.destination = .alert(.failedToLoadMessages(message: message))
                 return .none
 
-            case let .chat(.sendMessageResponse(.failure(error))):
+            case let .chat(.sendMessageResponse(sessionID, .failure(error))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
                 Logger.chat.error("Failed to send message: \(error)")
                 state.destination = .alert(
                     .failedToSendMessage(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .chat(.stopSessionResponse(sessionID, .failure(error))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to stop session: \(error)")
+                state.destination = .alert(
+                    .failedToStopSession(message: error.localizedDescription)
                 )
                 return .none
 
@@ -241,6 +256,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     static func failedToSendMessage(message: String) -> Self {
         AlertState {
             TextState("Failed to send message")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToStopSession(message: String) -> Self {
+        AlertState {
+            TextState("Failed to stop agent")
         } message: {
             TextState(message)
         }

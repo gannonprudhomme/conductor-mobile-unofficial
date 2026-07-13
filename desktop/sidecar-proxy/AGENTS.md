@@ -4,9 +4,9 @@ This directory contains the small Node/TypeScript proxy that sits between the
 installed Conductor desktop app and the real `conductor-runtime` sidecar.
 
 Keep this proxy narrow. It exists only to preserve Conductor's normal sidecar
-traffic while providing a minimal `/message` injection path for the local
-companion app. Do not move pairing, mobile auth, SQLite reads, session browsing,
-streaming UI, or broader product logic into this directory.
+traffic while providing minimal `/message` and `/stop` injection paths for the
+local companion app. Do not move pairing, mobile auth, SQLite reads, session
+browsing, streaming UI, or broader product logic into this directory.
 
 ## How It Works
 
@@ -27,8 +27,8 @@ Runtime flow:
 - Bytes from Conductor are forwarded to the real sidecar unchanged.
 - Lines from the real sidecar are parsed as newline-delimited JSON when
   possible.
-- Replies matching an injected `/message` JSON-RPC id are returned to that HTTP
-  caller.
+- Replies matching an injected control-request JSON-RPC id are returned to that
+  HTTP caller.
 - All other sidecar messages are forwarded back to Conductor unchanged.
 - Non-JSON sidecar output is forwarded back to Conductor instead of being
   treated as a proxy error.
@@ -39,6 +39,9 @@ Control API:
 - `POST /message` validates a JSON body, builds the reverse-engineered
   SidecarV2 `query` JSON-RPC request, writes it to the active real-sidecar
   socket, and waits for the matching response id.
+- `POST /stop` validates a JSON body, builds the reverse-engineered SidecarV2
+  `cancel` JSON-RPC request, writes it to the active real-sidecar socket, and
+  waits for the matching response id.
 
 ## Editing Rules
 
@@ -70,5 +73,6 @@ Build and syntax-check from `desktop/`:
 
 ```sh
 pnpm build:sidecar-proxy
+pnpm test:sidecar-proxy
 node --check sidecar-proxy/dist/runtime-proxy.mjs
 ```
