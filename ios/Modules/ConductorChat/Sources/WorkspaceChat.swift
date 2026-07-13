@@ -54,7 +54,7 @@ public struct WorkspaceChat: Sendable {
             let activeSessions = FetchAll(
                 Session
                     .where { $0.workspaceID.eq(workspace.id).and(!$0.isHidden) }
-                    .order { $0.updatedAt.desc() },
+                    .order(by: \.createdAt),
                 animation: .default
             )
 
@@ -348,6 +348,7 @@ public struct WorkspaceChatView: View {
         let selectedSessionID: Session.ID?
         let height: CGFloat
         let action: @MainActor (Session) -> Void
+        @State private var scrollPosition = ScrollPosition(idType: Session.ID.self)
 
         var body: some View {
             ScrollView(.horizontal) {
@@ -360,13 +361,34 @@ public struct WorkspaceChatView: View {
                             ) {
                                 action(session)
                             }
+                            // This padding originally lived on the GlassEffectContainer, but
+                            // applying it directly to the edge buttons keeps them from touching
+                            // the screen edge when ScrollPosition scrolls to them.
+                            .padding(.leading, session.id == sessions.first?.id ? 16 : 0)
+                            .padding(.trailing, session.id == sessions.last?.id ? 16 : 0)
                         }
                     }
+                    .scrollTargetLayout()
                 }
-                .padding(EdgeInsets(vertical: 8, horizontal: 16))
+                .padding(.vertical, 8)
             }
+            .scrollPosition($scrollPosition)
             .scrollIndicators(.hidden)
             .frame(height: height)
+            // Run initially for the cached active session, then follow active or user selections.
+            .onChange(of: selectedSessionID, initial: true) { _, sessionID in
+                selectedSessionChanged(sessionID)
+            }
+        }
+
+        private func selectedSessionChanged(_ sessionID: Session.ID?) {
+            guard let sessionID else {
+                return
+            }
+
+            withAnimation {
+                scrollPosition.scrollTo(id: sessionID, anchor: .center)
+            }
         }
     }
 

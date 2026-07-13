@@ -15,6 +15,39 @@ import Testing
 
 @MainActor
 struct WorkspaceChatTests {
+    @Test("Active sessions match Conductor's creation order")
+    func activeSessionsMatchConductorOrder() throws {
+        let olderSession = try makeSession(
+            id: "older",
+            workspaceID: "workspace-1",
+            createdAt: "2026-07-09 00:00:00",
+            updatedAt: "2026-07-09 03:00:00"
+        )
+        let newerSession = try makeSession(
+            id: "newer",
+            workspaceID: "workspace-1",
+            createdAt: "2026-07-09 01:00:00",
+            updatedAt: "2026-07-09 02:00:00"
+        )
+
+        try withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { newerSession }.execute(db)
+                try Session.upsert { olderSession }.execute(db)
+            }
+        } operation: {
+            let state = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: try makeWorkspace(activeSessionID: newerSession.id),
+                    repository: nil
+                )
+            )
+
+            #expect(state.activeSessions.map(\.id) == [olderSession.id, newerSession.id])
+        }
+    }
+
     @Test("The active workspace session is selected")
     func activeSessionIsSelected() throws {
         let activeSession = try makeSession(id: "active", workspaceID: "workspace-1")
@@ -497,6 +530,7 @@ private func makeSession(
     id: String,
     workspaceID: String,
     isHidden: Bool = false,
+    createdAt: String = "2026-07-09 00:00:00",
     updatedAt: String = "2026-07-09 01:00:00"
 ) throws -> Session {
     try JSONDecoder().decode(
@@ -509,7 +543,7 @@ private func makeSession(
               "title": "Session \(id)",
               "agent_type": "claude",
               "is_hidden": \(isHidden),
-              "created_at": "2026-07-09 00:00:00",
+              "created_at": "\(createdAt)",
               "updated_at": "\(updatedAt)",
               "status": "idle",
               "model": "sonnet",
