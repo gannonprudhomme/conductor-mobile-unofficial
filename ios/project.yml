@@ -166,6 +166,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorMainTests
         PRODUCT_NAME: $(TARGET_NAME)
 schemes:
+  ConductorMobile:
+    build:
+      targets:
+        ConductorMobile: all
   ConductorChatTests:
     build:
       targets:
