@@ -2,7 +2,6 @@
 
 [scripts]
 archive = "mise run clean-sims"
-run_mode = "nonconcurrent"
 
 [scripts.run.run]
 available_in = ["local"]
