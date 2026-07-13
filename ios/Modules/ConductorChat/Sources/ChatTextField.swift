@@ -45,8 +45,8 @@ struct ChatTextField: View {
         .animation(.default, value: isFocused)
         .padding(EdgeInsets(vertical: 12, horizontal: 16))
         .glassEffect(
-            .regular
-                .tint(.theme(.background).opacity(0.8)),
+            .clear
+                .tint(.theme(.background).opacity(0.75)),
             in: .rect(cornerRadius: 26)
         )
         .padding(EdgeInsets(vertical: 8, horizontal: 8))

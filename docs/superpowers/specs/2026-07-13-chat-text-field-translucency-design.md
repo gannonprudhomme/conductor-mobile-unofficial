@@ -6,12 +6,12 @@ Make the chat composer read as a clear, translucent surface while retaining its 
 
 ## Design
 
-Change the `ChatTextField` container's glass style from regular glass with an 80% background tint to clear glass with a 50% background tint:
+Change the `ChatTextField` container's glass style from regular glass with an 80% background tint to clear glass with a 75% background tint:
 
 ```swift
 .glassEffect(
     .clear
-        .tint(.theme(.background).opacity(0.5)),
+        .tint(.theme(.background).opacity(0.75)),
     in: .rect(cornerRadius: 26)
 )
 ```
