@@ -19,16 +19,29 @@ import SwiftUI
 /// i.e. this doesn't own its nav bar
 @Reducer
 public struct Chat: Sendable {
+    public typealias TurnSummaryID = String
+
     @ObservableState
     public struct State: Equatable {
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
+
         var messageDraft = ""
         var isMessageSendInFlight = false
         var isStopInFlight = false
         var displayedContentRevision = 0
-        var rows: [DisplayedChatRow]? = nil
+        var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
+
+        /// The turns + parsed rows (e.g. `Message.content` -> `CodexEvent`)
+        ///
+        /// We store this as this is *really* the source of truth in a sense for the rows we display.
+        /// Whereas ``rows`` below may not contain all possible message rows, e.g. rows that are collapsible behind a "turn summary".
         var turns: [Turn]? = nil
+
+        /// The final representation of rows to display.
+        ///
+        /// This hides or shows rows based on their collapsed status for turned rows
+        var rows: [DisplayedChatRow]? = nil
 
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
@@ -37,7 +50,8 @@ public struct Chat: Sendable {
             }
 
             rows = turns.flattenedChatRows(
-                activeTurnID: sessionStatus == .working ? turns.last?.id : nil
+                activeTurnID: sessionStatus == .working ? turns.last?.id : nil,
+                expandedSummaryIDs: expandedSummaryIDs
             )
         }
 
@@ -70,6 +84,7 @@ public struct Chat: Sendable {
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.displayedContentRevision == rhs.displayedContentRevision
+                && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
         }
 
         /// Read by ``WorkspaceChat`` to track the selected session.
@@ -91,6 +106,7 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             result: Result<Void, any Error>
         )
+        case turnSummaryTapped(Chat.TurnSummaryID)
         case binding(BindingAction<State>)
     }
 
@@ -130,6 +146,13 @@ public struct Chat: Sendable {
                 if status != .working {
                     state.isStopInFlight = false
                 }
+                return .none
+
+            case .turnSummaryTapped(let summaryID):
+                if state.expandedSummaryIDs.remove(summaryID) == nil {
+                    state.expandedSummaryIDs.insert(summaryID)
+                }
+                state.updateRows(sessionStatus: state.session.status)
                 return .none
 
             case .sendButtonTapped:
@@ -299,7 +322,12 @@ struct ChatView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: ChatRowLayout.stackSpacing) {
-                ChatRows(rows: store.rows ?? [])
+                ChatRows(
+                    rows: store.rows ?? [],
+                    turnSummaryTapped: {
+                        store.send(.turnSummaryTapped($0), animation: .default)
+                    }
+                )
 
                 Color.clear
                     .frame(height: 1)
@@ -422,10 +450,14 @@ struct ChatView: View {
 
     private struct ChatRows: View {
         let rows: [DisplayedChatRow]
+        let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
 
         var body: some View {
             ForEach(rows) { row in
-                ChatRowView(row: row)
+                ChatRowView(
+                    row: row,
+                    turnSummaryTapped: turnSummaryTapped
+                )
                     .padding(.horizontal, ChatRowLayout.horizontalPadding)
                     .padding(.top, ChatRowLayout.rowTopPadding)
             }
@@ -434,6 +466,7 @@ struct ChatView: View {
 
     private struct ChatRowView: View {
         let row: DisplayedChatRow
+        let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
 
         var body: some View {
             switch row {
@@ -455,6 +488,10 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .turnInProgress(let row):
                 TurnInProgressView(row: row)
+            case .turnSummary(let summary):
+                TurnSummaryRowView(summary: summary) {
+                    turnSummaryTapped(summary.id)
+                }
             }
         }
     }

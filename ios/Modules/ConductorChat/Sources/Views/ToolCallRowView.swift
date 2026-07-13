@@ -1,5 +1,5 @@
 //
-//  ToolCallRoleView.swift
+//  ToolCallRowView.swift
 //  ConductorChat
 //
 //  Created by Gannon Prudomme on 7/10/26.
@@ -22,7 +22,7 @@ struct ToolCallRowView: View {
                     Text(title)
                 }
             } icon: {
-                LucideIcon(lucideIcon, style: .small)
+                LucideIcon(DisplayedChatRow.TurnSummary.ToolIcon(toolCall).image, style: .small)
             }
         }
         .lineLimit(1)
@@ -38,27 +38,6 @@ struct ToolCallRowView: View {
                 
                 configuration.content
             }
-        }
-    }
-    
-    private var lucideIcon: UIImage {
-        switch toolCall {
-        case .readFile:
-            return Lucide.fileText
-        case .writeFile, .editFile:
-            return Lucide.filePen
-        case .listFiles:
-            return Lucide.fileQuestionMark // TODO: Need to get still
-        case .bash:
-            return Lucide.terminal
-        case .webSearch:
-            return Lucide.globe // TODO: Need to find
-        case .grep:
-            return Lucide.search
-        case .mcp:
-            return Lucide.airplay // TODO: Unsure
-        case .unknown:
-            return Lucide.fileQuestionMark
         }
     }
     
@@ -92,9 +71,9 @@ struct ToolCallRowView: View {
         switch toolCall {
         case .readFile(_, let filePath):
             FileTagView(fileName: fileName(from: filePath))
-        case .writeFile(_, let filePath, let content):
+        case .writeFile(_, let filePath, _):
             FileTagView(fileName: fileName(from: filePath))
-        case .editFile(_, let filePath, let oldString, let newString):
+        case .editFile(_, let filePath, _, _):
             FileTagView(fileName: fileName(from: filePath))
         case .listFiles(_, let path):
             somethingText(fileName(from: path ?? "."))
@@ -107,7 +86,7 @@ struct ToolCallRowView: View {
             Text("grep for '\(pattern)' in \(Text(fileName(from: path)).monospaced())")
         case .mcp(_, let name):
             Text(name)
-        case .unknown(_, let name, let input):
+        case .unknown(_, let name, _):
             Text(name)
         }
     }
@@ -124,6 +103,46 @@ struct ToolCallRowView: View {
     
     private func fileName(from path: String) -> String {
         URL(filePath: path).lastPathComponent
+    }
+}
+
+extension DisplayedChatRow.TurnSummary.ToolIcon {
+    var image: UIImage {
+        switch self {
+        case .fileText:
+            Lucide.fileText
+        case .filePen:
+            Lucide.filePen
+        case .fileQuestionMark:
+            Lucide.fileQuestionMark
+        case .terminal:
+            Lucide.terminal
+        case .globe:
+            Lucide.globe
+        case .search:
+            Lucide.search
+        case .airplay:
+            Lucide.airplay
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .fileText:
+            "file reads"
+        case .filePen:
+            "file changes"
+        case .fileQuestionMark:
+            "other file tools"
+        case .terminal:
+            "terminal commands"
+        case .globe:
+            "web searches"
+        case .search:
+            "code searches"
+        case .airplay:
+            "MCP tools"
+        }
     }
 }
 

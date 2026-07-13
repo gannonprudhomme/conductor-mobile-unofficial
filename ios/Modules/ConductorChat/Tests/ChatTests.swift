@@ -16,7 +16,7 @@ import Testing
 
 @MainActor
 struct ChatTests {
-    @Test("State equality tracks completed presentation rebuilds but not derived caches")
+    @Test("State equality tracks presentation changes but not derived caches")
     func stateEquality() throws {
         try withDependencies {
             try $0.bootstrapDatabase()
@@ -30,6 +30,10 @@ struct ChatTests {
 
             changedCaches.displayedContentRevision += 1
             #expect(original != changedCaches)
+
+            var changedExpansion = original
+            changedExpansion.expandedSummaryIDs.insert("turn-1:human-1")
+            #expect(original != changedExpansion)
         }
     }
 
@@ -390,6 +394,81 @@ struct ChatTests {
             }
         }
     }
+
+    @Test("Summary taps rebuild projected rows")
+    func turnSummaryTappedUpdatesRows() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let turn = Turn(
+                id: "turn-1",
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                rows: [
+                    .humanMessageRow(.init(id: "human-1", content: "Build it")),
+                    .assistantMessage(
+                        .toolCall(
+                            messageID: "tool-1",
+                            toolCall: .readFile(toolUseID: "tool-1", filePath: "File.swift")
+                        )
+                    ),
+                    .assistantMessage(
+                        .text(
+                            messageID: "final",
+                            content: .init("Done"),
+                            isMostRecentTextInTurn: true
+                        )
+                    ),
+                ]
+            )
+            let summaryID = "turn-1:human-1"
+            var state = Chat.State(session: session)
+            state.turns = [turn]
+            state.updateRows(sessionStatus: .idle)
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: "human-1", content: "Build it"),
+                    .turnSummary(id: summaryID, isExpanded: false),
+                    .assistant(id: "assistant:final:chunk:0"),
+                ]
+            )
+
+            await store.send(.turnSummaryTapped(summaryID)) {
+                $0.expandedSummaryIDs = [summaryID]
+                $0.rows = [turn].flattenedChatRows(
+                    activeTurnID: nil,
+                    expandedSummaryIDs: [summaryID]
+                )
+            }
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: "human-1", content: "Build it"),
+                    .turnSummary(id: summaryID, isExpanded: true),
+                    .assistant(id: "assistant:tool-1"),
+                    .assistant(id: "assistant:final:chunk:0"),
+                ]
+            )
+
+            await store.send(.turnSummaryTapped(summaryID)) {
+                $0.expandedSummaryIDs = []
+                $0.rows = [turn].flattenedChatRows(activeTurnID: nil)
+            }
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: "human-1", content: "Build it"),
+                    .turnSummary(id: summaryID, isExpanded: false),
+                    .assistant(id: "assistant:final:chunk:0"),
+                ]
+            )
+        }
+    }
 }
 
 private func makeMessage(
@@ -447,15 +526,18 @@ private enum DisplayedRowProjection: Equatable {
     case human(id: String, content: String)
     case assistant(id: String)
     case turnInProgress(id: String, startedAt: Date)
+    case turnSummary(id: String, isExpanded: Bool)
 
     init(_ row: DisplayedChatRow) {
-        switch row {
+        self = switch row {
         case .humanMessage(let message):
-            self = .human(id: message.id, content: message.content)
+            .human(id: message.id, content: message.content)
         case .assistantTextChunk, .assistantToolCall, .assistantError:
-            self = .assistant(id: row.id)
+            .assistant(id: row.id)
         case .turnInProgress(let progress):
-            self = .turnInProgress(id: progress.id, startedAt: progress.startedAt)
+            .turnInProgress(id: progress.id, startedAt: progress.startedAt)
+        case .turnSummary(let summary):
+            .turnSummary(id: summary.id, isExpanded: summary.isExpanded)
         }
     }
 }

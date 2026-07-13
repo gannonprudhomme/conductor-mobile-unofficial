@@ -19,8 +19,11 @@ import MarkdownUI
 struct Turn: Identifiable {
     let id: String
     let startedAt: Date
-    var rows: [Row]
+    private(set) var rows: [Row]
     
+    /// The first parsed representation of a parsed ``Message``
+    ///
+    ///
     enum Row {
         case humanMessageRow(HumanMessageRow)
         case assistantMessage(AssistantMessage)
@@ -235,7 +238,7 @@ struct Turn: Identifiable {
 }
 
 /// Helper for `ToolCall.init(from toolUseBlock:)`
-private extension Dictionary where Key == String, Value == JSONValue { /// aka `extension [String: JSONValue} { ...`
+private extension Dictionary where Key == String, Value == JSONValue {
     func string(for key: String) -> String? {
         guard case let .string(value) = self[key] else {
             return nil
@@ -251,6 +254,7 @@ extension Turn {
         parse(messages: messages, reusing: [])
     }
 
+    /// Called immediately once we receive Messages from the host
     static func parse(
         messages: [Message],
         reusing previousTurns: [Turn]
@@ -296,28 +300,20 @@ extension Turn {
                                     ),
                                     isMostRecentTextInTurn: true
                                 )
-                            case .thinking(let thinkingBlock):
-                                nil
                             case .toolUse(let toolUseBlock):
                                 .toolCall(messageID: message.id, toolCall: .init(from: toolUseBlock))
-                            case .unknown(let dictionary):
+                            case .thinking, .unknown:
                                 nil
                             }
                         } else {
                             nil
                         }
-                    case .user(let userEvent):
-                        nil
-                    case .system:
-                        nil
-                    case .result:
-                        nil
                     case .error(let errorEvent):
                         .error(messageID: message.id, message: errorEvent.content)
-                    case .unknown(let dictionary):
+                    case .user, .system, .result, .unknown:
                         nil
                     }
-                    
+
                     guard let row else {
                         return nil
                     }
@@ -369,9 +365,12 @@ extension Turn {
 
 /// One physical row in the outer `LazyVStack`.
 ///
-/// `Turn.Row` preserves the logical message structure, where one assistant text message
-/// owns every Markdown chunk. `DisplayedChatRow` is the flattened rendering structure: it expands
-/// those chunks into separate rows so SwiftUI can create them lazily near the viewport.
+/// `Turn.Row` preserves the logical message structure, where one assistant text message owns every Markdown chunk.
+/// `DisplayedChatRow` is the flattened rendering structure: it expands those chunks into separate rows so SwiftUI can create them lazily near the viewport.
+///
+/// Basically meaning: this is pretty much identical to `Turn.Row`, except that this:
+/// - Splits `Turn.Row.assistantMessage` into potentially multiple Markdown rows (for performance), depending on how big it is
+/// - Includes `turnSummary` and `turnInProgress` which are not actual `Message`s, but are derived from them.
 enum DisplayedChatRow: Identifiable {
     case humanMessage(Turn.Row.HumanMessageRow)
     case assistantTextChunk(
@@ -382,6 +381,46 @@ enum DisplayedChatRow: Identifiable {
     case assistantToolCall(messageID: String, toolCall: Turn.Row.AssistantMessage.ToolCall)
     case assistantError(messageID: String, message: String)
     case turnInProgress(Turn.Row.TurnInProgress)
+    case turnSummary(TurnSummary)
+
+    struct TurnSummary: Equatable, Identifiable {
+        let id: String
+        let isExpanded: Bool
+        let toolCallCount: Int
+        let messageCount: Int
+        let toolIcons: [ToolIcon]
+
+        enum ToolIcon: Hashable, Identifiable {
+            case fileText
+            case filePen
+            case fileQuestionMark
+            case terminal
+            case globe
+            case search
+            case airplay
+
+            var id: Self { self }
+
+            init(_ toolCall: Turn.Row.AssistantMessage.ToolCall) {
+                self = switch toolCall {
+                case .readFile:
+                    .fileText
+                case .writeFile, .editFile:
+                    .filePen
+                case .listFiles, .unknown:
+                    .fileQuestionMark
+                case .bash:
+                    .terminal
+                case .webSearch:
+                    .globe
+                case .grep:
+                    .search
+                case .mcp:
+                    .airplay
+                }
+            }
+        }
+    }
 
     var id: String {
         switch self {
@@ -394,6 +433,34 @@ enum DisplayedChatRow: Identifiable {
             "assistant:\(messageID)"
         case .turnInProgress(let row):
             "turn-in-progress:\(row.id)"
+        case .turnSummary(let summary):
+            "summary:\(summary.id)"
+        }
+    }
+}
+
+private extension Turn.Row {
+    /// Converts this logical turn row into physical chat rows, expanding assistant text into
+    /// one row per rendered Markdown chunk whenever a Markdown block is too large (>2k characters currently)
+    func expandedIntoMultipleMarkdownChunkRows() -> [DisplayedChatRow] {
+        switch self {
+        case .humanMessageRow(let row):
+            [.humanMessage(row)]
+        case .assistantMessage(let message):
+            switch message {
+            case let .text(messageID, content, isMostRecentTextInTurn):
+                content.chunks.map {
+                    .assistantTextChunk(
+                        messageID: messageID,
+                        chunk: $0,
+                        isMostRecentTextInTurn: isMostRecentTextInTurn
+                    )
+                }
+            case let .toolCall(messageID, toolCall):
+                [.assistantToolCall(messageID: messageID, toolCall: toolCall)]
+            case let .error(messageID, message):
+                [.assistantError(messageID: messageID, message: message)]
+            }
         }
     }
 }
@@ -410,39 +477,215 @@ extension Array where Element == Turn {
     ///
     /// The progress indicator is inserted here so each element in the lazy stack's
     /// `ForEach` always produces exactly one view, including the active turn state.
-    func flattenedChatRows(activeTurnID: Turn.ID?) -> [DisplayedChatRow] {
+    func flattenedChatRows(
+        activeTurnID: Turn.ID?,
+        expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
+    ) -> [DisplayedChatRow] {
         flatMap { turn in
-            let rows = turn.rows.flatMap { row -> [DisplayedChatRow] in
-                switch row {
-                case .humanMessageRow(let row):
-                    [.humanMessage(row)]
-                case .assistantMessage(let message):
-                    switch message {
-                    case let .text(messageID, content, isMostRecentTextInTurn):
-                        content.chunks.map {
-                            .assistantTextChunk(
-                                messageID: messageID,
-                                chunk: $0,
-                                isMostRecentTextInTurn: isMostRecentTextInTurn
-                            )
-                        }
-                    case let .toolCall(messageID, toolCall):
-                        [.assistantToolCall(messageID: messageID, toolCall: toolCall)]
-                    case let .error(messageID, message):
-                        [.assistantError(messageID: messageID, message: message)]
-                    }
-                }
-            }
+            let isActive = turn.id == activeTurnID
+            let projectedRows = turn.projectedChatRows(
+                isActive: isActive,
+                expandedSummaryIDs: expandedSummaryIDs
+            )
 
-            return if turn.id == activeTurnID {
-                rows + [
+            return if isActive {
+                projectedRows + [
                     .turnInProgress(
                         .init(id: turn.id, startedAt: turn.startedAt)
                     ),
                 ]
             } else {
-                rows
+                projectedRows
             }
         }
+    }
+}
+
+extension Turn {
+    /// Projects this turn's logical message rows into the physical rows consumed by `ChatRows`.
+    ///
+    /// `flattenedChatRows(activeTurnID:expandedSummaryIDs:)` calls this whenever `Chat.State`
+    /// rebuilds its cached presentation rows. Active turns remain fully expanded so streaming
+    /// progress never disappears behind a disclosure. Completed turns are split into segments
+    /// beginning with each human message; collapsible assistant work in each segment is replaced
+    /// by a summary row while the last global text or error remains visible as the final response.
+    ///
+    /// - Parameters:
+    ///   - isActive: Whether this turn is currently receiving assistant events.
+    ///   - expandedSummaryIDs: Summary IDs whose assistant work should be visible.
+    /// - Returns: Physical rows for the current disclosure state, ordered by source segment.
+    fileprivate func projectedChatRows(
+        isActive: Bool,
+        expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID>
+    ) -> [DisplayedChatRow] {
+        // This turn is active, don't attempt to collapse it - just return the rows entirely
+        guard !isActive else {
+            return rows.flatMap { $0.expandedIntoMultipleMarkdownChunkRows() }
+        }
+
+        // A completed turn can finish with another tool call after already presenting its answer.
+        // Find the last displayable text or error once for the entire turn so every segment can
+        // preserve that global response without repeatedly scanning `rows`.
+        let finalResponseRowIndex = rows.indices.last { index in
+            switch rows[index] {
+            case let .assistantMessage(.text(_, content, _)):
+                !content.chunks.isEmpty
+            case .assistantMessage(.error):
+                true
+            case .humanMessageRow, .assistantMessage(.toolCall):
+                false
+            }
+        }
+        var displayedRows: [DisplayedChatRow] = []
+        var humanMessage: Row.HumanMessageRow?
+        var assistantRows: [(index: Int, row: Row)] = []
+
+        // Each human message starts a collapsible segment containing the assistant rows that follow it.
+        // Assistant rows before any human message are emitted directly because they have no human anchor from which to derive a stable summary ID.
+        for (index, row) in rows.enumerated() {
+            switch row {
+            case .humanMessageRow(let row):
+                let rowsToAppend = Self.displayedRowsForSegment(
+                    turnID: self.id,
+                    humanMessage: humanMessage,
+                    finalResponseRowIndex: finalResponseRowIndex,
+                    expandedSummaryIDs: expandedSummaryIDs,
+                    assistantRows: assistantRows
+                )
+
+                displayedRows.append(contentsOf: rowsToAppend)
+                humanMessage = row
+                assistantRows.removeAll(keepingCapacity: true)
+            case .assistantMessage:
+                if humanMessage == nil { // no human message before this (somehow)
+                    displayedRows.append(contentsOf: row.expandedIntoMultipleMarkdownChunkRows())
+                } else {
+                    assistantRows.append((index, row))
+                }
+            }
+        }
+
+        // A segment is emitted when the next human message begins. For [human, tool, text], no next
+        // human message arrives, so `humanMessage` and `assistantRows` still hold that entire
+        // segment when the loop ends. Emit the final buffered segment here.
+        displayedRows.append(
+            contentsOf: Self.displayedRowsForSegment(
+                turnID: self.id,
+                humanMessage: humanMessage,
+                finalResponseRowIndex: finalResponseRowIndex,
+                expandedSummaryIDs: expandedSummaryIDs,
+                assistantRows: assistantRows
+            )
+        )
+
+        return displayedRows
+    }
+
+    /// Projects a human-message segment into the rows consumed by `ChatRows`.
+    /// Keeping logical assistant rows until this point lets the summary count messages and tools
+    /// before chunk expansion.
+    private static func displayedRowsForSegment(
+        turnID: Turn.ID,
+        humanMessage: Row.HumanMessageRow?,
+        finalResponseRowIndex: Int?,
+        expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID>,
+        assistantRows: [(index: Int, row: Row)]
+    ) -> [DisplayedChatRow] {
+        guard let humanMessage else {
+            return []
+        }
+
+        // Human messages are segment anchors and always remain visible.
+        var segmentRows: [DisplayedChatRow] = [.humanMessage(humanMessage)]
+
+        // The final global response stays outside its summary. Earlier displayable text,
+        // errors, and tool calls are revealable; empty text is not collapsible because toggling
+        // it could not reveal a physical row.
+        func shouldBeControlledByTurnSummary(_ indexedRow: (index: Int, row: Row)) -> Bool {
+            guard indexedRow.index != finalResponseRowIndex else {
+                return false
+            }
+
+            return switch indexedRow.row {
+            case let .assistantMessage(.text(_, content, _)):
+                !content.chunks.isEmpty
+            case .assistantMessage(.toolCall), .assistantMessage(.error):
+                true
+            case .humanMessageRow:
+                false
+            }
+        }
+
+        let summarizedRows = assistantRows.filter(shouldBeControlledByTurnSummary)
+        // A disclosure is useful only when expanding it reveals at least one row.
+        guard !summarizedRows.isEmpty else {
+            segmentRows.append(
+                contentsOf: assistantRows.flatMap { $0.row.expandedIntoMultipleMarkdownChunkRows() }
+            )
+            return segmentRows
+        }
+
+        let summary = Self.turnSummaryForSegment(
+            turnID: turnID,
+            humanMessageID: humanMessage.id,
+            expandedSummaryIDs: expandedSummaryIDs,
+            summarizedRows: summarizedRows
+        )
+        segmentRows.append(.turnSummary(summary))
+
+        // Expansion restores every displayable assistant row in source order. Collapsing retains
+        // only rows excluded from the summary, principally the final global response.
+        let visibleAssistantRows = if summary.isExpanded {
+            assistantRows
+        } else {
+            assistantRows.filter { !shouldBeControlledByTurnSummary($0) }
+        }
+
+        segmentRows.append(
+            contentsOf: visibleAssistantRows.flatMap { $0.row.expandedIntoMultipleMarkdownChunkRows() }
+        )
+
+        return segmentRows
+    }
+
+    /// Creates the disclosure summary for a human-message segment.
+    private static func turnSummaryForSegment(
+        turnID: Turn.ID,
+        humanMessageID: Row.HumanMessageRow.ID,
+        expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID>,
+        summarizedRows: [(index: Int, row: Row)]
+    ) -> DisplayedChatRow.TurnSummary {
+        // Including the human-message ID keeps summaries independently addressable when one
+        // stored turn contains multiple steered human messages.
+        let summaryID = "\(turnID):\(humanMessageID)"
+        var messageCount = 0
+        var toolCallCount = 0
+        var toolIcons: [DisplayedChatRow.TurnSummary.ToolIcon] = []
+        var seenToolIcons: Set<DisplayedChatRow.TurnSummary.ToolIcon> = []
+
+        // Counts describe exactly what expansion reveals. Tool icons represent distinct
+        // categories and retain first-use order so their arrangement is stable and meaningful.
+        for (_, row) in summarizedRows {
+            switch row {
+            case .assistantMessage(.text), .assistantMessage(.error):
+                messageCount += 1
+            case .assistantMessage(.toolCall(_, let toolCall)):
+                toolCallCount += 1
+                let toolIcon = DisplayedChatRow.TurnSummary.ToolIcon(toolCall)
+                if seenToolIcons.insert(toolIcon).inserted {
+                    toolIcons.append(toolIcon)
+                }
+            case .humanMessageRow:
+                break
+            }
+        }
+
+        return .init(
+            id: summaryID,
+            isExpanded: expandedSummaryIDs.contains(summaryID),
+            toolCallCount: toolCallCount,
+            messageCount: messageCount,
+            toolIcons: toolIcons
+        )
     }
 }

@@ -400,6 +400,435 @@ struct TurnTests {
         )
     }
 
+    @Test("Completed turns derive independently expandable segments in source order")
+    func completedTurnProjection() {
+        let human1 = Turn.Row.humanMessageRow(.init(id: "human-1", content: "Build it"))
+        let text1 = Turn.Row.assistantMessage(
+            .text(
+                messageID: "text-1",
+                content: .init("Working"),
+                isMostRecentTextInTurn: false
+            )
+        )
+        let tool1 = Turn.Row.assistantMessage(
+            .toolCall(
+                messageID: "tool-1",
+                toolCall: .readFile(toolUseID: "tool-read", filePath: "File.swift")
+            )
+        )
+        let human2 = Turn.Row.humanMessageRow(.init(id: "human-2", content: "Also test it"))
+        let text2 = Turn.Row.assistantMessage(
+            .text(
+                messageID: "text-2",
+                content: .init("Testing"),
+                isMostRecentTextInTurn: false
+            )
+        )
+        let tool2 = Turn.Row.assistantMessage(
+            .toolCall(
+                messageID: "tool-2",
+                toolCall: .grep(toolUseID: "tool-grep", pattern: "projectedChatRows", path: "Tests")
+            )
+        )
+        let final = Turn.Row.assistantMessage(
+            .text(
+                messageID: "final",
+                content: .init("Done"),
+                isMostRecentTextInTurn: true
+            )
+        )
+        let turn = Turn(
+            id: "turn-1",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            rows: [human1, text1, tool1, human2, text2, tool2, final]
+        )
+        let summary1 = DisplayedChatRow.TurnSummary(
+            id: "turn-1:human-1",
+            isExpanded: false,
+            toolCallCount: 1,
+            messageCount: 1,
+            toolIcons: [.fileText]
+        )
+        let summary2 = DisplayedChatRow.TurnSummary(
+            id: "turn-1:human-2",
+            isExpanded: false,
+            toolCallCount: 1,
+            messageCount: 1,
+            toolIcons: [.search]
+        )
+        let expandedSummary1 = DisplayedChatRow.TurnSummary(
+            id: summary1.id,
+            isExpanded: true,
+            toolCallCount: summary1.toolCallCount,
+            messageCount: summary1.messageCount,
+            toolIcons: summary1.toolIcons
+        )
+        let expandedSummary2 = DisplayedChatRow.TurnSummary(
+            id: summary2.id,
+            isExpanded: true,
+            toolCallCount: summary2.toolCallCount,
+            messageCount: summary2.messageCount,
+            toolIcons: summary2.toolIcons
+        )
+        let rows: (Set<DisplayedChatRow.TurnSummary.ID>) -> [DisplayedRowProjection] = {
+            [turn]
+                .flattenedChatRows(activeTurnID: nil, expandedSummaryIDs: $0)
+                .map(DisplayedRowProjection.init)
+        }
+
+        expectNoDifference(
+            rows([]),
+            [
+                .human(id: "human-1"),
+                .summary(rowID: "summary:turn-1:human-1", summary: summary1),
+                .human(id: "human-2"),
+                .summary(rowID: "summary:turn-1:human-2", summary: summary2),
+                .assistant(id: "assistant:final:chunk:0"),
+            ]
+        )
+        expectNoDifference(
+            rows([summary1.id]),
+            [
+                .human(id: "human-1"),
+                .summary(rowID: "summary:turn-1:human-1", summary: expandedSummary1),
+                .assistant(id: "assistant:text-1:chunk:0"),
+                .assistant(id: "assistant:tool-1"),
+                .human(id: "human-2"),
+                .summary(rowID: "summary:turn-1:human-2", summary: summary2),
+                .assistant(id: "assistant:final:chunk:0"),
+            ]
+        )
+        expectNoDifference(
+            rows([summary2.id]),
+            [
+                .human(id: "human-1"),
+                .summary(rowID: "summary:turn-1:human-1", summary: summary1),
+                .human(id: "human-2"),
+                .summary(rowID: "summary:turn-1:human-2", summary: expandedSummary2),
+                .assistant(id: "assistant:text-2:chunk:0"),
+                .assistant(id: "assistant:tool-2"),
+                .assistant(id: "assistant:final:chunk:0"),
+            ]
+        )
+        expectNoDifference(
+            rows([summary1.id, summary2.id]),
+            [
+                .human(id: "human-1"),
+                .summary(rowID: "summary:turn-1:human-1", summary: expandedSummary1),
+                .assistant(id: "assistant:text-1:chunk:0"),
+                .assistant(id: "assistant:tool-1"),
+                .human(id: "human-2"),
+                .summary(rowID: "summary:turn-1:human-2", summary: expandedSummary2),
+                .assistant(id: "assistant:text-2:chunk:0"),
+                .assistant(id: "assistant:tool-2"),
+                .assistant(id: "assistant:final:chunk:0"),
+            ]
+        )
+    }
+
+    @Test("Last text remains visible when followed by a tool call")
+    func trailingToolCall() {
+        let turn = Turn(
+            id: "turn",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            rows: [
+                .humanMessageRow(.init(id: "human", content: "Inspect it")),
+                .assistantMessage(
+                    .text(
+                        messageID: "text",
+                        content: .init("Still working"),
+                        isMostRecentTextInTurn: true
+                    )
+                ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "tool",
+                        toolCall: .readFile(toolUseID: "tool", filePath: "File.swift")
+                    )
+                ),
+            ]
+        )
+        let summaryID = "turn:human"
+        let summary = DisplayedChatRow.TurnSummary(
+            id: summaryID,
+            isExpanded: false,
+            toolCallCount: 1,
+            messageCount: 0,
+            toolIcons: [.fileText]
+        )
+        let expandedSummary = DisplayedChatRow.TurnSummary(
+            id: summaryID,
+            isExpanded: true,
+            toolCallCount: 1,
+            messageCount: 0,
+            toolIcons: [.fileText]
+        )
+
+        expectNoDifference(
+            [turn]
+                .flattenedChatRows(activeTurnID: nil)
+                .map(DisplayedRowProjection.init),
+            [
+                .human(id: "human"),
+                .summary(rowID: "summary:turn:human", summary: summary),
+                .assistant(id: "assistant:text:chunk:0"),
+            ]
+        )
+        expectNoDifference(
+            [turn]
+                .flattenedChatRows(
+                    activeTurnID: nil,
+                    expandedSummaryIDs: [summaryID]
+                )
+                .map(DisplayedRowProjection.init),
+            [
+                .human(id: "human"),
+                .summary(rowID: "summary:turn:human", summary: expandedSummary),
+                .assistant(id: "assistant:text:chunk:0"),
+                .assistant(id: "assistant:tool"),
+            ]
+        )
+    }
+
+    @Test("Active turns stay fully visible after historical results")
+    func activeTurnAfterHistoricalResults() throws {
+        let turnID = "active"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Hello", turnID: turnID),
+            makeEventMessage(
+                id: "first",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"First response"}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "first-result",
+                event: #"{"type":"result","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "continuation",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Steered continuation"}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "second-result",
+                event: #"{"type":"result","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0}}"#,
+                turnID: turnID
+            ),
+        ]
+        let turns = Turn.parse(messages: messages)
+
+        expectNoDifference(
+            turns.flattenedChatRows(activeTurnID: turnID).map(\.id),
+            [
+                "human:human",
+                "assistant:first:chunk:0",
+                "assistant:continuation:chunk:0",
+                "turn-in-progress:active",
+            ]
+        )
+        expectNoDifference(
+            turns.flattenedChatRows(activeTurnID: nil).map(\.id),
+            [
+                "human:human",
+                "summary:active:human",
+                "assistant:continuation:chunk:0",
+            ]
+        )
+    }
+
+    @Test("Idle error-ended turns collapse without a result event")
+    func idleErrorEndedTurn() throws {
+        let turnID = "error-ended"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Run it", turnID: turnID),
+            makeEventMessage(
+                id: "working",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "tool",
+                event: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"File.swift"}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "error",
+                event: #"{"type":"error","content":"aborted by user"}"#,
+                turnID: turnID
+            ),
+        ]
+        let summary = DisplayedChatRow.TurnSummary(
+            id: "error-ended:human",
+            isExpanded: false,
+            toolCallCount: 1,
+            messageCount: 1,
+            toolIcons: [.fileText]
+        )
+
+        expectNoDifference(
+            Turn.parse(messages: messages)
+                .flattenedChatRows(activeTurnID: nil)
+                .map(DisplayedRowProjection.init),
+            [
+                .human(id: "human"),
+                .summary(rowID: "summary:error-ended:human", summary: summary),
+                .assistant(id: "assistant:error"),
+            ]
+        )
+    }
+
+    @Test("Empty text does not create an empty summary")
+    func segmentWithoutCollapsedContent() {
+        let turn = Turn(
+            id: "complete",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            rows: [
+                .humanMessageRow(.init(id: "human", content: "Hello")),
+                .assistantMessage(
+                    .text(
+                        messageID: "empty",
+                        content: .init(""),
+                        isMostRecentTextInTurn: false
+                    )
+                ),
+                .assistantMessage(
+                    .text(
+                        messageID: "final",
+                        content: .init("Done"),
+                        isMostRecentTextInTurn: true
+                    )
+                ),
+                .assistantMessage(
+                    .text(
+                        messageID: "trailing-empty",
+                        content: .init(""),
+                        isMostRecentTextInTurn: false
+                    )
+                ),
+            ]
+        )
+
+        expectNoDifference(
+            [turn].flattenedChatRows(activeTurnID: nil).map(\.id),
+            ["human:human", "assistant:final:chunk:0"]
+        )
+    }
+
+    @Test("Only the last global error remains visible and earlier errors count as messages")
+    func intermediateErrors() {
+        let turn = Turn(
+            id: "turn",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            rows: [
+                .humanMessageRow(.init(id: "human", content: "Try it")),
+                .assistantMessage(.error(messageID: "first-error", message: "Retrying")),
+                .assistantMessage(.error(messageID: "final-error", message: "Stopped")),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "tool",
+                        toolCall: .bash(toolUseID: "tool", command: "swift test")
+                    )
+                ),
+            ]
+        )
+        let summaryID = "turn:human"
+        let summary = DisplayedChatRow.TurnSummary(
+            id: summaryID,
+            isExpanded: false,
+            toolCallCount: 1,
+            messageCount: 1,
+            toolIcons: [.terminal]
+        )
+        let expandedSummary = DisplayedChatRow.TurnSummary(
+            id: summaryID,
+            isExpanded: true,
+            toolCallCount: 1,
+            messageCount: 1,
+            toolIcons: [.terminal]
+        )
+
+        expectNoDifference(
+            [turn]
+                .flattenedChatRows(activeTurnID: nil)
+                .map(DisplayedRowProjection.init),
+            [
+                .human(id: "human"),
+                .summary(rowID: "summary:turn:human", summary: summary),
+                .assistant(id: "assistant:final-error"),
+            ]
+        )
+        expectNoDifference(
+            [turn]
+                .flattenedChatRows(
+                    activeTurnID: nil,
+                    expandedSummaryIDs: [summaryID]
+                )
+                .map(DisplayedRowProjection.init),
+            [
+                .human(id: "human"),
+                .summary(rowID: "summary:turn:human", summary: expandedSummary),
+                .assistant(id: "assistant:first-error"),
+                .assistant(id: "assistant:final-error"),
+                .assistant(id: "assistant:tool"),
+            ]
+        )
+    }
+
+    @Test("Summary tool icons are ordered and distinct")
+    func summaryToolIcons() throws {
+        let turn = Turn(
+            id: "turn",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            rows: [
+                .humanMessageRow(.init(id: "human", content: "Inspect it")),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "read-1",
+                        toolCall: .readFile(toolUseID: "read-1", filePath: "One.swift")
+                    )
+                ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "write",
+                        toolCall: .writeFile(toolUseID: "write", filePath: "Two.swift", content: "")
+                    )
+                ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "read-2",
+                        toolCall: .readFile(toolUseID: "read-2", filePath: "Three.swift")
+                    )
+                ),
+                .assistantMessage(.error(messageID: "error", message: "Recovered")),
+                .assistantMessage(
+                    .text(
+                        messageID: "final",
+                        content: .init("Done"),
+                        isMostRecentTextInTurn: true
+                    )
+                ),
+            ]
+        )
+        let displayedRows = [turn].flattenedChatRows(activeTurnID: nil)
+        let summaries: [DisplayedChatRow.TurnSummary] = displayedRows
+            .compactMap { row in
+                guard case .turnSummary(let summary) = row else {
+                    return nil
+                }
+                return summary
+            }
+        let summary = try #require(summaries.first)
+
+        expectNoDifference(
+            displayedRows.map(\.id),
+            ["human:human", "summary:turn:human", "assistant:final:chunk:0"]
+        )
+        #expect(summary.toolCallCount == 3)
+        #expect(summary.messageCount == 1)
+        expectNoDifference(summary.toolIcons, [.fileText, .filePen])
+    }
+
     @Test("Every specialized tool uses its observed input shape")
     func specializedTools() throws {
         let fixtures: [(id: String, event: String, expected: ToolCall)] = [
@@ -537,6 +966,26 @@ private enum TurnRowProjection: Equatable {
         toolCall: Turn.Row.AssistantMessage.ToolCall
     )
     case assistantError(messageID: String, message: String)
+}
+
+private enum DisplayedRowProjection: Equatable {
+    case human(id: String)
+    case assistant(id: String)
+    case turnInProgress(id: String)
+    case summary(rowID: String, summary: DisplayedChatRow.TurnSummary)
+
+    init(_ row: DisplayedChatRow) {
+        self = switch row {
+        case .humanMessage(let message):
+            .human(id: message.id)
+        case .assistantTextChunk, .assistantToolCall, .assistantError:
+            .assistant(id: row.id)
+        case .turnInProgress(let progress):
+            .turnInProgress(id: progress.id)
+        case .turnSummary(let summary):
+            .summary(rowID: row.id, summary: summary)
+        }
+    }
 }
 
 private extension Turn {
