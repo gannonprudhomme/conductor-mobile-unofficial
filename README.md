@@ -66,6 +66,25 @@ mise -C ios run build
 That task runs XcodeGen first, then runs `xcodebuild` for the
 `ConductorMobile` scheme and pipes the output through `xcbeautify`.
 
+Archive and upload the iOS app to TestFlight with its current marketing version:
+
+```sh
+mise run release
+```
+
+Pass a version to override `MARKETING_VERSION` for that upload:
+
+```sh
+mise run release 0.2.0
+```
+
+The release task uses the Apple account configured in Xcode for signing and
+uploading. Xcode assigns the next App Store Connect build number. Uploads from
+concurrent release tasks on the same Mac are serialized, while their archives
+can build in parallel. The app record for
+`com.gannonprudhomme.conductor-mobile-unofficial` must already exist in App
+Store Connect.
+
 Build and syntax-check the proxy with:
 
 ```sh

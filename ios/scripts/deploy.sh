@@ -45,7 +45,7 @@ fi
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$IOS_DIR/.derivedData/deploy}"
 APP_NAME="ConductorMobile.app"
-APP_BUNDLE_ID="build.conductor.mobile"
+APP_BUNDLE_ID="com.gannonprudhomme.conductor-mobile-unofficial"
 
 destination_id() {
   if [[ "$DESTINATION" =~ (^|,)id=([^,]+) ]]; then

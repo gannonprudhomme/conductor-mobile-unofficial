@@ -5,6 +5,10 @@ mr = "mise run"
 description = "Build, install, and launch the native iOS app"
 run = "mise -C ios run deploy -- \"$@\""
 
+[tasks.release]
+description = "Archive and upload the native iOS app to TestFlight"
+run = "mise -C ios run release -- \"$@\""
+
 [tasks.run]
 description = "Build, install, and launch the native iOS app on this worktree's simulator"
 run = "mise -C ios run run"

@@ -1,6 +1,6 @@
 name: ConductorMobile
 options:
-  bundleIdPrefix: build.conductor
+  bundleIdPrefix: com.gannonprudhomme
   deploymentTarget:
     iOS: "26.0"
   minimumXcodeGenVersion: "2.45.0"
@@ -76,7 +76,7 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         DEVELOPMENT_TEAM: L4K4Q74X62
         MARKETING_VERSION: "0.1"
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial
         PRODUCT_NAME: $(TARGET_NAME)
         TARGETED_DEVICE_FAMILY: "1,2"
   SharedConductorDataTests:
@@ -91,7 +91,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.SharedConductorDataTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.SharedConductorDataTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorMobileDataTests:
     type: bundle.unit-test
@@ -107,7 +107,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorMobileDataTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorMobileDataTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorDesignTests:
     type: bundle.unit-test
@@ -121,7 +121,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorDesignTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorDesignTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorWorkspacesTests:
     type: bundle.unit-test
@@ -135,7 +135,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorWorkspacesTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorWorkspacesTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorChatTests:
     type: bundle.unit-test
@@ -149,7 +149,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorChatTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorChatTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorMainTests:
     type: bundle.unit-test
@@ -163,7 +163,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorMainTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorMainTests
         PRODUCT_NAME: $(TARGET_NAME)
 schemes:
   ConductorMobile:

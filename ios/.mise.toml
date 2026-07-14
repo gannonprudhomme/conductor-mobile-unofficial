@@ -21,6 +21,11 @@ flag "--attach" help="Attach the terminal to the app process after launching"
 '''
 run = 'scripts/deploy.sh ${usage_destination:+"${usage_destination}"} ${usage_attach:+--attach}'
 
+[tasks.release]
+description = "Archive and upload the native iOS app to TestFlight"
+depends = ["gen"]
+run = "scripts/release.sh \"$@\""
+
 [tasks.run]
 description = "Build, install, and launch the native iOS app on this worktree's simulator"
 depends = ["gen"]

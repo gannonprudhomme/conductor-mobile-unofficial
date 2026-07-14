@@ -11,3 +11,13 @@ run = "scripts/build.sh"
 description = "Build and run the native macOS app"
 depends = ["gen"]
 run = "scripts/run.sh"
+
+[tasks.release]
+description = "Build, sign, notarize, and package a macOS release"
+depends = ["gen"]
+run = "scripts/release.sh \"$@\""
+
+[tasks.publish]
+description = "Build and upload a draft GitHub release"
+depends = ["gen"]
+run = "scripts/publish-release.sh \"$@\""
