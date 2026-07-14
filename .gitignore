@@ -1,6 +1,7 @@
 # Package managers
 .pnpm-store/
 node_modules/
+.swiftpm/
 
 # Logs
 logs/

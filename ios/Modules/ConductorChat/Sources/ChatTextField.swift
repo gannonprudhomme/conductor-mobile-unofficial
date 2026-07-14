@@ -72,17 +72,35 @@ struct ChatTextField: View {
             modelPicker
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            SendStopButton(
-                text: text,
-                isSendInFlight: isSendInFlight,
-                isStopInFlight: isStopInFlight,
-                isWorking: isWorking,
-                onSendTapped: onSendTapped,
-                onStopTapped: onStopTapped
-            )
+            HStack(spacing: 8) {
+                if isWorking {
+                    StopButton(
+                        isEnabled: !isAnyActionInFlight,
+                        isInFlight: isStopInFlight,
+                        action: onStopTapped
+                    )
+                }
+
+                if !isWorking || hasSendableText {
+                    SendButton(
+                        isEnabled: hasSendableText && !isAnyActionInFlight,
+                        isInFlight: isSendInFlight,
+                        action: onSendTapped
+                    )
+                }
+            }
         }
         .frame(maxWidth: .infinity)
+        .animation(.default, value: hasSendableText)
         .animation(.default, value: isWorking)
+    }
+
+    private var hasSendableText: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var isAnyActionInFlight: Bool {
+        isSendInFlight || isStopInFlight
     }
 
     private var modelPicker: some View {
@@ -100,95 +118,77 @@ struct ChatTextField: View {
         .font(.theme(.small))
     }
 
-    private struct SendStopButton: View {
-        @ScaledMetric(relativeTo: .body) private var primaryActionIconSize = ThemeFontStyle.body.size
-
-        let text: String
-        let isSendInFlight: Bool
-        let isStopInFlight: Bool
-        let isWorking: Bool
-        let onSendTapped: @MainActor () -> Void
-        let onStopTapped: @MainActor () -> Void
+    private struct SendButton: View {
+        let isEnabled: Bool
+        let isInFlight: Bool
+        let action: @MainActor () -> Void
 
         var body: some View {
-            Button(action: primaryAction) {
+            Button(action: action) {
                 Label {
-                    Text(isWorking ? "Stop agent" : "Send message")
+                    Text("Send message")
                 } icon: {
-                    if isPrimaryActionInFlight {
+                    if isInFlight {
                         // Intentionally use the platform spinner for this compact button.
                         ProgressView()
-                    } else if isWorking {
-                        let rectSize = primaryActionIconSize / 1.5
+                    } else {
+                        LucideIcon(Lucide.arrowUp, style: .body)
+                    }
+                }
+                .labelStyle(.iconOnly)
+                .font(.theme(.body))
+                .foregroundStyle(.theme(.background))
+                .tint(.theme(.background))
+                .padding(8)
+            }
+            .disabled(!isEnabled)
+            .glassEffect(
+                .regular
+                    .tint(Color.theme(.foreground).opacity(isEnabled ? 1 : 0.5))
+                    .interactive(isEnabled)
+            )
+            .animation(.default, value: isInFlight)
+        }
+    }
+
+    private struct StopButton: View {
+        @ScaledMetric(relativeTo: ThemeFontStyle.body.textStyle)
+        private var iconSize = ThemeFontStyle.body.size
+
+        let isEnabled: Bool
+        let isInFlight: Bool
+        let action: @MainActor () -> Void
+
+        var body: some View {
+            Button(action: action) {
+                Label {
+                    Text("Stop agent")
+                } icon: {
+                    if isInFlight {
+                        // Intentionally use the platform spinner for this compact button.
+                        ProgressView()
+                    } else {
+                        let rectSize = iconSize / 1.5
                         Rectangle()
                             .fill(Color.theme(.textPrimary))
                             .frame(width: rectSize, height: rectSize)
-                            .frame(width: primaryActionIconSize, height: primaryActionIconSize)
-                            .contentTransition(.opacity)
-                    } else {
-                        LucideIcon(Lucide.arrowUp, style: .body)
+                            .frame(width: iconSize, height: iconSize)
                             .contentTransition(.opacity)
                     }
                 }
                 .labelStyle(.iconOnly)
                 .font(.theme(.body))
-                .foregroundStyle(primaryActionForegroundStyle)
-                .tint(primaryActionForegroundStyle)
+                .foregroundStyle(.theme(.textPrimary))
+                .tint(.theme(.textPrimary))
                 .padding(8)
             }
-            .disabled(!isPrimaryActionEnabled)
+            .disabled(!isEnabled)
             .glassEffect(
-                isWorking
-                    ? .clear
-                        .tint(Color.clear)
-                        .interactive(isPrimaryActionEnabled)
-                    : .regular
-                        .tint(primaryActionTint)
-                        .interactive(isPrimaryActionEnabled)
+                .regular
+                    .tint(Color.theme(.foreground).opacity(0.05))
+                    .interactive(isEnabled)
             )
-            .overlay {
-                if isWorking {
-                    Circle()
-                        .strokeBorder(
-                            Color.theme(.textPrimary),
-                            lineWidth: 1
-                        )
-                }
-            }
-            .animation(.default, value: isWorking)
-            .animation(.default, value: isPrimaryActionInFlight)
-        }
-
-        private var hasSendableText: Bool {
-            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-
-        private var isPrimaryActionEnabled: Bool {
-            !isPrimaryActionInFlight && (isWorking || hasSendableText)
-        }
-
-        private var isPrimaryActionInFlight: Bool {
-            isSendInFlight || isStopInFlight
-        }
-
-        private var primaryAction: @MainActor () -> Void {
-            isWorking ? onStopTapped : onSendTapped
-        }
-
-        private var primaryActionForegroundStyle: Color {
-            if isWorking {
-                Color.theme(.textPrimary)
-            } else {
-                Color.theme(.background)
-            }
-        }
-
-        private var primaryActionTint: Color {
-            if isWorking {
-                Color.clear
-            } else {
-                Color.theme(.foreground).opacity(isPrimaryActionEnabled ? 1 : 0.5)
-            }
+            .animation(.default, value: isInFlight)
         }
     }
 }

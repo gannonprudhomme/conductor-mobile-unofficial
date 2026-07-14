@@ -440,7 +440,7 @@ function cleanup(context: ProxyContext, extra: JsonObject = {}): void {
   writeInfo(context, { shuttingDown: true, ...extra });
 }
 
-function buildQueryRequest(input: MessageInput): JsonRpcRequest {
+export function buildQueryRequest(input: MessageInput): JsonRpcRequest {
   const sessionId = requiredNonEmptyString(input.sessionId, "sessionId");
   const workspaceId = requiredNonEmptyString(input.workspaceId, "workspaceId");
   const cwd = requiredNonEmptyString(input.cwd, "cwd");
@@ -449,6 +449,8 @@ function buildQueryRequest(input: MessageInput): JsonRpcRequest {
   const agentType = optionalString(input.agentType) ?? "codex";
   const model = optionalString(input.model) ?? "gpt-5.5";
   const messageId = optionalString(input.messageId) ?? randomUUID();
+  const defaultDeliveryMode =
+    agentType === "codex" || agentType === "claude" ? "steering" : "default";
 
   return {
     jsonrpc: "2.0",
@@ -468,7 +470,7 @@ function buildQueryRequest(input: MessageInput): JsonRpcRequest {
         model,
         permissionMode: optionalString(input.permissionMode) ?? "default",
         fastMode: Boolean(input.fastMode),
-        deliveryMode: optionalString(input.deliveryMode) ?? "default",
+        deliveryMode: optionalString(input.deliveryMode) ?? defaultDeliveryMode,
         agentParams: input.agentParams ?? {
           agentType,
           modelReasoningEffort: optionalString(input.modelReasoningEffort) ?? "high",

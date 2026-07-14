@@ -1,7 +1,99 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildCancelRequest, injectedHttpResponse } from "./runtime-proxy.mjs";
+import {
+  buildCancelRequest,
+  buildQueryRequest,
+  injectedHttpResponse,
+} from "./runtime-proxy.mjs";
+
+test("buildQueryRequest steers messages by default", () => {
+  const request = buildQueryRequest({
+    agentType: "codex",
+    cwd: "/tmp/workspace-1",
+    message: "Run the tests.",
+    messageId: "message-1",
+    model: "gpt-5.5",
+    rpcId: "rpc-1",
+    sessionId: "session-1",
+    workspaceId: "workspace-1",
+  });
+
+  assert.deepEqual(request, {
+    jsonrpc: "2.0",
+    id: "rpc-1",
+    method: "query",
+    params: {
+      type: "query",
+      id: "session-1",
+      agentType: "codex",
+      message: "Run the tests.",
+      prompt: "Run the tests.",
+      options: {
+        cwd: "/tmp/workspace-1",
+        workspaceId: "workspace-1",
+        userMessageId: "message-1",
+        turnId: "message-1",
+        model: "gpt-5.5",
+        permissionMode: "default",
+        fastMode: false,
+        deliveryMode: "steering",
+        agentParams: {
+          agentType: "codex",
+          modelReasoningEffort: "high",
+          personality: "pragmatic",
+        },
+      },
+    },
+  });
+});
+
+test("buildQueryRequest preserves explicit queue delivery", () => {
+  const request = buildQueryRequest({
+    cwd: "/tmp/workspace-1",
+    deliveryMode: "default",
+    message: "Run this next.",
+    sessionId: "session-1",
+    workspaceId: "workspace-1",
+  });
+
+  assert.equal(
+    (request.params.options as { deliveryMode: string }).deliveryMode,
+    "default",
+  );
+});
+
+test("buildQueryRequest steers Claude messages by default", () => {
+  const request = buildQueryRequest({
+    agentType: "claude",
+    cwd: "/tmp/workspace-1",
+    message: "Run the tests.",
+    sessionId: "session-1",
+    workspaceId: "workspace-1",
+  });
+
+  assert.equal(
+    (request.params.options as { deliveryMode: string }).deliveryMode,
+    "steering",
+  );
+});
+
+test("buildQueryRequest queues unsupported agents by default", () => {
+  for (const agentType of ["acp", "future-agent"]) {
+    const request = buildQueryRequest({
+      agentType,
+      cwd: "/tmp/workspace-1",
+      message: "Run the tests.",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+    });
+
+    assert.equal(
+      (request.params.options as { deliveryMode: string }).deliveryMode,
+      "default",
+    );
+  }
+});
 
 test("buildCancelRequest creates the SidecarV2 cancel wire format", () => {
   const request = buildCancelRequest({

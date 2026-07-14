@@ -321,12 +321,12 @@ struct ChatTests {
         }
     }
 
-    @Test("Sending a message clears the message draft after the desktop accepts it")
+    @Test("Steering a working session clears the message draft after the desktop accepts it")
     func messageSendSucceeds() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let session = try makeSession()
+            let session = try makeSession(status: "working")
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
