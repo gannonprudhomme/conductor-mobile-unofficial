@@ -153,15 +153,18 @@ extension DesktopClient: DependencyKey {
     private struct SendMessageRequest: Encodable {
         let message: String
         let fastMode: Bool
+        let reasoningEffort: Session.ReasoningEffort
 
         init(message: String, options: Session.AgentOptions) {
             self.message = message
             self.fastMode = options.fastMode
+            self.reasoningEffort = options.reasoningEffort
         }
 
         private enum CodingKeys: String, CodingKey {
             case message
             case fastMode = "fast_mode"
+            case reasoningEffort = "reasoning_effort"
         }
     }
 

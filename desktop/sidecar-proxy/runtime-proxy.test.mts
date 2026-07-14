@@ -48,7 +48,7 @@ test("buildQueryRequest steers messages by default", () => {
   });
 });
 
-test("buildQueryRequest forwards fast mode", () => {
+test("buildQueryRequest forwards fast mode and reasoning effort", () => {
   const request = buildQueryRequest({
     agentType: "codex",
     cwd: "/tmp/workspace-1",
@@ -56,12 +56,41 @@ test("buildQueryRequest forwards fast mode", () => {
     message: "Run the tests.",
     messageId: "message-1",
     model: "gpt-5.6-sol",
+    modelReasoningEffort: "ultra",
+    permissionMode: "plan",
+    personality: "pragmatic",
     rpcId: "rpc-1",
     sessionId: "session-1",
     workspaceId: "workspace-1",
   });
 
-  assert.equal((request.params.options as { fastMode: boolean }).fastMode, true);
+  assert.deepEqual(request, {
+    jsonrpc: "2.0",
+    id: "rpc-1",
+    method: "query",
+    params: {
+      type: "query",
+      id: "session-1",
+      agentType: "codex",
+      message: "Run the tests.",
+      prompt: "Run the tests.",
+      options: {
+        cwd: "/tmp/workspace-1",
+        workspaceId: "workspace-1",
+        userMessageId: "message-1",
+        turnId: "message-1",
+        model: "gpt-5.6-sol",
+        permissionMode: "plan",
+        fastMode: true,
+        deliveryMode: "steering",
+        agentParams: {
+          agentType: "codex",
+          modelReasoningEffort: "ultra",
+          personality: "pragmatic",
+        },
+      },
+    },
+  });
 });
 
 test("buildQueryRequest preserves explicit queue delivery", () => {

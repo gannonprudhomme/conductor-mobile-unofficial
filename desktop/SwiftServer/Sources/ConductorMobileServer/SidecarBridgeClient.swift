@@ -20,6 +20,9 @@ struct SidecarBridgeClient: Sendable {
         let fastMode: Bool
         let message: String
         let model: String
+        let modelReasoningEffort: String
+        let permissionMode: String
+        let personality: String
         let sessionID: String
         let workspaceID: String
 
@@ -29,6 +32,9 @@ struct SidecarBridgeClient: Sendable {
             case fastMode
             case message
             case model
+            case modelReasoningEffort
+            case permissionMode
+            case personality
             case sessionID = "sessionId"
             case workspaceID = "workspaceId"
         }

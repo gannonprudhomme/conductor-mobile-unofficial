@@ -335,6 +335,7 @@ struct ChatTests {
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
                     #expect(options.fastMode)
+                    #expect(options.reasoningEffort == .extraHigh)
                 }
             }
 
@@ -376,8 +377,8 @@ struct ChatTests {
         }
     }
 
-    @Test("Fast mode updates the selected desktop session")
-    func fastModeUpdates() async throws {
+    @Test("Fast mode and reasoning effort update the selected desktop session")
+    func sessionAgentOptionsUpdates() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
@@ -405,7 +406,19 @@ struct ChatTests {
             }
             expectNoDifference(
                 recordedOptions.value,
-                Session.AgentOptions(fastMode: false)
+                Session.AgentOptions(fastMode: false, reasoningEffort: .extraHigh)
+            )
+
+            await store.send(.reasoningEffortSelected(.ultra)) {
+                $0.agentOptions.reasoningEffort = .ultra
+                $0.isSessionOptionsUpdateInFlight = true
+            }
+            await store.receive(\.updateSessionAgentOptionsResponse) {
+                $0.isSessionOptionsUpdateInFlight = false
+            }
+            expectNoDifference(
+                recordedOptions.value,
+                Session.AgentOptions(fastMode: false, reasoningEffort: .ultra)
             )
         }
     }
@@ -569,7 +582,10 @@ private func makeSession(status: String = "idle") throws -> Session {
               "updated_at": "2026-07-09 00:00:00",
               "status": "\(status)",
               "model": "gpt-5",
+              "permission_mode": "default",
+              "codex_thinking_level": "xhigh",
               "fast_mode": true,
+              "agent_personality": "pragmatic",
               "unread_count": 0,
               "freshly_compacted": 0,
               "context_token_count": 0

@@ -245,7 +245,10 @@ struct ServerTests {
             unreadCount: 0,
             freshlyCompacted: 0,
             contextTokenCount: 0,
-            fastMode: false
+            permissionMode: .plan,
+            codexThinkingLevel: .high,
+            fastMode: false,
+            agentPersonality: .pragmatic
         )
         try await database.write { db in
             try Workspace.insert { workspace }.execute(db)
@@ -264,7 +267,7 @@ struct ServerTests {
                     method: .post,
                     headers: [.contentType: "application/json"],
                     body: ByteBuffer(
-                        string: #"{"message":"  Run the tests.  ","fast_mode":true}"#
+                        string: #"{"message":"  Run the tests.  ","fast_mode":true,"reasoning_effort":"xhigh"}"#
                     )
                 ) { response in
                     #expect(response.status == .noContent)
@@ -280,6 +283,9 @@ struct ServerTests {
                 fastMode: true,
                 message: "  Run the tests.  ",
                 model: "gpt-5.5",
+                modelReasoningEffort: "xhigh",
+                permissionMode: "plan",
+                personality: "pragmatic",
                 sessionID: "session-1",
                 workspaceID: "workspace-1"
             )

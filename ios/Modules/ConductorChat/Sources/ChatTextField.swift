@@ -14,33 +14,39 @@ struct ChatTextField: View {
     @FocusState var isFocused: Bool
 
     @Binding var text: String
+    let session: Session
     let agentOptions: Session.AgentOptions
     let isSendInFlight: Bool
     let isSessionOptionsUpdateInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
     let onFastModeTapped: @MainActor () -> Void
+    let onReasoningEffortSelected: @MainActor (Session.ReasoningEffort) -> Void
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
     init(
         text: Binding<String>,
+        session: Session,
         agentOptions: Session.AgentOptions,
         isSendInFlight: Bool,
         isSessionOptionsUpdateInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onReasoningEffortSelected: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
         self._text = text
+        self.session = session
         self.agentOptions = agentOptions
         self.isSendInFlight = isSendInFlight
         self.isSessionOptionsUpdateInFlight = isSessionOptionsUpdateInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
         self.onFastModeTapped = onFastModeTapped
+        self.onReasoningEffortSelected = onReasoningEffortSelected
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -80,9 +86,13 @@ struct ChatTextField: View {
         HStack(spacing: 8) {
             ScrollView(.horizontal) {
                 HStack(spacing: 4) {
-                    modelPicker
+                    modelLabel
 
                     fastModeButton
+
+                    if !session.availableReasoningEfforts.isEmpty {
+                        reasoningEffortButton
+                    }
                 }
             }
             .scrollIndicators(.hidden)
@@ -121,12 +131,12 @@ struct ChatTextField: View {
         isSendInFlight || isStopInFlight
     }
 
-    private var modelPicker: some View {
+    private var modelLabel: some View {
         Label {
-            Text("GPT-5.6 Sol")
+            Text(session.displayModelName)
         } icon: {
             AgentIcon(
-                agentType: Session.AgentType.codex,
+                agentType: session.agentType,
                 size: ThemeFontStyle.small.size,
                 relativeTo: ThemeFontStyle.small.textStyle
             )
@@ -161,6 +171,89 @@ struct ChatTextField: View {
         .disabled(isSessionOptionsUpdateInFlight)
         .accessibilityLabel("Fast mode")
         .accessibilityValue(agentOptions.fastMode ? "On" : "Off")
+    }
+
+    private var reasoningEffortButton: some View {
+        Button(action: reasoningEffortButtonTapped) {
+            HStack(spacing: 6) {
+                ReasoningEffortIcon(
+                    isSelected: agentOptions.reasoningEffort != .none
+                )
+
+                if agentOptions.reasoningEffort != .none {
+                    Text(
+                        agentOptions.reasoningEffort.displayName(
+                            agentType: session.agentType
+                        )
+                    )
+                        .font(.theme(.small))
+                }
+            }
+            .foregroundStyle(reasoningEffortForegroundStyle)
+            .padding(EdgeInsets(vertical: 6, horizontal: 8))
+            .background(reasoningEffortBackgroundStyle, in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .frame(minWidth: 44, minHeight: 44)
+        .disabled(isSessionOptionsUpdateInFlight)
+        .accessibilityLabel("Reasoning effort")
+        .accessibilityValue(
+            agentOptions.reasoningEffort.displayName(agentType: session.agentType)
+        )
+        .accessibilityHint("Cycles through available reasoning efforts")
+    }
+
+    private func reasoningEffortButtonTapped() {
+        guard let nextEffort = session.nextReasoningEffort(
+            after: agentOptions.reasoningEffort
+        ) else {
+            return
+        }
+
+        onReasoningEffortSelected(nextEffort)
+    }
+
+    private var reasoningEffortBackgroundStyle: AnyShapeStyle {
+        if agentOptions.reasoningEffort == .ultra {
+            AnyShapeStyle(LinearGradient.reasoningUltra)
+        } else if agentOptions.reasoningEffort == .none {
+            AnyShapeStyle(Color.clear)
+        } else {
+            AnyShapeStyle(Color.theme(.highlight))
+        }
+    }
+
+    private var reasoningEffortForegroundStyle: Color {
+        if agentOptions.reasoningEffort == .none {
+            .theme(.textSecondary)
+        } else if agentOptions.reasoningEffort == .ultra {
+            .theme(.textPrimary)
+        } else {
+            .theme(.accent)
+        }
+    }
+
+    private struct ReasoningEffortIcon: View {
+        @ScaledMetric(relativeTo: .footnote) private var height = 16.0
+        @ScaledMetric(relativeTo: .footnote) private var barWidth = 2.5
+        @ScaledMetric(relativeTo: .footnote) private var spacing = 1.5
+
+        let isSelected: Bool
+
+        var body: some View {
+            HStack(alignment: .bottom, spacing: spacing) {
+                ForEach(1...6, id: \.self) { bar in
+                    Capsule()
+                        .fill(.theme(isSelected ? .accent : .textSecondary))
+                        .frame(
+                            width: barWidth,
+                            height: height * CGFloat(bar) / 6
+                        )
+                }
+            }
+            .frame(height: height)
+            .accessibilityHidden(true)
+        }
     }
 
     private struct SendButton: View {
@@ -259,12 +352,18 @@ struct ChatTextField: View {
     .safeAreaBar(edge: .bottom) {
         ChatTextField(
             text: $text,
-            agentOptions: .init(fastMode: true),
+            session: .preview(
+                model: "gpt-5.6-sol",
+                codexThinkingLevel: .extraHigh,
+                fastMode: true
+            ),
+            agentOptions: .init(fastMode: true, reasoningEffort: .extraHigh),
             isSendInFlight: false,
             isSessionOptionsUpdateInFlight: false,
             isStopInFlight: false,
             isWorking: true,
             onFastModeTapped: { },
+            onReasoningEffortSelected: { _ in },
             onSendTapped: { },
             onStopTapped: { }
         )

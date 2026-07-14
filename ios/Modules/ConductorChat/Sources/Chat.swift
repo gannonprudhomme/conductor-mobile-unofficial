@@ -100,6 +100,7 @@ public struct Chat: Sendable {
         case fastModeButtonTapped
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
+        case reasoningEffortSelected(Session.ReasoningEffort)
         case sessionAgentOptionsChanged(Session.AgentOptions)
         case sendButtonTapped
         case sendMessageResponse(
@@ -163,6 +164,16 @@ public struct Chat: Sendable {
                 }
 
                 state.agentOptions.fastMode.toggle()
+                state.isSessionOptionsUpdateInFlight = true
+                return updateSessionAgentOptions(state)
+
+            case .reasoningEffortSelected(let effort):
+                guard !state.isSessionOptionsUpdateInFlight,
+                      effort != state.agentOptions.reasoningEffort else {
+                    return .none
+                }
+
+                state.agentOptions.reasoningEffort = effort
                 state.isSessionOptionsUpdateInFlight = true
                 return updateSessionAgentOptions(state)
 
@@ -399,12 +410,14 @@ struct ChatView: View {
         .safeAreaBar(edge: .bottom) {
             ChatTextField(
                 text: $store.messageDraft,
+                session: store.session,
                 agentOptions: store.agentOptions,
                 isSendInFlight: store.isMessageSendInFlight,
                 isSessionOptionsUpdateInFlight: store.isSessionOptionsUpdateInFlight,
                 isStopInFlight: store.isStopInFlight,
                 isWorking: store.session.status == .working,
                 onFastModeTapped: { store.send(.fastModeButtonTapped) },
+                onReasoningEffortSelected: { store.send(.reasoningEffortSelected($0)) },
                 onSendTapped: { store.send(.sendButtonTapped) },
                 onStopTapped: { store.send(.stopButtonTapped) }
             )

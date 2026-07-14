@@ -103,6 +103,17 @@ public func appDatabase() throws -> any DatabaseWriter {
             .execute(db)
     }
 
+    migrator.registerMigration("Add session reasoning effort") { db in
+        try #sql("ALTER TABLE \"sessions\" ADD COLUMN \"permission_mode\" TEXT")
+            .execute(db)
+        try #sql("ALTER TABLE \"sessions\" ADD COLUMN \"codex_thinking_level\" TEXT")
+            .execute(db)
+        try #sql("ALTER TABLE \"sessions\" ADD COLUMN \"agent_personality\" TEXT")
+            .execute(db)
+        try #sql("ALTER TABLE \"sessions\" ADD COLUMN \"claude_effort_level\" TEXT")
+            .execute(db)
+    }
+
     migrator.registerMigration("Create repos") { db in
         try #sql(
             """

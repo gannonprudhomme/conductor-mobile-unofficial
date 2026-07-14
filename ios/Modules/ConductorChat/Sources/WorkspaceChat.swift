@@ -179,7 +179,7 @@ public struct WorkspaceChat: Sendable {
                     return .none
                 }
 
-                Logger.chat.error("Failed to update session fast mode: \(error)")
+                Logger.chat.error("Failed to update session agent options: \(error)")
                 state.destination = .alert(
                     .failedToUpdateSessionAgentOptions(message: error.localizedDescription)
                 )
@@ -296,7 +296,7 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
 
     static func failedToUpdateSessionAgentOptions(message: String) -> Self {
         AlertState {
-            TextState("Failed to update fast mode")
+            TextState("Failed to update session options")
         } message: {
             TextState(message)
         }

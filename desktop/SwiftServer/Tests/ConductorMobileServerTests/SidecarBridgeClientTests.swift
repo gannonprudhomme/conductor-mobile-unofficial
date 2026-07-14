@@ -51,6 +51,9 @@ struct SidecarBridgeClientTests {
                     fastMode: true,
                     message: "Run the tests.",
                     model: "gpt-5.5",
+                    modelReasoningEffort: "xhigh",
+                    permissionMode: "plan",
+                    personality: "pragmatic",
                     sessionID: "session-1",
                     workspaceID: "workspace-1"
                 )
@@ -66,6 +69,9 @@ struct SidecarBridgeClientTests {
         #expect(object["fastMode"] as? Bool == true)
         #expect(object["message"] as? String == "Run the tests.")
         #expect(object["model"] as? String == "gpt-5.5")
+        #expect(object["modelReasoningEffort"] as? String == "xhigh")
+        #expect(object["permissionMode"] as? String == "plan")
+        #expect(object["personality"] as? String == "pragmatic")
         #expect(object["sessionId"] as? String == "session-1")
         #expect(object["workspaceId"] as? String == "workspace-1")
     }

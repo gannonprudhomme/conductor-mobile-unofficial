@@ -23,7 +23,11 @@ extension Session {
         unreadCount: Int = 0,
         freshlyCompacted: Int = 0,
         contextTokenCount: Int = 0,
-        fastMode: Bool? = false
+        permissionMode: PermissionMode? = .default,
+        codexThinkingLevel: ReasoningEffort? = .high,
+        fastMode: Bool? = false,
+        agentPersonality: Personality? = .pragmatic,
+        claudeEffortLevel: ReasoningEffort? = nil
     ) -> Self {
         Self(
             id: id,
@@ -39,7 +43,11 @@ extension Session {
             unreadCount: unreadCount,
             freshlyCompacted: freshlyCompacted,
             contextTokenCount: contextTokenCount,
-            fastMode: fastMode
+            permissionMode: permissionMode,
+            codexThinkingLevel: codexThinkingLevel,
+            fastMode: fastMode,
+            agentPersonality: agentPersonality,
+            claudeEffortLevel: claudeEffortLevel
         )
     }
 }

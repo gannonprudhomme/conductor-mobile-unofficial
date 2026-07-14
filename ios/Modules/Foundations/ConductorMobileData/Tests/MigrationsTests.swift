@@ -48,6 +48,8 @@ struct MigrationsTests {
         #expect(repositories == 0)
         #expect(messages == 0)
         #expect(!workspaceColumns.contains("CUSTOM_is_working"))
+        #expect(sessionColumns.contains("codex_thinking_level"))
         #expect(sessionColumns.contains("fast_mode"))
+        #expect(sessionColumns.contains("claude_effort_level"))
     }
 }

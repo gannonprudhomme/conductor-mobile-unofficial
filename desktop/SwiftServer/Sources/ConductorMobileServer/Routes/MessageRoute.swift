@@ -40,8 +40,12 @@ enum MessageRoute {
 
                 return MessageSendContext(
                     agentType: row.agentType,
+                    agentPersonality: row.agentPersonality,
+                    claudeEffortLevel: row.claudeEffortLevel,
+                    codexThinkingLevel: row.codexThinkingLevel,
                     fastMode: row.fastMode,
                     model: row.model,
+                    permissionMode: row.permissionMode,
                     workspacePath: row.workspacePath
                 )
             }
@@ -71,6 +75,13 @@ enum MessageRoute {
                     fastMode: request.fastMode ?? messageSendContext.fastMode ?? false,
                     message: request.message,
                     model: messageSendContext.model,
+                    modelReasoningEffort: (
+                        request.reasoningEffort
+                            ?? messageSendContext.reasoningEffort
+                            ?? .high
+                    ).rawValue,
+                    permissionMode: (messageSendContext.permissionMode ?? .default).rawValue,
+                    personality: (messageSendContext.agentPersonality ?? .pragmatic).rawValue,
                     sessionID: sessionID,
                     workspaceID: workspaceID
                 )
@@ -97,18 +108,28 @@ enum MessageRoute {
     @Selection
     fileprivate struct MessageSendContext: Sendable {
         let agentType: Session.AgentType
+        let agentPersonality: Session.Personality?
+        let claudeEffortLevel: Session.ReasoningEffort?
+        let codexThinkingLevel: Session.ReasoningEffort?
         let fastMode: Bool?
         let model: String
+        let permissionMode: Session.PermissionMode?
         let workspacePath: String?
+
+        var reasoningEffort: Session.ReasoningEffort? {
+            agentType == .claude ? claudeEffortLevel : codexThinkingLevel
+        }
     }
 
     private struct SendMessageRequest: Decodable {
         let message: String
         let fastMode: Bool?
+        let reasoningEffort: Session.ReasoningEffort?
 
         private enum CodingKeys: String, CodingKey {
             case message
             case fastMode = "fast_mode"
+            case reasoningEffort = "reasoning_effort"
         }
     }
 }
@@ -129,8 +150,12 @@ private extension Session {
             .select { session, workspace in
                 MessageRoute.MessageSendContext.Columns(
                     agentType: session.agentType,
+                    agentPersonality: session.agentPersonality,
+                    claudeEffortLevel: session.claudeEffortLevel,
+                    codexThinkingLevel: session.codexThinkingLevel,
                     fastMode: session.fastMode,
                     model: session.model,
+                    permissionMode: session.permissionMode,
                     workspacePath: workspace.workspacePath
                 )
             }

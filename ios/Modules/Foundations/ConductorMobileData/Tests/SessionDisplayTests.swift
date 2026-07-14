@@ -38,6 +38,11 @@ struct SessionDisplayTests {
 
         #expect(session.displayTitle == "Investigate desktop bridge")
         #expect(session.debugSubtitle == "waiting_on_tool | gpt-5.3-codex | codex")
+        #expect(session.displayModelName == "GPT-5.3 Codex")
+        #expect(
+            session.availableReasoningEfforts
+                == [.low, .medium, .high, .extraHigh]
+        )
         #expect(session.updatedDate == Date(timeIntervalSince1970: 1_783_558_800))
     }
 
@@ -45,5 +50,21 @@ struct SessionDisplayTests {
     func agentTypeDisplayName() {
         #expect(Session.AgentType.codex.displayName == "Codex")
         #expect(Session.AgentType(rawValue: "future-agent").displayName == "future-agent")
+    }
+
+    @Test("Reasoning effort labels follow the selected agent")
+    func reasoningEffortDisplayName() {
+        #expect(Session.ReasoningEffort.extraHigh.displayName(agentType: .codex) == "Extra high")
+        #expect(Session.ReasoningEffort.extraHigh.displayName(agentType: .claude) == "Max")
+        #expect(Session.ReasoningEffort.ultra.displayName(agentType: .codex) == "Ultra")
+    }
+
+    @Test("Reasoning effort cycles through the selected model's options")
+    func nextReasoningEffort() {
+        let session = Session.preview(model: "gpt-5.6-sol")
+
+        #expect(session.nextReasoningEffort(after: .none) == .low)
+        #expect(session.nextReasoningEffort(after: .high) == .extraHigh)
+        #expect(session.nextReasoningEffort(after: .ultra) == .low)
     }
 }
