@@ -350,6 +350,9 @@ public struct WorkspaceChatView: View {
         }
         .background(.theme(.background))
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
+        .sensoryFeedback(.error, trigger: store.destination) { _, destination in
+            destination?.alert != nil
+        }
         .sheet(
             item: $store.scope(
                 state: \.destination?.archivedSessions,

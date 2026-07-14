@@ -148,6 +148,9 @@ struct ChatTextField: View {
                     .interactive(isEnabled)
             )
             .animation(.default, value: isInFlight)
+            .sensoryFeedback(.selection, trigger: isInFlight) { _, isInFlight in
+                isInFlight
+            }
         }
     }
 
@@ -189,6 +192,9 @@ struct ChatTextField: View {
                     .interactive(isEnabled)
             )
             .animation(.default, value: isInFlight)
+            .sensoryFeedback(.selection, trigger: isInFlight) { _, isInFlight in
+                isInFlight
+            }
         }
     }
 }
