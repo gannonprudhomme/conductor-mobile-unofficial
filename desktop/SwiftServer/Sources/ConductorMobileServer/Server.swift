@@ -213,10 +213,10 @@ public enum Server {
 
                 while !Task.isCancelled {
                     // SQLite has no cross-process asynchronous change notification to subscribe
-                    // to. Fifty milliseconds targets near-live UI updates while each socket does
-                    // at most about 20 inexpensive scalar PRAGMA reads per second. Full snapshots
-                    // are only loaded after that token changes.
-                    try await Task.sleep(for: .milliseconds(50))
+                    // to. Twenty-five milliseconds targets near-live UI updates while each socket
+                    // does at most about 40 inexpensive scalar PRAGMA reads per second. Full
+                    // snapshots are only loaded after that token changes.
+                    try await Task.sleep(for: .milliseconds(25))
                     let nextDataVersion = try readCurrentDataVersion(in: database)
 
                     let hasDatabaseChanged = nextDataVersion != dataVersion

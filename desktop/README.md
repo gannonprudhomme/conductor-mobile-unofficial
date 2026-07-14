@@ -19,7 +19,7 @@ starts it with the app, forwards its logs, and stops it when the app exits.
 The Swift server listens on `0.0.0.0:3768` and opens Conductor's SQLite database
 through a single queue. Mobile state arrives through resource-scoped WebSocket
 streams; while a phone is subscribed, the server checks SQLite's `data_version`
-every 50 milliseconds and only sends a new full snapshot when the queried
+every 25 milliseconds and only sends a new full snapshot when the queried
 resource changes. Repository icons and message commands remain HTTP routes.
 `PATCH /workspaces/{workspaceID}` accepts any combination of `unread`, `pinned`,
 and `status`. The React UI continues to call the Rust bridge installer through
