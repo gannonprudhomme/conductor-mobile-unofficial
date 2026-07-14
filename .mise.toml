@@ -10,13 +10,16 @@ description = "Build, install, and launch the native iOS app on this worktree's 
 run = "mise -C ios run run"
 
 [tasks.xcode]
-description = "Generate and open the native iOS workspace in Xcode"
-run = "mise -C ios run xcode"
+description = "Generate both native projects and open their Xcode workspace"
+run = [
+    "mise -C ios run gen",
+    "mise -C desktop run gen",
+    "open Conductor.xcworkspace",
+]
 
-[tasks.tauri]
-description = "Install dependencies and run the desktop Tauri app"
-dir = "desktop"
-run = "pnpm install && pnpm tauri dev"
+[tasks.desktop]
+description = "Build and run the native macOS app"
+run = "mise -C desktop run run"
 
 [tasks.test]
 description = "Run native iOS module tests on this worktree's simulator"

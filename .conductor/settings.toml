@@ -16,15 +16,10 @@ icon = "smartphone"
 
 [scripts.run.xcode]
 available_in = ["local"]
-command = "mise -C ios run xcode"
+command = "mise run xcode"
 icon = "hammer"
 
-[scripts.run.tauri]
+[scripts.run.desktop]
 available_in = ["local"]
-command = "mise run tauri"
+command = "mise run desktop"
 icon = "monitor"
-
-[scripts.run.server]
-available_in = ["local"]
-command = "mise run server dev"
-icon = "server"

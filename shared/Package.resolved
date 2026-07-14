@@ -1,5 +1,5 @@
 {
-  "originHash" : "39db1a3e836ed917f7c40d1e78495326819237c1e64a030f3821e86e99436b0c",
+  "originHash" : "1de73186b4b7e6c9e5180b4be472682591f3ee85f00a11c5a6db2200c95cdc31",
   "pins" : [
     {
       "identity" : "combine-schedulers",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
         "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "lucide-icons-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/JakubMazur/lucide-icons-swift",
+      "state" : {
+        "revision" : "b658dbac886f2ac3baeaed46810bc4ddbc9a5961",
+        "version" : "1.23.0"
       }
     },
     {

@@ -67,13 +67,13 @@ let package = Package(
                 .product(name: "Dependencies", package: "swift-dependencies"),
                 .product(name: "DependenciesMacros", package: "swift-dependencies"),
                 .product(name: "SharedConductorData", package: "ConductorShared"),
+                .product(name: "SharedConductorDesign", package: "ConductorShared"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 "ConductorMobileData",
             ],
             path: "ConductorDesign/Sources",
             resources: [
                 .process("Assets.xcassets"),
-                .process("Fonts"),
             ],
             swiftSettings: swiftSettings
         ),

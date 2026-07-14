@@ -6,8 +6,8 @@ This repository is the starting point for a monorepo around mobile access to
 The planned shape is:
 
 - A native SwiftUI iOS app for interacting with Conductor from a phone.
-- A local Tauri desktop companion that keeps its React UI and bridge installer
-  in Tauri/Rust while a bundled Swift server talks to the mobile app.
+- A native SwiftUI macOS companion whose UI and mobile server share one process.
+  It invokes the existing Rust bridge installer as a small helper executable.
 
 The service is expected to handle pairing or authentication, likely through a QR
 code scanned from the phone, then pass messages between the mobile app and the
@@ -22,25 +22,33 @@ live runtime.
 ## Current prototype
 
 - `ios/`: native iOS app scaffold. The app target is intentionally thin; app
-  logic lives in local Swift package modules under `ios/Modules`. Run
-  `mise -C ios run gen`, then open `ios/ConductorMobile.xcworkspace`.
-- `shared/`: Swift package containing `ConductorFoundation` and the
-  `SharedConductorData` models that match Conductor's desktop database and mobile API.
+  logic lives in local Swift package modules under `ios/Modules`.
+- `shared/`: Swift package containing `ConductorFoundation`, the
+  `SharedConductorData` models that match Conductor's desktop database and mobile API,
+  and the colors and fonts shared by the iOS and macOS apps.
 - `ios/Modules/Foundations/ConductorMobileData`: iOS-only networking,
   persistence, mobile workspace state, previews, and queries.
-- `desktop/`: Tauri/React app and Rust bridge installer. Its bundled Swift
-  sidecar in `desktop/SwiftServer` reads Conductor's database and serves the
-  mobile API.
-- `desktop/sidecar-proxy/runtime-proxy.mts`: small TypeScript
-  proxy for the reverse-engineered message-send path. It compiles to `.mjs`
+- `desktop/`: native SwiftUI macOS app plus separate Swift bridge-client and
+  mobile-server modules. The server accesses Conductor's database and serves the
+  mobile API from the app process.
+- `desktop/Bridge/Installer/`: the retained Rust installer logic, packaged as a
+  one-shot helper executable with no desktop UI framework.
+- `desktop/Bridge/Proxy/runtime-proxy.mts`: small TypeScript
+  proxy for the reverse-engineered message and stop paths. It compiles to `.mjs`
   because the installed Conductor runtime wrapper runs plain Node. It should
-  stay send-only; SQLite reads, local-storage drafts, pairing, and streaming
+  stay control-only; SQLite access, local-storage drafts, pairing, and streaming
   belong in the Swift mobile server.
 
 Install the local iOS tooling with Homebrew if needed:
 
 ```sh
 brew install mise xcodegen xcbeautify
+```
+
+Generate both native projects and open them in Xcode with:
+
+```sh
+mise run xcode
 ```
 
 Generate the iOS Xcode project with:
@@ -61,7 +69,12 @@ That task runs XcodeGen first, then runs `xcodebuild` for the
 Build and syntax-check the proxy with:
 
 ```sh
-cd desktop
-pnpm build:sidecar-proxy
-node --check sidecar-proxy/dist/runtime-proxy.mjs
+pnpm --dir desktop/Bridge/Proxy run build
+node --check desktop/Bridge/Proxy/dist/runtime-proxy.mjs
+```
+
+Build and run the native macOS companion with:
+
+```sh
+mise run desktop
 ```

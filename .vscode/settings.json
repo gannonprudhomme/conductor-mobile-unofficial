@@ -1,8 +1,8 @@
 {
   "rust-analyzer.linkedProjects": [
-    "desktop/src-tauri/Cargo.toml"
+    "desktop/Bridge/Installer/Cargo.toml"
   ],
-  "typescript.tsdk": "desktop/node_modules/typescript/lib",
+  "typescript.tsdk": "desktop/Bridge/Proxy/node_modules/typescript/lib",
   "typescript.validate.enable": true,
-  "js/ts.tsdk.path": "desktop/node_modules/typescript/lib"
+  "js/ts.tsdk.path": "desktop/Bridge/Proxy/node_modules/typescript/lib"
 }

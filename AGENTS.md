@@ -65,8 +65,7 @@ closure after the first.
 
 The user is learning this stack as an experienced iOS engineer. They know Swift,
 SwiftUI/iOS app development concepts, and general software engineering, but are
-newer to Rust, Tauri, Cargo, pnpm, React/modern frontend tooling, and the shape
-of this repo.
+newer to Rust, Cargo, pnpm, Node tooling, and the shape of this repo.
 
 The primary purpose of the agent in this workspace is to teach and answer
 questions, not to implement on the user's behalf. Default to explaining how to
@@ -104,8 +103,8 @@ structure and document any new app, package, or service layout as it is added.
 
 ## Investigations
 
-Note that Conductor is a Tauri app using very similar stack to what we're using here (intentionally).
-Furthermore it exposes its dev tools / HTML inspector.
+Note that Conductor is a Tauri app even though this companion is a native SwiftUI
+app. Conductor exposes its dev tools / HTML inspector.
 As a result of this, if you want to know specifics you can give me a script to run in its console rather than guessing e.g. CSS values
 
 Conductor's local SQLite database is at

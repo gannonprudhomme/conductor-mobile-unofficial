@@ -16,8 +16,10 @@ let package = Package(
     products: [
         .library(name: "ConductorFoundation", targets: ["ConductorFoundation"]),
         .library(name: "SharedConductorData", targets: ["SharedConductorData"]),
+        .library(name: "SharedConductorDesign", targets: ["SharedConductorDesign"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/JakubMazur/lucide-icons-swift", exact: "1.23.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.14.0"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
     ],
@@ -36,6 +38,17 @@ let package = Package(
                 .product(name: "SQLiteData", package: "sqlite-data"),
             ],
             path: "SharedConductorData/Sources",
+            swiftSettings: swiftSettings
+        ),
+        .target(
+            name: "SharedConductorDesign",
+            dependencies: [
+                .product(name: "LucideIcons", package: "lucide-icons-swift"),
+            ],
+            path: "SharedConductorDesign/Sources",
+            resources: [
+                .process("Fonts"),
+            ],
             swiftSettings: swiftSettings
         ),
         .testTarget(

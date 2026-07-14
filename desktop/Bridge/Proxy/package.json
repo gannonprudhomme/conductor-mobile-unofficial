@@ -1,0 +1,12 @@
+{
+  "name": "conductor-bridge-proxy",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "test": "pnpm build && node --test dist/runtime-proxy.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "~6.0.3"
+  }
+}

@@ -26,18 +26,15 @@ dist-ssr/
 *.mobileprovision
 *.pem
 
-# Tauri and Rust
-/desktop/src-tauri/target/
-/desktop/src-tauri/gen/schemas
-/desktop/src-tauri/binaries/*
-!/desktop/src-tauri/binaries/.gitignore
+# Rust
+/desktop/Bridge/Installer/target/
 
 # Local env files
 .env*.local
 
 # Editor directories and files
-/desktop/.vscode/*
-!/desktop/.vscode/extensions.json
+xcuserdata/
+*.xcuserstate
 .idea/
 .DS_Store
 *.suo
