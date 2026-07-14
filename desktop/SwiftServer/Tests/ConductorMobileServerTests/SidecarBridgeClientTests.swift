@@ -48,6 +48,7 @@ struct SidecarBridgeClientTests {
                 SidecarBridgeClient.RuntimeMessageRequest(
                     agentType: "codex",
                     cwd: "/tmp/workspace-1",
+                    fastMode: true,
                     message: "Run the tests.",
                     model: "gpt-5.5",
                     sessionID: "session-1",
@@ -58,18 +59,15 @@ struct SidecarBridgeClientTests {
 
         let body = try #require(recordedBody.withLock { $0 })
         let object = try #require(
-            JSONSerialization.jsonObject(with: body) as? [String: String]
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
         )
-        #expect(
-            object == [
-                "agentType": "codex",
-                "cwd": "/tmp/workspace-1",
-                "message": "Run the tests.",
-                "model": "gpt-5.5",
-                "sessionId": "session-1",
-                "workspaceId": "workspace-1",
-            ]
-        )
+        #expect(object["agentType"] as? String == "codex")
+        #expect(object["cwd"] as? String == "/tmp/workspace-1")
+        #expect(object["fastMode"] as? Bool == true)
+        #expect(object["message"] as? String == "Run the tests.")
+        #expect(object["model"] as? String == "gpt-5.5")
+        #expect(object["sessionId"] as? String == "session-1")
+        #expect(object["workspaceId"] as? String == "workspace-1")
     }
 
     @Test("Stop requests use the proxy's stop endpoint and JSON keys")

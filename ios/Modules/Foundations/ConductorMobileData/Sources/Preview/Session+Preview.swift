@@ -22,7 +22,8 @@ extension Session {
         model: String = "gpt-5",
         unreadCount: Int = 0,
         freshlyCompacted: Int = 0,
-        contextTokenCount: Int = 0
+        contextTokenCount: Int = 0,
+        fastMode: Bool? = false
     ) -> Self {
         Self(
             id: id,
@@ -37,7 +38,8 @@ extension Session {
             model: model,
             unreadCount: unreadCount,
             freshlyCompacted: freshlyCompacted,
-            contextTokenCount: contextTokenCount
+            contextTokenCount: contextTokenCount,
+            fastMode: fastMode
         )
     }
 }

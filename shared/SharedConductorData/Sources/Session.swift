@@ -25,6 +25,8 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
     public var lastUserMessageAt: String?
     public var status: Status
     public var model: String
+    @Column("fast_mode")
+    public var fastMode: Bool?
     @Column("unread_count")
     public var unreadCount: Int
     @Column("freshly_compacted")
@@ -45,7 +47,8 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
         model: String,
         unreadCount: Int,
         freshlyCompacted: Int,
-        contextTokenCount: Int
+        contextTokenCount: Int,
+        fastMode: Bool? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -57,6 +60,7 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
         self.lastUserMessageAt = lastUserMessageAt
         self.status = status
         self.model = model
+        self.fastMode = fastMode
         self.unreadCount = unreadCount
         self.freshlyCompacted = freshlyCompacted
         self.contextTokenCount = contextTokenCount
@@ -87,6 +91,24 @@ extension Session {
         public static let error = Self(rawValue: "error")
         public static let working = Self(rawValue: "working")
     }
+
+    public struct AgentOptions: Codable, Equatable, Sendable {
+        public var fastMode: Bool
+
+        public init(fastMode: Bool) {
+            self.fastMode = fastMode
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case fastMode = "fast_mode"
+        }
+    }
+}
+
+extension Session {
+    public var agentOptions: AgentOptions {
+        AgentOptions(fastMode: fastMode ?? false)
+    }
 }
 
 extension Session {
@@ -101,6 +123,7 @@ extension Session {
         case lastUserMessageAt = "last_user_message_at"
         case status
         case model
+        case fastMode = "fast_mode"
         case unreadCount = "unread_count"
         case freshlyCompacted = "freshly_compacted"
         case contextTokenCount = "context_token_count"

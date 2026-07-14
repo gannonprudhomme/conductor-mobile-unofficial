@@ -174,6 +174,17 @@ public struct WorkspaceChat: Sendable {
                 )
                 return .none
 
+            case let .chat(.updateSessionAgentOptionsResponse(sessionID, .failure(error))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to update session fast mode: \(error)")
+                state.destination = .alert(
+                    .failedToUpdateSessionAgentOptions(message: error.localizedDescription)
+                )
+                return .none
+
             case let .sessionButtonTapped(session):
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
                 state.hasUserSelectedSession = true
@@ -278,6 +289,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     static func failedToStopSession(message: String) -> Self {
         AlertState {
             TextState("Failed to stop agent")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToUpdateSessionAgentOptions(message: String) -> Self {
+        AlertState {
+            TextState("Failed to update fast mode")
         } message: {
             TextState(message)
         }

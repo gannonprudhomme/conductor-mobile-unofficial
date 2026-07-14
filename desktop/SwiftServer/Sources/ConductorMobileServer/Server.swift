@@ -140,6 +140,14 @@ public enum Server {
             )
         }
 
+        router.post("/workspaces/{workspaceID}/sessions/{sessionID}/agent-options") { request, context in
+            return try await SessionAgentOptionsRoute.post(
+                request: request,
+                context: context,
+                database: database
+            )
+        }
+
         return Application(
             router: router,
             server: .http1WebSocketUpgrade(webSocketRouter: webSocketRouter),

@@ -40,6 +40,7 @@ enum MessageRoute {
 
                 return MessageSendContext(
                     agentType: row.agentType,
+                    fastMode: row.fastMode,
                     model: row.model,
                     workspacePath: row.workspacePath
                 )
@@ -67,6 +68,7 @@ enum MessageRoute {
                 SidecarBridgeClient.RuntimeMessageRequest(
                     agentType: messageSendContext.agentType.rawValue,
                     cwd: workspacePath,
+                    fastMode: request.fastMode ?? messageSendContext.fastMode ?? false,
                     message: request.message,
                     model: messageSendContext.model,
                     sessionID: sessionID,
@@ -95,12 +97,19 @@ enum MessageRoute {
     @Selection
     fileprivate struct MessageSendContext: Sendable {
         let agentType: Session.AgentType
+        let fastMode: Bool?
         let model: String
         let workspacePath: String?
     }
 
     private struct SendMessageRequest: Decodable {
         let message: String
+        let fastMode: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case fastMode = "fast_mode"
+        }
     }
 }
 
@@ -120,6 +129,7 @@ private extension Session {
             .select { session, workspace in
                 MessageRoute.MessageSendContext.Columns(
                     agentType: session.agentType,
+                    fastMode: session.fastMode,
                     model: session.model,
                     workspacePath: workspace.workspacePath
                 )

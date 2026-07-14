@@ -330,10 +330,11 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, options in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
+                    #expect(options.fastMode)
                 }
             }
 
@@ -361,7 +362,7 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _ in
                     throw TestError()
                 }
             }
@@ -372,6 +373,40 @@ struct ChatTests {
             await store.receive(\.sendMessageResponse) {
                 $0.isMessageSendInFlight = false
             }
+        }
+    }
+
+    @Test("Fast mode updates the selected desktop session")
+    func fastModeUpdates() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let recordedOptions = LockIsolated<Session.AgentOptions?>(nil)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.updateSessionAgentOptions = {
+                    workspaceID,
+                    sessionID,
+                    options in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    recordedOptions.withValue { $0 = options }
+                }
+            }
+
+            await store.send(.fastModeButtonTapped) {
+                $0.agentOptions.fastMode = false
+                $0.isSessionOptionsUpdateInFlight = true
+            }
+            await store.receive(\.updateSessionAgentOptionsResponse) {
+                $0.isSessionOptionsUpdateInFlight = false
+            }
+            expectNoDifference(
+                recordedOptions.value,
+                Session.AgentOptions(fastMode: false)
+            )
         }
     }
 
@@ -534,6 +569,7 @@ private func makeSession(status: String = "idle") throws -> Session {
               "updated_at": "2026-07-09 00:00:00",
               "status": "\(status)",
               "model": "gpt-5",
+              "fast_mode": true,
               "unread_count": 0,
               "freshly_compacted": 0,
               "context_token_count": 0

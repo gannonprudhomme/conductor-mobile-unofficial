@@ -14,24 +14,33 @@ struct ChatTextField: View {
     @FocusState var isFocused: Bool
 
     @Binding var text: String
+    let agentOptions: Session.AgentOptions
     let isSendInFlight: Bool
+    let isSessionOptionsUpdateInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
+    let onFastModeTapped: @MainActor () -> Void
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
     init(
         text: Binding<String>,
+        agentOptions: Session.AgentOptions,
         isSendInFlight: Bool,
+        isSessionOptionsUpdateInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
+        onFastModeTapped: @escaping @MainActor () -> Void,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
         self._text = text
+        self.agentOptions = agentOptions
         self.isSendInFlight = isSendInFlight
+        self.isSessionOptionsUpdateInFlight = isSessionOptionsUpdateInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
+        self.onFastModeTapped = onFastModeTapped
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -69,8 +78,17 @@ struct ChatTextField: View {
 
     private var bottomRowButtons: some View {
         HStack(spacing: 8) {
-            modelPicker
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ScrollView(.horizontal) {
+                HStack(spacing: 4) {
+                    modelPicker
+
+                    fastModeButton
+                }
+            }
+            .scrollIndicators(.hidden)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .defaultScrollAnchor(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
                 if isWorking {
@@ -116,6 +134,33 @@ struct ChatTextField: View {
         .labelStyle(.conductorExtraSmall)
         .foregroundStyle(.theme(.textPrimary))
         .font(.theme(.small))
+        .fixedSize()
+    }
+
+    private var fastModeButton: some View {
+        Button(action: onFastModeTapped) {
+            HStack(spacing: 6) {
+                LucideIcon(Lucide.zap, style: .small)
+
+                if agentOptions.fastMode {
+                    Text("Fast")
+                        .font(.theme(.small))
+                }
+            }
+            .foregroundStyle(
+                .theme(agentOptions.fastMode ? .accent : .textSecondary)
+            )
+            .padding(EdgeInsets(vertical: 6, horizontal: 8))
+            .background(
+                agentOptions.fastMode ? .theme(.highlight) : Color.clear,
+                in: .capsule
+            )
+        }
+        .buttonStyle(.plain)
+        .frame(minWidth: 44, minHeight: 44)
+        .disabled(isSessionOptionsUpdateInFlight)
+        .accessibilityLabel("Fast mode")
+        .accessibilityValue(agentOptions.fastMode ? "On" : "Off")
     }
 
     private struct SendButton: View {
@@ -214,9 +259,12 @@ struct ChatTextField: View {
     .safeAreaBar(edge: .bottom) {
         ChatTextField(
             text: $text,
+            agentOptions: .init(fastMode: true),
             isSendInFlight: false,
+            isSessionOptionsUpdateInFlight: false,
             isStopInFlight: false,
             isWorking: true,
+            onFastModeTapped: { },
             onSendTapped: { },
             onStopTapped: { }
         )

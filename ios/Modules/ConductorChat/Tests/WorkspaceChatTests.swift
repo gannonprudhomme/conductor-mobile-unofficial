@@ -342,7 +342,7 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, _ in
                     #expect(workspaceID == workspace.id)
                     #expect(sessionID == activeSession.id)
                     #expect(message == "Run the tests.")

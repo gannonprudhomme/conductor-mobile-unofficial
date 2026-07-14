@@ -244,7 +244,8 @@ struct ServerTests {
             model: "gpt-5.5",
             unreadCount: 0,
             freshlyCompacted: 0,
-            contextTokenCount: 0
+            contextTokenCount: 0,
+            fastMode: false
         )
         try await database.write { db in
             try Workspace.insert { workspace }.execute(db)
@@ -262,7 +263,9 @@ struct ServerTests {
                     uri: "/workspaces/workspace-1/sessions/session-1/messages",
                     method: .post,
                     headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"message":"  Run the tests.  "}"#)
+                    body: ByteBuffer(
+                        string: #"{"message":"  Run the tests.  ","fast_mode":true}"#
+                    )
                 ) { response in
                     #expect(response.status == .noContent)
                     #expect(response.body.readableBytes == 0)
@@ -274,6 +277,7 @@ struct ServerTests {
             await recorder.message == SidecarBridgeClient.RuntimeMessageRequest(
                 agentType: "codex",
                 cwd: "/tmp/workspace-1",
+                fastMode: true,
                 message: "  Run the tests.  ",
                 model: "gpt-5.5",
                 sessionID: "session-1",

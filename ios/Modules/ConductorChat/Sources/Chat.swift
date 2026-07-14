@@ -25,9 +25,10 @@ public struct Chat: Sendable {
     public struct State: Equatable {
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
-
+        var agentOptions: Session.AgentOptions
         var messageDraft = ""
         var isMessageSendInFlight = false
+        var isSessionOptionsUpdateInFlight = false
         var isStopInFlight = false
         var displayedContentRevision = 0
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
@@ -56,6 +57,7 @@ public struct Chat: Sendable {
         }
 
         init(session: Session) {
+            self.agentOptions = session.agentOptions
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -80,8 +82,10 @@ public struct Chat: Sendable {
         public static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
+                && lhs.agentOptions == rhs.agentOptions
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
+                && lhs.isSessionOptionsUpdateInFlight == rhs.isSessionOptionsUpdateInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.displayedContentRevision == rhs.displayedContentRevision
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
@@ -93,8 +97,10 @@ public struct Chat: Sendable {
 
     public enum Action: BindableAction {
         case task
+        case fastModeButtonTapped
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
+        case sessionAgentOptionsChanged(Session.AgentOptions)
         case sendButtonTapped
         case sendMessageResponse(
             sessionID: Session.ID,
@@ -107,6 +113,10 @@ public struct Chat: Sendable {
             result: Result<Void, any Error>
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
+        case updateSessionAgentOptionsResponse(
+            sessionID: Session.ID,
+            result: Result<Void, any Error>
+        )
         case binding(BindingAction<State>)
     }
 
@@ -147,6 +157,23 @@ public struct Chat: Sendable {
                 }
                 return .none
 
+            case .fastModeButtonTapped:
+                guard !state.isSessionOptionsUpdateInFlight else {
+                    return .none
+                }
+
+                state.agentOptions.fastMode.toggle()
+                state.isSessionOptionsUpdateInFlight = true
+                return updateSessionAgentOptions(state)
+
+            case .sessionAgentOptionsChanged(let options):
+                guard !state.isSessionOptionsUpdateInFlight else {
+                    return .none
+                }
+
+                state.agentOptions = options
+                return .none
+
             case .turnSummaryTapped(let summaryID):
                 if state.expandedSummaryIDs.remove(summaryID) == nil {
                     state.expandedSummaryIDs.insert(summaryID)
@@ -161,12 +188,18 @@ public struct Chat: Sendable {
                 }
 
                 state.isMessageSendInFlight = true
-                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                return .run {
+                    [
+                        options = state.agentOptions,
+                        sessionID = state.session.id,
+                        workspaceID = state.session.workspaceID,
+                    ] send in
                     let result = await Result {
                         try await desktopClient.sendMessage(
                             workspaceID: workspaceID,
                             sessionID: sessionID,
-                            message: message
+                            message: message,
+                            options: options
                         )
                         return message
                     }
@@ -229,6 +262,17 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
+            case let .updateSessionAgentOptionsResponse(sessionID, result):
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
+
+                state.isSessionOptionsUpdateInFlight = false
+                if case .failure = result {
+                    state.agentOptions = state.session.agentOptions
+                }
+                return .none
+
             case .binding, .loadMessagesFailed:
                 return .none
             }
@@ -259,6 +303,28 @@ public struct Chat: Sendable {
                 Logger.chat.error("Failed to load messages: \(error)")
                 await send(.loadMessagesFailed(error.localizedDescription))
             }
+        }
+    }
+
+    private func updateSessionAgentOptions(_ state: State) -> Effect<Action> {
+        .run {
+            [
+                options = state.agentOptions,
+                sessionID = state.session.id,
+                workspaceID = state.session.workspaceID,
+            ] send in
+            await send(
+                .updateSessionAgentOptionsResponse(
+                    sessionID: sessionID,
+                    result: await Result {
+                        try await desktopClient.updateSessionAgentOptions(
+                            workspaceID: workspaceID,
+                            sessionID: sessionID,
+                            options: options
+                        )
+                    }
+                )
+            )
         }
     }
 
@@ -333,9 +399,12 @@ struct ChatView: View {
         .safeAreaBar(edge: .bottom) {
             ChatTextField(
                 text: $store.messageDraft,
+                agentOptions: store.agentOptions,
                 isSendInFlight: store.isMessageSendInFlight,
+                isSessionOptionsUpdateInFlight: store.isSessionOptionsUpdateInFlight,
                 isStopInFlight: store.isStopInFlight,
                 isWorking: store.session.status == .working,
+                onFastModeTapped: { store.send(.fastModeButtonTapped) },
                 onSendTapped: { store.send(.sendButtonTapped) },
                 onStopTapped: { store.send(.stopButtonTapped) }
             )
@@ -345,6 +414,9 @@ struct ChatView: View {
         }
         .onChange(of: store.session.status) { _, status in
             sessionStatusChanged(status)
+        }
+        .onChange(of: store.session.agentOptions) { _, options in
+            store.send(.sessionAgentOptionsChanged(options))
         }
         .task(id: store.session.id) {
             await store.send(.task).finish()

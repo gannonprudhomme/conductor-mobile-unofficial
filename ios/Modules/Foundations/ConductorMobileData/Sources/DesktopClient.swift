@@ -21,11 +21,21 @@ public struct DesktopClient: Sendable {
     public var observeWorkspaces: @Sendable () -> AsyncThrowingStream<WorkspaceListSnapshot, any Error> = {
         AsyncThrowingStream { $0.finish() }
     }
-    public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Void
+    public var sendMessage: @Sendable (
+        _ workspaceID: String,
+        _ sessionID: String,
+        _ message: String,
+        _ options: Session.AgentOptions
+    ) async throws -> Void
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ unread: Bool) async throws -> Void
     public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
+    public var updateSessionAgentOptions: @Sendable (
+        _ workspaceID: String,
+        _ sessionID: String,
+        _ options: Session.AgentOptions
+    ) async throws -> Void
 }
 
 public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
@@ -64,9 +74,9 @@ extension DesktopClient: DependencyKey {
                 WorkspaceListSnapshot.self,
                 at: workspacesWebSocketURL
             )
-        } sendMessage: { workspaceID, sessionID, message in
+        } sendMessage: { workspaceID, sessionID, message, options in
             try await post(
-                ["message": message],
+                SendMessageRequest(message: message, options: options),
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
             )
         } setWorkspacePinned: { workspaceID, pinned in
@@ -90,6 +100,12 @@ extension DesktopClient: DependencyKey {
                 // POST /workspaces/{workspaceID}/sessions/{sessionID}/stop
                 to: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
                     .appending(path: "stop")
+            )
+        } updateSessionAgentOptions: { workspaceID, sessionID, options in
+            try await post(
+                options,
+                to: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: "agent-options")
             )
         }
     }
@@ -132,6 +148,21 @@ extension DesktopClient: DependencyKey {
 
         let (data, response) = try await urlSession.data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
+    }
+
+    private struct SendMessageRequest: Encodable {
+        let message: String
+        let fastMode: Bool
+
+        init(message: String, options: Session.AgentOptions) {
+            self.message = message
+            self.fastMode = options.fastMode
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case fastMode = "fast_mode"
+        }
     }
 
     // URLSession only throws for transport failures, so validate HTTP status codes separately.
