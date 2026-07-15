@@ -173,7 +173,23 @@ struct ServerTests {
                     [Message].self,
                     from: try #require(await iterator.next())
                 )
-                #expect(changed.map(\.id) == ["message-1", "message-2"])
+                #expect(changed.map(\.id) == ["message-2"])
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            UPDATE session_messages
+                            SET content = 'Updated.'
+                            WHERE id = 'message-1'
+                            """
+                    )
+                }
+                let updated = try decode(
+                    [Message].self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(updated.map(\.id) == ["message-1"])
+                #expect(updated.first?.content == "Updated.")
             }
 
             try await client.execute(

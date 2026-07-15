@@ -9,11 +9,31 @@ import SharedConductorData
 import SQLiteData
 
 extension Message {
+    static var excludingToolResults: Where<Message> {
+        Message.where { message in
+            #sql(
+                """
+                CASE
+                  WHEN json_valid(\(message.content))
+                  THEN NOT (
+                    json_extract(\(message.content), '$.type') = 'user'
+                    AND json_extract(
+                      \(message.content),
+                      '$.message.content[0].type'
+                    ) = 'tool_result'
+                  )
+                  ELSE 1
+                END
+                """
+            )
+        }
+    }
+
     static func all(
         forWorkspaceID workspaceID: String,
         sessionID: String
     ) -> some SelectStatement<Message, Message, Session> {
-        Message
+        excludingToolResults
             .where { $0.sessionID.eq(sessionID) }
             .order(by: \.createdAt)
             .join(Session.all) { message, session in

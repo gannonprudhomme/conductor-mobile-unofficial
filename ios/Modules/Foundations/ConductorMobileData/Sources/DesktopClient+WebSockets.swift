@@ -42,9 +42,17 @@ extension DesktopClient {
             .appending(path: "sessions")
     }
 
-    /// Note: Automatically reacts to changes in the server address
+    /// Automatically reacts to changes in the server address.
+    ///
+    /// `bufferingPolicy` controls which values wait when the producer is faster than the
+    /// consumer. State snapshots keep only the newest pending value by default; callers whose
+    /// values are incremental can opt into an unbounded buffer so no update is discarded.
     static func observe<Value: Decodable & Sendable>(
         _ type: Value.Type,
+        bufferingPolicy: AsyncThrowingStream<
+            Value,
+            any Error
+        >.Continuation.BufferingPolicy = .bufferingNewest(1),
         at makeURL: @escaping @Sendable (String) -> URL
     ) -> AsyncThrowingStream<Value, any Error> {
         @Dependency(\.urlSession) var urlSession
@@ -61,6 +69,7 @@ extension DesktopClient {
             .flatMapLatest { serverAddress in
                 webSocketStream(
                     type,
+                    bufferingPolicy: bufferingPolicy,
                     using: WebSocketTaskClient(
                         urlSession.webSocketTask(with: makeURL(serverAddress))
                     )
@@ -71,7 +80,7 @@ extension DesktopClient {
         // dependency endpoints promise a concrete `AsyncThrowingStream`. This outer stream is
         // the type-erasure bridge between them. It also forwards consumer cancellation to the
         // task driving the operator chain.
-        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        return AsyncThrowingStream(bufferingPolicy: bufferingPolicy) { continuation in
             let producer = Task {
                 do {
                     for try await value in values {
@@ -97,9 +106,13 @@ extension DesktopClient {
     // Only non-private for tests
     static func webSocketStream<Value: Decodable & Sendable>(
         _ type: Value.Type,
+        bufferingPolicy: AsyncThrowingStream<
+            Value,
+            any Error
+        >.Continuation.BufferingPolicy = .bufferingNewest(1),
         using task: WebSocketTaskClient
     ) -> AsyncThrowingStream<Value, any Error> {
-        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        return AsyncThrowingStream(bufferingPolicy: bufferingPolicy) { continuation in
             task.resume()
             let producer = Task {
                 // A producer can fail before its termination handler is installed. In that case,

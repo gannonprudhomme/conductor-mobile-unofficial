@@ -24,6 +24,7 @@ public enum Server {
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
+        let databaseChanges = DatabaseChangeObserver(database: database)
 
         router.get("/ping") { _, _ in
             HTTPResponse.Status.noContent
@@ -63,7 +64,7 @@ public enum Server {
             try await streamSnapshots(
                 inbound: inbound,
                 outbound: outbound,
-                database: database
+                databaseChanges: databaseChanges
             ) {
                 try await database.read { database in
                     try WorkspaceListSnapshot(
@@ -82,7 +83,7 @@ public enum Server {
             try await streamSnapshots(
                 inbound: inbound,
                 outbound: outbound,
-                database: database
+                databaseChanges: databaseChanges
             ) {
                 try await database.read { database in
                     try Session.all(forWorkspaceID: workspaceID).fetchAll(database)
@@ -96,10 +97,10 @@ public enum Server {
         ) { inbound, outbound, context in
             let workspaceID = try context.requestContext.parameters.require("workspaceID")
             let sessionID = try context.requestContext.parameters.require("sessionID")
-            try await streamSnapshots(
+            try await streamMessages(
                 inbound: inbound,
                 outbound: outbound,
-                database: database
+                databaseChanges: databaseChanges
             ) {
                 try await database.read { database in
                     try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
@@ -168,9 +169,10 @@ public enum Server {
     private static func streamSnapshots<Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
-        database: DatabaseQueue,
+        databaseChanges: DatabaseChangeObserver,
         loadSnapshot: @escaping @Sendable () async throws -> Snapshot
     ) async throws where Snapshot: Encodable & Equatable & Sendable {
+        let changes = try await databaseChanges.changes()
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Phone -> desktop: discard application data while waiting for close or failure.
             group.addTask {
@@ -181,7 +183,6 @@ public enum Server {
             // and push each changed route-specific snapshot.
             group.addTask {
                 let encoder = JSONEncoder.conductor
-                var dataVersion = try readCurrentDataVersion(in: database)
                 var previousSnapshot = try await loadSnapshot()
 
                 // Every subscriber receives state immediately instead of waiting for a write.
@@ -189,20 +190,9 @@ public enum Server {
                     String(decoding: try encoder.encode(previousSnapshot), as: UTF8.self)
                 )
 
-                while !Task.isCancelled {
-                    // SQLite has no cross-process asynchronous change notification to subscribe
-                    // to. Three milliseconds targets near-live UI updates while each socket does
-                    // at most about 333 inexpensive scalar PRAGMA reads per second. Full
-                    // snapshots are only loaded after that token changes.
-                    try await Task.sleep(for: .milliseconds(3))
-                    let nextDataVersion = try readCurrentDataVersion(in: database)
-
-                    let hasDatabaseChanged = nextDataVersion != dataVersion
-                    guard hasDatabaseChanged else {
-                        continue
-                    }
-
-                    dataVersion = nextDataVersion
+                // One observer polls SQLite for every socket. Slow snapshot consumers retain only
+                // the newest pending change instead of creating an unbounded update backlog.
+                for try await _ in changes {
                     let snapshot = try await loadSnapshot()
 
                     // data_version covers the whole database, so an unrelated table write can
@@ -225,9 +215,55 @@ public enum Server {
         }
     }
 
-    private static func readCurrentDataVersion(in database: DatabaseQueue) throws -> Int {
-        try database.read { database in
-            try #sql("PRAGMA data_version", as: Int.self).fetchOne(database) ?? 0
+    /// Runs for each accepted `/workspaces/{workspaceID}/sessions/{sessionID}/messages`
+    /// WebSocket connection. It immediately sends the session's complete message history, then
+    /// reloads that history after each database invalidation and sends only messages that were
+    /// added or updated.
+    ///
+    /// This is separate from `streamSnapshots` because message histories continually grow. Sending
+    /// only incremental batches after the initial snapshot avoids repeatedly transferring and
+    /// storing the entire history while still letting the mobile client upsert every change.
+    private static func streamMessages(
+        inbound: WebSocketInboundStream,
+        outbound: WebSocketOutboundWriter,
+        databaseChanges: DatabaseChangeObserver,
+        loadMessages: @escaping @Sendable () async throws -> [Message]
+    ) async throws {
+        let changes = try await databaseChanges.changes()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for try await _ in inbound {}
+            }
+
+            group.addTask {
+                let encoder = JSONEncoder.conductor
+                var previousMessages = try await loadMessages()
+                try await outbound.writeTextMessage(
+                    String(decoding: try encoder.encode(previousMessages), as: UTF8.self)
+                )
+
+                for try await _ in changes {
+                    let messages = try await loadMessages()
+                    let previousMessagesByID = Dictionary(
+                        uniqueKeysWithValues: previousMessages.map { ($0.id, $0) }
+                    )
+                    let changedMessages = messages.filter {
+                        previousMessagesByID[$0.id] != $0
+                    }
+                    previousMessages = messages
+
+                    guard !changedMessages.isEmpty else {
+                        continue
+                    }
+
+                    try await outbound.writeTextMessage(
+                        String(decoding: try encoder.encode(changedMessages), as: UTF8.self)
+                    )
+                }
+            }
+
+            defer { group.cancelAll() }
+            _ = try await group.next()
         }
     }
 

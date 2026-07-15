@@ -136,6 +136,49 @@ struct DesktopClientWebSocketsTests {
         }
     }
 
+    @Test("Unbounded WebSocket observations retain every pending change")
+    func webSocketChangeBuffering() async throws {
+        struct TestError: Error { }
+
+        let frames = LockIsolated<[URLSessionWebSocketTask.Message]>([
+            .string(#"["first"]"#),
+            .string(#"["second"]"#),
+            .string(#"["third"]"#),
+        ])
+        let (framesConsumed, framesConsumedContinuation) = AsyncStream.makeStream(
+            of: Void.self
+        )
+        let stream = DesktopClient.webSocketStream(
+            [String].self,
+            bufferingPolicy: .unbounded,
+            using: DesktopClient.WebSocketTaskClient {
+            } receive: {
+                guard let frame = (frames.withValue { frames in
+                    frames.isEmpty ? nil : frames.removeFirst()
+                }) else {
+                    framesConsumedContinuation.yield()
+                    throw TestError()
+                }
+
+                return frame
+            } resume: {
+            }
+        )
+        var framesConsumedIterator = framesConsumed.makeAsyncIterator()
+
+        _ = await framesConsumedIterator.next()
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        let second = try await iterator.next()
+        let third = try await iterator.next()
+        expectNoDifference(first, ["first"])
+        expectNoDifference(second, ["second"])
+        expectNoDifference(third, ["third"])
+        await #expect(throws: TestError.self) {
+            try await iterator.next()
+        }
+    }
+
     @Test("Canceling an observation stops its WebSocket and receive task")
     func webSocketCancellation() async {
         let (receiveStarted, receiveStartedContinuation) = AsyncStream.makeStream(of: Void.self)

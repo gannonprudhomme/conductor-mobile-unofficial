@@ -295,11 +295,9 @@ public struct Chat: Sendable {
         .run {
             [
                 initiallyIsLoadingMessages = state.isLoadingMessages,
-                previousMessages = Set(state.messages),
                 sessionID = state.session.id,
                 workspaceID = state.session.workspaceID,
             ] send in
-            var previousMessages = previousMessages
             var isAwaitingInitialResponse = initiallyIsLoadingMessages
             await WebSocketHelpers.observe {
                 desktopClient.observeMessages(
@@ -307,16 +305,11 @@ public struct Chat: Sendable {
                     sessionID: sessionID
                 )
             } onValue: { messages in
-                // We store the previous messages for the next time we get a response to avoid processing duplicates
-                // Eventually we'll do a diff system to avoid having to do this
                 if isAwaitingInitialResponse {
                     isAwaitingInitialResponse = false
                     await send(.initialMessagesResponse(messages))
                 }
-                previousMessages = try await loadMessages(
-                    messages,
-                    previousMessages: previousMessages
-                )
+                try await storeMessages(messages)
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
                 await send(.loadMessagesFailed(error.localizedDescription))
@@ -347,24 +340,17 @@ public struct Chat: Sendable {
         }
     }
 
-    @concurrent private func loadMessages(
-        _ messages: [Message],
-        previousMessages: Set<Message>
-    ) async throws -> Set<Message> {
+    @concurrent private func storeMessages(
+        _ messages: [Message]
+    ) async throws {
         guard !messages.isEmpty else {
-            return previousMessages
-        }
-
-        let newMessages = Set(messages)
-        guard newMessages != previousMessages else {
-            return previousMessages
+            return
         }
 
         try await database.write { db in
             try Message.upsert { messages }
                 .execute(db)
         }
-        return newMessages
     }
 }
 

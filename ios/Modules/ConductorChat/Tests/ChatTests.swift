@@ -166,8 +166,8 @@ struct ChatTests {
         }
     }
 
-    @Test("Task skips unchanged message snapshots regardless of transport order")
-    func taskSkipsUnchangedMessages() async throws {
+    @Test("Task ingests initial and changed message batches")
+    func taskIngestsMessageBatches() async throws {
         let database = try appDatabase()
         let session = try makeSession()
         var mutableEarlyMessage = try makeMessage(
@@ -248,8 +248,7 @@ struct ChatTests {
         )
         #expect(store.state.displayedContentRevision == 3)
 
-        continuation.yield([updatedEarlyMessage, lateMessage])
-        continuation.yield([updatedEarlyMessage, updatedLateMessage])
+        continuation.yield([updatedLateMessage])
         await store.receive(\.messagesUpdated) {
             $0.displayedContentRevision += 1
         }
@@ -273,7 +272,7 @@ struct ChatTests {
         expectNoDifference(storedMessages, [updatedEarlyMessage, updatedLateMessage])
         #expect(
             try await database.write { $0.totalChangesCount }
-                == baselineChangeCount + 4
+                == baselineChangeCount + 3
         )
 
         await task.cancel()

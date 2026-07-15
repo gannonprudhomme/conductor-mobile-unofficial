@@ -61,7 +61,11 @@ extension DesktopClient: DependencyKey {
         Self { serverAddress in
             try await ping(serverAddress: serverAddress)
         } observeMessages: { workspaceID, sessionID in
-            observe([Message].self) { serverAddress in
+            // Messages are the only unbounded observation: frames after the initial snapshot
+            // contain incremental changes, so dropping one could permanently miss an update.
+            // Workspace and session frames are complete snapshots and can safely keep only the
+            // newest pending value.
+            observe([Message].self, bufferingPolicy: .unbounded) { serverAddress in
                 messagesWebSocketURL(
                     serverAddress: serverAddress,
                     workspaceID: workspaceID,
