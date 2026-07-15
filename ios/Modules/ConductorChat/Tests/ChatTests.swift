@@ -34,6 +34,10 @@ struct ChatTests {
             var changedExpansion = original
             changedExpansion.expandedSummaryIDs.insert("turn-1:human-1")
             #expect(original != changedExpansion)
+
+            var finishedLoading = original
+            finishedLoading.isLoadingMessages = false
+            #expect(original != finishedLoading)
         }
     }
 
@@ -144,6 +148,12 @@ struct ChatTests {
             #expect(store.state.displayedContentRevision == 1)
             #expect(connectionCount.value == 1)
 
+            firstContinuation.yield([])
+            await store.receive(\.initialMessagesResponse) {
+                $0.isLoadingMessages = false
+                $0.displayedContentRevision += 1
+            }
+
             firstContinuation.finish(throwing: TestError())
             await store.receive(\.loadMessagesFailed)
             #expect(connectionCount.value == 1)
@@ -220,6 +230,10 @@ struct ChatTests {
         )
 
         continuation.yield([lateMessage, updatedEarlyMessage])
+        await store.receive(\.initialMessagesResponse) {
+            $0.isLoadingMessages = false
+            $0.displayedContentRevision += 1
+        }
         await store.receive(\.messagesUpdated) {
             $0.displayedContentRevision += 1
         }
@@ -232,7 +246,7 @@ struct ChatTests {
                 .init(id: "late", content: "Message late"),
             ]
         )
-        #expect(store.state.displayedContentRevision == 2)
+        #expect(store.state.displayedContentRevision == 3)
 
         continuation.yield([updatedEarlyMessage, lateMessage])
         continuation.yield([updatedEarlyMessage, updatedLateMessage])
@@ -248,7 +262,7 @@ struct ChatTests {
                 .init(id: "late", content: "Updated late message"),
             ]
         )
-        #expect(store.state.displayedContentRevision == 3)
+        #expect(store.state.displayedContentRevision == 4)
 
         let storedMessages = try await database.read { db in
             try Message
@@ -318,6 +332,37 @@ struct ChatTests {
                 startedAt: message.createdAt,
                 messages: [.init(id: "human-1", content: "Hello")]
             )
+        }
+    }
+
+    @Test("An empty initial response replaces cached presentation before loading finishes")
+    func emptyInitialResponse() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var message = try makeMessage(
+                id: "cached",
+                sessionID: "session-1",
+                createdAt: "2026-07-09 01:00:00"
+            )
+            message.role = .user
+            message.turnID = "turn-1"
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(.messagesUpdated([message])) {
+                $0.displayedContentRevision += 1
+            }
+            #expect(store.state.isLoadingMessages)
+
+            await store.send(.initialMessagesResponse([])) {
+                $0.isLoadingMessages = false
+                $0.displayedContentRevision += 1
+            }
+            #expect(try #require(store.state.turns).isEmpty)
+            #expect(try #require(store.state.rows).isEmpty)
         }
     }
 

@@ -232,6 +232,9 @@ struct WorkspacesTests {
                     workspaces: [firstExpectedWorkspace]
                 )
             }
+            await store.receive(\.initialWorkspacesResponse) {
+                $0.isLoadingWorkspaces = false
+            }
             #expect(connectionCount.value == 1)
 
             firstContinuation.finish(throwing: TestError())

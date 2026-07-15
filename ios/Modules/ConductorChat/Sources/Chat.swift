@@ -27,6 +27,7 @@ public struct Chat: Sendable {
         @FetchOne var session: Session
 
         var messageDraft = ""
+        var isLoadingMessages = true
         var isMessageSendInFlight = false
         var isStopInFlight = false
         var displayedContentRevision = 0
@@ -81,6 +82,7 @@ public struct Chat: Sendable {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
                 && lhs.messageDraft == rhs.messageDraft
+                && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.displayedContentRevision == rhs.displayedContentRevision
@@ -93,6 +95,7 @@ public struct Chat: Sendable {
 
     public enum Action: BindableAction {
         case task
+        case initialMessagesResponse([Message])
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
         case sendButtonTapped
@@ -138,6 +141,16 @@ public struct Chat: Sendable {
                 )
                 state.updateRows(sessionStatus: state.session.status)
                 state.displayedContentRevision += 1
+                return .none
+
+            case let .initialMessagesResponse(messages):
+                state.turns = Turn.parse(
+                    messages: messages,
+                    reusing: state.turns ?? []
+                )
+                state.updateRows(sessionStatus: state.session.status)
+                state.displayedContentRevision += 1
+                state.isLoadingMessages = false
                 return .none
 
             case .sessionStatusChanged(let status):
@@ -238,11 +251,13 @@ public struct Chat: Sendable {
     private func observeMessages(_ state: State) -> Effect<Action> {
         .run {
             [
+                initiallyIsLoadingMessages = state.isLoadingMessages,
                 previousMessages = Set(state.messages),
                 sessionID = state.session.id,
                 workspaceID = state.session.workspaceID,
             ] send in
             var previousMessages = previousMessages
+            var isAwaitingInitialResponse = initiallyIsLoadingMessages
             await WebSocketHelpers.observe {
                 desktopClient.observeMessages(
                     workspaceID: workspaceID,
@@ -251,6 +266,10 @@ public struct Chat: Sendable {
             } onValue: { messages in
                 // We store the previous messages for the next time we get a response to avoid processing duplicates
                 // Eventually we'll do a diff system to avoid having to do this
+                if isAwaitingInitialResponse {
+                    isAwaitingInitialResponse = false
+                    await send(.initialMessagesResponse(messages))
+                }
                 previousMessages = try await loadMessages(
                     messages,
                     previousMessages: previousMessages
@@ -315,12 +334,13 @@ struct ChatView: View {
             .scrollTargetLayout()
         }
         .overlay {
-            if store.turns == nil {
+            if store.isLoadingMessages {
                 ProgressView()
-                    .progressViewStyle(.conductor)
+                    .progressViewStyle(.network)
                     .tint(.theme(.textSecondary))
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .background(.theme(.background))
             }
         }
         .scrollPosition($scrollPosition)

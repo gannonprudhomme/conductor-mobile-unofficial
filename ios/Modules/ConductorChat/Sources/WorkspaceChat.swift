@@ -31,6 +31,7 @@ public struct WorkspaceChat: Sendable {
         ///
         /// However we want to prevent that from overriding a local switch from the user
         var hasUserSelectedSession = false
+        var isLoadingSessions = true
 
         @FetchAll public var activeSessions: [Session]
         @FetchAll public var archivedSessions: [Session]
@@ -139,6 +140,7 @@ public struct WorkspaceChat: Sendable {
                     workspaceActiveSessionID: state.workspace.activeSessionID,
                     hasUserSelectedSession: state.hasUserSelectedSession
                 )
+                state.isLoadingSessions = false
                 return .none
 
             case let .loadSessionsResponse(.failure(error)):
@@ -300,7 +302,7 @@ public struct WorkspaceChatView: View {
                     .id(chatStore.sessionID)
             } else {
                 ProgressView()
-                    .progressViewStyle(.conductor)
+                    .progressViewStyle(.network)
                     .tint(.theme(.textSecondary))
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -323,7 +325,7 @@ public struct WorkspaceChatView: View {
             .labelStyle(.conductorExtraSmall)
         }
         .toolbar {
-            if !store.archivedSessions.isEmpty {
+            if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         store.send(.archivedSessionsButtonTapped)
@@ -346,6 +348,16 @@ public struct WorkspaceChatView: View {
                 height: sessionPickerHeight
             ) { session in
                 store.send(.sessionButtonTapped(session))
+            }
+        }
+        .overlay {
+            if store.isLoadingSessions {
+                ProgressView()
+                    .progressViewStyle(.network)
+                    .tint(.theme(.textSecondary))
+                    .frame(width: 32, height: 32)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .background(.theme(.background))
             }
         }
         .background(.theme(.background))

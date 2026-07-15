@@ -71,6 +71,7 @@ public struct Workspaces: Sendable {
         )
         public var workspaces: [WorkspaceWithRepository] = []
 
+        var isLoadingWorkspaces = true
         var sections: [WorkspaceSection] = []
 
         public init() {
@@ -139,6 +140,7 @@ public struct Workspaces: Sendable {
     public enum Action {
         case alert(PresentationAction<Alert>)
         case groupingChanged(WorkspaceWithRepository.Grouping)
+        case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
         case repositoryFilterButtonTapped(String?)
         case setWorkspacePinnedFailed(any Error)
@@ -186,7 +188,7 @@ public struct Workspaces: Sendable {
                             .dropFirst()
                             .map(Action.workspacesChanged)
                     },
-                    observeWorkspaces()
+                    observeWorkspaces(state)
                 )
 
             case let .groupingChanged(grouping):
@@ -195,6 +197,10 @@ public struct Workspaces: Sendable {
                     workspaces: state.workspaces
                 )
                 return reloadWorkspaces(state)
+
+            case .initialWorkspacesResponse:
+                state.isLoadingWorkspaces = false
+                return .none
 
             case let .loadWorkspacesFailed(error):
                 state.alert = .failedToLoadWorkspaces(error: error)
@@ -323,8 +329,9 @@ public struct Workspaces: Sendable {
         }
     }
 
-    private func observeWorkspaces() -> Effect<Action> {
-        .run { send in
+    private func observeWorkspaces(_ state: State) -> Effect<Action> {
+        .run { [initiallyIsLoadingWorkspaces = state.isLoadingWorkspaces] send in
+            var isAwaitingInitialResponse = initiallyIsLoadingWorkspaces
             await WebSocketHelpers.observe {
                 desktopClient.observeWorkspaces()
             } onValue: { snapshot in
@@ -345,6 +352,11 @@ public struct Workspaces: Sendable {
                         }
                     }
                     .execute(db)
+                }
+
+                if isAwaitingInitialResponse {
+                    isAwaitingInitialResponse = false
+                    await send(.initialWorkspacesResponse)
                 }
             } onFailure: { error in
                 Logger.workspace.error("Failed to observe workspaces: \(error)")
@@ -422,7 +434,14 @@ public struct WorkspacesView: View {
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .overlay {
-            if store.workspaces.isEmpty {
+            if store.isLoadingWorkspaces {
+                ProgressView()
+                    .progressViewStyle(.network)
+                    .tint(.theme(.textSecondary))
+                    .frame(width: 32, height: 32)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .background(.theme(.background))
+            } else if store.workspaces.isEmpty {
                 ContentUnavailableView(
                     "No Workspaces",
                     systemImage: "rectangle.stack",
@@ -447,11 +466,13 @@ public struct WorkspacesView: View {
                 }
             }
 
-            ToolbarItem(placement: .bottomBar) {
-                WorkspaceFilterMenu(store: store)
-            }
+            if !store.isLoadingWorkspaces, !store.workspaces.isEmpty {
+                ToolbarItem(placement: .bottomBar) {
+                    WorkspaceFilterMenu(store: store)
+                }
 
-            ToolbarSpacer(.flexible, placement: .bottomBar)
+                ToolbarSpacer(.flexible, placement: .bottomBar)
+            }
         }
         .background(.theme(.background))
         .alert($store.scope(state: \.alert, action: \.alert))

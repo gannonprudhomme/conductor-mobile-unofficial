@@ -100,9 +100,11 @@ struct WorkspaceChatTests {
             }
 
             #expect(store.state.chat?.sessionID == cachedFallback.id)
+            #expect(store.state.isLoadingSessions)
 
             await store.send(.loadSessionsResponse(.success([cachedFallback, activeSession]))) {
                 $0.chat = Chat.State(session: activeSession)
+                $0.isLoadingSessions = false
             }
         }
     }
@@ -133,7 +135,9 @@ struct WorkspaceChatTests {
             await store.send(.sessionButtonTapped(cachedFallback)) {
                 $0.hasUserSelectedSession = true
             }
-            await store.send(.loadSessionsResponse(.success([activeSession, cachedFallback])))
+            await store.send(.loadSessionsResponse(.success([activeSession, cachedFallback]))) {
+                $0.isLoadingSessions = false
+            }
         }
     }
 
@@ -160,7 +164,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
+            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession]))) {
+                $0.isLoadingSessions = false
+            }
             await store.send(.sessionButtonTapped(selectedSession)) {
                 $0.hasUserSelectedSession = true
                 $0.chat = Chat.State(session: selectedSession)
@@ -207,7 +213,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
+            await store.send(.loadSessionsResponse(.success([activeSession, selectedSession]))) {
+                $0.isLoadingSessions = false
+            }
             await store.send(.sessionButtonTapped(selectedSession)) {
                 $0.hasUserSelectedSession = true
                 $0.chat = Chat.State(session: selectedSession)
@@ -267,7 +275,9 @@ struct WorkspaceChatTests {
             let task = await store.send(.task)
 
             continuation.yield([session])
-            await store.receive(\.loadSessionsResponse.success)
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
+            }
 
             continuation.yield([replacement])
             await store.receive(\.loadSessionsResponse.success) {
@@ -310,7 +320,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.loadSessionsResponse(.success([selectedSession, activeSession])))
+            await store.send(.loadSessionsResponse(.success([selectedSession, activeSession]))) {
+                $0.isLoadingSessions = false
+            }
             await store.send(.sessionButtonTapped(selectedSession)) {
                 $0.hasUserSelectedSession = true
                 $0.chat = Chat.State(session: selectedSession)
@@ -644,7 +656,9 @@ struct WorkspaceChatTests {
 
             await clock.advance(by: .seconds(1))
             secondContinuation.yield([activeSession])
-            await store.receive(\.loadSessionsResponse.success)
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
+            }
             #expect(connectionCount.value == 2)
 
             await task.cancel()
