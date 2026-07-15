@@ -466,21 +466,56 @@ private extension Turn.Row {
 }
 
 enum ChatRowLayout {
-    static let stackSpacing: CGFloat = 8
-    static let rowTopPadding: CGFloat = 8
+    static let stackSpacing: CGFloat = 4
     static let horizontalPadding: CGFloat = 16
-    static let interRowSpacing = stackSpacing + rowTopPadding
+    static let interRowSpacing = stackSpacing
+
+    static func calculatePadding(
+        for row: DisplayedChatRow,
+        at index: Int,
+        in rows: [DisplayedChatRow]
+    ) -> (top: CGFloat, bottom: CGFloat) {
+        switch row {
+        case .humanMessage:
+            return (12, 12)
+        case .assistantTextChunk(_, let chunk, _):
+            // Markdown chunks and consecutive assistant messages are separate lazy-stack rows.
+            // Look ahead so adjacent assistant text shares one outer message margin.
+            let isFollowedByAssistantText = if index < rows.index(before: rows.endIndex) {
+                switch rows[index + 1] {
+                case .assistantTextChunk: true
+                default: false
+                }
+            } else {
+                false
+            }
+            return (chunk.id == 0 ? 8 : 0, isFollowedByAssistantText ? 0 : 8)
+        case .assistantToolCall:
+            return (0, 4)
+        case .assistantError, .turnInProgress, .turnSummary:
+            return (0, 0)
+        }
+    }
+}
+
+/// A physical chat row with the outer lazy-stack spacing already resolved.
+struct DisplayedChatRowWithPadding: Identifiable {
+    let content: DisplayedChatRow
+    let topPadding: CGFloat
+    let bottomPadding: CGFloat
+
+    var id: DisplayedChatRow.ID { content.id }
 }
 
 extension Array where Element == Turn {
     /// Flattens the turns and assistant Markdown chunks into the rows consumed by `ChatRows`.
     ///
-    /// The progress indicator is inserted here so each element in the lazy stack's
-    /// `ForEach` always produces exactly one view, including the active turn state.
+    /// The progress indicator and spacing are inserted here so each element in the lazy
+    /// stack's `ForEach` always produces exactly one configured view.
     func flattenedChatRows(
         activeTurnID: Turn.ID?,
         expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
-    ) -> [DisplayedChatRow] {
+    ) -> [DisplayedChatRowWithPadding] {
         flatMap { turn in
             let isActive = turn.id == activeTurnID
             let projectedRows = turn.projectedChatRows(
@@ -488,7 +523,7 @@ extension Array where Element == Turn {
                 expandedSummaryIDs: expandedSummaryIDs
             )
 
-            return if isActive {
+            let rows = if isActive {
                 projectedRows + [
                     .turnInProgress(
                         .init(id: turn.id, startedAt: turn.startedAt)
@@ -496,6 +531,20 @@ extension Array where Element == Turn {
                 ]
             } else {
                 projectedRows
+            }
+
+            return rows.enumerated().map { index, row in
+                let rowPadding = ChatRowLayout.calculatePadding(for: row, at: index, in: rows)
+                let isFirstRowInTurn = index == rows.startIndex
+                let isLastRowInTurn = index == rows.index(before: rows.endIndex)
+                let completedTurnBottomPadding: CGFloat = isActive ? 0 : 12
+
+                return DisplayedChatRowWithPadding(
+                    content: row,
+                    topPadding: rowPadding.top + (isFirstRowInTurn ? 12 : 0),
+                    bottomPadding: rowPadding.bottom
+                        + (isLastRowInTurn ? completedTurnBottomPadding : 0)
+                )
             }
         }
     }

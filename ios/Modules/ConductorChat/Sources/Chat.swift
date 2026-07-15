@@ -41,7 +41,7 @@ public struct Chat: Sendable {
         /// The final representation of rows to display.
         ///
         /// This hides or shows rows based on their collapsed status for turned rows
-        var rows: [DisplayedChatRow]? = nil
+        var rows: [DisplayedChatRowWithPadding]? = nil
 
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
@@ -422,17 +422,18 @@ struct ChatView: View {
     }
 
     private struct ChatRows: View {
-        let rows: [DisplayedChatRow]
+        let rows: [DisplayedChatRowWithPadding]
         let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
 
         var body: some View {
             ForEach(rows) { row in
                 ChatRowView(
-                    row: row,
+                    row: row.content,
                     turnSummaryTapped: turnSummaryTapped
                 )
                     .padding(.horizontal, ChatRowLayout.horizontalPadding)
-                    .padding(.top, ChatRowLayout.rowTopPadding)
+                    .padding(.top, row.topPadding)
+                    .padding(.bottom, row.bottomPadding)
             }
         }
     }

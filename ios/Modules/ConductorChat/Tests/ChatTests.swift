@@ -555,6 +555,10 @@ private enum DisplayedRowProjection: Equatable {
     case turnInProgress(id: String, startedAt: Date)
     case turnSummary(id: String, isExpanded: Bool)
 
+    init(_ row: DisplayedChatRowWithPadding) {
+        self.init(row.content)
+    }
+
     init(_ row: DisplayedChatRow) {
         self = switch row {
         case .humanMessage(let message):

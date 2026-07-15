@@ -29,8 +29,9 @@ struct TurnSummaryRowView: View {
                     .rotationEffect(.degrees(summary.isExpanded ? 0 : -90))
             }
             .labelStyle(.conductorSmall)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .bottomLeading)
-            .contentShape(.rect)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Preserve an approximately 44-point tap target without adding layout height.
+            .contentShape(.interaction, Rectangle().inset(by: -14))
         }
         .buttonStyle(.plain)
         .foregroundStyle(.theme(.textSecondary))

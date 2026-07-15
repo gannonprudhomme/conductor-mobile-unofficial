@@ -261,9 +261,12 @@ struct TurnTests {
 
         expectNoDifference(
             [Spacing.none, .standard, .heading, .thematicBreak].map {
-                $0.additionalTopPadding(rootFontSize: 16, existingSpacing: 16)
+                $0.additionalTopPadding(
+                    rootFontSize: 16,
+                    existingSpacing: ChatRowLayout.interRowSpacing
+                )
             },
-            [0, 0, 8, 16]
+            [0, 12, 20, 28]
         )
     }
 
@@ -290,18 +293,70 @@ struct TurnTests {
         let rows = turns.flattenedChatRows(activeTurnID: nil)
 
         expectNoDifference(
-            rows.map(\.id),
+            rows.map(DisplayedRowWithPaddingProjection.init),
             [
-                "assistant:assistant-1:chunk:0",
-                "assistant:assistant-1:chunk:1",
+                .init(
+                    id: "assistant:assistant-1:chunk:0",
+                    topPadding: 20,
+                    bottomPadding: 0
+                ),
+                .init(
+                    id: "assistant:assistant-1:chunk:1",
+                    topPadding: 0,
+                    bottomPadding: 20
+                ),
             ]
         )
         #expect(rows.allSatisfy {
-            guard case .assistantTextChunk(_, _, let isMostRecentTextInTurn) = $0 else {
+            guard case .assistantTextChunk(_, _, let isMostRecentTextInTurn) = $0.content else {
                 return false
             }
             return isMostRecentTextInTurn
         })
+    }
+
+    @Test("Consecutive assistant messages share one outer margin")
+    func consecutiveAssistantMessageSpacing() {
+        let turns = [
+            Turn(
+                id: "turn-1",
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                rows: [
+                    .assistantMessage(
+                        .text(
+                            messageID: "assistant-1",
+                            content: .init("First"),
+                            isMostRecentTextInTurn: false
+                        )
+                    ),
+                    .assistantMessage(
+                        .text(
+                            messageID: "assistant-2",
+                            content: .init("Second"),
+                            isMostRecentTextInTurn: true
+                        )
+                    ),
+                ]
+            ),
+        ]
+
+        expectNoDifference(
+            turns
+                .flattenedChatRows(activeTurnID: nil)
+                .map(DisplayedRowWithPaddingProjection.init),
+            [
+                .init(
+                    id: "assistant:assistant-1:chunk:0",
+                    topPadding: 20,
+                    bottomPadding: 0
+                ),
+                .init(
+                    id: "assistant:assistant-2:chunk:0",
+                    topPadding: 8,
+                    bottomPadding: 20
+                ),
+            ]
+        )
     }
 
     @Test("Protocol-only events are ignored and errors become visible rows")
@@ -374,20 +429,43 @@ struct TurnTests {
         )
     }
 
-    @Test("The active turn gets a progress row in flattened presentation data")
+    @Test("Flattened presentation data adds row spacing and active progress")
     func activeTurnProgressRow() {
         let startedAt = Date(timeIntervalSince1970: 1_000)
         let turns = [
             Turn(
                 id: "turn-1",
                 startedAt: startedAt,
-                rows: [.humanMessageRow(.init(id: "human-1", content: "Hello"))]
+                rows: [
+                    .humanMessageRow(.init(id: "human-1", content: "Hello")),
+                    .assistantMessage(
+                        .text(
+                            messageID: "text-1",
+                            content: .init("Hi"),
+                            isMostRecentTextInTurn: true
+                        )
+                    ),
+                    .assistantMessage(
+                        .toolCall(
+                            messageID: "tool-1",
+                            toolCall: .webSearch(toolUseID: "tool-use-1")
+                        )
+                    ),
+                ]
             ),
         ]
 
         let activeRows = turns.flattenedChatRows(activeTurnID: "turn-1")
-        expectNoDifference(activeRows.map(\.id), ["human:human-1", "turn-in-progress:turn-1"])
-        guard case let .turnInProgress(progress) = activeRows.last else {
+        expectNoDifference(
+            activeRows.map(DisplayedRowWithPaddingProjection.init),
+            [
+                .init(id: "human:human-1", topPadding: 24, bottomPadding: 12),
+                .init(id: "assistant:text-1:chunk:0", topPadding: 8, bottomPadding: 8),
+                .init(id: "assistant:tool-1", topPadding: 0, bottomPadding: 4),
+                .init(id: "turn-in-progress:turn-1", topPadding: 0, bottomPadding: 0),
+            ]
+        )
+        guard case let .turnInProgress(progress) = activeRows.last?.content else {
             Issue.record("Expected a turn progress row")
             return
         }
@@ -395,8 +473,18 @@ struct TurnTests {
         #expect(progress.startedAt == startedAt)
 
         expectNoDifference(
-            turns.flattenedChatRows(activeTurnID: nil).map(\.id),
-            ["human:human-1"]
+            turns
+                .flattenedChatRows(
+                    activeTurnID: nil,
+                    expandedSummaryIDs: ["turn-1:human-1"]
+                )
+                .map(DisplayedRowWithPaddingProjection.init),
+            [
+                .init(id: "human:human-1", topPadding: 24, bottomPadding: 12),
+                .init(id: "summary:turn-1:human-1", topPadding: 0, bottomPadding: 0),
+                .init(id: "assistant:text-1:chunk:0", topPadding: 8, bottomPadding: 8),
+                .init(id: "assistant:tool-1", topPadding: 0, bottomPadding: 16),
+            ]
         )
     }
 
@@ -813,7 +901,7 @@ struct TurnTests {
         let displayedRows = [turn].flattenedChatRows(activeTurnID: nil)
         let summaries: [DisplayedChatRow.TurnSummary] = displayedRows
             .compactMap { row in
-                guard case .turnSummary(let summary) = row else {
+                guard case .turnSummary(let summary) = row.content else {
                     return nil
                 }
                 return summary
@@ -974,6 +1062,10 @@ private enum DisplayedRowProjection: Equatable {
     case turnInProgress(id: String)
     case summary(rowID: String, summary: DisplayedChatRow.TurnSummary)
 
+    init(_ row: DisplayedChatRowWithPadding) {
+        self.init(row.content)
+    }
+
     init(_ row: DisplayedChatRow) {
         self = switch row {
         case .humanMessage(let message):
@@ -985,6 +1077,24 @@ private enum DisplayedRowProjection: Equatable {
         case .turnSummary(let summary):
             .summary(rowID: row.id, summary: summary)
         }
+    }
+}
+
+private struct DisplayedRowWithPaddingProjection: Equatable {
+    let id: String
+    let topPadding: CGFloat
+    let bottomPadding: CGFloat
+
+    init(_ row: DisplayedChatRowWithPadding) {
+        self.id = row.id
+        self.topPadding = row.topPadding
+        self.bottomPadding = row.bottomPadding
+    }
+
+    init(id: String, topPadding: CGFloat, bottomPadding: CGFloat) {
+        self.id = id
+        self.topPadding = topPadding
+        self.bottomPadding = bottomPadding
     }
 }
 
