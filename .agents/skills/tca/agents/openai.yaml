@@ -1,0 +1,4 @@
+interface:
+  display_name: "TCA"
+  short_description: "Build features using the repository’s TCA patterns"
+  default_prompt: "Use $tca to implement this feature with the repository’s TCA patterns."

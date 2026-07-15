@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swift Style"
+  short_description: "Apply repository-wide Swift source conventions"
+  default_prompt: "Use $swift-style to apply this repository’s Swift source conventions."

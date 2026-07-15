@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swift Testing"
+  short_description: "Write Swift tests using repository conventions"
+  default_prompt: "Use $swift-testing to write tests that follow this repository’s conventions."

@@ -19,49 +19,16 @@ Swift modules used by both iOS and desktop live in the standalone package under
 mobile persistence, computed mobile state, UI, and lifecycle code in the iOS
 package.
 
-Begin every Swift file, including shared and desktop-server files, with the
-standard Xcode filename, module, and creator comment header used by existing
-files. The `// swift-tools-version:` declaration remains the first line of each
-Swift package manifest.
+## Repository skills
 
-Keep each Swift test file scoped to exactly one production source file, and name
-the test file after that source. Never combine tests for multiple production
-source files into one test file.
+Detailed Swift and iOS conventions live in repo-local skills under
+`.agents/skills/`. Use every skill matching the work rather than relying on
+memory or duplicating its rules in `AGENTS.md`.
 
-Prefer compile-time types in Swift code and tests. Seed database tests with
-concrete records using `.init(...)` or `.preview(...)` and execute typed
-StructuredQueries statements instead of inserting or fetching records with raw
-SQL.
-
-Use StructuredQueries for Swift database reads and writes. Reserve raw SQL for
-schema setup and migrations, or for the smallest localized `#sql` fragment when
-StructuredQueries cannot express an operation directly.
-
-Keep short, simple StructuredQueries statements on one line. When a query spans
-multiple lines, put the table and each chained query operation on separate lines.
-
-Name Boolean values as questions or predicates, using prefixes such as `is`,
-`has`, `can`, or `should`.
-
-Never put a Swift `guard` statement and its exit on one line. Use a multiline
-`else` body, even when it only contains a single `return` or `throw`.
-
-Within Swift `switch` statements, place no-op cases that only `return` or
-`return .none` after every case that performs work. This applies to reducer
-action switches too.
-
-Never use an error's `localizedDescription` in logs. Interpolate the error
-itself so the log preserves its concrete diagnostic information.
-
-Always call `@DependencyClient` endpoints through their generated methods with
-named arguments. Use the underlying closure properties only when overriding
-dependencies in tests or previews.
-
-Always use trailing-closure syntax when a Swift call ends in one or more
-closure arguments. For multiple trailing closures, keep the labels on every
-closure after the first.
-
-Within Swift enum declarations, place nested type declarations after all cases.
+- Use `$swift-style` for any Swift source or test file.
+- Use `$swift-data` for records, persistence, database access, and typed queries.
+- Use `$swift-testing` for Swift tests and test targets.
+- Follow `ios/AGENTS.md` for the additional skills that apply under `ios/`.
 
 ## Teaching-first collaboration
 

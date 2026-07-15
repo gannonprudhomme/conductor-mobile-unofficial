@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swift Data"
+  short_description: "Use the repository’s typed persistence patterns"
+  default_prompt: "Use $swift-data to implement this persistence work with typed queries."

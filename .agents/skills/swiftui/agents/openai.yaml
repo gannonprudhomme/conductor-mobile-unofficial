@@ -1,0 +1,4 @@
+interface:
+  display_name: "SwiftUI"
+  short_description: "Build interfaces using the app’s SwiftUI rules"
+  default_prompt: "Use $swiftui to build this interface with the repository’s SwiftUI conventions."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS Development"
+  short_description: "Build and organize the native iOS application"
+  default_prompt: "Use $ios-development to build and organize this iOS change correctly."
