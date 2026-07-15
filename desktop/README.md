@@ -44,7 +44,7 @@ intentionally unsandboxed because installation modifies the external
 The Swift server listens on `0.0.0.0:3768` and opens Conductor's SQLite database
 through a single queue. Mobile state arrives through resource-scoped WebSocket
 streams; while a phone is subscribed, the server checks SQLite's `data_version`
-every 25 milliseconds and only sends a new full snapshot when the queried
+every 3 milliseconds and only sends a new full snapshot when the queried
 resource changes. Repository icons and message commands remain HTTP routes.
 `PATCH /workspaces/{workspaceID}` accepts any combination of `unread`, `pinned`,
 and `status`. The SwiftUI window polls the Rust helper for bridge status every
