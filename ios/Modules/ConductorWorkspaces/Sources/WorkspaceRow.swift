@@ -88,8 +88,6 @@ struct WorkspaceRow: View {
         }
 
         Section {
-            Text("Change status")
-
             Picker(
                 "Status",
                 selection: Binding( // no Binding initializer for sqlite-backed data, so must send an action

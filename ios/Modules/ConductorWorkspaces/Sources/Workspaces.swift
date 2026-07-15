@@ -466,13 +466,13 @@ public struct WorkspacesView: View {
                 }
             }
 
-            if !store.isLoadingWorkspaces, !store.workspaces.isEmpty {
+//            if !store.isLoadingWorkspaces, !store.workspaces.isEmpty {
                 ToolbarItem(placement: .bottomBar) {
                     WorkspaceFilterMenu(store: store)
                 }
 
                 ToolbarSpacer(.flexible, placement: .bottomBar)
-            }
+//            }
         }
         .background(.theme(.background))
         .alert($store.scope(state: \.alert, action: \.alert))
@@ -638,21 +638,7 @@ public struct WorkspacesView: View {
             let repositoryName = selectedRepositoryName
 
             Menu {
-                Menu("Group by") {
-                    Picker(
-                        "Group by",
-                        selection: Binding(store.$grouping).animation(.default)
-                    ) {
-                        ForEach(WorkspaceWithRepository.Grouping.allCases, id: \.self) { grouping in
-                            Text(grouping.title)
-                                .tag(grouping)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.inline)
-                }
-
-                Menu("Repository") {
+                Menu {
                     Picker(
                         "Repository",
                         selection: $store.selectedRepositoryID.sending(
@@ -670,26 +656,32 @@ public struct WorkspacesView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.inline)
+                } label: {
+                    Text("Repository")
+
+                    if let selectedRepositoryName = store.repositories.first(where: { $0.id == store.selectedRepositoryID })?.name {
+                        Text(selectedRepositoryName)
+                    }
+                }
+
+                Section("Group by") {
+                    ConductorMenuPicker(
+                        WorkspaceWithRepository.Grouping.allCases,
+                        selection: Binding(store.$grouping).animation(.default)
+                    ) { grouping in
+                        Text(grouping.title)
+                    }
                 }
 
                 Section("Sort by") {
-                    ForEach(WorkspaceWithRepository.Sort.allCases, id: \.self) { sort in
-                        Button {
-                            store.send(.sortButtonTapped(sort))
-                        } label: {
-                            if store.sort == sort {
-                                Label {
-                                    Text(sort.title)
-                                } icon: {
-                                    ColoredMenuImage(
-                                        Lucide.check,
-                                        color: .theme(.textPrimary)
-                                    )
-                                }
-                            } else {
-                                Text(sort.title)
-                            }
-                        }
+                    ConductorMenuPicker(
+                        WorkspaceWithRepository.Sort.allCases,
+                        selection: Binding(
+                            get: { store.sort },
+                            set: { store.send(.sortButtonTapped($0)) }
+                        )
+                    ) { sort in
+                        Text(sort.title)
                     }
                 }
             } label: {
@@ -697,7 +689,7 @@ public struct WorkspacesView: View {
             }
             .accessibilityLabel("Filter workspaces")
             .accessibilityValue(
-                repositoryName.map { "Grouped by \($0)" } ?? "All repositories"
+                repositoryName.map { "Filtered by \($0)" } ?? "All repositories"
             )
         }
     }
@@ -739,7 +731,7 @@ public struct WorkspacesView: View {
 
                 if let repositoryName {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text("Grouped by")
+                        Text("Filter by")
                             .foregroundStyle(.theme(.textPrimary))
                         Text(repositoryName)
                             .fontWeight(.semibold)

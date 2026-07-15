@@ -72,6 +72,7 @@ struct ChatTextField: View {
         .textFieldStyle(.plain)
         .font(.theme(.body))
         .foregroundStyle(.theme(.textPrimary))
+        .tint(.theme(.accent))
     }
 
     private var bottomRowButtons: some View {
