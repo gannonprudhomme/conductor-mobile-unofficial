@@ -1,16 +1,160 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -gt 1 ]]; then
-  echo "Usage: release.sh [marketing-version]" >&2
-  echo "Example: release.sh 0.2.0" >&2
-  exit 2
-fi
+usage() {
+  echo "Usage: release.sh [marketing-version] [--summary summary]" >&2
+  echo "Examples:" >&2
+  echo "  release.sh 0.2.0" >&2
+  echo "  release.sh 0.2.0 --summary 'Test the new workspace flow'" >&2
+}
+
+VERSION=""
+SUMMARY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --summary)
+      if [[ $# -lt 2 ]]; then
+        echo "--summary requires a value." >&2
+        usage
+        exit 2
+      fi
+      SUMMARY="$2"
+      shift 2
+      ;;
+    --summary=*)
+      SUMMARY="${1#*=}"
+      shift
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "$VERSION" ]]; then
+        echo "Only one marketing version may be provided." >&2
+        usage
+        exit 2
+      fi
+      VERSION="$1"
+      shift
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="$(git -C "$IOS_DIR" rev-parse --show-toplevel)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/conductor-mobile-release.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
+
+if [[ -f "$REPO_DIR/.env.testflight.local" ]]; then
+  # shellcheck disable=SC1091
+  source "$REPO_DIR/.env.testflight.local"
+fi
+
+app_store_connect_token() {
+  local output
+  local token
+
+  if ! output="$(
+    xcrun altool \
+      --generate-jwt \
+      --apiKey "$ASC_API_KEY_ID" \
+      --apiIssuer "$ASC_API_ISSUER_ID" \
+      --p8-file-path "$ASC_API_KEY_PATH" 2>&1
+  )"; then
+    echo "Could not generate an App Store Connect token." >&2
+    return 1
+  fi
+
+  token="$(printf '%s\n' "$output" | awk -F. 'NF == 3 && /^eyJ/ { token = $0 } END { print token }')"
+  if [[ -z "$token" ]]; then
+    echo "App Store Connect did not return a token." >&2
+    return 1
+  fi
+
+  printf '%s' "$token"
+}
+
+app_store_connect_get() {
+  local endpoint="$1"
+  local response="$2"
+  shift 2
+
+  local token
+  token="$(app_store_connect_token)"
+
+  local status
+  status="$(
+    curl \
+      --silent \
+      --show-error \
+      --globoff \
+      --get \
+      --output "$response" \
+      --write-out '%{http_code}' \
+      --header "Authorization: Bearer $token" \
+      "$@" \
+      "https://api.appstoreconnect.apple.com/v1/$endpoint"
+  )"
+
+  if [[ "$status" != 200 ]]; then
+    echo "App Store Connect request failed with HTTP $status." >&2
+    jq -r '.errors[0].detail // empty' "$response" >&2
+    return 1
+  fi
+}
+
+latest_build() {
+  local version="$1"
+  local response="$WORK_DIR/latest-build.json"
+
+  app_store_connect_get builds "$response" \
+    --data-urlencode "filter[app]=$APP_ID" \
+    --data-urlencode "filter[preReleaseVersion.version]=$version" \
+    --data-urlencode "sort=-uploadedDate" \
+    --data-urlencode "limit=1"
+  jq -r '.data[0] | select(.) | [.id, .attributes.processingState] | @tsv' "$response"
+}
+
+set_testflight_notes() {
+  local build_id="$1"
+  local notes="$2"
+  local payload="$WORK_DIR/testflight-notes.json"
+  local response="$WORK_DIR/testflight-notes-response.json"
+
+  jq --null-input --arg build_id "$build_id" --arg notes "$notes" '{
+    data: {
+      type: "betaBuildLocalizations",
+      attributes: {locale: "en-US", whatsNew: $notes},
+      relationships: {build: {data: {type: "builds", id: $build_id}}}
+    }
+  }' > "$payload"
+
+  local token
+  token="$(app_store_connect_token)"
+
+  local status
+  status="$(
+    curl \
+      --silent \
+      --show-error \
+      --output "$response" \
+      --write-out '%{http_code}' \
+      --request POST \
+      --header "Authorization: Bearer $token" \
+      --header "Content-Type: application/json" \
+      --data-binary "@$payload" \
+      https://api.appstoreconnect.apple.com/v1/betaBuildLocalizations
+  )"
+
+  if [[ "$status" != 201 ]]; then
+    echo "Could not set TestFlight notes (HTTP $status)." >&2
+    jq -r '.errors[0].detail // empty' "$response" >&2
+    return 1
+  fi
+}
 
 XCODEBUILD_ARGUMENTS=(
   -workspace "$IOS_DIR/ConductorMobile.xcworkspace"
@@ -24,8 +168,7 @@ XCODEBUILD_ARGUMENTS=(
   -allowProvisioningUpdates
 )
 
-if [[ $# -eq 1 ]]; then
-  VERSION="$1"
+if [[ -n "$VERSION" ]]; then
   XCODEBUILD_ARGUMENTS+=(MARKETING_VERSION="$VERSION")
 else
   VERSION="$(
@@ -37,6 +180,37 @@ fi
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
   echo "The marketing version must contain two or three numeric components (for example, 0.2.0)." >&2
   exit 2
+fi
+
+if [[ -z "${ASC_API_KEY_ID:-}" || -z "${ASC_API_ISSUER_ID:-}" ]]; then
+  echo "TestFlight metadata requires ASC_API_KEY_ID and ASC_API_ISSUER_ID." >&2
+  echo "Set them in $REPO_DIR/.env.testflight.local or in the environment." >&2
+  exit 2
+fi
+
+ASC_API_KEY_PATH="${ASC_API_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_API_KEY_ID.p8}"
+if [[ ! -f "$ASC_API_KEY_PATH" ]]; then
+  echo "App Store Connect API key not found at $ASC_API_KEY_PATH." >&2
+  echo "Set ASC_API_KEY_PATH to the key's .p8 file." >&2
+  exit 2
+fi
+
+AUTHENTICATION_ARGUMENTS=(
+  -authenticationKeyPath "$ASC_API_KEY_PATH"
+  -authenticationKeyID "$ASC_API_KEY_ID"
+  -authenticationKeyIssuerID "$ASC_API_ISSUER_ID"
+)
+XCODEBUILD_ARGUMENTS+=("${AUTHENTICATION_ARGUMENTS[@]}")
+
+APP_RESPONSE="$WORK_DIR/app.json"
+app_store_connect_get apps "$APP_RESPONSE" \
+  --data-urlencode "filter[bundleId]=com.gannonprudhomme.conductor-mobile-unofficial" \
+  --data-urlencode "limit=1"
+
+APP_ID="$(jq -r '.data[0].id // empty' "$APP_RESPONSE")"
+if [[ -z "$APP_ID" ]]; then
+  echo "The Conductor Mobile app was not found in App Store Connect." >&2
+  exit 1
 fi
 
 mkdir -p "$IOS_DIR/dist"
@@ -52,11 +226,54 @@ exec 9>"$LOCK_FILE"
 echo "Waiting for the TestFlight upload lock..."
 lockf 9
 
+BRANCH="$(git -C "$REPO_DIR" symbolic-ref --quiet --short HEAD || git -C "$REPO_DIR" rev-parse --short HEAD)"
+COMMIT_NOTES="$(git -C "$REPO_DIR" log -5 --format='- %s')"
+TESTFLIGHT_NOTES="Branch: $BRANCH"$'\n'"$COMMIT_NOTES"
+if [[ -n "$SUMMARY" ]]; then
+  TESTFLIGHT_NOTES="$SUMMARY"$'\n'"$TESTFLIGHT_NOTES"
+fi
+printf 'TestFlight notes:\n\n%s\n\n' "$TESTFLIGHT_NOTES"
+
+PREVIOUS_VERSION_BUILD="$(latest_build "$VERSION")"
+IFS=$'\t' read -r PREVIOUS_BUILD_ID _ <<< "$PREVIOUS_VERSION_BUILD"
+
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" xcodebuild \
   -exportArchive \
   -archivePath "$ARCHIVE" \
   -exportPath "$WORK_DIR/Export" \
   -exportOptionsPlist "$IOS_DIR/ExportOptions.plist" \
-  -allowProvisioningUpdates | xcbeautify
+  -allowProvisioningUpdates \
+  "${AUTHENTICATION_ARGUMENTS[@]}" | xcbeautify
 
-echo "Uploaded $ARCHIVE to App Store Connect."
+echo "Waiting for the uploaded build to finish processing..."
+NEW_BUILD_ID=""
+DEADLINE=$((SECONDS + 1200))
+while (( SECONDS < DEADLINE )); do
+  CURRENT_BUILD="$(latest_build "$VERSION")"
+  if [[ -n "$CURRENT_BUILD" ]]; then
+    IFS=$'\t' read -r CURRENT_BUILD_ID CURRENT_BUILD_STATE <<< "$CURRENT_BUILD"
+
+    if [[ "$CURRENT_BUILD_ID" != "$PREVIOUS_BUILD_ID" ]]; then
+      if [[ "$CURRENT_BUILD_STATE" == VALID ]]; then
+        NEW_BUILD_ID="$CURRENT_BUILD_ID"
+        break
+      fi
+
+      if [[ "$CURRENT_BUILD_STATE" == FAILED || "$CURRENT_BUILD_STATE" == INVALID ]]; then
+        echo "The uploaded TestFlight build failed processing." >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  sleep 10
+done
+
+if [[ -z "$NEW_BUILD_ID" ]]; then
+  echo "Timed out waiting for the uploaded TestFlight build." >&2
+  exit 1
+fi
+
+set_testflight_notes "$NEW_BUILD_ID" "$TESTFLIGHT_NOTES"
+
+echo "Uploaded $ARCHIVE to App Store Connect with TestFlight notes."

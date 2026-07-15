@@ -1,4 +1,5 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+file_include_globs = ".env.testflight.local\n"
 
 [scripts]
 archive = "mise run clean-sims"
