@@ -59,27 +59,56 @@ enum IconRoute {
     }
 
     private static func pngData(contentsOf url: URL) throws -> Data {
-        guard let image = NSImage(contentsOf: url) else {
-            throw HTTPError(.internalServerError, message: "Could not decode repository icon")
+        // NIO thread-pool jobs have no per-job autorelease pool. Drain AppKit's temporary image
+        // representations after each request, and draw one bounded bitmap instead of creating the
+        // multiple large raster snapshots produced by NSImage.tiffRepresentation.
+        try autoreleasepool {
+            guard let image = NSImage(contentsOf: url) else {
+                throw HTTPError(.internalServerError, message: "Could not decode repository icon")
+            }
+            let size = image.size
+            guard size.width.isFinite,
+                size.height.isFinite,
+                size.width > 0,
+                size.height > 0,
+                size.width <= maximumPixelDimension,
+                size.height <= maximumPixelDimension,
+                size.width * size.height <= maximumPixelCount
+            else {
+                throw HTTPError(.notFound)
+            }
+            let width = Int(size.width.rounded(.up))
+            let height = Int(size.height.rounded(.up))
+            guard let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: width,
+                pixelsHigh: height,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ), let graphicsContext = NSGraphicsContext(bitmapImageRep: bitmap) else {
+                throw HTTPError(.internalServerError, message: "Could not decode repository icon")
+            }
+
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = graphicsContext
+            image.draw(
+                in: NSRect(x: 0, y: 0, width: width, height: height),
+                from: .zero,
+                operation: .copy,
+                fraction: 1
+            )
+            NSGraphicsContext.restoreGraphicsState()
+
+            guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                throw HTTPError(.internalServerError, message: "Could not encode repository icon")
+            }
+            return pngData
         }
-        let size = image.size
-        guard size.width.isFinite,
-            size.height.isFinite,
-            size.width > 0,
-            size.height > 0,
-            size.width <= maximumPixelDimension,
-            size.height <= maximumPixelDimension,
-            size.width * size.height <= maximumPixelCount
-        else {
-            throw HTTPError(.notFound)
-        }
-        guard let tiffData = image.tiffRepresentation,
-            let bitmap = NSBitmapImageRep(data: tiffData),
-            let pngData = bitmap.representation(using: .png, properties: [:])
-        else {
-            throw HTTPError(.internalServerError, message: "Could not decode repository icon")
-        }
-        return pngData
     }
 
     // Searches known favicon locations in priority order and returns the first safe, usable file.
