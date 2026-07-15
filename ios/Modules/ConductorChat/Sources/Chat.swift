@@ -333,9 +333,11 @@ struct ChatView: View {
         .safeAreaBar(edge: .bottom) {
             ChatTextField(
                 text: $store.messageDraft,
+                agentType: store.session.agentType,
                 isSendInFlight: store.isMessageSendInFlight,
                 isStopInFlight: store.isStopInFlight,
                 isWorking: store.session.status == .working,
+                model: store.session.model,
                 onSendTapped: { store.send(.sendButtonTapped) },
                 onStopTapped: { store.send(.stopButtonTapped) }
             )

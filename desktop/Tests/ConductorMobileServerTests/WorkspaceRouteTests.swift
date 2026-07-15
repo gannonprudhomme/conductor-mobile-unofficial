@@ -40,7 +40,7 @@ struct WorkspaceRouteTests {
             updatedAt: "2026-07-09T00:00:04Z",
             lastUserMessageAt: nil,
             status: .idle,
-            model: "gpt-5",
+            model: .init(rawValue: "gpt-5"),
             unreadCount: 0,
             freshlyCompacted: 0,
             contextTokenCount: 0
@@ -55,7 +55,7 @@ struct WorkspaceRouteTests {
             updatedAt: "2026-07-09T00:00:01Z",
             lastUserMessageAt: nil,
             status: .idle,
-            model: "gpt-5",
+            model: .init(rawValue: "gpt-5"),
             unreadCount: 3,
             freshlyCompacted: 0,
             contextTokenCount: 0
@@ -70,7 +70,7 @@ struct WorkspaceRouteTests {
             updatedAt: "2026-07-09T00:00:02Z",
             lastUserMessageAt: nil,
             status: .idle,
-            model: "gpt-5",
+            model: .init(rawValue: "gpt-5"),
             unreadCount: 0,
             freshlyCompacted: 0,
             contextTokenCount: 0
@@ -85,7 +85,7 @@ struct WorkspaceRouteTests {
             updatedAt: "2026-07-09T00:00:03Z",
             lastUserMessageAt: nil,
             status: .idle,
-            model: "gpt-5",
+            model: .init(rawValue: "gpt-5"),
             unreadCount: 7,
             freshlyCompacted: 0,
             contextTokenCount: 0

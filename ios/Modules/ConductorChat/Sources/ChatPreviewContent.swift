@@ -58,7 +58,7 @@ struct ChatPreviewContent: Sendable {
                 content: assistantTextEvent(assistantMessage, sessionID: session.id),
                 createdAt: session.updatedAt,
                 sentAt: session.updatedAt,
-                model: session.model,
+                model: session.model.rawValue,
                 sdkMessageID: "\(session.id)-preview-sdk-message",
                 turnID: turnID
             ),

@@ -7,6 +7,7 @@
 
 import SharedConductorData
 @testable import ConductorMobileData
+import CustomDump
 import Foundation
 import Testing
 
@@ -45,5 +46,32 @@ struct SessionDisplayTests {
     func agentTypeDisplayName() {
         #expect(Session.AgentType.codex.displayName == "Codex")
         #expect(Session.AgentType(rawValue: "future-agent").displayName == "future-agent")
+    }
+
+    @Test("Models use known display names and preserve unknown values")
+    func modelDisplayName() {
+        let expectedDisplayNames = [
+            (rawValue: "fable-5", displayName: "Fable 5"),
+            (rawValue: "opus", displayName: "Opus"),
+            (rawValue: "opus-1m", displayName: "Opus 1M"),
+            (rawValue: "opus-4-8-1m", displayName: "Opus 4.8 1M"),
+            (rawValue: "opus-4-7-1m", displayName: "Opus 4.7 1M"),
+            (rawValue: "opus-4-6-1m", displayName: "Opus 4.6 1M"),
+            (rawValue: "sonnet-5-1m", displayName: "Sonnet 5 1M"),
+            (rawValue: "sonnet-4-6-1m", displayName: "Sonnet 4.6 1M"),
+            (rawValue: "sonnet", displayName: "Sonnet 4.6"),
+            (rawValue: "haiku", displayName: "Haiku 4.5"),
+            (rawValue: "gpt-5.6-sol", displayName: "GPT-5.6 Sol"),
+            (rawValue: "gpt-5.6-terra", displayName: "GPT-5.6 Terra"),
+            (rawValue: "gpt-5.6-luna", displayName: "GPT-5.6 Luna"),
+            (rawValue: "gpt-5.5", displayName: "GPT-5.5"),
+            (rawValue: "gpt-5.4", displayName: "GPT-5.4"),
+            (rawValue: "gpt-5.3-codex", displayName: "GPT-5.3 Codex"),
+            (rawValue: "future-model", displayName: "future-model"),
+        ]
+
+        for (rawValue, displayName) in expectedDisplayNames {
+            expectNoDifference(Session.Model(rawValue: rawValue).displayName, displayName)
+        }
     }
 }

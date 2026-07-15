@@ -37,7 +37,7 @@ struct WorkspaceChatPreviewContent: Sendable {
             title: "Review session navigation",
             agentType: .claude,
             updatedAt: "2026-06-25T09:31:00.000Z",
-            model: "sonnet",
+            model: .sonnet4_6,
             unreadCount: 3,
             contextTokenCount: 9340
         )

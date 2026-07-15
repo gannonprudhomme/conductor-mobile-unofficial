@@ -7,6 +7,7 @@
 
 import SharedConductorData
 import ConductorDesign
+import ConductorMobileData
 import LucideIcons
 import SwiftUI
 
@@ -14,24 +15,30 @@ struct ChatTextField: View {
     @FocusState var isFocused: Bool
 
     @Binding var text: String
+    let agentType: Session.AgentType
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
+    let model: Session.Model
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
     init(
         text: Binding<String>,
+        agentType: Session.AgentType,
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
+        model: Session.Model,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
         self._text = text
+        self.agentType = agentType
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
+        self.model = model
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -69,7 +76,7 @@ struct ChatTextField: View {
 
     private var bottomRowButtons: some View {
         HStack(spacing: 8) {
-            modelPicker
+            modelLabel
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
@@ -103,12 +110,12 @@ struct ChatTextField: View {
         isSendInFlight || isStopInFlight
     }
 
-    private var modelPicker: some View {
+    private var modelLabel: some View {
         Label {
-            Text("GPT-5.6 Sol")
+            Text(verbatim: model.displayName)
         } icon: {
             AgentIcon(
-                agentType: Session.AgentType.codex,
+                agentType: agentType,
                 size: ThemeFontStyle.small.size,
                 relativeTo: ThemeFontStyle.small.textStyle
             )
@@ -214,9 +221,11 @@ struct ChatTextField: View {
     .safeAreaBar(edge: .bottom) {
         ChatTextField(
             text: $text,
+            agentType: .claude,
             isSendInFlight: false,
             isStopInFlight: false,
             isWorking: true,
+            model: .sonnet4_6,
             onSendTapped: { },
             onStopTapped: { }
         )

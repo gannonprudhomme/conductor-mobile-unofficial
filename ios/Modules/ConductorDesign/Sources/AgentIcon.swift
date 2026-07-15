@@ -38,7 +38,7 @@ public struct AgentIcon: View {
         case .claude:
             UIImage(resource: .claude)
         default:
-            Lucide.bot
+            Lucide.circleQuestionMark
         }
     }
 }

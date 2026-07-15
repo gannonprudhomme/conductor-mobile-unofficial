@@ -245,7 +245,7 @@ struct ServerTests {
             updatedAt: "2026-07-09T00:00:01Z",
             lastUserMessageAt: nil,
             status: .idle,
-            model: "gpt-5.5",
+            model: .gpt5_5,
             unreadCount: 0,
             freshlyCompacted: 0,
             contextTokenCount: 0

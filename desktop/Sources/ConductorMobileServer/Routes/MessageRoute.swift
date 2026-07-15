@@ -68,7 +68,7 @@ enum MessageRoute {
                     agentType: messageSendContext.agentType.rawValue,
                     cwd: workspacePath,
                     message: request.message,
-                    model: messageSendContext.model,
+                    model: messageSendContext.model.rawValue,
                     sessionID: sessionID,
                     workspaceID: workspaceID
                 )
@@ -95,7 +95,7 @@ enum MessageRoute {
     @Selection
     fileprivate struct MessageSendContext: Sendable {
         let agentType: Session.AgentType
-        let model: String
+        let model: Session.Model
         let workspacePath: String?
     }
 
