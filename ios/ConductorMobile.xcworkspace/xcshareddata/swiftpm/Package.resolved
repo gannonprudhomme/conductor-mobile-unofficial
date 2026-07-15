@@ -1,5 +1,5 @@
 {
-  "originHash" : "99656747feb405dc4fc52ba8a558e6d31a10cf9f82be37d21e0150bb1051b072",
+  "originHash" : "1f2a85eb108424b6687d180eb77a81450a10dce542df992d1f8fada9f3798e7b",
   "pins" : [
     {
       "identity" : "combine-schedulers",
@@ -44,6 +44,15 @@
       "state" : {
         "revision" : "0c79d7a5748fc6d9ce7a1ba2b50f31b175305049",
         "version" : "1.6.6"
+      }
+    },
+    {
+      "identity" : "swift-async-algorithms",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-async-algorithms",
+      "state" : {
+        "revision" : "3da39bbc4e687d4192af7c9cf4eab805745a0b9c",
+        "version" : "1.1.5"
       }
     },
     {
@@ -195,8 +204,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/pointfreeco/swift-structured-queries",
       "state" : {
-        "revision" : "500c4cb5182842ded958ad32052ed2e35bec5fb7",
-        "version" : "0.33.1"
+        "revision" : "50a429884d7a6c0613df2a31a24009cc436bfb18",
+        "version" : "0.33.2"
       }
     },
     {

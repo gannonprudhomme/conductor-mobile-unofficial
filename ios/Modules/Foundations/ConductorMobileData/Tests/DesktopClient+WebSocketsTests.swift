@@ -15,19 +15,33 @@ struct DesktopClientWebSocketsTests {
     @Test("WebSocket resource URLs use the desktop service")
     func webSocketURLs() {
         expectNoDifference(
-            DesktopClient.workspacesWebSocketURL.absoluteString,
+            DesktopClient.workspacesWebSocketURL(
+                serverAddress: DesktopClient.defaultServerAddress
+            ).absoluteString,
             "ws://192.168.0.32:3768/workspaces"
         )
         expectNoDifference(
-            DesktopClient.sessionsWebSocketURL(workspaceID: "workspace-1").absoluteString,
+            DesktopClient.sessionsWebSocketURL(
+                serverAddress: DesktopClient.defaultServerAddress,
+                workspaceID: "workspace-1"
+            ).absoluteString,
             "ws://192.168.0.32:3768/workspaces/workspace-1/sessions"
         )
         expectNoDifference(
             DesktopClient.messagesWebSocketURL(
+                serverAddress: DesktopClient.defaultServerAddress,
                 workspaceID: "workspace-1",
                 sessionID: "session-1"
             ).absoluteString,
             "ws://192.168.0.32:3768/workspaces/workspace-1/sessions/session-1/messages"
+        )
+        expectNoDifference(
+            DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac").absoluteString,
+            "ws://my-mac:3768/workspaces"
+        )
+        expectNoDifference(
+            DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac:4000").absoluteString,
+            "ws://my-mac:4000/workspaces"
         )
     }
 
@@ -55,7 +69,7 @@ struct DesktopClientWebSocketsTests {
         )
         let cancelCount = LockIsolated(0)
         let resumeCount = LockIsolated(0)
-        let stream = DesktopClient.observe(
+        let stream = DesktopClient.webSocketStream(
             [String].self,
             using: DesktopClient.WebSocketTaskClient {
                 cancelCount.withValue { $0 += 1 }
@@ -96,7 +110,7 @@ struct DesktopClientWebSocketsTests {
         let (framesConsumed, framesConsumedContinuation) = AsyncStream.makeStream(
             of: Void.self
         )
-        let stream = DesktopClient.observe(
+        let stream = DesktopClient.webSocketStream(
             [String].self,
             using: DesktopClient.WebSocketTaskClient {
             } receive: {
@@ -130,7 +144,7 @@ struct DesktopClientWebSocketsTests {
         )
         let (frames, _) = AsyncStream.makeStream(of: URLSessionWebSocketTask.Message.self)
         let cancelCount = LockIsolated(0)
-        let stream = DesktopClient.observe(
+        let stream = DesktopClient.webSocketStream(
             [String].self,
             using: DesktopClient.WebSocketTaskClient {
                 cancelCount.withValue { $0 += 1 }

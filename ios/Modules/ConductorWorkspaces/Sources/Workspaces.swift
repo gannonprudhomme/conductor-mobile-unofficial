@@ -145,6 +145,8 @@ public struct Workspaces: Sendable {
         case setWorkspaceStatusFailed(any Error)
         case setWorkspaceUnreadFailed(any Error)
         case sortButtonTapped(WorkspaceWithRepository.Sort)
+        /// Note: `MainView` handles this action so we can keep this module decoupled from `ConductorSettings`
+        case settingsButtonTapped
         case task
         case workspacesChanged([WorkspaceWithRepository])
         case workspacePinnedButtonTapped(WorkspaceWithRepository)
@@ -279,7 +281,7 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .alert, .workspaceTapped:
+            case .alert, .settingsButtonTapped, .workspaceTapped:
                 return .none
             }
         }
@@ -432,6 +434,19 @@ public struct WorkspacesView: View {
         }
         .themedNavigationTitle("Workspaces")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    store.send(.settingsButtonTapped)
+                } label: {
+                    Label {
+                        Text("Settings")
+                    } icon: {
+                        LucideIcon(Lucide.settings, size: 20, relativeTo: .title)
+                    }
+                    .foregroundStyle(.theme(.textPrimary))
+                }
+            }
+
             ToolbarItem(placement: .bottomBar) {
                 WorkspaceFilterMenu(store: store)
             }

@@ -160,7 +160,7 @@ struct WorkspacesTests {
         }
     }
 
-    @Test("Workspace snapshots stream, reconnect after failure, and cancel with the task")
+    @Test("Workspace snapshots reconnect after failures and cancel")
     func workspaceSnapshotsStreamReconnectAndCancel() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
@@ -219,13 +219,7 @@ struct WorkspacesTests {
                         $0 += 1
                         return $0
                     }
-                    return switch count {
-                    case 1:
-                        firstStream
-
-                    default:
-                        secondStream
-                    }
+                    return count == 1 ? firstStream : secondStream
                 }
             }
 

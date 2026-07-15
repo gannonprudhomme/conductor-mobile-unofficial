@@ -7,6 +7,7 @@
 
 import Combine
 import ComposableArchitecture
+import ConductorSettings
 import SharedConductorData
 import ConductorMobileData
 import ConductorWorkspaces
@@ -19,6 +20,22 @@ import UIKit
 
 @MainActor
 struct MainTests {
+    @Test("Settings button presents settings")
+    func settingsButtonPresentsSettings() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+
+            await store.send(.workspaces(.settingsButtonTapped)) {
+                $0.settings = ConductorSettings.State()
+            }
+        }
+    }
+
     @Test("Workspace selection pushes its chat")
     func workspaceSelectionPushesChat() async throws {
         let workspace = Workspace.preview(

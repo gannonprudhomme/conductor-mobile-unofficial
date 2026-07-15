@@ -1,20 +1,24 @@
 //
 //  StatusTag.swift
-//  ConductorDesktop
+//  SharedConductorDesign
 //
 //  Created by Gannon Prudomme on 7/13/26.
 //
 
-import SharedConductorDesign
 import SwiftUI
 
-struct StatusTag: View {
+public struct StatusTag: View {
     let title: String
     let isEnabled: Bool
 
     @Environment(\.accessibilityReduceMotion) private var shouldReduceMotion
 
-    var body: some View {
+    public init(title: String, isEnabled: Bool) {
+        self.title = title
+        self.isEnabled = isEnabled
+    }
+
+    public var body: some View {
         AnimatedText(title)
             .font(.theme(.extraSmall))
             .foregroundStyle(color)

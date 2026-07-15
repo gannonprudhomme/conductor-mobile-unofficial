@@ -5,17 +5,28 @@
 //  Created by Gannon Prudomme on 7/13/26.
 //
 
+import AsyncAlgorithms
 import Dependencies
 import Foundation
+import Observation
 import SharedConductorData
+import Sharing
 
 extension DesktopClient {
-    static let workspacesWebSocketURL = webSocketBaseURL.appending(path: "workspaces")
+    static func workspacesWebSocketURL(serverAddress: String) -> URL {
+        serverURL(scheme: "ws", address: serverAddress)!
+            .appending(path: "workspaces")
+    }
+
     static let maximumWebSocketMessageSize = 64 * 1_024 * 1_024
 
     /// `/workspaces/{workspaceID}/sessions/{sessionID}/messages`
-    static func messagesWebSocketURL(workspaceID: String, sessionID: String) -> URL {
-        webSocketBaseURL
+    static func messagesWebSocketURL(
+        serverAddress: String,
+        workspaceID: String,
+        sessionID: String
+    ) -> URL {
+        serverURL(scheme: "ws", address: serverAddress)!
             .appending(path: "workspaces")
             .appending(path: workspaceID)
             .appending(path: "sessions")
@@ -23,27 +34,68 @@ extension DesktopClient {
             .appending(path: "messages")
     }
 
-    /// `/workspaces/{workspaceID}/sessions
-    static func sessionsWebSocketURL(workspaceID: String) -> URL {
-        webSocketBaseURL
+    /// `/workspaces/{workspaceID}/sessions`
+    static func sessionsWebSocketURL(serverAddress: String, workspaceID: String) -> URL {
+        serverURL(scheme: "ws", address: serverAddress)!
             .appending(path: "workspaces")
             .appending(path: workspaceID)
             .appending(path: "sessions")
     }
 
+    /// Note: Automatically reacts to changes in the server address
     static func observe<Value: Decodable & Sendable>(
         _ type: Value.Type,
-        at url: URL
+        at makeURL: @escaping @Sendable (String) -> URL
     ) -> AsyncThrowingStream<Value, any Error> {
         @Dependency(\.urlSession) var urlSession
+        @Shared(.desktopServerAddress) var desktopServerAddress
 
-        return observe(
-            type,
-            using: WebSocketTaskClient(urlSession.webSocketTask(with: url))
-        )
+        // Capture the shared value's projection so `Observations` can track the current address
+        // and every persisted change without making feature consumers manage reconnections.
+        let sharedServerAddress = $desktopServerAddress
+
+        let values = Observations { sharedServerAddress.wrappedValue }
+            .removeDuplicates()
+            // When the address actually changes, `flatMapLatest` cancels the old WebSocket stream
+            // and subscribes to a new one.
+            .flatMapLatest { serverAddress in
+                webSocketStream(
+                    type,
+                    using: WebSocketTaskClient(
+                        urlSession.webSocketTask(with: makeURL(serverAddress))
+                    )
+                )
+            }
+
+        // The operators above return an opaque `some AsyncSequence`, while `DesktopClient`'s
+        // dependency endpoints promise a concrete `AsyncThrowingStream`. This outer stream is
+        // the type-erasure bridge between them. It also forwards consumer cancellation to the
+        // task driving the operator chain.
+        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let producer = Task {
+                do {
+                    for try await value in values {
+                        if case .terminated = continuation.yield(value) {
+                            return
+                        }
+                    }
+                } catch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                producer.cancel()
+            }
+        }
     }
 
-    static func observe<Value: Decodable & Sendable>(
+    // Only non-private for tests
+    static func webSocketStream<Value: Decodable & Sendable>(
         _ type: Value.Type,
         using task: WebSocketTaskClient
     ) -> AsyncThrowingStream<Value, any Error> {
@@ -80,7 +132,7 @@ extension DesktopClient {
         }
     }
 
-    // Really just a protocol/mock surfaace over `URLSessionWebSocketTask`
+    // Really just a protocol/mock surface over `URLSessionWebSocketTask`
     struct WebSocketTaskClient: Sendable {
         fileprivate var cancel: @Sendable () -> Void
         fileprivate var receive: @Sendable () async throws -> URLSessionWebSocketTask.Message
@@ -112,8 +164,6 @@ extension DesktopClient {
 }
 
 fileprivate extension DesktopClient {
-    static let webSocketBaseURL = URL(string: "ws://\(desktopServerAddress)")!
-
     static func data(from message: URLSessionWebSocketTask.Message) throws -> Data {
         switch message {
         case let .data(data):

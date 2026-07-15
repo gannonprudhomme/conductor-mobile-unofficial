@@ -62,9 +62,9 @@ The native iOS app lives here and is SwiftUI/TCA-first.
 - For a raw sheet or full-screen-cover dismissal control, use
   `Button(role: .close)` inside a `ToolbarItem` with `.cancellationAction`
   placement.
-- Every app-level `ProgressView` must use `.progressViewStyle(.conductor(...))`
-  and an explicit themed color. Never use the platform-default progress style
-  directly in app UI.
+- Every app-level `ProgressView` must use an explicit semantic style and themed
+  color. Use `.progressViewStyle(.conductor(...))` only while an agent is
+  working, and `.progressViewStyle(.network)` for ordinary network requests.
 - Give toolbar titles and primary toolbar icons an explicit
   `.foregroundStyle(.theme(.textPrimary))`. Never rely on the system toolbar
   tint for app toolbar content.

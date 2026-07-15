@@ -1,6 +1,6 @@
 //
 //  AnimatedText.swift
-//  ConductorDesktop
+//  SharedConductorDesign
 //
 //  Created by Gannon Prudomme on 7/13/26.
 //
@@ -11,7 +11,7 @@ import SwiftUI
 //
 // Honestly I should probably remove this but for the size of this desktop portion is this is fine,
 // it's pretty much my only slop on the desktop+Swift side.
-struct AnimatedText: View {
+public struct AnimatedText: View {
     let title: String
 
     @Environment(\.accessibilityReduceMotion) private var shouldReduceMotion
@@ -20,12 +20,12 @@ struct AnimatedText: View {
     @State private var width: CGFloat?
     @State private var fadeTask: Task<Void, Never>?
 
-    init(_ title: String) {
+    public init(_ title: String) {
         self.title = title
         _displayedTitle = State(initialValue: title)
     }
 
-    var body: some View {
+    public var body: some View {
         Text(displayedTitle)
             .fixedSize()
             .opacity(opacity)

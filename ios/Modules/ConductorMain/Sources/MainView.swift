@@ -7,6 +7,7 @@
 
 import ComposableArchitecture
 import ConductorChat
+import ConductorSettings
 import ConductorWorkspaces
 import SwiftUI
 
@@ -20,6 +21,7 @@ public struct Main: Sendable {
     @ObservableState
     public struct State: Equatable {
         public var path = StackState<Path.State>()
+        @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
 
         public init() {
@@ -28,6 +30,7 @@ public struct Main: Sendable {
 
     public enum Action {
         case path(StackActionOf<Path>)
+        case settings(PresentationAction<ConductorSettings.Action>)
         case workspaces(Workspaces.Action)
     }
 
@@ -35,22 +38,33 @@ public struct Main: Sendable {
     }
 
     public var body: some ReducerOf<Self> {
-        Scope(state: \.workspaces, action: \.workspaces) {
-            Workspaces()
-        }
-        Reduce { state, action in
-            switch action {
-            case let .workspaces(.workspaceTapped(item)):
-                state.path.append(
-                    .workspaceChat(
-                        WorkspaceChat.State(workspaceWithRepository: item)
-                    )
-                )
-                return .none
-
-            case .path, .workspaces:
-                return .none
+        CombineReducers {
+            Scope(state: \.workspaces, action: \.workspaces) {
+                Workspaces()
             }
+            Reduce { state, action in
+                switch action {
+                // We handle the displaying of Settings in here so we can keep ConductorSettings + ConductorWorkspaces decoupled
+                // akin to how modules are decoupled for push navigation
+                case .workspaces(.settingsButtonTapped):
+                    state.settings = ConductorSettings.State()
+                    return .none
+
+                case let .workspaces(.workspaceTapped(item)):
+                    state.path.append(
+                        .workspaceChat(
+                            WorkspaceChat.State(workspaceWithRepository: item)
+                        )
+                    )
+                    return .none
+
+                case .path, .settings, .workspaces:
+                    return .none
+                }
+            }
+        }
+        .ifLet(\.$settings, action: \.settings) {
+            ConductorSettings()
         }
         .forEach(\.path, action: \.path)
     }
@@ -70,6 +84,9 @@ public struct MainView: View {
             WorkspacesView(
                 store: store.scope(state: \.workspaces, action: \.workspaces)
             )
+            .sheet(item: $store.scope(state: \.settings, action: \.settings)) { store in
+                ConductorSettingsView(store: store)
+            }
         } destination: { store in
             switch store.case {
             case let .workspaceChat(store):

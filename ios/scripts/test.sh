@@ -14,6 +14,7 @@ TEST_SCHEMES=(
   SharedConductorDataTests
   ConductorMobileDataTests
   ConductorDesignTests
+  ConductorSettingsTests
   ConductorWorkspacesTests
   ConductorMainTests
 )

@@ -17,9 +17,11 @@ let package = Package(
         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
         .library(name: "ConductorMobileData", targets: ["ConductorMobileData"]),
+        .library(name: "ConductorSettings", targets: ["ConductorSettings"]),
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-async-algorithms", exact: "1.1.5"),
         .package(url: "https://github.com/apple/swift-log", from: "1.14.0"),
         .package(name: "ConductorShared", path: "../../shared"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", exact: "2.4.1"),
@@ -36,10 +38,12 @@ let package = Package(
         .target(
             name: "ConductorMobileData",
             dependencies: [
+                .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
                 .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "ConductorFoundation", package: "ConductorShared"),
                 .product(name: "Dependencies", package: "swift-dependencies"),
                 .product(name: "DependenciesMacros", package: "swift-dependencies"),
+                .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
             ],
             path: "Foundations/ConductorMobileData/Sources",
@@ -78,6 +82,17 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .target(
+            name: "ConductorSettings",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "Sharing", package: "swift-sharing"),
+                "ConductorDesign",
+                "ConductorMobileData",
+            ],
+            path: "ConductorSettings/Sources",
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "ConductorWorkspaces",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
@@ -97,6 +112,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "ConductorChat",
+                "ConductorSettings",
                 "ConductorWorkspaces",
             ],
             path: "ConductorMain/Sources",

@@ -70,6 +70,10 @@ struct ServerTests {
         )
 
         try await application.test(.live) { client in
+            try await client.execute(uri: "/ping", method: .get) { response in
+                #expect(response.status == .noContent)
+            }
+
             for uri in [
                 "/sessions",
                 "/repositories",

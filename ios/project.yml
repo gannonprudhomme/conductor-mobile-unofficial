@@ -46,6 +46,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.productivity
         LSRequiresIPhoneOS: true
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
           UISceneConfigurations: {}
@@ -166,6 +168,20 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorMainTests
         PRODUCT_NAME: $(TARGET_NAME)
+  ConductorSettingsTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/ConductorSettings/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorSettings
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorSettingsTests
+        PRODUCT_NAME: $(TARGET_NAME)
 schemes:
   ConductorMobile:
     build:
@@ -213,3 +229,10 @@ schemes:
     test:
       targets:
         - ConductorMainTests
+  ConductorSettingsTests:
+    build:
+      targets:
+        ConductorSettingsTests: test
+    test:
+      targets:
+        - ConductorSettingsTests

@@ -25,6 +25,10 @@ public enum Server {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
 
+        router.get("/ping") { _, _ in
+            HTTPResponse.Status.noContent
+        }
+
         let shouldUpgradeToWebSocket: @Sendable (Request, RequestContext) async throws -> RouterShouldUpgrade = { request, _ in
             if originIsAllowed(request, allowedOrigin: allowedOrigin) {
                 // Accept the HTTP-to-WebSocket switch and start the matching route handler.

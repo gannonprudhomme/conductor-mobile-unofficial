@@ -7,7 +7,9 @@
 
 @testable import ConductorMobileData
 import CustomDump
+import Dependencies
 import Foundation
+import Sharing
 import SharedConductorData
 import Testing
 
@@ -48,15 +50,34 @@ struct DesktopClientTests {
 
     @Test("Repository icon URLs use the desktop icon endpoint")
     func repositoryIconURL() {
-        let repository = Repository(
-            id: "repository-1",
-            createdAt: Date(timeIntervalSince1970: 0),
-            updatedAt: Date(timeIntervalSince1970: 0)
-        )
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            let repository = Repository(
+                id: "repository-1",
+                createdAt: Date(timeIntervalSince1970: 0),
+                updatedAt: Date(timeIntervalSince1970: 0)
+            )
 
-        expectNoDifference(
-            DesktopClient.repositoryIconURL(for: repository).absoluteString,
-            "http://192.168.0.32:3768/repositories/repository-1/icon"
-        )
+            expectNoDifference(
+                DesktopClient.repositoryIconURL(for: repository).absoluteString,
+                "http://192.168.0.32:3768/repositories/repository-1/icon"
+            )
+
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+
+            expectNoDifference(
+                DesktopClient.repositoryIconURL(for: repository).absoluteString,
+                "http://my-mac:3768/repositories/repository-1/icon"
+            )
+
+            $desktopServerAddress.withLock { $0 = "my-mac:4000" }
+
+            expectNoDifference(
+                DesktopClient.repositoryIconURL(for: repository).absoluteString,
+                "http://my-mac:4000/repositories/repository-1/icon"
+            )
+        }
     }
 }

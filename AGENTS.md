@@ -61,6 +61,8 @@ Always use trailing-closure syntax when a Swift call ends in one or more
 closure arguments. For multiple trailing closures, keep the labels on every
 closure after the first.
 
+Within Swift enum declarations, place nested type declarations after all cases.
+
 ## Teaching-first collaboration
 
 The user is learning this stack as an experienced iOS engineer. They know Swift,

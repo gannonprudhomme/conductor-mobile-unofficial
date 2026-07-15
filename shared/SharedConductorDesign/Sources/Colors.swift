@@ -19,6 +19,7 @@ public enum ThemeColorStyle {
     case foreground
     case gitGreen
     case gitRed
+    case gray500
     case highlight
     case highlightForeground
     case input
@@ -58,6 +59,10 @@ public extension ShapeStyle where Self == Color {
 
         case .destructiveBorder:
             Color(red: 125.0 / 255.0, green: 61.0 / 255.0, blue: 61.0 / 255.0)
+
+        case .gray500:
+            // Matches Conductor's `--color-gray-500` CSS variable.
+            Color(red: 142.0 / 255.0, green: 136.0 / 255.0, blue: 133.0 / 255.0)
 
         case .foreground, .textPrimary:
             Color(red: 234.0 / 255.0, green: 232.0 / 255.0, blue: 230.0 / 255.0)
