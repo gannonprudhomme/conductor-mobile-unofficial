@@ -121,36 +121,60 @@ latest_build() {
 set_testflight_notes() {
   local build_id="$1"
   local notes="$2"
+  local localizations="$WORK_DIR/testflight-localizations.json"
   local payload="$WORK_DIR/testflight-notes.json"
   local response="$WORK_DIR/testflight-notes-response.json"
+  local endpoint="https://api.appstoreconnect.apple.com/v1/betaBuildLocalizations"
+  local expected_status=201
+  local method=POST
 
-  jq --null-input --arg build_id "$build_id" --arg notes "$notes" '{
-    data: {
-      type: "betaBuildLocalizations",
-      attributes: {locale: "en-US", whatsNew: $notes},
-      relationships: {build: {data: {type: "builds", id: $build_id}}}
-    }
-  }' > "$payload"
+  app_store_connect_get "builds/$build_id/betaBuildLocalizations" "$localizations"
+
+  local localization_id
+  localization_id="$(
+    jq -r '[.data[] | select(.attributes.locale == "en-US")][0].id // empty' "$localizations"
+  )"
+
+  if [[ -n "$localization_id" ]]; then
+    endpoint="$endpoint/$localization_id"
+    expected_status=200
+    method=PATCH
+    jq --null-input --arg id "$localization_id" --arg notes "$notes" '{
+      data: {
+        type: "betaBuildLocalizations",
+        id: $id,
+        attributes: {whatsNew: $notes}
+      }
+    }' > "$payload"
+  else
+    jq --null-input --arg build_id "$build_id" --arg notes "$notes" '{
+      data: {
+        type: "betaBuildLocalizations",
+        attributes: {locale: "en-US", whatsNew: $notes},
+        relationships: {build: {data: {type: "builds", id: $build_id}}}
+      }
+    }' > "$payload"
+  fi
 
   local token
   token="$(app_store_connect_token)"
 
-  local status
-  status="$(
+  local http_status
+  http_status="$(
     curl \
       --silent \
       --show-error \
       --output "$response" \
       --write-out '%{http_code}' \
-      --request POST \
+      --request "$method" \
       --header "Authorization: Bearer $token" \
       --header "Content-Type: application/json" \
       --data-binary "@$payload" \
-      https://api.appstoreconnect.apple.com/v1/betaBuildLocalizations
+      "$endpoint"
   )"
 
-  if [[ "$status" != 201 ]]; then
-    echo "Could not set TestFlight notes (HTTP $status)." >&2
+  if [[ "$http_status" != "$expected_status" ]]; then
+    echo "Could not set TestFlight notes (HTTP $http_status)." >&2
     jq -r '.errors[0].detail // empty' "$response" >&2
     return 1
   fi
