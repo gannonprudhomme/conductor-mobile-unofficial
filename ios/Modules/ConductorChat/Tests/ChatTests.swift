@@ -38,6 +38,10 @@ struct ChatTests {
             var finishedLoading = original
             finishedLoading.isLoadingMessages = false
             #expect(original != finishedLoading)
+
+            var emptySnapshot = original
+            emptySnapshot.isMessageSnapshotEmpty = true
+            #expect(original != emptySnapshot)
         }
     }
 
@@ -141,6 +145,7 @@ struct ChatTests {
             let task = await store.send(.task)
 
             await store.receive(\.messagesUpdated) {
+                $0.isMessageSnapshotEmpty = true
                 $0.displayedContentRevision += 1
             }
             #expect(try #require(store.state.turns).isEmpty)
@@ -334,34 +339,78 @@ struct ChatTests {
         }
     }
 
-    @Test("An empty initial response replaces cached presentation before loading finishes")
+    @Test("An empty initial response replaces cached presentation and shows the empty state")
     func emptyInitialResponse() async throws {
+        let session = try makeSession()
+        let message: Message = .init(
+            id: "cached",
+            sessionID: session.id,
+            role: .user,
+            content: "Cached message",
+            createdAt: Date(timeIntervalSince1970: 0),
+            turnID: "turn-1"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Message.upsert { message }.execute(db)
+            }
+        } operation: {
+            let state = Chat.State(session: session)
+            try await state.$messages.load()
+            let messages = state.messages
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(.messagesUpdated(messages)) {
+                $0.displayedContentRevision += 1
+            }
+            expectNoDifference(store.state.messages, [message])
+            #expect(store.state.isLoadingMessages)
+            #expect(!store.state.shouldShowEmptyChat)
+
+            await store.send(.initialMessagesResponse([])) {
+                $0.isLoadingMessages = false
+                $0.isMessageSnapshotEmpty = true
+                $0.displayedContentRevision += 1
+            }
+            expectNoDifference(store.state.messages, [message])
+            #expect(try #require(store.state.turns).isEmpty)
+            #expect(try #require(store.state.rows).isEmpty)
+            #expect(store.state.shouldShowEmptyChat)
+        }
+    }
+
+    @Test("Protocol-only messages produce no turns but remain a nonempty snapshot")
+    func protocolOnlyMessagesRemainNonempty() async throws {
+        let session = try makeSession()
+        let message: Message = .init(
+            id: "system",
+            sessionID: session.id,
+            role: .assistant,
+            content: #"{"type":"system","subtype":"status","status":"compacting"}"#,
+            createdAt: Date(timeIntervalSince1970: 0),
+            turnID: "turn-1"
+        )
+
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            var message = try makeMessage(
-                id: "cached",
-                sessionID: "session-1",
-                createdAt: "2026-07-09 01:00:00"
-            )
-            message.role = .user
-            message.turnID = "turn-1"
-            let session = try makeSession()
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
-            await store.send(.messagesUpdated([message])) {
-                $0.displayedContentRevision += 1
-            }
-            #expect(store.state.isLoadingMessages)
-
-            await store.send(.initialMessagesResponse([])) {
+            await store.send(.initialMessagesResponse([message])) {
                 $0.isLoadingMessages = false
                 $0.displayedContentRevision += 1
             }
-            #expect(try #require(store.state.turns).isEmpty)
-            #expect(try #require(store.state.rows).isEmpty)
+
+            #expect(!store.state.isMessageSnapshotEmpty)
+            #expect(store.state.turns?.isEmpty == true)
+            #expect(store.state.rows?.isEmpty == true)
+            #expect(!store.state.shouldShowEmptyChat)
         }
     }
 
@@ -396,6 +445,7 @@ struct ChatTests {
                 $0.isLoadingMessages = false
                 $0.displayedContentRevision += 1
             }
+            #expect(!store.state.shouldShowEmptyChat)
             try expectHumanPresentationCaches(
                 store.state,
                 turnID: "turn-1",

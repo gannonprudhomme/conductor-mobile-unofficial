@@ -40,6 +40,36 @@ struct WorkspaceDisplayTests {
         }
     }
 
+    @Test("Empty chat directory names use the directory, path, then ID")
+    func emptyChatDirectoryName() {
+        let workspaces = [
+            Workspace.preview(
+                id: "workspace-1",
+                directoryName: "preferred-directory",
+                workspacePath: "/Users/test/path-directory"
+            ),
+            Workspace.preview(
+                id: "workspace-2",
+                workspacePath: "/Users/test/nil-directory"
+            ),
+            Workspace.preview(
+                id: "workspace-3",
+                directoryName: "",
+                workspacePath: "/Users/test/empty-directory/"
+            ),
+            Workspace.preview(
+                id: "workspace-4",
+                directoryName: "",
+                workspacePath: ""
+            ),
+        ]
+
+        #expect(
+            workspaces.map(\.emptyChatDirectoryName)
+                == ["preferred-directory", "nil-directory", "empty-directory", "workspace-4"]
+        )
+    }
+
     @Test("Workspace display branch names use Conductor sentence case")
     func displayBranchNameFormatsConductorNames() {
         let workspace = Workspace.preview(branch: "foo-baz_qux")

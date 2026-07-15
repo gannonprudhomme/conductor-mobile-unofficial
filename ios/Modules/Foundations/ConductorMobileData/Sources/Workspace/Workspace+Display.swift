@@ -36,6 +36,14 @@ extension Workspace.Status {
 }
 
 extension Workspace {
+    public var emptyChatDirectoryName: String {
+        let workspacePathDirectoryName = workspacePath
+            .flatMap { $0.split(separator: "/").last }
+            .map(String.init)
+
+        return directoryName?.nilIfEmpty ?? workspacePathDirectoryName ?? id
+    }
+
     public var displayBranchName: String {
         let name = [
             branch,

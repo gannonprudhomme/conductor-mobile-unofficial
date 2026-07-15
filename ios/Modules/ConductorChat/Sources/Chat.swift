@@ -28,6 +28,7 @@ public struct Chat: Sendable {
 
         var messageDraft = ""
         var isLoadingMessages = true
+        var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
         var isStopInFlight = false
 
@@ -46,6 +47,10 @@ public struct Chat: Sendable {
         ///
         /// This hides or shows rows based on their collapsed status for turned rows
         var rows: [DisplayedChatRowWithPadding]? = nil
+
+        var shouldShowEmptyChat: Bool {
+            !isLoadingMessages && isMessageSnapshotEmpty
+        }
 
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
@@ -86,6 +91,7 @@ public struct Chat: Sendable {
                 && lhs.session == rhs.session
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
+                && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
@@ -146,6 +152,7 @@ public struct Chat: Sendable {
                 )
 
             case .messagesUpdated(let messages):
+                state.isMessageSnapshotEmpty = messages.isEmpty
                 state.turns = Turn.parse(
                     messages: messages,
                     reusing: state.turns ?? []
@@ -163,6 +170,8 @@ public struct Chat: Sendable {
                     .filter { !responseMessageIDs.contains($0.id) }
                 // After the first snapshot, database observation owns subsequent updates.
                 state.confirmedMessagesAwaitingInitialSnapshot.removeAll()
+                state.isMessageSnapshotEmpty = messages.isEmpty
+                    && confirmedMessagesMissingFromSnapshot.isEmpty
                 state.turns = Turn.parse(
                     messages: messages + confirmedMessagesMissingFromSnapshot,
                     reusing: state.turns ?? []
@@ -356,12 +365,9 @@ public struct Chat: Sendable {
 
 struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
+    let directoryName: String
     @State private var scrollState = ScrollState()
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
-
-    init(store: StoreOf<Chat>) {
-        self.store = store
-    }
 
     var body: some View {
         ScrollView {
@@ -393,6 +399,8 @@ struct ChatView: View {
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .background(.theme(.background))
+            } else if store.shouldShowEmptyChat {
+                EmptyChatView(directoryName: directoryName)
             }
         }
         .scrollPosition($scrollPosition)
@@ -484,14 +492,23 @@ struct ChatView: View {
     }
 
     private struct EmptyChatView: View {
+        let directoryName: String
+
+        private var wrappableDirectoryName: String {
+            // U+00AD is a soft hyphen: invisible until the text wraps at that character.
+            directoryName.map(String.init).joined(separator: "\u{00AD}")
+        }
+
         var body: some View {
-            ContentUnavailableView(
-                "No Messages",
-                systemImage: "bubble.left.and.bubble.right",
-                description: Text("This session has no messages.")
+            Text(
+                "New chat in \(Text(verbatim: "/\(wrappableDirectoryName).").font(.theme(.codeSmall)))"
             )
-            .foregroundStyle(.theme(.textPrimary))
-            .font(.theme(.body))
+                .font(.theme(.small))
+                .foregroundStyle(.theme(.textSecondary))
+                .multilineTextAlignment(.leading)
+                .padding(.horizontal, 24)
+                .padding(.top, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -564,7 +581,8 @@ struct ChatView: View {
         ChatView(
             store: Store(initialState: Chat.State(session: content.session)) {
                 Chat()
-            }
+            },
+            directoryName: "tacoma-v1"
         )
     }
     .preferredColorScheme(.dark)

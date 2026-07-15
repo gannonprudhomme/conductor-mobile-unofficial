@@ -302,7 +302,10 @@ public struct WorkspaceChatView: View {
     public var body: some View {
         Group {
             if let chatStore = store.scope(state: \.chat, action: \.chat) {
-                ChatView(store: chatStore)
+                ChatView(
+                    store: chatStore,
+                    directoryName: store.workspace.emptyChatDirectoryName
+                )
                     // Treat each session as distinct content so view-local scroll state resets.
                     .id(chatStore.sessionID)
             } else {
