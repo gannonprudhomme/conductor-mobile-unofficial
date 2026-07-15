@@ -23,11 +23,43 @@ public struct DesktopClient: Sendable {
     public var observeWorkspaces: @Sendable () -> AsyncThrowingStream<WorkspaceListSnapshot, any Error> = {
         AsyncThrowingStream { $0.finish() }
     }
+    public var ping: @Sendable () async throws -> Void = { }
     public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ unread: Bool) async throws -> Void
     public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Session?
+
+    public enum ConnectionStatus: Equatable, Sendable {
+        case connected
+        case connecting
+        case disconnected
+    }
+
+    public enum DeviceIcon: String, CaseIterable, Codable, Equatable, Sendable {
+        case desktop
+        case laptop
+        case server
+    }
+
+    public struct DisplayConfiguration: Codable, Equatable, Sendable {
+        public var name: String
+        public var icon: DeviceIcon
+
+        public init(name: String, icon: DeviceIcon) {
+            self.name = name
+            self.icon = icon
+        }
+    }
+}
+
+public extension SharedKey where Self == InMemoryKey<DesktopClient.ConnectionStatus>.Default {
+    static var desktopConnectionStatus: Self {
+        Self[
+            .inMemory("desktopConnectionStatus"),
+            default: .connecting,
+        ]
+    }
 }
 
 public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
@@ -49,6 +81,33 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
             } else {
                 "The desktop service returned HTTP \(statusCode): \(message)"
             }
+        }
+    }
+
+    public static func isConnectionFailure(_ error: any Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain,
+           nsError.code == Int(POSIXErrorCode.ENOTCONN.rawValue) {
+            return true
+        }
+
+        guard let urlError = error as? URLError else {
+            return false
+        }
+
+        return switch urlError.code {
+        case .cannotConnectToHost,
+             .cannotFindHost,
+             .dataNotAllowed,
+             .dnsLookupFailed,
+             .internationalRoamingOff,
+             .networkConnectionLost,
+             .notConnectedToInternet,
+             .timedOut:
+            true
+
+        default:
+            false
         }
     }
 }
@@ -83,6 +142,8 @@ extension DesktopClient: DependencyKey {
             observe(WorkspaceListSnapshot.self) { serverAddress in
                 workspacesWebSocketURL(serverAddress: serverAddress)
             }
+        } ping: {
+            try await ping()
         } sendMessage: { workspaceID, sessionID, message in
             try await post(
                 ["message": message],
@@ -141,11 +202,26 @@ extension DesktopClient: DependencyKey {
             throw DesktopClientError.invalidServerAddress
         }
 
+        // Settings can probe an unsaved draft address without changing the live connection status.
         @Dependency(\.urlSession) var urlSession
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         let (data, response) = try await urlSession.data(for: request)
+        try validateSuccessfulHTTPResponse(response, data: data)
+    }
+
+    private static func ping() async throws {
+        @Shared(.desktopConnectionStatus) var connectionStatus
+        $connectionStatus.withLock {
+            if $0 == .disconnected {
+                $0 = .connecting
+            }
+        }
+
+        var request = URLRequest(url: baseURL.appending(path: "ping"))
+        request.timeoutInterval = 3
+        let (data, response) = try await data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 
@@ -175,14 +251,12 @@ extension DesktopClient: DependencyKey {
         to url: URL,
         decoding responseType: Response.Type
     ) async throws -> Response? {
-        @Dependency(\.urlSession) var urlSession
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await urlSession.data(for: request)
+        let (data, response) = try await data(for: request)
         let statusCode = try validateSuccessfulHTTPResponse(response, data: data)
         guard statusCode != 204 else {
             return nil
@@ -213,15 +287,29 @@ extension DesktopClient: DependencyKey {
         _ body: Body,
         at url: URL
     ) async throws {
-        @Dependency(\.urlSession) var urlSession
-
         var request = URLRequest(url: url)
         request.httpMethod = "PATCH"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await urlSession.data(for: request)
+        let (data, response) = try await data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
+    }
+
+    private static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        @Dependency(\.urlSession) var urlSession
+        @Shared(.desktopConnectionStatus) var connectionStatus
+
+        do {
+            let result = try await urlSession.data(for: request)
+            $connectionStatus.withLock { $0 = .connected }
+            return result
+        } catch {
+            if DesktopClientError.isConnectionFailure(error) {
+                $connectionStatus.withLock { $0 = .disconnected }
+            }
+            throw error
+        }
     }
 }
 
@@ -253,6 +341,19 @@ public extension SharedKey where Self == FileStorageKey<String>.Default {
                     .appending(component: "desktop-server-address.json")
             ),
             default: DesktopClient.defaultServerAddress,
+        ]
+    }
+}
+
+public extension SharedKey
+where Self == FileStorageKey<DesktopClient.DisplayConfiguration?>.Default {
+    static var desktopDisplayConfiguration: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "desktop-display-configuration.json")
+            ),
+            default: nil,
         ]
     }
 }

@@ -15,6 +15,80 @@ import Testing
 
 @Suite(.serialized)
 struct DesktopClientTests {
+    @Test("Connection failures are distinguished from server and application errors")
+    func connectionFailures() {
+        let connectionErrors = [
+            URLError(.cannotConnectToHost),
+            URLError(.networkConnectionLost),
+            URLError(.notConnectedToInternet),
+            URLError(.timedOut),
+        ]
+
+        expectNoDifference(
+            connectionErrors.map(DesktopClientError.isConnectionFailure),
+            [true, true, true, true]
+        )
+        expectNoDifference(
+            DesktopClientError.isConnectionFailure(
+                NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(POSIXErrorCode.ENOTCONN.rawValue)
+                )
+            ),
+            true
+        )
+        expectNoDifference(
+            DesktopClientError.isConnectionFailure(
+                DesktopClientError.requestFailed(statusCode: 503, message: "Unavailable")
+            ),
+            false
+        )
+    }
+
+    @Test("Heartbeat requests update connection status while preserving their errors")
+    func requestConnectionStatus() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let client = DesktopClient.liveValue
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultInMemoryStorage = InMemoryStorage()
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+            let requestedPaths = LockIsolated<[String]>([])
+            DesktopClientURLProtocol.handler.setValue { request in
+                requestedPaths.withValue { $0.append(request.url?.path ?? "") }
+                return (
+                    HTTPURLResponse(
+                        url: try #require(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!,
+                    Data()
+                )
+            }
+            defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+            try await client.ping()
+            expectNoDifference(connectionStatus, .connected)
+            expectNoDifference(requestedPaths.value, ["/ping"])
+
+            DesktopClientURLProtocol.handler.setValue { _ in
+                throw URLError(.networkConnectionLost)
+            }
+            await #expect(throws: URLError.self) {
+                try await client.ping()
+            }
+            expectNoDifference(connectionStatus, .disconnected)
+        }
+    }
+
     @Test("Sending a message returns the canonical database row")
     func sendMessage() async throws {
         let message = Message(
@@ -195,6 +269,35 @@ struct DesktopClientTests {
             DesktopClientError.requestFailed(statusCode: 404, message: "").localizedDescription
                 == "The desktop service returned HTTP 404."
         )
+    }
+
+    @Test("Desktop display configuration defaults to nil and persists in file storage")
+    func displayConfiguration() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            @Shared(.desktopDisplayConfiguration) var displayConfiguration
+
+            expectNoDifference(displayConfiguration, nil)
+
+            $displayConfiguration.withLock {
+                $0 = DesktopClient.DisplayConfiguration(
+                    name: "Office desktop",
+                    icon: .desktop
+                )
+            }
+
+            @Shared(.desktopDisplayConfiguration) var reloadedDisplayConfiguration
+            expectNoDifference(
+                reloadedDisplayConfiguration,
+                Optional(
+                    DesktopClient.DisplayConfiguration(
+                        name: "Office desktop",
+                        icon: .desktop
+                    )
+                )
+            )
+        }
     }
 
     @Test("Conductor decoder accepts SQLite and ISO 8601 dates")

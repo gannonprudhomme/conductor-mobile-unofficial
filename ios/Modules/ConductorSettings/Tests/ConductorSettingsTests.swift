@@ -15,8 +15,29 @@ import Testing
 
 @MainActor
 struct ConductorSettingsTests {
-    @Test("Saving trims and persists the desktop server address")
-    func saveServerAddress() async {
+    @Test("Unsaved settings changes are detected")
+    func unsavedChanges() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            var state = ConductorSettings.State()
+            #expect(!state.hasChanges)
+
+            state.initialServerAddress = "draft-mac"
+            #expect(state.hasChanges)
+
+            state.initialServerAddress = state.storedServerAddress
+            state.displayName = "Office desktop"
+            #expect(state.hasChanges)
+
+            state.displayName = ""
+            state.deviceIcon = .desktop
+            #expect(state.hasChanges)
+        }
+    }
+
+    @Test("Saving trims and persists the desktop settings")
+    func saveDesktopSettings() async {
         let isDismissed = LockIsolated(false)
 
         await withDependencies {
@@ -37,13 +58,30 @@ struct ConductorSettingsTests {
             ) {
                 $0.initialServerAddress = "  my-mac  "
             }
+            await store.send(
+                .binding(.set(\.displayName, "  Office desktop  "))
+            ) {
+                $0.displayName = "  Office desktop  "
+            }
+            await store.send(
+                .binding(.set(\.deviceIcon, .desktop))
+            ) {
+                $0.deviceIcon = .desktop
+            }
             await store.send(.saveButtonTapped) {
                 $0.connectionTestSource = .saveButtonTapped
+                $0.displayName = "Office desktop"
                 $0.initialServerAddress = "my-mac"
             }
             await store.receive(\.connectionTestResult) {
                 $0.connectionTestSource = nil
                 $0.testedServerAddress = "my-mac"
+                $0.$storedDisplayConfiguration.withLock {
+                    $0 = DesktopClient.DisplayConfiguration(
+                        name: "Office desktop",
+                        icon: .desktop
+                    )
+                }
                 $0.$storedServerAddress.withLock { $0 = "my-mac" }
             }
             await store.finish()
@@ -52,6 +90,15 @@ struct ConductorSettingsTests {
             expectNoDifference(
                 ConductorSettings.State().initialServerAddress,
                 "my-mac"
+            )
+            expectNoDifference(
+                ConductorSettings.State().storedDisplayConfiguration,
+                Optional(
+                    DesktopClient.DisplayConfiguration(
+                        name: "Office desktop",
+                        icon: .desktop
+                    )
+                )
             )
         }
     }
@@ -231,14 +278,20 @@ struct ConductorSettingsTests {
             let store = TestStore(initialState: ConductorSettings.State()) {
                 ConductorSettings()
             }
+            #expect(store.state.displayName.isEmpty)
+            expectNoDifference(store.state.deviceIcon, .laptop)
 
             await store.send(.saveButtonTapped)
             await store.finish()
             #expect(isDismissed.value)
+            expectNoDifference(
+                ConductorSettings.State().storedDisplayConfiguration,
+                nil
+            )
         }
     }
 
-    @Test("Editing without saving leaves the persisted desktop server address unchanged")
+    @Test("Editing without saving leaves the persisted desktop settings unchanged")
     func discardDraft() async {
         await withDependencies {
             $0.defaultFileStorage = .inMemory
@@ -252,10 +305,24 @@ struct ConductorSettingsTests {
             ) {
                 $0.initialServerAddress = "draft-mac"
             }
+            await store.send(
+                .binding(.set(\.displayName, "Draft server"))
+            ) {
+                $0.displayName = "Draft server"
+            }
+            await store.send(
+                .binding(.set(\.deviceIcon, .server))
+            ) {
+                $0.deviceIcon = .server
+            }
 
             expectNoDifference(
                 ConductorSettings.State().initialServerAddress,
                 DesktopClient.defaultServerAddress
+            )
+            expectNoDifference(
+                ConductorSettings.State().storedDisplayConfiguration,
+                nil
             )
         }
     }

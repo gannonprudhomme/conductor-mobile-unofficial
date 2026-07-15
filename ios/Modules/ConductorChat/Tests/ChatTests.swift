@@ -10,12 +10,30 @@ import SharedConductorData
 import ConductorMobileData
 import CustomDump
 import Foundation
+import Sharing
 import SQLiteData
 @testable import ConductorChat
 import Testing
 
 @MainActor
 struct ChatTests {
+    @Test("Connection status follows the shared desktop status")
+    func connectionStatus() throws {
+        try withDependencies {
+            $0.defaultInMemoryStorage = InMemoryStorage()
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            let state = Chat.State(session: try makeSession())
+
+            $connectionStatus.withLock { $0 = .connected }
+            expectNoDifference(state.connectionStatus, .connected)
+
+            $connectionStatus.withLock { $0 = .disconnected }
+            expectNoDifference(state.connectionStatus, .disconnected)
+        }
+    }
+
     @Test("State equality tracks presentation changes but not derived caches")
     func stateEquality() throws {
         try withDependencies {

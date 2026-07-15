@@ -145,13 +145,23 @@ public struct WorkspaceChat: Sendable {
 
             case let .loadSessionsResponse(.failure(error)):
                 Logger.chat.error("Failed to load sessions: \(error)")
+                guard !DesktopClientError.isConnectionFailure(error) else {
+                    return .none
+                }
+
                 state.destination = .alert(
                     .failedToLoadSessions(message: error.localizedDescription)
                 )
                 return .none
 
-            case let .chat(.loadMessagesFailed(message)):
-                state.destination = .alert(.failedToLoadMessages(message: message))
+            case let .chat(.loadMessagesFailed(error)):
+                guard !DesktopClientError.isConnectionFailure(error) else {
+                    return .none
+                }
+
+                state.destination = .alert(
+                    .failedToLoadMessages(message: error.localizedDescription)
+                )
                 return .none
 
             case let .chat(.sendMessageResponse(sessionID, .failure(error))):

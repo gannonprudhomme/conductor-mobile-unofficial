@@ -112,6 +112,15 @@ extension DesktopClient {
         >.Continuation.BufferingPolicy = .bufferingNewest(1),
         using task: WebSocketTaskClient
     ) -> AsyncThrowingStream<Value, any Error> {
+        @Shared(.desktopConnectionStatus) var connectionStatus
+        let sharedConnectionStatus = $connectionStatus
+
+        sharedConnectionStatus.withLock {
+            if $0 != .connected {
+                $0 = .connecting
+            }
+        }
+
         return AsyncThrowingStream(bufferingPolicy: bufferingPolicy) { continuation in
             task.resume()
             let producer = Task {
@@ -126,6 +135,11 @@ extension DesktopClient {
                 do {
                     while !Task.isCancelled {
                         let message = try await task.receive()
+                        guard !Task.isCancelled else {
+                            return
+                        }
+
+                        sharedConnectionStatus.withLock { $0 = .connected }
                         let data = try data(from: message)
                         let value = try JSONDecoder.conductor.decode(type, from: data)
 
@@ -134,13 +148,20 @@ extension DesktopClient {
                         }
                     }
                 } catch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+
+                    if DesktopClientError.isConnectionFailure(error) {
+                        sharedConnectionStatus.withLock { $0 = .disconnected }
+                    }
                     continuation.finish(throwing: error)
                 }
             }
 
             continuation.onTermination = { _ in
-                task.cancel()
                 producer.cancel()
+                task.cancel()
             }
         }
     }

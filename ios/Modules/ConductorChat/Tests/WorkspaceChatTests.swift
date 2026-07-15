@@ -499,9 +499,9 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.chat(.loadMessagesFailed("The service is unavailable."))) {
+            await store.send(.chat(.loadMessagesFailed(TestError()))) {
                 $0.destination = .alert(
-                    .failedToLoadMessages(message: "The service is unavailable.")
+                    .failedToLoadMessages(message: TestError().localizedDescription)
                 )
             }
             await store.send(.destination(.dismiss)) {
@@ -627,6 +627,65 @@ struct WorkspaceChatTests {
                     )
                 )
             )
+        }
+    }
+
+    @Test("Observation connection failures do not alert but command failures do")
+    func connectionFailurePresentation() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(
+            id: "active",
+            workspaceID: workspace.id,
+            status: "working"
+        )
+        let error = URLError(.networkConnectionLost)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.loadSessionsResponse(.failure(error)))
+            await store.send(.chat(.loadMessagesFailed(error)))
+            await store.send(
+                .chat(
+                    .sendMessageResponse(
+                        sessionID: activeSession.id,
+                        result: .failure(error)
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToSendMessage(message: error.localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(
+                .chat(
+                    .stopSessionResponse(
+                        sessionID: activeSession.id,
+                        result: .failure(error)
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToStopSession(message: error.localizedDescription)
+                )
+            }
         }
     }
 

@@ -11,12 +11,50 @@ import ConductorMobileData
 import CustomDump
 import Dependencies
 import Foundation
+import Sharing
 import SQLiteData
 @testable import ConductorWorkspaces
 import Testing
 
 @MainActor
 struct WorkspacesTests {
+    @Test("Connection display follows the shared desktop settings")
+    func connectionDisplay() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultInMemoryStorage = InMemoryStorage()
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            @Shared(.desktopDisplayConfiguration) var displayConfiguration
+            let state = Workspaces.State()
+
+            expectNoDifference(state.displayConfiguration, nil)
+
+            $connectionStatus.withLock { $0 = .connected }
+            expectNoDifference(state.connectionStatus, .connected)
+
+            $connectionStatus.withLock { $0 = .disconnected }
+            expectNoDifference(state.connectionStatus, .disconnected)
+
+            $displayConfiguration.withLock {
+                $0 = DesktopClient.DisplayConfiguration(
+                    name: "Office desktop",
+                    icon: .desktop
+                )
+            }
+            expectNoDifference(
+                state.displayConfiguration,
+                Optional(
+                    DesktopClient.DisplayConfiguration(
+                        name: "Office desktop",
+                        icon: .desktop
+                    )
+                )
+            )
+        }
+    }
+
     @Test("Workspace display options persist between state instances")
     func displayOptionsPersist() async throws {
         try await withDependencies {
@@ -146,6 +184,7 @@ struct WorkspacesTests {
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
+                $0.continuousClock = TestClock()
                 $0.desktopClient.observeWorkspaces = { stream }
             }
 
@@ -237,10 +276,8 @@ struct WorkspacesTests {
             }
             #expect(connectionCount.value == 1)
 
-            firstContinuation.finish(throwing: TestError())
-            await store.receive(\.loadWorkspacesFailed) {
-                $0.alert = .failedToLoadWorkspaces(error: TestError())
-            }
+            firstContinuation.finish(throwing: URLError(.networkConnectionLost))
+            await store.receive(\.loadWorkspacesFailed)
             #expect(connectionCount.value == 1)
 
             await clock.advance(by: .seconds(1))
@@ -255,6 +292,45 @@ struct WorkspacesTests {
 
             await task.cancel()
             #expect(secondConnectionCancelled.value)
+        }
+    }
+
+    @Test("Task pings the desktop immediately and every three seconds")
+    func connectionHeartbeat() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let clock = TestClock()
+            let pingCount = LockIsolated(0)
+            let (stream, continuation) = AsyncThrowingStream<
+                WorkspaceListSnapshot,
+                any Error
+            >.makeStream()
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.continuousClock = clock
+                $0.desktopClient.observeWorkspaces = { stream }
+                $0.desktopClient.ping = {
+                    pingCount.withValue { $0 += 1 }
+                }
+            }
+
+            let task = await store.send(.task)
+            await clock.advance()
+            #expect(pingCount.value == 1)
+
+            await clock.advance(by: .seconds(2))
+            #expect(pingCount.value == 1)
+
+            await clock.advance(by: .seconds(1))
+            #expect(pingCount.value == 2)
+
+            await task.cancel()
+            continuation.finish()
+            await clock.advance(by: .seconds(3))
+            #expect(pingCount.value == 2)
         }
     }
 
@@ -356,6 +432,38 @@ struct WorkspacesTests {
             }
             let updatedWorkspace = try #require(fetchedWorkspace)
             #expect(updatedWorkspace.pinnedAt != nil)
+        }
+    }
+
+    @Test("Explicit workspace connection failures present an alert")
+    func workspaceConnectionFailure() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let item = workspace(id: "workspace")
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_555_200)
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    throw URLError(.networkConnectionLost)
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item))
+
+            await store.receive(\.setWorkspacePinnedFailed) {
+                $0.alert = .failedToUpdateWorkspacePin(
+                    error: URLError(.networkConnectionLost)
+                )
+            }
         }
     }
 }

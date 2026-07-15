@@ -21,30 +21,13 @@ import SwiftUI
 public struct Workspaces: Sendable {
     @ObservableState
     public struct State: Equatable {
-        struct WorkspaceSection: Equatable, Identifiable, Sendable {
-            var id: String { groupByType.id }
-            let groupByType: GroupByType
-            var items: [WorkspaceWithRepository]
-
-            enum GroupByType: Equatable, Sendable {
-                case status(Workspace.Status)
-                case project(
-                    repositoryID: Repository.ID?,
-                    repository: Repository?,
-                    title: String
-                )
-
-                var id: String {
-                    switch self {
-                    case let .status(status): "status:\(status.rawValue)"
-                    case let .project(repositoryID, _, _):
-                        "project:\(repositoryID ?? "")"
-                    }
-                }
-            }
-        }
-
         @Presents public var alert: AlertState<Action.Alert>?
+
+        @Shared(.desktopConnectionStatus)
+        public var connectionStatus
+
+        @Shared(.desktopDisplayConfiguration)
+        public var displayConfiguration
 
         @FetchAll(
             Repository.all
@@ -135,6 +118,29 @@ public struct Workspaces: Sendable {
                 }
             }
         }
+
+        struct WorkspaceSection: Equatable, Identifiable, Sendable {
+            var id: String { groupByType.id }
+            let groupByType: GroupByType
+            var items: [WorkspaceWithRepository]
+
+            enum GroupByType: Equatable, Sendable {
+                case status(Workspace.Status)
+                case project(
+                    repositoryID: Repository.ID?,
+                    repository: Repository?,
+                    title: String
+                )
+
+                var id: String {
+                    switch self {
+                    case let .status(status): "status:\(status.rawValue)"
+                    case let .project(repositoryID, _, _):
+                        "project:\(repositoryID ?? "")"
+                    }
+                }
+            }
+        }
     }
 
     public enum Action {
@@ -161,6 +167,7 @@ public struct Workspaces: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.continuousClock) var clock
     @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
@@ -188,6 +195,7 @@ public struct Workspaces: Sendable {
                             .dropFirst()
                             .map(Action.workspacesChanged)
                     },
+                    monitorConnection(),
                     observeWorkspaces(state)
                 )
 
@@ -203,6 +211,10 @@ public struct Workspaces: Sendable {
                 return .none
 
             case let .loadWorkspacesFailed(error):
+                guard !DesktopClientError.isConnectionFailure(error) else {
+                    return .none
+                }
+
                 state.alert = .failedToLoadWorkspaces(error: error)
                 return .none
 
@@ -247,8 +259,8 @@ public struct Workspaces: Sendable {
                             .execute(db)
                     }
                     try await desktopClient.setWorkspacePinned(
-                        item.id,
-                        pinned
+                        workspaceID: item.id,
+                        pinned: pinned
                     )
                 }
 
@@ -266,7 +278,10 @@ public struct Workspaces: Sendable {
                             }
                             .execute(db)
                     }
-                    try await desktopClient.setWorkspaceStatus(item.id, status)
+                    try await desktopClient.setWorkspaceStatus(
+                        workspaceID: item.id,
+                        status: status
+                    )
                 }
 
             case let .workspaceUnreadButtonTapped(item):
@@ -282,8 +297,8 @@ public struct Workspaces: Sendable {
                             .execute(db)
                     }
                     try await desktopClient.setWorkspaceUnread(
-                        item.id,
-                        hasUnread
+                        workspaceID: item.id,
+                        unread: hasUnread
                     )
                 }
 
@@ -361,6 +376,15 @@ public struct Workspaces: Sendable {
             } onFailure: { error in
                 Logger.workspace.error("Failed to observe workspaces: \(error)")
                 await send(.loadWorkspacesFailed(error))
+            }
+        }
+    }
+
+    private func monitorConnection() -> Effect<Action> {
+        .run { _ in
+            while !Task.isCancelled {
+                try? await desktopClient.ping()
+                try await clock.sleep(for: .seconds(3))
             }
         }
     }
@@ -451,7 +475,12 @@ public struct WorkspacesView: View {
                 .font(.theme(.body))
             }
         }
-        .themedNavigationTitle("Workspaces")
+        .themedNavigationTitle("Conductor", alignment: .leading) {
+            ConnectionStatusSubtitle(
+                status: store.connectionStatus,
+                displayConfiguration: store.displayConfiguration
+            )
+        }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
@@ -477,6 +506,75 @@ public struct WorkspacesView: View {
         .background(.theme(.background))
         .alert($store.scope(state: \.alert, action: \.alert))
         .preferredColorScheme(.dark)
+    }
+
+    private struct ConnectionStatusSubtitle: View {
+        let status: DesktopClient.ConnectionStatus
+        let displayConfiguration: DesktopClient.DisplayConfiguration?
+
+        @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
+        private var indicatorFrameSize = 12
+
+        @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
+        private var indicatorSize = 8
+
+        private var displayName: String {
+            displayConfiguration?.name ?? "MacBook Pro"
+        }
+
+        private var deviceIcon: DesktopClient.DeviceIcon {
+            displayConfiguration?.icon ?? .laptop
+        }
+
+        var body: some View {
+            Label {
+                Text(displayName)
+                    .foregroundStyle(.theme(.textSecondary))
+                    .font(.theme(.small))
+                    .lineLimit(1)
+            } icon: {
+                HStack(spacing: 4) {
+                    indicator
+
+                    LucideIcon(deviceIcon.lucideImage, style: .small)
+                }
+            }
+            .labelStyle(.conductorExtraSmall)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(displayName)
+            .accessibilityValue(accessibilityValue)
+        }
+
+        private var indicator: some View {
+            Group {
+                switch status {
+                case .connected, .disconnected:
+                    Circle()
+                        .fill(.theme(status == .connected ? .gitGreen : .gitRed))
+                        .frame(width: indicatorSize, height: indicatorSize)
+
+                case .connecting:
+                    ProgressView()
+                        .progressViewStyle(.network)
+                        .tint(.theme(.textSecondary))
+                        .controlSize(.mini)
+                }
+            }
+            .frame(width: indicatorFrameSize, height: indicatorFrameSize)
+        }
+
+        private var accessibilityValue: String {
+            switch status {
+            case .connected:
+                "Connected"
+
+            case .connecting:
+                "Connecting"
+
+            case .disconnected:
+                "Disconnected"
+            }
+        }
     }
 
     private func workspaceRowAction(
@@ -762,17 +860,105 @@ fileprivate extension Set where Element == String {
     }
 }
 
-#Preview {
-    let _ = try! prepareDependencies {
-        try $0.bootstrapDatabase()
+private extension DesktopClient.DeviceIcon {
+    var lucideImage: UIImage {
+        switch self {
+        case .desktop:
+            Lucide.monitor
+
+        case .laptop:
+            Lucide.laptop
+
+        case .server:
+            Lucide.server
+        }
+    }
+}
+
+#if DEBUG
+@MainActor
+private struct WorkspacesPreview: View {
+    let connectionStatus: Shared<DesktopClient.ConnectionStatus>
+    let shouldCycleStatus: Bool
+    let store: StoreOf<Workspaces>
+
+    init(
+        status: DesktopClient.ConnectionStatus,
+        shouldCycleStatus: Bool = false
+    ) {
+        let _ = try! prepareDependencies {
+            try $0.bootstrapDatabase()
+        }
+        let (connectionStatus, store) = withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultInMemoryStorage = InMemoryStorage()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = status }
+            return (
+                $connectionStatus,
+                Store(initialState: Workspaces.State()) {
+                    Workspaces()
+                }
+            )
+        }
+        self.connectionStatus = connectionStatus
+        self.shouldCycleStatus = shouldCycleStatus
+        self.store = store
     }
 
-    NavigationStack {
-        WorkspacesView(
-            store: Store(initialState: Workspaces.State()) {
-                Workspaces()
-            }
-        )
+    var body: some View {
+        NavigationStack {
+            WorkspacesView(store: store)
+        }
+        .preferredColorScheme(.dark)
+        .task {
+            await cycleStatus()
+        }
     }
-    .preferredColorScheme(.dark)
+
+    private func cycleStatus() async {
+        guard shouldCycleStatus else {
+            return
+        }
+
+        let statuses = DesktopClient.ConnectionStatus.allPreviewStatuses
+        var index = statuses.firstIndex(of: connectionStatus.wrappedValue) ?? 0
+        let clock = ContinuousClock()
+        while !Task.isCancelled {
+            do {
+                try await clock.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+
+            index = (index + 1) % statuses.count
+            connectionStatus.withLock { $0 = statuses[index] }
+        }
+    }
 }
+
+private extension DesktopClient.ConnectionStatus {
+    static let allPreviewStatuses: [Self] = [
+        .connected,
+        .connecting,
+        .disconnected,
+    ]
+}
+
+#Preview("Loop") {
+    WorkspacesPreview(status: .connected, shouldCycleStatus: true)
+}
+
+#Preview("Online") {
+    WorkspacesPreview(status: .connected)
+}
+
+#Preview("Connecting") {
+    WorkspacesPreview(status: .connecting)
+}
+
+#Preview("Offline") {
+    WorkspacesPreview(status: .disconnected)
+}
+#endif

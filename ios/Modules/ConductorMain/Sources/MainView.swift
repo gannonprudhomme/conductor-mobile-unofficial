@@ -98,6 +98,9 @@ public struct MainView: View {
             // alive while the root WorkspacesView is off-screen.
             await store.send(.workspaces(.task)).finish()
         }
+        .sensoryFeedback(.error, trigger: store.workspaces.connectionStatus) {
+            $0 == .connected && $1 == .disconnected
+        }
     }
 }
 

@@ -19,10 +19,15 @@ public struct ConductorSettings: Sendable {
     public struct State: Equatable {
         @Presents public var alert: AlertState<Action.Alert>?
 
+        @Shared(.desktopDisplayConfiguration)
+        public var storedDisplayConfiguration
+
         @Shared(.desktopServerAddress)
         public var storedServerAddress
 
         var connectionTestSource: ConnectionTestSource?
+        public var deviceIcon: DesktopClient.DeviceIcon
+        public var displayName: String
         public var initialServerAddress: String
 
         /// The server address we actually submitted & tested this session (i.e. lifetime of this view)
@@ -31,12 +36,21 @@ public struct ConductorSettings: Sendable {
         var testedServerAddress: String?
 
         public init() {
+            @Shared(.desktopDisplayConfiguration) var storedDisplayConfiguration
             @Shared(.desktopServerAddress) var storedServerAddress
+            self.deviceIcon = storedDisplayConfiguration?.icon ?? .laptop
+            self.displayName = storedDisplayConfiguration?.name ?? ""
             self.initialServerAddress = storedServerAddress
         }
 
         var isConnectionTestInFlight: Bool {
             connectionTestSource != nil
+        }
+
+        var hasChanges: Bool {
+            initialServerAddress != storedServerAddress
+                || displayName != (storedDisplayConfiguration?.name ?? "")
+                || deviceIcon != (storedDisplayConfiguration?.icon ?? .laptop)
         }
 
         var isSaveButtonDisabled: Bool {
@@ -54,6 +68,10 @@ public struct ConductorSettings: Sendable {
 
         var normalizedServerAddress: String {
             initialServerAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var normalizedDisplayName: String {
+            displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         enum ConnectionTestSource: Equatable {
@@ -90,6 +108,7 @@ public struct ConductorSettings: Sendable {
                     return .none
                 }
 
+                state.displayName = state.normalizedDisplayName
                 state.initialServerAddress = state.normalizedServerAddress
 
                 if state.initialServerAddress == state.storedServerAddress
@@ -160,6 +179,16 @@ public struct ConductorSettings: Sendable {
     }
 
     private func save(state: inout State) -> Effect<Action> {
+        state.$storedDisplayConfiguration.withLock {
+            $0 = if state.displayName.isEmpty {
+                nil
+            } else {
+                DesktopClient.DisplayConfiguration(
+                    name: state.displayName,
+                    icon: state.deviceIcon
+                )
+            }
+        }
         state.$storedServerAddress.withLock { $0 = state.initialServerAddress }
         return .run { _ in
             await dismiss()
@@ -179,7 +208,9 @@ extension AlertState where Action == ConductorSettings.Action.Alert {
 
 public struct ConductorSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var isDisplayNameFocused: Bool
     @FocusState private var isServerAddressFocused: Bool
+    @State private var isDiscardConfirmationPresented = false
     @Bindable var store: StoreOf<ConductorSettings>
 
     public init(store: StoreOf<ConductorSettings>) {
@@ -206,6 +237,10 @@ public struct ConductorSettingsView: View {
             Section {
                 connectionRow
                     .listRowBackground(Color.clear)
+
+                displayRow
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden, edges: .bottom)
             } header: {
                 Text("Connection") // font 2xl (24 px)
                     .font(.theme(.heading).weight(.medium)) // need 500
@@ -218,9 +253,22 @@ public struct ConductorSettingsView: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button(role: .close) {
-                    dismiss()
+                    if store.hasChanges {
+                        isDiscardConfirmationPresented = true
+                    } else {
+                        dismiss()
+                    }
                 }
                 .foregroundStyle(.theme(.textPrimary))
+                .confirmationDialog(
+                    "Are you sure you want to discard changes?",
+                    isPresented: $isDiscardConfirmationPresented,
+                    titleVisibility: .visible
+                ) {
+                    Button("Discard changes", role: .destructive) {
+                        dismiss()
+                    }
+                }
             }
 
             ToolbarItem(placement: .topBarTrailing) {
@@ -268,7 +316,74 @@ public struct ConductorSettingsView: View {
 
                 testConnectionButton
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var displayRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Display name")
+                    .font(.theme(.small).weight(.medium))
+                    .foregroundStyle(.theme(.textPrimary))
+
+                Text("Shown with the connection status on the Workspaces screen.")
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+            .padding(.leading, 2)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            HStack(spacing: 8) {
+                deviceIconMenu
+
+                displayNameTextField
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var deviceIconMenu: some View {
+        Menu {
+            Picker("Device icon", selection: $store.deviceIcon) {
+                ForEach(DesktopClient.DeviceIcon.allCases, id: \.self) { icon in
+                    Label {
+                        Text(icon.title)
+                    } icon: {
+                        ColoredMenuImage(icon.lucideImage)
+                    }
+                    .tag(icon)
+                }
+            }
+        } label: {
+            Label {
+                Text(store.deviceIcon.title)
+            } icon: {
+                LucideIcon(store.deviceIcon.lucideImage, style: .small)
+            }
+        }
+        .buttonStyle(.conductorSecondary)
+        .accessibilityLabel("Device icon")
+        .accessibilityValue(store.deviceIcon.title)
+    }
+
+    private var displayNameTextField: some View {
+        TextField(
+            "Display name",
+            text: $store.displayName,
+            prompt: Text(verbatim: "MacBook Pro")
+                .foregroundStyle(.theme(.textSecondary))
+        )
+        .textFieldStyle(
+            .conductor(
+                text: $store.displayName,
+                isClearButtonVisible: isDisplayNameFocused
+            )
+        )
+        .focused($isDisplayNameFocused)
+        .textContentType(.name)
+        .submitLabel(.done)
+        .disabled(store.isConnectionTestInFlight)
     }
 
     private var ipAddressTextField: some View {
@@ -363,6 +478,34 @@ public struct ConductorSettingsView: View {
 
         private func shouldPlaySuccessFeedback(oldValue: String?, newValue: String?) -> Bool {
             newValue != nil && newValue != oldValue
+        }
+    }
+}
+
+private extension DesktopClient.DeviceIcon {
+    var lucideImage: UIImage {
+        switch self {
+        case .desktop:
+            Lucide.monitor
+
+        case .laptop:
+            Lucide.laptop
+
+        case .server:
+            Lucide.server
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .desktop:
+            "Desktop"
+
+        case .laptop:
+            "Laptop"
+
+        case .server:
+            "Server"
         }
     }
 }

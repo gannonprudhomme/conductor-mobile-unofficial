@@ -23,6 +23,7 @@ private struct ConductorSecondaryButtonStyleBody: View {
             configuration.label
                 .labelStyle(.conductorSmall)
                 .padding(EdgeInsets(vertical: 8, horizontal: 12))
+                .frame(maxHeight: .infinity, alignment: .center)
                 .font(.theme(.small))
                 .foregroundStyle(.theme(.textPrimary))
                 .overlay {

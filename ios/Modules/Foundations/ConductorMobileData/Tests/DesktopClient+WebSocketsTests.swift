@@ -9,6 +9,7 @@
 import CustomDump
 import Dependencies
 import Foundation
+import Sharing
 import Testing
 
 struct DesktopClientWebSocketsTests {
@@ -98,6 +99,44 @@ struct DesktopClientWebSocketsTests {
         expectNoDifference(cancelCount.value, 1)
     }
 
+    @Test("WebSocket observations update their shared connection status")
+    func webSocketConnectionStatus() async throws {
+        try await withDependencies {
+            $0.defaultInMemoryStorage = InMemoryStorage()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+            let (frames, framesContinuation) = AsyncThrowingStream.makeStream(
+                of: URLSessionWebSocketTask.Message.self,
+                throwing: (any Error).self
+            )
+            let stream = DesktopClient.webSocketStream(
+                [String].self,
+                using: DesktopClient.WebSocketTaskClient {
+                } receive: {
+                    for try await frame in frames {
+                        return frame
+                    }
+                    throw CancellationError()
+                } resume: {
+                }
+            )
+            var iterator = stream.makeAsyncIterator()
+
+            expectNoDifference(connectionStatus, .connecting)
+
+            framesContinuation.yield(.string(#"["connected"]"#))
+            _ = try await iterator.next()
+            expectNoDifference(connectionStatus, .connected)
+
+            framesContinuation.finish(throwing: URLError(.networkConnectionLost))
+            await #expect(throws: URLError.self) {
+                try await iterator.next()
+            }
+            expectNoDifference(connectionStatus, .disconnected)
+        }
+    }
+
     @Test("WebSocket observations retain only the newest pending snapshot")
     func webSocketSnapshotBuffering() async throws {
         struct TestError: Error { }
@@ -181,41 +220,93 @@ struct DesktopClientWebSocketsTests {
 
     @Test("Canceling an observation stops its WebSocket and receive task")
     func webSocketCancellation() async {
-        let (receiveStarted, receiveStartedContinuation) = AsyncStream.makeStream(of: Void.self)
-        let (producerCancelled, producerCancelledContinuation) = AsyncStream.makeStream(
-            of: Void.self
-        )
-        let (frames, _) = AsyncStream.makeStream(of: URLSessionWebSocketTask.Message.self)
-        let cancelCount = LockIsolated(0)
-        let stream = DesktopClient.webSocketStream(
-            [String].self,
-            using: DesktopClient.WebSocketTaskClient {
-                cancelCount.withValue { $0 += 1 }
-            } receive: {
-                receiveStartedContinuation.yield()
-                return try await withTaskCancellationHandler {
-                    for await frame in frames {
-                        return frame
+        await withDependencies {
+            $0.defaultInMemoryStorage = InMemoryStorage()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .connected }
+            let (receiveStarted, receiveStartedContinuation) = AsyncStream.makeStream(of: Void.self)
+            let (producerCancelled, producerCancelledContinuation) = AsyncStream.makeStream(
+                of: Void.self
+            )
+            let receiveContinuation = LockIsolated<
+                CheckedContinuation<URLSessionWebSocketTask.Message, any Error>?
+            >(nil)
+            let cancelCount = LockIsolated(0)
+            let stream = DesktopClient.webSocketStream(
+                [String].self,
+                using: DesktopClient.WebSocketTaskClient {
+                    cancelCount.withValue { $0 += 1 }
+                    receiveContinuation.withValue {
+                        $0?.resume(throwing: URLError(.networkConnectionLost))
+                        $0 = nil
                     }
-                    throw CancellationError()
-                } onCancel: {
-                    producerCancelledContinuation.yield()
-                    producerCancelledContinuation.finish()
+                } receive: {
+                    try await withTaskCancellationHandler {
+                        try await withCheckedThrowingContinuation { continuation in
+                            receiveContinuation.setValue(continuation)
+                            receiveStartedContinuation.yield()
+                        }
+                    } onCancel: {
+                        producerCancelledContinuation.yield()
+                        producerCancelledContinuation.finish()
+                    }
+                } resume: {
                 }
-            } resume: {
+            )
+            let observation = Task {
+                for try await _ in stream { }
             }
-        )
-        let observation = Task {
-            for try await _ in stream { }
+            var receiveStartedIterator = receiveStarted.makeAsyncIterator()
+            var producerCancelledIterator = producerCancelled.makeAsyncIterator()
+
+            _ = await receiveStartedIterator.next()
+            observation.cancel()
+            _ = await producerCancelledIterator.next()
+            _ = await observation.result
+
+            expectNoDifference(cancelCount.value, 1)
+            expectNoDifference(connectionStatus, .connected)
         }
-        var receiveStartedIterator = receiveStarted.makeAsyncIterator()
-        var producerCancelledIterator = producerCancelled.makeAsyncIterator()
+    }
 
-        _ = await receiveStartedIterator.next()
-        observation.cancel()
-        _ = await producerCancelledIterator.next()
-        _ = await observation.result
+    @Test("Canceled WebSocket frames do not update connection status")
+    func canceledWebSocketFrame() async {
+        await withDependencies {
+            $0.defaultInMemoryStorage = InMemoryStorage()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+            let (receiveStarted, receiveStartedContinuation) = AsyncStream.makeStream(of: Void.self)
+            let receiveContinuation = LockIsolated<
+                CheckedContinuation<URLSessionWebSocketTask.Message, Never>?
+            >(nil)
+            let stream = DesktopClient.webSocketStream(
+                [String].self,
+                using: DesktopClient.WebSocketTaskClient {
+                    receiveContinuation.withValue {
+                        $0?.resume(returning: .string(#"["stale"]"#))
+                        $0 = nil
+                    }
+                } receive: {
+                    await withCheckedContinuation { continuation in
+                        receiveContinuation.setValue(continuation)
+                        receiveStartedContinuation.yield()
+                    }
+                } resume: {
+                }
+            )
+            let observation = Task {
+                for try await _ in stream { }
+            }
+            var receiveStartedIterator = receiveStarted.makeAsyncIterator()
 
-        expectNoDifference(cancelCount.value, 1)
+            expectNoDifference(connectionStatus, .connecting)
+            _ = await receiveStartedIterator.next()
+            observation.cancel()
+            _ = await observation.result
+
+            expectNoDifference(connectionStatus, .connecting)
+        }
     }
 }

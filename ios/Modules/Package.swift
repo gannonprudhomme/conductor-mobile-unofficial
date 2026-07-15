@@ -57,6 +57,7 @@ let package = Package(
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Markdown", package: "swift-markdown"),
+                .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 "ConductorMobileData",

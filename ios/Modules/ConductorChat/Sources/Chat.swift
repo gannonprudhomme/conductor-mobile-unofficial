@@ -12,6 +12,7 @@ import ConductorDesign
 import ConductorMobileData
 import Foundation
 import Logging
+import Sharing
 import SQLiteData
 import SwiftUI
 
@@ -23,6 +24,9 @@ public struct Chat: Sendable {
 
     @ObservableState
     public struct State: Equatable {
+        @Shared(.desktopConnectionStatus)
+        var connectionStatus
+
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
 
@@ -89,6 +93,7 @@ public struct Chat: Sendable {
         public static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
+                && lhs.connectionStatus == rhs.connectionStatus
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -107,7 +112,7 @@ public struct Chat: Sendable {
     public enum Action: BindableAction {
         case task
         case initialMessagesResponse([Message])
-        case loadMessagesFailed(String)
+        case loadMessagesFailed(any Error)
         case messagesUpdated([Message])
         /// Sent after POST returns its persisted row, before writing it locally. The message
         /// appears when that write is observed; this buffers it against an older first snapshot.
@@ -321,7 +326,7 @@ public struct Chat: Sendable {
                 try await storeMessages(messages)
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
-                await send(.loadMessagesFailed(error.localizedDescription))
+                await send(.loadMessagesFailed(error))
             }
         }
     }
@@ -411,16 +416,35 @@ struct ChatView: View {
                 .ignoresSafeArea()
         }
         .safeAreaBar(edge: .bottom) {
-            ChatTextField(
-                text: $store.messageDraft,
-                agentType: store.session.agentType,
-                isSendInFlight: store.isMessageSendInFlight,
-                isStopInFlight: store.isStopInFlight,
-                isWorking: store.session.status == .working,
-                model: store.session.model,
-                onSendTapped: { store.send(.sendButtonTapped) },
-                onStopTapped: { store.send(.stopButtonTapped) }
-            )
+            VStack(spacing: 8) {
+                if store.connectionStatus != .connected {
+                    Label {
+                        Text("Reconnecting")
+                    } icon: {
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.textSecondary))
+                            .controlSize(.mini)
+                    }
+                        .labelStyle(.conductorSmall)
+                        .font(.theme(.small))
+                        .foregroundStyle(.theme(.textSecondary))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                ChatTextField(
+                    text: $store.messageDraft,
+                    agentType: store.session.agentType,
+                    isSendInFlight: store.isMessageSendInFlight,
+                    isStopInFlight: store.isStopInFlight,
+                    isWorking: store.session.status == .working,
+                    model: store.session.model,
+                    onSendTapped: { store.send(.sendButtonTapped) },
+                    onStopTapped: { store.send(.stopButtonTapped) }
+                )
+            }
+            .animation(.default, value: store.connectionStatus)
         }
         .onChange(of: store.displayedContentRevision) {
             displayedContentRevisionChanged()
@@ -563,28 +587,99 @@ struct ChatView: View {
 }
 
 #if DEBUG
-#Preview {
-    let content = try! ChatPreviewContent()
-    let _ = try! prepareDependencies {
-        try $0.bootstrapDatabase()
-        try $0.defaultDatabase.write { db in
-            try Message.upsert { content.messages }
-                .execute(db)
-        }
-        $0.desktopClient.observeMessages = { _, _ in
-            AsyncThrowingStream { continuation in
-                continuation.yield([])
+@MainActor
+private struct ChatPreview: View {
+    let connectionStatus: Shared<DesktopClient.ConnectionStatus>
+    let shouldCycleStatus: Bool
+    let store: StoreOf<Chat>
+
+    init(
+        status: DesktopClient.ConnectionStatus,
+        shouldCycleStatus: Bool = false
+    ) {
+        let content = try! ChatPreviewContent()
+        let _ = try! prepareDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Message.upsert { content.messages }
+                    .execute(db)
+            }
+            $0.desktopClient.observeMessages = { _, _ in
+                AsyncThrowingStream { continuation in
+                    continuation.yield([])
+                }
             }
         }
+
+        let (connectionStatus, store) = withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultInMemoryStorage = InMemoryStorage()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = status }
+            return (
+                $connectionStatus,
+                Store(initialState: Chat.State(session: content.session)) {
+                    Chat()
+                }
+            )
+        }
+        self.connectionStatus = connectionStatus
+        self.shouldCycleStatus = shouldCycleStatus
+        self.store = store
     }
-    NavigationStack {
-        ChatView(
-            store: Store(initialState: Chat.State(session: content.session)) {
-                Chat()
-            },
-            directoryName: "tacoma-v1"
-        )
+    var body: some View {
+        NavigationStack {
+            ChatView(store: store, directoryName: "tacoma-v1")
+        }
+        .preferredColorScheme(.dark)
+        .task {
+            await cycleStatus()
+        }
     }
-    .preferredColorScheme(.dark)
+
+    private func cycleStatus() async {
+        guard shouldCycleStatus else {
+            return
+        }
+
+        let statuses = DesktopClient.ConnectionStatus.allPreviewStatuses
+        var index = statuses.firstIndex(of: connectionStatus.wrappedValue) ?? 0
+        let clock = ContinuousClock()
+        while !Task.isCancelled {
+            do {
+                try await clock.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+
+            index = (index + 1) % statuses.count
+            connectionStatus.withLock { $0 = statuses[index] }
+        }
+    }
+}
+
+private extension DesktopClient.ConnectionStatus {
+    static let allPreviewStatuses: [Self] = [
+        .connected,
+        .connecting,
+        .disconnected,
+    ]
+}
+
+#Preview("Loop") {
+    ChatPreview(status: .connected, shouldCycleStatus: true)
+}
+
+#Preview("Online") {
+    ChatPreview(status: .connected)
+}
+
+#Preview("Connecting") {
+    ChatPreview(status: .connecting)
+}
+
+#Preview("Offline") {
+    ChatPreview(status: .disconnected)
 }
 #endif
