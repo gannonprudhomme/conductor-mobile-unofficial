@@ -36,6 +36,40 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var queueOrder: Int?
     @Column("sender_id")
     public var senderID: String?
+
+    public init(
+        id: String,
+        sessionID: String? = nil,
+        role: Role? = nil,
+        content: String? = nil,
+        createdAt: Date,
+        sentAt: Date? = nil,
+        fullMessage: String? = nil,
+        cancelledAt: String? = nil,
+        model: String? = nil,
+        sdkMessageID: String? = nil,
+        lastAssistantMessageID: String? = nil,
+        turnID: String? = nil,
+        isResumableMessage: Int? = nil,
+        queueOrder: Int? = nil,
+        senderID: String? = nil
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.role = role
+        self.content = content
+        self.createdAt = createdAt
+        self.sentAt = sentAt
+        self.fullMessage = fullMessage
+        self.cancelledAt = cancelledAt
+        self.model = model
+        self.sdkMessageID = sdkMessageID
+        self.lastAssistantMessageID = lastAssistantMessageID
+        self.turnID = turnID
+        self.isResumableMessage = isResumableMessage
+        self.queueOrder = queueOrder
+        self.senderID = senderID
+    }
 }
 
 extension Message {

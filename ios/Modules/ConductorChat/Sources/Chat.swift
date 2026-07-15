@@ -30,6 +30,9 @@ public struct Chat: Sendable {
         var isLoadingMessages = true
         var isMessageSendInFlight = false
         var isStopInFlight = false
+
+        /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
+        var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
         var displayedContentRevision = 0
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
 
@@ -85,6 +88,8 @@ public struct Chat: Sendable {
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
+                && lhs.confirmedMessagesAwaitingInitialSnapshot
+                    == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.displayedContentRevision == rhs.displayedContentRevision
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
         }
@@ -98,6 +103,12 @@ public struct Chat: Sendable {
         case initialMessagesResponse([Message])
         case loadMessagesFailed(String)
         case messagesUpdated([Message])
+        /// Sent after POST returns its persisted row, before writing it locally. The message
+        /// appears when that write is observed; this buffers it against an older first snapshot.
+        case messageConfirmed(
+            sessionID: Session.ID,
+            message: Message
+        )
         case sendButtonTapped
         case sendMessageResponse(
             sessionID: Session.ID,
@@ -144,8 +155,16 @@ public struct Chat: Sendable {
                 return .none
 
             case let .initialMessagesResponse(messages):
+                // A completed send can race with an older first WebSocket snapshot. Prefer the
+                // snapshot's copy when IDs overlap, and append only confirmed rows it omitted.
+                let responseMessageIDs = Set(messages.map(\.id))
+                let confirmedMessagesMissingFromSnapshot = state
+                    .confirmedMessagesAwaitingInitialSnapshot
+                    .filter { !responseMessageIDs.contains($0.id) }
+                // After the first snapshot, database observation owns subsequent updates.
+                state.confirmedMessagesAwaitingInitialSnapshot.removeAll()
                 state.turns = Turn.parse(
-                    messages: messages,
+                    messages: messages + confirmedMessagesMissingFromSnapshot,
                     reusing: state.turns ?? []
                 )
                 state.updateRows(sessionStatus: state.session.status)
@@ -153,11 +172,15 @@ public struct Chat: Sendable {
                 state.isLoadingMessages = false
                 return .none
 
+            case let .messageConfirmed(sessionID, message):
+                guard sessionID == state.sessionID, state.isLoadingMessages else {
+                    return .none
+                }
+                state.confirmedMessagesAwaitingInitialSnapshot.append(message)
+                return .none
+
             case .sessionStatusChanged(let status):
                 state.updateRows(sessionStatus: status)
-                if status != .working {
-                    state.isStopInFlight = false
-                }
                 return .none
 
             case .turnSummaryTapped(let summaryID):
@@ -176,11 +199,23 @@ public struct Chat: Sendable {
                 state.isMessageSendInFlight = true
                 return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
                     let result = await Result {
-                        try await desktopClient.sendMessage(
+                        if let canonicalMessage = try await desktopClient.sendMessage(
                             workspaceID: workspaceID,
                             sessionID: sessionID,
                             message: message
-                        )
+                        ) {
+                            await send(
+                                .messageConfirmed(
+                                    sessionID: sessionID,
+                                    message: canonicalMessage
+                                )
+                            )
+                            do {
+                                try await reconcileMessage(canonicalMessage)
+                            } catch {
+                                Logger.chat.error("Failed to reconcile sent message: \(error)")
+                            }
+                        }
                         return message
                     }
 
@@ -205,12 +240,12 @@ public struct Chat: Sendable {
                     if state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines) == message {
                         state.messageDraft = ""
                     }
+                    return .none
 
                 case .failure:
                     // Send errors are displayed by the parent ``WorkspaceChat``.
-                    break
+                    return .none
                 }
-                return .none
 
             case .stopButtonTapped:
                 guard state.session.status == .working, !state.isStopInFlight else {
@@ -219,15 +254,23 @@ public struct Chat: Sendable {
 
                 state.isStopInFlight = true
                 return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                    let result = await Result {
+                        if let canonicalSession = try await desktopClient.stopSession(
+                            workspaceID: workspaceID,
+                            sessionID: sessionID
+                        ) {
+                            do {
+                                try await reconcileSession(canonicalSession)
+                            } catch {
+                                Logger.chat.error("Failed to reconcile stopped session: \(error)")
+                            }
+                        }
+                    }
+
                     await send(
                         .stopSessionResponse(
                             sessionID: sessionID,
-                            result: await Result {
-                                try await desktopClient.stopSession(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID
-                                )
-                            }
+                            result: result
                         )
                     )
                 }
@@ -278,6 +321,29 @@ public struct Chat: Sendable {
                 Logger.chat.error("Failed to load messages: \(error)")
                 await send(.loadMessagesFailed(error.localizedDescription))
             }
+        }
+    }
+
+    private func reconcileMessage(_ message: Message) async throws {
+        try await database.write { database in
+            guard try Message.find(message.id).fetchOne(database) == nil else {
+                return
+            }
+            try Message.insert { message }.execute(database)
+        }
+    }
+
+    private func reconcileSession(_ session: Session) async throws {
+        try await database.write { database in
+            if let existingSession = try Session.find(session.id).fetchOne(database),
+               let existingUpdatedDate = existingSession.updatedDate,
+               let responseUpdatedDate = session.updatedDate,
+               existingUpdatedDate >= responseUpdatedDate {
+                // Conductor timestamps have second precision, so an equal row may be a newer
+                // same-second state that already arrived through observation.
+                return
+            }
+            try Session.upsert { session }.execute(database)
         }
     }
 

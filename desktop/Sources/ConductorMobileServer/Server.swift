@@ -128,6 +128,7 @@ public enum Server {
             }
 
             return try await StopRoute.post(
+                request: request,
                 context: context,
                 database: database
             )

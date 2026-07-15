@@ -18,6 +18,7 @@ struct SidecarBridgeClient: Sendable {
         let agentType: String
         let cwd: String
         let message: String
+        let messageID: String
         let model: String
         let sessionID: String
         let workspaceID: String
@@ -26,6 +27,7 @@ struct SidecarBridgeClient: Sendable {
             case agentType
             case cwd
             case message
+            case messageID = "messageId"
             case model
             case sessionID = "sessionId"
             case workspaceID = "workspaceId"

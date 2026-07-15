@@ -169,6 +169,11 @@ public struct WorkspaceChat: Sendable {
                 guard state.chat?.sessionID == sessionID else {
                     return .none
                 }
+                // Observation can receive the canonical stopped session before a delayed
+                // POST failure, so do not report a stop failure once it is no longer working.
+                guard state.chat?.session.status == .working else {
+                    return .none
+                }
 
                 Logger.chat.error("Failed to stop session: \(error)")
                 state.destination = .alert(

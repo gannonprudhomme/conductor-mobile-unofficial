@@ -49,6 +49,7 @@ struct SidecarBridgeClientTests {
                     agentType: "codex",
                     cwd: "/tmp/workspace-1",
                     message: "Run the tests.",
+                    messageID: "message-1",
                     model: "gpt-5.5",
                     sessionID: "session-1",
                     workspaceID: "workspace-1"
@@ -65,6 +66,7 @@ struct SidecarBridgeClientTests {
                 "agentType": "codex",
                 "cwd": "/tmp/workspace-1",
                 "message": "Run the tests.",
+                "messageId": "message-1",
                 "model": "gpt-5.5",
                 "sessionId": "session-1",
                 "workspaceId": "workspace-1",

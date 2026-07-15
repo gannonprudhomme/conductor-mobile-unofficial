@@ -361,6 +361,7 @@ struct WorkspaceChatTests {
                     for await _ in responses {
                         throw TestError()
                     }
+                    throw TestError()
                 }
             }
 
@@ -415,6 +416,7 @@ struct WorkspaceChatTests {
                     for await _ in responses {
                         throw TestError()
                     }
+                    throw TestError()
                 }
             }
 
@@ -551,7 +553,11 @@ struct WorkspaceChatTests {
     @Test("When chat fails to stop a session, an alert is presented and dismissed")
     func chatFailsToStopSession() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
-        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+        let activeSession = try makeSession(
+            id: "active",
+            workspaceID: workspace.id,
+            status: "working"
+        )
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -585,6 +591,42 @@ struct WorkspaceChatTests {
             await store.send(.destination(.dismiss)) {
                 $0.destination = nil
             }
+        }
+    }
+
+    @Test("A stop failure is ignored after the stopped session was observed")
+    func observedStopSuppressesFailure() async throws {
+        let workspace = Workspace.preview(activeSessionID: "active")
+        let activeSession = Session.preview(
+            id: "active",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .stopSessionResponse(
+                        sessionID: activeSession.id,
+                        result: .failure(TestError())
+                    )
+                )
+            )
         }
     }
 

@@ -23,11 +23,11 @@ public struct DesktopClient: Sendable {
     public var observeWorkspaces: @Sendable () -> AsyncThrowingStream<WorkspaceListSnapshot, any Error> = {
         AsyncThrowingStream { $0.finish() }
     }
-    public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Void
+    public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ unread: Bool) async throws -> Void
-    public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
+    public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Session?
 }
 
 public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
@@ -82,7 +82,8 @@ extension DesktopClient: DependencyKey {
         } sendMessage: { workspaceID, sessionID, message in
             try await post(
                 ["message": message],
-                to: messagesURL(workspaceID: workspaceID, sessionID: sessionID)
+                to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
+                decoding: Message.self
             )
         } setWorkspacePinned: { workspaceID, pinned in
             try await patch(
@@ -104,7 +105,8 @@ extension DesktopClient: DependencyKey {
                 [String: String](),
                 // POST /workspaces/{workspaceID}/sessions/{sessionID}/stop
                 to: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
-                    .appending(path: "stop")
+                    .appending(path: "stop"),
+                decoding: Session.self
             )
         }
     }
@@ -164,10 +166,11 @@ extension DesktopClient: DependencyKey {
             .appending(path: workspaceID)
     }
 
-    private static func post<Body: Encodable>(
+    private static func post<Body: Encodable, Response: Decodable>(
         _ body: Body,
-        to url: URL
-    ) async throws {
+        to url: URL,
+        decoding responseType: Response.Type
+    ) async throws -> Response? {
         @Dependency(\.urlSession) var urlSession
 
         var request = URLRequest(url: url)
@@ -176,14 +179,19 @@ extension DesktopClient: DependencyKey {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let (data, response) = try await urlSession.data(for: request)
-        try validateSuccessfulHTTPResponse(response, data: data)
+        let statusCode = try validateSuccessfulHTTPResponse(response, data: data)
+        guard statusCode != 204 else {
+            return nil
+        }
+        return try JSONDecoder.conductor.decode(responseType, from: data)
     }
 
     // URLSession only throws for transport failures, so validate HTTP status codes separately.
+    @discardableResult
     private static func validateSuccessfulHTTPResponse(
         _ response: URLResponse,
         data: Data
-    ) throws {
+    ) throws -> Int {
         guard let response = response as? HTTPURLResponse else {
             throw DesktopClientError.invalidResponse
         }
@@ -194,6 +202,7 @@ extension DesktopClient: DependencyKey {
                 message: String(decoding: data, as: UTF8.self)
             )
         }
+        return response.statusCode
     }
 
     private static func patch<Body: Encodable & Sendable>(

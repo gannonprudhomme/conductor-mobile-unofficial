@@ -366,12 +366,62 @@ struct ChatTests {
         }
     }
 
-    @Test("Steering a working session clears the message draft after the desktop accepts it")
+    @Test("An initial response preserves a canonical message received while loading")
+    func initialResponsePreservesCanonicalMessage() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview()
+            let message = Message(
+                id: "message-1",
+                sessionID: session.id,
+                role: .user,
+                content: "Run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "turn-1"
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .messageConfirmed(
+                    sessionID: session.id,
+                    message: message
+                )
+            ) {
+                $0.confirmedMessagesAwaitingInitialSnapshot = [message]
+            }
+            await store.send(.initialMessagesResponse([])) {
+                $0.confirmedMessagesAwaitingInitialSnapshot = []
+                $0.isLoadingMessages = false
+                $0.displayedContentRevision += 1
+            }
+            try expectHumanPresentationCaches(
+                store.state,
+                turnID: "turn-1",
+                startedAt: message.createdAt,
+                messages: [.init(id: message.id, content: "Run the tests.")]
+            )
+        }
+    }
+
+    @Test("Sending persists the canonical message before completing")
     func messageSendSucceeds() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let session = try makeSession(status: "working")
+            @Dependency(\.defaultDatabase) var database
+
+            let session = Session.preview(status: .working)
+            let sentMessage = Message(
+                id: "message-1",
+                sessionID: session.id,
+                role: .user,
+                content: "Please run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "turn-1"
+            )
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
@@ -379,6 +429,7 @@ struct ChatTests {
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
+                    return sentMessage
                 }
             }
 
@@ -388,10 +439,175 @@ struct ChatTests {
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
             }
+            await store.receive(\.messageConfirmed) {
+                $0.confirmedMessagesAwaitingInitialSnapshot = [sentMessage]
+            }
             await store.receive(\.sendMessageResponse) {
                 $0.messageDraft = ""
                 $0.isMessageSendInFlight = false
             }
+            await store.finish()
+
+            let persistedMessage = try await database.read { database in
+                try Message.find(sentMessage.id).fetchOne(database)
+            }
+            expectNoDifference(persistedMessage, sentMessage)
+        }
+    }
+
+    @Test("A legacy send response still completes successfully")
+    func legacyMessageSendSucceeds() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _ in nil }
+            }
+
+            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
+                $0.messageDraft = "Run the tests."
+            }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.messageDraft = ""
+                $0.isMessageSendInFlight = false
+            }
+        }
+    }
+
+    @Test("A send response preserves a draft edited while the request was in flight")
+    func editedDraftIsPreserved() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview()
+            let (responses, responseContinuation) = AsyncStream<Message?>.makeStream()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _ in
+                    for await response in responses {
+                        return response
+                    }
+                    throw TestError()
+                }
+            }
+
+            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
+                $0.messageDraft = "Run the tests."
+            }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.send(.binding(.set(\.messageDraft, "Only run unit tests."))) {
+                $0.messageDraft = "Only run unit tests."
+            }
+
+            responseContinuation.yield(Optional<Message>.none)
+            await store.receive(\.sendMessageResponse) {
+                $0.isMessageSendInFlight = false
+            }
+            responseContinuation.finish()
+            await store.finish()
+        }
+    }
+
+    @Test("An observed message wins over the HTTP response with the same ID")
+    func observedMessageWins() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let session = Session.preview()
+            let observedMessage = Message(
+                id: "message-1",
+                sessionID: session.id,
+                role: .user,
+                content: "Observed canonical content",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_801),
+                turnID: "turn-1"
+            )
+            let responseMessage = Message(
+                id: observedMessage.id,
+                sessionID: session.id,
+                role: .user,
+                content: "Run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "turn-1"
+            )
+            try await database.write { database in
+                try Message.insert { observedMessage }.execute(database)
+            }
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
+            }
+
+            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
+                $0.messageDraft = "Run the tests."
+            }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.receive(\.messageConfirmed) {
+                $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.messageDraft = ""
+                $0.isMessageSendInFlight = false
+            }
+            await store.finish()
+
+            let persistedMessage = try await database.read { database in
+                try Message.find(observedMessage.id).fetchOne(database)
+            }
+            expectNoDifference(persistedMessage, observedMessage)
+        }
+    }
+
+    @Test("A reconciliation failure completes without producing a load failure")
+    func messageReconciliationFailureStillCompletes() async throws {
+        let database = try appDatabase()
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let session = Session.preview()
+            let responseMessage = Message(
+                id: "message-1",
+                sessionID: session.id,
+                role: .user,
+                content: "Run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800)
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
+            }
+
+            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
+                $0.messageDraft = "Run the tests."
+            }
+            try database.close()
+
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.receive(\.messageConfirmed) {
+                $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.messageDraft = ""
+                $0.isMessageSendInFlight = false
+            }
+            await store.finish()
         }
     }
 
@@ -420,18 +636,25 @@ struct ChatTests {
         }
     }
 
-    @Test("Stopping a working session re-enables Stop after acknowledgement")
+    @Test("Stopping persists the canonical session before completing")
     func stopSessionSucceeds() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let session = try makeSession(status: "working")
+            @Dependency(\.defaultDatabase) var database
+
+            let session = Session.preview(status: .working)
+            let stoppedSession = Session.preview(
+                updatedAt: "2026-07-09T01:00:00Z",
+                status: .idle
+            )
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
                 $0.desktopClient.stopSession = { workspaceID, sessionID in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
+                    return stoppedSession
                 }
             }
 
@@ -440,6 +663,79 @@ struct ChatTests {
             }
             await store.receive(\.stopSessionResponse) {
                 $0.isStopInFlight = false
+            }
+            await store.finish()
+
+            let persistedSession = try await database.read { database in
+                try Session.find(stoppedSession.id).fetchOne(database)
+            }
+            expectNoDifference(persistedSession, stoppedSession)
+        }
+    }
+
+    @Test("A legacy stop response still completes successfully")
+    func legacyStopSessionSucceeds() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(status: .working)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.stopSession = { _, _ in nil }
+            }
+
+            await store.send(.stopButtonTapped) {
+                $0.isStopInFlight = true
+            }
+            await store.receive(\.stopSessionResponse) {
+                $0.isStopInFlight = false
+            }
+        }
+    }
+
+    @Test("An observed session wins over an equal or older HTTP response")
+    func observedSessionWins() async throws {
+        for observedUpdatedAt in [
+            "2026-07-09T01:00:00Z",
+            "2026-07-09T02:00:00Z",
+        ] {
+            let database = try appDatabase()
+            let observedSession = Session.preview(
+                updatedAt: observedUpdatedAt,
+                status: .working
+            )
+            let responseSession = Session.preview(
+                updatedAt: "2026-07-09T01:00:00Z",
+                status: .idle
+            )
+            try await database.write { database in
+                try Session.insert { observedSession }.execute(database)
+            }
+
+            try await withDependencies {
+                $0.defaultDatabase = database
+            } operation: {
+                let store = TestStore(
+                    initialState: Chat.State(session: observedSession)
+                ) {
+                    Chat()
+                } withDependencies: {
+                    $0.desktopClient.stopSession = { _, _ in responseSession }
+                }
+
+                await store.send(.stopButtonTapped) {
+                    $0.isStopInFlight = true
+                }
+                await store.receive(\.stopSessionResponse) {
+                    $0.isStopInFlight = false
+                }
+                await store.finish()
+
+                let persistedSession = try await database.read { database in
+                    try Session.find(observedSession.id).fetchOne(database)
+                }
+                expectNoDifference(persistedSession, observedSession)
             }
         }
     }

@@ -80,7 +80,7 @@ struct ChatTextField: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
-                if isWorking {
+                if isWorking || isStopInFlight {
                     StopButton(
                         isEnabled: !isAnyActionInFlight,
                         isInFlight: isStopInFlight,
@@ -88,7 +88,7 @@ struct ChatTextField: View {
                     )
                 }
 
-                if !isWorking || hasSendableText {
+                if (!isWorking && !isStopInFlight) || hasSendableText || isSendInFlight {
                     SendButton(
                         isEnabled: hasSendableText && !isAnyActionInFlight,
                         isInFlight: isSendInFlight,
@@ -136,8 +136,9 @@ struct ChatTextField: View {
                     Text("Send message")
                 } icon: {
                     if isInFlight {
-                        // Intentionally use the platform spinner for this compact button.
                         ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.background))
                     } else {
                         LucideIcon(Lucide.arrowUp, style: .body)
                     }
@@ -175,8 +176,9 @@ struct ChatTextField: View {
                     Text("Stop agent")
                 } icon: {
                     if isInFlight {
-                        // Intentionally use the platform spinner for this compact button.
                         ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.textPrimary))
                     } else {
                         let rectSize = iconSize / 1.5
                         Rectangle()

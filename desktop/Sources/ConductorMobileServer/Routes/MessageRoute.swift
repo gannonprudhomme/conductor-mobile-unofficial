@@ -17,11 +17,16 @@ enum MessageRoute {
         request: Request,
         context: Server.RequestContext,
         database: any DatabaseReader
-    ) async throws -> HTTPResponse.Status {
+    ) async throws -> Response {
+        @Dependency(\.continuousClock) var clock
         @Dependency(\.sidecarBridgeClient) var sidecarBridgeClient
+        @Dependency(\.uuid) var uuid
 
-        let request = try await request.decode(as: SendMessageRequest.self, context: context)
-        guard !request.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let sendMessageRequest = try await request.decode(
+            as: SendMessageRequest.self,
+            context: context
+        )
+        guard !sendMessageRequest.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PlainTextResponseError(.badRequest, message: "Message cannot be empty.")
         }
         let workspaceID = try context.parameters.require("workspaceID")
@@ -62,12 +67,14 @@ enum MessageRoute {
             )
         }
 
+        let messageID = uuid().uuidString
         do {
             try await sidecarBridgeClient.sendMessage(
                 SidecarBridgeClient.RuntimeMessageRequest(
                     agentType: messageSendContext.agentType.rawValue,
                     cwd: workspacePath,
-                    message: request.message,
+                    message: sendMessageRequest.message,
+                    messageID: messageID,
                     model: messageSendContext.model.rawValue,
                     sessionID: sessionID,
                     workspaceID: workspaceID
@@ -89,7 +96,62 @@ enum MessageRoute {
             )
         }
 
-        return .noContent
+        let message = try await waitForPersistedMessage(
+            id: messageID,
+            sessionID: sessionID,
+            database: database,
+            clock: clock
+        )
+        guard let message else {
+            throw PlainTextResponseError(
+                .badGateway,
+                message: "Conductor accepted the message, but it did not appear in the database before the persistence check timed out."
+            )
+        }
+
+        return try JSONEncoder.conductor.encode(
+            message,
+            from: request,
+            context: context
+        )
+    }
+
+    private static func waitForPersistedMessage<C: Clock>(
+        id: Message.ID,
+        sessionID: Session.ID,
+        database: any DatabaseReader,
+        clock: C
+    ) async throws -> Message? where C.Duration == Duration {
+        let fastPollingDuration = Duration.milliseconds(100)
+        let timeout = Duration.seconds(2)
+        let start = clock.now
+
+        while !Task.isCancelled {
+            let message = try await database.read { database in
+                try Message
+                    .where {
+                        $0.id.eq(id)
+                            && $0.sessionID.eq(sessionID)
+                    }
+                    .fetchOne(database)
+            }
+            if let message {
+                return message
+            }
+
+            let elapsed = start.duration(to: clock.now)
+            guard elapsed < timeout else {
+                return nil
+            }
+
+            let interval: Duration = elapsed < fastPollingDuration
+                ? .milliseconds(1)
+                : .milliseconds(25)
+            let sleepDuration = min(interval, timeout - elapsed)
+            try await clock.sleep(for: sleepDuration)
+        }
+
+        throw CancellationError()
     }
 
     @Selection

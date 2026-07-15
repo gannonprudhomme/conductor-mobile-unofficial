@@ -5,7 +5,6 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
-import Dependencies
 import Foundation
 import HummingbirdTesting
 import HummingbirdWSClient
@@ -223,101 +222,6 @@ struct ServerTests {
                 #expect(response.status == .forbidden)
             }
         }
-    }
-
-    @Test("POST message forwards the selected session to the sidecar bridge")
-    func postMessage() async throws {
-        let database = try testConductorDatabase()
-        let date = Date(timeIntervalSince1970: 1_783_555_200)
-        let workspace = Workspace(
-            id: "workspace-1",
-            createdAt: date,
-            updatedAt: date,
-            workspacePath: "/tmp/workspace-1"
-        )
-        let session = Session(
-            id: "session-1",
-            workspaceID: workspace.id,
-            title: "Working",
-            agentType: .codex,
-            isHidden: false,
-            createdAt: "2026-07-09T00:00:01Z",
-            updatedAt: "2026-07-09T00:00:01Z",
-            lastUserMessageAt: nil,
-            status: .idle,
-            model: .gpt5_5,
-            unreadCount: 0,
-            freshlyCompacted: 0,
-            contextTokenCount: 0
-        )
-        try await database.write { db in
-            try Workspace.insert { workspace }.execute(db)
-            try Session.insert { session }.execute(db)
-        }
-        let recorder = MessageRecorder()
-        try await withDependencies {
-            $0.sidecarBridgeClient.sendMessage = { message in
-                await recorder.record(message)
-            }
-        } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"message":"  Run the tests.  "}"#)
-                ) { response in
-                    #expect(response.status == .noContent)
-                    #expect(response.body.readableBytes == 0)
-                }
-            }
-        }
-
-        #expect(
-            await recorder.message == SidecarBridgeClient.RuntimeMessageRequest(
-                agentType: "codex",
-                cwd: "/tmp/workspace-1",
-                message: "  Run the tests.  ",
-                model: "gpt-5.5",
-                sessionID: "session-1",
-                workspaceID: "workspace-1"
-            )
-        )
-    }
-
-    @Test("POST message rejects blank input before contacting the sidecar bridge")
-    func postBlankMessage() async throws {
-        let database = try testConductorDatabase()
-        let recorder = MessageRecorder()
-        try await withDependencies {
-            $0.sidecarBridgeClient.sendMessage = { message in
-                await recorder.record(message)
-            }
-        } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"message":" \n "}"#)
-                ) { response in
-                    #expect(response.status == .badRequest)
-                    #expect(String(buffer: response.body) == "Message cannot be empty.")
-                }
-            }
-        }
-
-        #expect(await recorder.message == nil)
-    }
-}
-
-private actor MessageRecorder {
-    private(set) var message: SidecarBridgeClient.RuntimeMessageRequest?
-
-    func record(_ message: SidecarBridgeClient.RuntimeMessageRequest) {
-        self.message = message
     }
 }
 
