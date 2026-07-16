@@ -24,7 +24,12 @@ public struct DesktopClient: Sendable {
         AsyncThrowingStream { $0.finish() }
     }
     public var ping: @Sendable () async throws -> Void = { }
-    public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Message?
+    public var sendMessage: @Sendable (
+        _ workspaceID: String,
+        _ sessionID: String,
+        _ message: String,
+        _ options: Session.AgentOptions
+    ) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ unread: Bool) async throws -> Void
@@ -144,9 +149,9 @@ extension DesktopClient: DependencyKey {
             }
         } ping: {
             try await ping()
-        } sendMessage: { workspaceID, sessionID, message in
+        } sendMessage: { workspaceID, sessionID, message, options in
             try await post(
-                ["message": message],
+                SendMessageRequest(message: message, options: options),
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
                 decoding: Message.self
             )
@@ -262,6 +267,21 @@ extension DesktopClient: DependencyKey {
             return nil
         }
         return try JSONDecoder.conductor.decode(responseType, from: data)
+    }
+
+    private struct SendMessageRequest: Encodable {
+        let message: String
+        let fastMode: Bool
+
+        init(message: String, options: Session.AgentOptions) {
+            self.message = message
+            self.fastMode = options.fastMode
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case fastMode = "fast_mode"
+        }
     }
 
     // URLSession only throws for transport failures, so validate HTTP status codes separately.

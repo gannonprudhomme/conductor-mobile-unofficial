@@ -35,6 +35,12 @@ struct MigrationsTests {
                 sql: "SELECT name FROM pragma_table_info('workspaces')"
             )
         }
+        let sessionColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('sessions')"
+            )
+        }
 
         #expect(workspaces == 0)
         #expect(mobileWorkspaceStates == 0)
@@ -42,5 +48,6 @@ struct MigrationsTests {
         #expect(repositories == 0)
         #expect(messages == 0)
         #expect(!workspaceColumns.contains("CUSTOM_is_working"))
+        #expect(sessionColumns.contains("fast_mode"))
     }
 }

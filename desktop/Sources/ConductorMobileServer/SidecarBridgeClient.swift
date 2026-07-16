@@ -17,6 +17,7 @@ struct SidecarBridgeClient: Sendable {
     struct RuntimeMessageRequest: Encodable, Equatable, Sendable {
         let agentType: String
         let cwd: String
+        let fastMode: Bool
         let message: String
         let messageID: String
         let model: String
@@ -26,6 +27,7 @@ struct SidecarBridgeClient: Sendable {
         private enum CodingKeys: String, CodingKey {
             case agentType
             case cwd
+            case fastMode
             case message
             case messageID = "messageId"
             case model

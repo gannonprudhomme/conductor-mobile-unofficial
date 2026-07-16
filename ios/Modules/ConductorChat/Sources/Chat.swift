@@ -29,7 +29,7 @@ public struct Chat: Sendable {
 
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
-
+        var agentOptions: Session.AgentOptions
         var messageDraft = ""
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
@@ -69,6 +69,7 @@ public struct Chat: Sendable {
         }
 
         init(session: Session) {
+            self.agentOptions = session.agentOptions
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -94,6 +95,7 @@ public struct Chat: Sendable {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
+                && lhs.agentOptions == rhs.agentOptions
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -111,6 +113,7 @@ public struct Chat: Sendable {
 
     public enum Action: BindableAction {
         case task
+        case fastModeButtonTapped
         case initialMessagesResponse([Message])
         case loadMessagesFailed(any Error)
         case messagesUpdated([Message])
@@ -197,6 +200,10 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: status)
                 return .none
 
+            case .fastModeButtonTapped:
+                state.agentOptions.fastMode.toggle()
+                return .none
+
             case .turnSummaryTapped(let summaryID):
                 if state.expandedSummaryIDs.remove(summaryID) == nil {
                     state.expandedSummaryIDs.insert(summaryID)
@@ -211,12 +218,18 @@ public struct Chat: Sendable {
                 }
 
                 state.isMessageSendInFlight = true
-                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                return .run {
+                    [
+                        options = state.agentOptions,
+                        sessionID = state.session.id,
+                        workspaceID = state.session.workspaceID,
+                    ] send in
                     let result = await Result {
                         if let canonicalMessage = try await desktopClient.sendMessage(
                             workspaceID: workspaceID,
                             sessionID: sessionID,
-                            message: message
+                            message: message,
+                            options: options
                         ) {
                             await send(
                                 .messageConfirmed(
@@ -436,10 +449,12 @@ struct ChatView: View {
                 ChatTextField(
                     text: $store.messageDraft,
                     agentType: store.session.agentType,
+                    agentOptions: store.agentOptions,
                     isSendInFlight: store.isMessageSendInFlight,
                     isStopInFlight: store.isStopInFlight,
                     isWorking: store.session.status == .working,
                     model: store.session.model,
+                    onFastModeTapped: { store.send(.fastModeButtonTapped) },
                     onSendTapped: { store.send(.sendButtonTapped) },
                     onStopTapped: { store.send(.stopButtonTapped) }
                 )

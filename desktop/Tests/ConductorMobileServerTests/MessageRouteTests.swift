@@ -46,7 +46,7 @@ struct MessageRouteTests {
                         method: .post,
                         headers: [.contentType: "application/json"],
                         body: ByteBuffer(
-                            string: #"{"message":"  Run the tests.  "}"#
+                            string: #"{"message":"  Run the tests.  ","fast_mode":true}"#
                         )
                     ) { response in
                         #expect(response.status == .ok)
@@ -71,6 +71,7 @@ struct MessageRouteTests {
             await recorder.message == SidecarBridgeClient.RuntimeMessageRequest(
                 agentType: "codex",
                 cwd: "/tmp/workspace-1",
+                fastMode: true,
                 message: "  Run the tests.  ",
                 messageID: messageID,
                 model: "gpt-5.5",
@@ -156,7 +157,8 @@ private func messageRouteDatabase() async throws -> DatabaseQueue {
         model: .gpt5_5,
         unreadCount: 0,
         freshlyCompacted: 0,
-        contextTokenCount: 0
+        contextTokenCount: 0,
+        fastMode: false
     )
     try await database.write { database in
         try Workspace.insert { workspace }.execute(database)

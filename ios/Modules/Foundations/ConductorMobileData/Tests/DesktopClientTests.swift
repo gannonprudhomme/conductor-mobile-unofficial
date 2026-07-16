@@ -125,7 +125,8 @@ struct DesktopClientTests {
             try await DesktopClient.liveValue.sendMessage(
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
-                message: "Run the tests."
+                message: "Run the tests.",
+                options: .init(fastMode: true)
             )
         }
 
@@ -137,12 +138,10 @@ struct DesktopClientTests {
         )
         let body = try #require(request.bodyData)
         let object = try #require(
-            JSONSerialization.jsonObject(with: body) as? [String: String]
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
         )
-        expectNoDifference(
-            object,
-            ["message": "Run the tests."]
-        )
+        #expect(object["message"] as? String == "Run the tests.")
+        #expect(object["fast_mode"] as? Bool == true)
     }
 
     @Test("Sending supports a legacy no-content response")
@@ -171,7 +170,8 @@ struct DesktopClientTests {
             try await DesktopClient.liveValue.sendMessage(
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
-                message: "Run the tests."
+                message: "Run the tests.",
+                options: .init(fastMode: false)
             )
         }
 

@@ -480,7 +480,7 @@ struct ChatTests {
         } operation: {
             @Dependency(\.defaultDatabase) var database
 
-            let session = Session.preview(status: .working)
+            let session = Session.preview(status: .working, fastMode: true)
             let sentMessage = Message(
                 id: "message-1",
                 sessionID: session.id,
@@ -492,10 +492,11 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, options in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
+                    #expect(options.fastMode)
                     return sentMessage
                 }
             }
@@ -531,7 +532,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in nil }
+                $0.desktopClient.sendMessage = { _, _, _, _ in nil }
             }
 
             await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
@@ -557,7 +558,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _ in
                     for await response in responses {
                         return response
                     }
@@ -614,7 +615,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _ in responseMessage }
             }
 
             await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
@@ -656,7 +657,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _ in responseMessage }
             }
 
             await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
@@ -689,7 +690,7 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _ in
                     throw TestError()
                 }
             }
@@ -700,6 +701,47 @@ struct ChatTests {
             await store.receive(\.sendMessageResponse) {
                 $0.isMessageSendInFlight = false
             }
+        }
+    }
+
+    @Test("Fast mode changes locally and is sent with the next message")
+    func fastModeChangesLocally() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let recordedOptions = LockIsolated<Session.AgentOptions?>(nil)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, options in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    #expect(message == "Use the next setting.")
+                    recordedOptions.withValue { $0 = options }
+                    return nil
+                }
+            }
+
+            await store.send(.fastModeButtonTapped) {
+                $0.agentOptions.fastMode = false
+            }
+            #expect(recordedOptions.value == nil)
+
+            await store.send(.binding(.set(\.messageDraft, "Use the next setting."))) {
+                $0.messageDraft = "Use the next setting."
+            }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.messageDraft = ""
+                $0.isMessageSendInFlight = false
+            }
+            expectNoDifference(
+                recordedOptions.value,
+                Session.AgentOptions(fastMode: false)
+            )
         }
     }
 
@@ -942,6 +984,7 @@ private func makeSession(status: String = "idle") throws -> Session {
               "updated_at": "2026-07-09 00:00:00",
               "status": "\(status)",
               "model": "gpt-5",
+              "fast_mode": true,
               "unread_count": 0,
               "freshly_compacted": 0,
               "context_token_count": 0

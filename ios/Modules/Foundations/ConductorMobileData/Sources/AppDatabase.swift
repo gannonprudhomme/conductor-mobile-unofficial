@@ -98,6 +98,11 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Add session fast mode") { db in
+        try #sql("ALTER TABLE \"sessions\" ADD COLUMN \"fast_mode\" INTEGER DEFAULT 0")
+            .execute(db)
+    }
+
     migrator.registerMigration("Create repos") { db in
         try #sql(
             """
