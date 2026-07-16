@@ -148,7 +148,7 @@ public struct Workspaces: Sendable {
         case groupingChanged(WorkspaceWithRepository.Grouping)
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
-        case repositoryFilterButtonTapped(String?)
+        case repositoryFilterChanged(String?)
         case setWorkspacePinnedFailed(any Error)
         case setWorkspaceStatusFailed(any Error)
         case setWorkspaceUnreadFailed(any Error)
@@ -179,6 +179,7 @@ public struct Workspaces: Sendable {
             switch action {
             case .task:
                 let grouping = state.$grouping
+                let selectedRepositoryID = state.$selectedRepositoryID
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
@@ -188,6 +189,12 @@ public struct Workspaces: Sendable {
                             .removeDuplicates()
                             .dropFirst()
                             .map(Action.groupingChanged)
+                    },
+                    .publisher {
+                        selectedRepositoryID.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.repositoryFilterChanged)
                     },
                     .publisher {
                         workspaces.publisher
@@ -218,8 +225,7 @@ public struct Workspaces: Sendable {
                 state.alert = .failedToLoadWorkspaces(error: error)
                 return .none
 
-            case let .repositoryFilterButtonTapped(repositoryID):
-                state.$selectedRepositoryID.withLock { $0 = repositoryID }
+            case .repositoryFilterChanged:
                 return reloadWorkspaces(state)
 
             case let .sortButtonTapped(sort):
@@ -739,26 +745,32 @@ public struct WorkspacesView: View {
                 Menu {
                     Picker(
                         "Repository",
-                        selection: $store.selectedRepositoryID.sending(
-                            \.repositoryFilterButtonTapped
-                        )
-                        .animation(.default)
+                        selection: Binding(store.$selectedRepositoryID)
                     ) {
                         Text("All Repositories")
                             .tag(String?.none)
 
                         ForEach(store.repositories) { repository in
-                            Text(repository.displayName)
-                                .tag(Optional(repository.id))
+                            Label {
+                                Text(verbatim: repository.displayName)
+                            } icon: {
+                                RepositoryIcon(
+                                    repository: repository,
+                                    size: 16,
+                                    relativeTo: .body
+                                )
+                            }
+                            .tag(Optional(repository.id))
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.inline)
                 } label: {
                     Text("Repository")
-
-                    if let selectedRepositoryName = store.repositories.first(where: { $0.id == store.selectedRepositoryID })?.name {
-                        Text(selectedRepositoryName)
+                    if let repositoryName {
+                        Text(verbatim: repositoryName)
+                    } else {
+                        Text("All Repositories")
                     }
                 }
 

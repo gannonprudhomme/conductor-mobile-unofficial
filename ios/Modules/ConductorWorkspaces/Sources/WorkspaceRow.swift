@@ -37,6 +37,7 @@ struct WorkspaceRow: View {
             } icon: {
                 if showsRepositoryIcon {
                     RepositoryIcon(repository: item.repository, size: 20, relativeTo: .body)
+                        .foregroundStyle(.theme(.textSecondary))
                 }
 
                 if item.isWorking {

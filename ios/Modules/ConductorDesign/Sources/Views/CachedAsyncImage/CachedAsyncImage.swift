@@ -16,6 +16,7 @@ public struct CachedAsyncImage<Content: View>: View {
     private let scale: CGFloat
     private let revalidatesCachedResponse: Bool
     private let transaction: Transaction
+    private let prepareImage: (UIImage) async -> UIImage?
     private let content: (AsyncImagePhase) -> Content
 
     public init(
@@ -23,12 +24,14 @@ public struct CachedAsyncImage<Content: View>: View {
         scale: CGFloat = 1,
         revalidatesCachedResponse: Bool = false,
         transaction: Transaction = Transaction(),
+        prepareImage: @escaping (UIImage) async -> UIImage? = { $0 },
         @ViewBuilder content: @escaping (AsyncImagePhase) -> Content
     ) {
         self.url = url
         self.scale = scale
         self.revalidatesCachedResponse = revalidatesCachedResponse
         self.transaction = transaction
+        self.prepareImage = prepareImage
         self.content = content
     }
 
@@ -46,11 +49,15 @@ public struct CachedAsyncImage<Content: View>: View {
         }
 
         do {
-            let image = try await Loader().image(
+            let loadedImage = try await Loader().image(
                 for: URLRequest(url: url),
                 scale: scale,
                 revalidatesCachedResponse: revalidatesCachedResponse
             )
+            try Task.checkCancellation()
+            guard let image = await prepareImage(loadedImage) else {
+                throw LoadingError.invalidImageData
+            }
             try Task.checkCancellation()
 
             withTransaction(transaction) {

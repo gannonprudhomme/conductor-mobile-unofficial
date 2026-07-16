@@ -339,6 +339,7 @@ public struct WorkspaceChatView: View {
                     size: 13,
                     relativeTo: .footnote
                 )
+                .foregroundStyle(.theme(.textSecondary))
             }
             .labelStyle(.conductorExtraSmall)
         }

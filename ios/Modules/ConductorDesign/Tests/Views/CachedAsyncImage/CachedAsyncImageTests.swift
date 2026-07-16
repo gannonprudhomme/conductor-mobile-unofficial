@@ -28,6 +28,9 @@ struct CachedAsyncImageTests {
             Color.clear
         }
         _ = CachedAsyncImage(url: nil, revalidatesCachedResponse: true)
+        _ = CachedAsyncImage(url: nil, prepareImage: { _ in nil }) { _ in
+            Color.clear
+        }
     }
 
     @Test("The live cache client stores and retrieves responses")

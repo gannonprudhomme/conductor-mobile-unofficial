@@ -16,8 +16,6 @@ public struct RepositoryIcon: View {
     private let iconName: String?
     private let faviconURL: URL?
     private let avatarURL: URL?
-    private let size: CGFloat
-    private let textStyle: Font.TextStyle
 
     public init(
         iconName: String?,
@@ -29,8 +27,6 @@ public struct RepositoryIcon: View {
         self.iconName = iconName
         self.faviconURL = faviconURL
         self.avatarURL = avatarURL
-        self.size = size
-        self.textStyle = textStyle
         self._scaledSize = ScaledMetric(
             wrappedValue: size,
             relativeTo: textStyle
@@ -68,8 +64,7 @@ public struct RepositoryIcon: View {
     public var body: some View {
         Group {
             if let iconName, !iconName.isEmpty, let icon = UIImage(lucideId: iconName) {
-                LucideIcon(icon, size: size, relativeTo: textStyle)
-                    .foregroundStyle(.theme(.textSecondary))
+                Image(uiImage: templateImage(icon))
             } else if let faviconURL {
                 faviconImage(url: faviconURL)
             } else if let avatarURL {
@@ -83,7 +78,11 @@ public struct RepositoryIcon: View {
     }
 
     private func faviconImage(url: URL) -> some View {
-        CachedAsyncImage(url: url, revalidatesCachedResponse: true) { phase in
+        CachedAsyncImage(
+            url: url,
+            revalidatesCachedResponse: true,
+            prepareImage: prepareRemoteImage
+        ) { phase in
             if let image = phase.image {
                 styled(image: image)
             } else if phase.error != nil, let avatarURL {
@@ -95,10 +94,12 @@ public struct RepositoryIcon: View {
     }
 
     private func remoteImage(url: URL) -> some View {
-        CachedAsyncImage(url: url) { image in
-            styled(image: image)
-        } placeholder: {
-            fallbackIcon
+        CachedAsyncImage(url: url, prepareImage: prepareRemoteImage) { phase in
+            if let image = phase.image {
+                styled(image: image)
+            } else {
+                fallbackIcon
+            }
         }
     }
 
@@ -109,8 +110,24 @@ public struct RepositoryIcon: View {
             .clipShape(.rect(cornerRadius: scaledSize / 5))
     }
 
+    private func prepareRemoteImage(_ image: UIImage) async -> UIImage? {
+        await image.byPreparingThumbnail(
+            ofSize: CGSize(width: scaledSize, height: scaledSize)
+        )
+    }
+
     private var fallbackIcon: some View {
-        LucideIcon(Lucide.folderGit2, size: size, relativeTo: textStyle)
-            .foregroundStyle(.theme(.textSecondary))
+        Image(uiImage: templateImage(Lucide.folderGit2))
+    }
+
+    private func templateImage(_ image: UIImage) -> UIImage {
+        let bounds = CGRect(
+            origin: .zero,
+            size: CGSize(width: scaledSize, height: scaledSize)
+        )
+        return UIGraphicsImageRenderer(size: bounds.size).image { _ in
+            image.draw(in: bounds)
+        }
+        .withRenderingMode(.alwaysTemplate)
     }
 }

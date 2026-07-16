@@ -63,13 +63,11 @@ struct WorkspacesTests {
         } operation: {
             let initialState = Workspaces.State()
             initialState.$grouping.withLock { $0 = .project }
+            initialState.$selectedRepositoryID.withLock { $0 = "repo-1" }
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             }
 
-            await store.send(.repositoryFilterButtonTapped("repo-1")) {
-                $0.$selectedRepositoryID.withLock { $0 = "repo-1" }
-            }
             await store.send(.sortButtonTapped(.created)) {
                 $0.$sort.withLock { $0 = .created }
             }
@@ -194,6 +192,35 @@ struct WorkspacesTests {
             await store.receive(\.groupingChanged, .project) {
                 $0.sections = projectSections
             }
+
+            await task.cancel()
+        }
+    }
+
+    @Test("Repository filter changes reload workspaces through the reducer")
+    func repositoryFilterChangesReloadWorkspaces() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let (stream, _) = AsyncThrowingStream<
+                WorkspaceListSnapshot,
+                any Error
+            >.makeStream()
+            let initialState = Workspaces.State()
+            let selectedRepositoryID = initialState.$selectedRepositoryID
+            let store = TestStore(initialState: initialState) {
+                Workspaces()
+            } withDependencies: {
+                $0.continuousClock = TestClock()
+                $0.desktopClient.observeWorkspaces = { stream }
+                $0.desktopClient.ping = {}
+            }
+
+            let task = await store.send(.task)
+            selectedRepositoryID.withLock { $0 = "repo-1" }
+
+            await store.receive(\.repositoryFilterChanged, "repo-1")
 
             await task.cancel()
         }
