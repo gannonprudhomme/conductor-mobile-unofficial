@@ -34,7 +34,7 @@ struct ChatTests {
         }
     }
 
-    @Test("State equality tracks presentation changes but not derived caches")
+    @Test("State equality tracks presentation state but not derived caches")
     func stateEquality() throws {
         try withDependencies {
             try $0.bootstrapDatabase()
@@ -45,9 +45,6 @@ struct ChatTests {
             changedCaches.rows = []
 
             #expect(original == changedCaches)
-
-            changedCaches.displayedContentRevision += 1
-            #expect(original != changedCaches)
 
             var changedExpansion = original
             changedExpansion.expandedSummaryIDs.insert("turn-1:human-1")
@@ -61,21 +58,6 @@ struct ChatTests {
             emptySnapshot.isMessageSnapshotEmpty = true
             #expect(original != emptySnapshot)
         }
-    }
-
-    @Test("Displayed content scrolls initially and only follows later updates from the bottom")
-    func displayedContentScrolling() {
-        let scrollState = ChatView.ScrollState()
-        scrollState.isBottomMarkerVisible = false
-
-        #expect(scrollState.displayedContentChanged(hasRows: false) == .none)
-        #expect(!scrollState.hasDisplayedContent)
-        #expect(scrollState.displayedContentChanged(hasRows: true) == .initial)
-        #expect(scrollState.hasDisplayedContent)
-        #expect(scrollState.displayedContentChanged(hasRows: true) == .none)
-
-        scrollState.isBottomMarkerVisible = true
-        #expect(scrollState.displayedContentChanged(hasRows: true) == .subsequent)
     }
 
     @Test("Messages are limited to the selected session and ordered chronologically")
@@ -164,17 +146,14 @@ struct ChatTests {
 
             await store.receive(\.messagesUpdated) {
                 $0.isMessageSnapshotEmpty = true
-                $0.displayedContentRevision += 1
             }
             #expect(try #require(store.state.turns).isEmpty)
             #expect(try #require(store.state.rows).isEmpty)
-            #expect(store.state.displayedContentRevision == 1)
             #expect(connectionCount.value == 1)
 
             firstContinuation.yield([])
             await store.receive(\.initialMessagesResponse) {
                 $0.isLoadingMessages = false
-                $0.displayedContentRevision += 1
             }
 
             firstContinuation.finish(throwing: TestError())
@@ -239,9 +218,7 @@ struct ChatTests {
 
         let task = await store.send(.task)
 
-        await store.receive(\.messagesUpdated) {
-            $0.displayedContentRevision += 1
-        }
+        await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -255,11 +232,8 @@ struct ChatTests {
         continuation.yield([lateMessage, updatedEarlyMessage])
         await store.receive(\.initialMessagesResponse) {
             $0.isLoadingMessages = false
-            $0.displayedContentRevision += 1
         }
-        await store.receive(\.messagesUpdated) {
-            $0.displayedContentRevision += 1
-        }
+        await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -269,12 +243,8 @@ struct ChatTests {
                 .init(id: "late", content: "Message late"),
             ]
         )
-        #expect(store.state.displayedContentRevision == 3)
-
         continuation.yield([updatedLateMessage])
-        await store.receive(\.messagesUpdated) {
-            $0.displayedContentRevision += 1
-        }
+        await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -284,8 +254,6 @@ struct ChatTests {
                 .init(id: "late", content: "Updated late message"),
             ]
         )
-        #expect(store.state.displayedContentRevision == 4)
-
         let storedMessages = try await database.read { db in
             try Message
                 .where { $0.sessionID.eq(session.id) }
@@ -326,9 +294,7 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.messagesUpdated([message])) {
-                $0.displayedContentRevision += 1
-            }
+            await store.send(.messagesUpdated([message]))
             try expectHumanPresentationCaches(
                 store.state,
                 turnID: "turn-1",
@@ -337,7 +303,6 @@ struct ChatTests {
             )
 
             await store.send(.sessionStatusChanged(.working))
-            #expect(store.state.displayedContentRevision == 1)
             expectNoDifference(
                 try #require(store.state.rows).map(DisplayedRowProjection.init),
                 [
@@ -347,7 +312,6 @@ struct ChatTests {
             )
 
             await store.send(.sessionStatusChanged(.idle))
-            #expect(store.state.displayedContentRevision == 1)
             try expectHumanPresentationCaches(
                 store.state,
                 turnID: "turn-1",
@@ -382,9 +346,7 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.messagesUpdated(messages)) {
-                $0.displayedContentRevision += 1
-            }
+            await store.send(.messagesUpdated(messages))
             expectNoDifference(store.state.messages, [message])
             #expect(store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
@@ -392,7 +354,6 @@ struct ChatTests {
             await store.send(.initialMessagesResponse([])) {
                 $0.isLoadingMessages = false
                 $0.isMessageSnapshotEmpty = true
-                $0.displayedContentRevision += 1
             }
             expectNoDifference(store.state.messages, [message])
             #expect(try #require(store.state.turns).isEmpty)
@@ -422,7 +383,6 @@ struct ChatTests {
 
             await store.send(.initialMessagesResponse([message])) {
                 $0.isLoadingMessages = false
-                $0.displayedContentRevision += 1
             }
 
             #expect(!store.state.isMessageSnapshotEmpty)
@@ -461,7 +421,6 @@ struct ChatTests {
             await store.send(.initialMessagesResponse([])) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = []
                 $0.isLoadingMessages = false
-                $0.displayedContentRevision += 1
             }
             #expect(!store.state.shouldShowEmptyChat)
             try expectHumanPresentationCaches(
@@ -505,6 +464,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.messageConfirmed) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [sentMessage]
@@ -539,6 +499,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.sendMessageResponse) {
                 $0.messageDraft = ""
@@ -570,6 +531,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.send(.binding(.set(\.messageDraft, "Only run unit tests."))) {
                 $0.messageDraft = "Only run unit tests."
@@ -622,6 +584,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.messageConfirmed) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
@@ -666,6 +629,7 @@ struct ChatTests {
 
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.messageConfirmed) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
@@ -696,6 +660,7 @@ struct ChatTests {
 
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.sendMessageResponse) {
                 $0.isMessageSendInFlight = false

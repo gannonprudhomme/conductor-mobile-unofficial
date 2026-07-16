@@ -38,9 +38,9 @@ enum MarkdownBlockParser {
     enum BoundaryKind: Equatable {
         /// A block that uses MarkdownUI's normal one-em separation.
         case standard
-        /// A heading whose larger leading margin must be restored between lazy rows.
+        /// A heading whose larger leading margin must be restored between hosted rows.
         case heading
-        /// A horizontal rule whose two-em margin must be restored between lazy rows.
+        /// A horizontal rule whose two-em margin must be restored between hosted rows.
         case thematicBreak
     }
 

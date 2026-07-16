@@ -11,8 +11,8 @@ import ConductorMobileData
 import IssueReporting
 import MarkdownUI
 
-/// This is solely a representation for UI / displaying in chat,
-/// Thus it is structured in a way which plays to the strengths of a `LazyVStack`.
+/// This is solely a representation for displaying chat. It is structured as stable,
+/// independently renderable rows for the chat collection view.
 ///
 /// E.g. handling conditionals in the data layer (here) instead of in a `View`
 /// For more details on what I mean, see: https://wwdc.ai/2026/321
@@ -81,19 +81,28 @@ struct Turn: Identifiable {
                     }
                 }
 
-                struct Chunk: Identifiable {
+                // Only equatable for collection view's diffable data source
+                struct Chunk: Equatable, Identifiable {
                     let id: Int
+                    let source: String
                     let markdown: MarkdownContent
                     let spacingBefore: Spacing
 
                     init(id: Int, source: String, spacingBefore: Spacing) {
                         self.id = id
+                        self.source = source
                         self.markdown = MarkdownContent(source)
                         self.spacingBefore = spacingBefore
                     }
 
+                    static func == (lhs: Self, rhs: Self) -> Bool {
+                        lhs.id == rhs.id
+                            && lhs.source == rhs.source
+                            && lhs.spacingBefore == rhs.spacingBefore
+                    }
+
                     /// The original Markdown margin that must be reconstructed before this chunk.
-                    /// Splitting one Markdown document into separate lazy rows prevents MarkdownUI
+                    /// Splitting one Markdown document into separate hosted rows prevents MarkdownUI
                     /// from applying its normal margin across the chunk boundary.
                     enum Spacing: Equatable {
                         case none
@@ -101,7 +110,7 @@ struct Turn: Identifiable {
                         case heading
                         case thematicBreak
 
-                        /// Returns only the padding not already supplied by the outer lazy stack.
+                        /// Returns only the padding not already supplied by the chat row layout.
                         /// For example, a 1.5-em heading margin at a 16-point root font is 24 points.
                         /// If the stack already provides 16 points, this returns 8.
                         func additionalTopPadding(
@@ -411,15 +420,16 @@ private extension AgentEvent.SystemEvent {
     }
 }
 
-/// One physical row in the outer `LazyVStack`.
+/// One physical row in the chat collection view.
 ///
 /// `Turn.Row` preserves the logical message structure, where one assistant text message owns every Markdown chunk.
-/// `DisplayedChatRow` is the flattened rendering structure: it expands those chunks into separate rows so SwiftUI can create them lazily near the viewport.
+/// `DisplayedChatRow` is the flattened rendering structure: it expands those chunks into separate,
+/// reusable collection-view rows while retaining SwiftUI for their content.
 ///
 /// Basically meaning: this is pretty much identical to `Turn.Row`, except that this:
 /// - Splits `Turn.Row.assistantMessage` into potentially multiple Markdown rows (for performance), depending on how big it is
 /// - Includes `turnSummary`, `turnInProgress`, and `turnFooter`, which are not actual `Message`s, but are derived from them.
-enum DisplayedChatRow: Identifiable {
+enum DisplayedChatRow: Equatable, Identifiable {
     case humanMessage(Turn.Row.HumanMessageRow)
     case assistantTextChunk(
         messageID: String,
@@ -526,6 +536,7 @@ enum ChatRowLayout {
     static let stackSpacing: CGFloat = 4
     static let horizontalPadding: CGFloat = 16
     static let interRowSpacing = stackSpacing
+    static let summaryHitTargetExpansion: CGFloat = 14
 
     static func calculatePadding(
         for row: DisplayedChatRow,
@@ -536,7 +547,7 @@ enum ChatRowLayout {
         case .humanMessage:
             return (12, 12)
         case .assistantTextChunk(_, let chunk, _):
-            // Markdown chunks and consecutive assistant messages are separate lazy-stack rows.
+            // Markdown chunks and consecutive assistant messages are separate rendered rows.
             // Look ahead so adjacent assistant text shares one outer message margin.
             let shouldCollapseBottomPadding = if index < rows.index(before: rows.endIndex) {
                 switch rows[index + 1] {
@@ -557,8 +568,8 @@ enum ChatRowLayout {
     }
 }
 
-/// A physical chat row with the outer lazy-stack spacing already resolved.
-struct DisplayedChatRowWithPadding: Identifiable {
+/// A physical chat row with its outer renderer spacing already resolved.
+struct DisplayedChatRowWithPadding: Equatable, Identifiable {
     let content: DisplayedChatRow
     let topPadding: CGFloat
     let bottomPadding: CGFloat
@@ -567,10 +578,10 @@ struct DisplayedChatRowWithPadding: Identifiable {
 }
 
 extension Array where Element == Turn {
-    /// Flattens the turns and assistant Markdown chunks into the rows consumed by `ChatRows`.
+    /// Flattens the turns and assistant Markdown chunks into the rows consumed by the chat renderer.
     ///
-    /// The progress indicator and spacing are inserted here so each element in the lazy
-    /// stack's `ForEach` always produces exactly one configured view.
+    /// Progress and spacing are inserted here so each collection item represents exactly one
+    /// hosted view, including the active turn state.
     func flattenedChatRows(
         activeTurnID: Turn.ID?,
         expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
@@ -633,7 +644,7 @@ extension Turn {
         return nil
     }
 
-    /// Projects this turn's logical message rows into the physical rows consumed by `ChatRows`.
+    /// Projects this turn's logical message rows into physical chat rows.
     ///
     /// `flattenedChatRows(activeTurnID:expandedSummaryIDs:)` calls this whenever `Chat.State`
     /// rebuilds its cached presentation rows. Active turns remain fully expanded so streaming
@@ -712,7 +723,7 @@ extension Turn {
         return displayedRows
     }
 
-    /// Projects a human-message segment into the rows consumed by `ChatRows`.
+    /// Projects a human-message segment into physical chat rows.
     /// Keeping logical assistant rows until this point lets the summary count messages and tools
     /// before chunk expansion.
     private static func displayedRowsForSegment(

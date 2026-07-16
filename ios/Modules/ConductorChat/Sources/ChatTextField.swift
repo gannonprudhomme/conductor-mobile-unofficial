@@ -151,6 +151,7 @@ struct ChatTextField: View {
                 .padding(8)
             }
             .disabled(!isEnabled)
+            .accessibilityIdentifier("chat.send")
             .glassEffect(
                 .regular
                     .tint(Color.theme(.foreground).opacity(isEnabled ? 1 : 0.5))

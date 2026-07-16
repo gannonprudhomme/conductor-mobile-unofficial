@@ -370,6 +370,7 @@ struct WorkspaceChatTests {
             }
             await store.send(.chat(.sendButtonTapped)) {
                 $0.chat?.isMessageSendInFlight = true
+                $0.chat?.scrollToBottomRequest = 1
             }
             await store.send(.sessionButtonTapped(selectedSession)) {
                 $0.hasUserSelectedSession = true

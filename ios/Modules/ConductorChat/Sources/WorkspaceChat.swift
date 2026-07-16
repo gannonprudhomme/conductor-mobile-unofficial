@@ -66,7 +66,7 @@ public struct WorkspaceChat: Sendable {
                 $0.id == workspace.activeSessionID
             } ?? self.activeSessions.first
 
-            self.chat = session.map(Chat.State.init)
+            self.chat = session.map { Chat.State(session: $0) }
         }
 
         public var workspace: Workspace {
@@ -238,7 +238,7 @@ public struct WorkspaceChat: Sendable {
             guard !canReuseCurrentChat else {
                 return currentChat
             }
-            return session.map(Chat.State.init)
+            return session.map { Chat.State(session: $0) }
         }
     }
 
@@ -359,7 +359,6 @@ public struct WorkspaceChatView: View {
                 }
             }
         }
-        .scrollEdgeEffectStyle(.soft, for: .top)
         .safeAreaBar(edge: .top) {
             SessionPicker(
                 sessions: store.activeSessions,
@@ -369,6 +368,7 @@ public struct WorkspaceChatView: View {
                 store.send(.sessionButtonTapped(session))
             }
         }
+        .scrollEdgeEffectStyle(.soft, for: .top)
         .overlay {
             if store.isLoadingSessions {
                 ProgressView()
@@ -430,6 +430,7 @@ public struct WorkspaceChatView: View {
             }
             .scrollPosition($scrollPosition)
             .scrollIndicators(.hidden)
+            .accessibilityIdentifier("workspace-chat.session-picker")
             .frame(height: height)
             // Run initially for the cached active session, then follow active or user selections.
             .onChange(of: selectedSessionID, initial: true) { _, sessionID in
