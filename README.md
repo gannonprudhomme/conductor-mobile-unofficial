@@ -39,7 +39,7 @@ Steps:
 
 ### Desktop Companion
 
-In order to be able to actually control Conductor **remotely**, you need to install the desktop "companion". You can grab it from [Releases](), or build it yourself with `mise run desktop`.
+In order to be able to actually control Conductor **remotely**, you need to install the desktop "companion". You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
 
 #### Sidecar proxy (for sending messages)
 
