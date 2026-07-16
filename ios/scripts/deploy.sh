@@ -72,6 +72,8 @@ XCODEBUILD_ARGS=(
   -configuration Debug
   -skipMacroValidation
   -skipPackagePluginValidation
+  -skipPackageUpdates
+  -onlyUsePackageVersionsFromResolvedFile
   -destination "$DESTINATION"
   -derivedDataPath "$DERIVED_DATA_PATH"
 )
