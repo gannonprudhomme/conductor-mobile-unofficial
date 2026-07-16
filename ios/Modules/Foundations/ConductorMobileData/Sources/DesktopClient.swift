@@ -14,6 +14,8 @@ import Sharing
 @DependencyClient
 public struct DesktopClient: Sendable {
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
+    public var createWorkspace:
+        @Sendable (_ repositoryID: String, _ prompt: String) async throws -> Void
     public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
         AsyncThrowingStream { $0.finish() }
     }
@@ -118,6 +120,12 @@ extension DesktopClient: DependencyKey {
     public static var liveValue: Self {
         Self { serverAddress in
             try await ping(serverAddress: serverAddress)
+        } createWorkspace: { repositoryID, prompt in
+            try await post(
+                CreateWorkspaceBody(repositoryID: repositoryID, prompt: prompt),
+                to: baseURL().appending(path: "workspaces"),
+                expectedStatus: 202
+            )
         } observeMessages: { workspaceID, sessionID in
             // Messages are the only unbounded observation: frames after the initial snapshot
             // contain incremental changes, so dropping one could permanently miss an update.
@@ -280,23 +288,60 @@ extension DesktopClient: DependencyKey {
         return try JSONDecoder.conductor.decode(responseType, from: data)
     }
 
+    private static func post<Body: Encodable & Sendable>(
+        _ body: Body,
+        to url: URL,
+        expectedStatus: Int
+    ) async throws {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder().encode(body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await data(for: request)
+        try validateSuccessfulHTTPResponse(
+            response,
+            data: data,
+            expectedStatus: expectedStatus
+        )
+    }
+
     // URLSession only throws for transport failures, so validate HTTP status codes separately.
     @discardableResult
     private static func validateSuccessfulHTTPResponse(
         _ response: URLResponse,
-        data: Data
+        data: Data,
+        expectedStatus: Int? = nil
     ) throws -> Int {
         guard let response = response as? HTTPURLResponse else {
             throw DesktopClientError.invalidResponse
         }
 
-        guard (200..<300).contains(response.statusCode) else {
+        let isSuccessful = if let expectedStatus {
+            response.statusCode == expectedStatus
+        } else {
+            (200..<300).contains(response.statusCode)
+        }
+        guard isSuccessful else {
             throw DesktopClientError.requestFailed(
                 statusCode: response.statusCode,
-                message: String(decoding: data, as: UTF8.self)
+                message: errorMessage(from: data)
             )
         }
         return response.statusCode
+    }
+
+    static func errorMessage(from data: Data) -> String {
+        (try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message)
+            ?? String(decoding: data, as: UTF8.self)
+    }
+
+    private struct ErrorResponse: Decodable {
+        let error: Details
+
+        struct Details: Decodable {
+            let message: String
+        }
     }
 
     private static func patch<Body: Encodable & Sendable>(
@@ -326,6 +371,16 @@ extension DesktopClient: DependencyKey {
             }
             throw error
         }
+    }
+}
+
+private struct CreateWorkspaceBody: Encodable, Sendable {
+    let repositoryID: String
+    let prompt: String
+
+    enum CodingKeys: String, CodingKey {
+        case repositoryID = "repository_id"
+        case prompt
     }
 }
 

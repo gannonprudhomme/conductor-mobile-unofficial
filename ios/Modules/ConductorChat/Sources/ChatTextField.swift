@@ -76,9 +76,13 @@ struct ChatTextField: View {
     }
 
     private var bottomRowButtons: some View {
-        HStack(spacing: 8) {
-            modelLabel
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 0) {
+            ChatConfigMenusView(
+                agentType: agentType,
+                model: model
+            )
+            
+            Spacer(minLength: 8)
 
             HStack(spacing: 8) {
                 if isWorking || isStopInFlight {
@@ -109,21 +113,6 @@ struct ChatTextField: View {
 
     private var isAnyActionInFlight: Bool {
         isSendInFlight || isStopInFlight
-    }
-
-    private var modelLabel: some View {
-        Label {
-            Text(verbatim: model.displayName)
-        } icon: {
-            AgentIcon(
-                agentType: agentType,
-                size: ThemeFontStyle.small.size,
-                relativeTo: ThemeFontStyle.small.textStyle
-            )
-        }
-        .labelStyle(.conductorExtraSmall)
-        .foregroundStyle(.theme(.textPrimary))
-        .font(.theme(.small))
     }
 
     private struct SendButton: View {

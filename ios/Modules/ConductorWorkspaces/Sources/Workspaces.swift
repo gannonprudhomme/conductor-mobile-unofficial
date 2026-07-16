@@ -21,7 +21,7 @@ import SwiftUI
 public struct Workspaces: Sendable {
     @ObservableState
     public struct State: Equatable {
-        @Presents public var alert: AlertState<Action.Alert>?
+        @Presents public var destination: Destination.State?
 
         @Shared(.desktopConnectionStatus)
         public var connectionStatus
@@ -42,8 +42,8 @@ public struct Workspaces: Sendable {
         @Shared(.workspaceGrouping)
         public var grouping
 
-        @Shared(.selectedRepositoryID)
-        public var selectedRepositoryID
+        @Shared(.selectedRepositoryIDFilter)
+        public var selectedRepositoryIDFilter
 
         @Shared(.workspaceSort)
         public var sort
@@ -60,7 +60,7 @@ public struct Workspaces: Sendable {
         public init() {
             _workspaces = FetchAll(
                 WorkspaceWithRepository.all(
-                    repositoryID: selectedRepositoryID,
+                    repositoryID: selectedRepositoryIDFilter,
                     sortedBy: sort,
                     groupedBy: grouping
                 ),
@@ -165,8 +165,17 @@ public struct Workspaces: Sendable {
         }
     }
 
+    @Reducer
+    public enum Destination {
+        case alert(AlertState<Alert>)
+        case createWorkspace(CreateWorkspace)
+
+        public enum Alert: Equatable {}
+    }
+
     public enum Action {
-        case alert(PresentationAction<Alert>)
+        case createButtonTapped
+        case destination(PresentationAction<Destination.Action>)
         case groupingChanged(WorkspaceWithRepository.Grouping)
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
@@ -183,9 +192,6 @@ public struct Workspaces: Sendable {
         case workspaceStatusButtonTapped(WorkspaceWithRepository, Workspace.Status)
         case workspaceTapped(WorkspaceWithRepository)
         case workspaceUnreadButtonTapped(WorkspaceWithRepository)
-
-        public enum Alert: Equatable {
-        }
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -201,7 +207,7 @@ public struct Workspaces: Sendable {
             switch action {
             case .task:
                 let grouping = state.$grouping
-                let selectedRepositoryID = state.$selectedRepositoryID
+                let selectedRepositoryIDFilter = state.$selectedRepositoryIDFilter
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
@@ -213,7 +219,7 @@ public struct Workspaces: Sendable {
                             .map(Action.groupingChanged)
                     },
                     .publisher {
-                        selectedRepositoryID.publisher
+                        selectedRepositoryIDFilter.publisher
                             .removeDuplicates()
                             .dropFirst()
                             .map(Action.repositoryFilterChanged)
@@ -235,6 +241,23 @@ public struct Workspaces: Sendable {
                 )
                 return reloadWorkspaces(state)
 
+            case .createButtonTapped:
+                guard !state.repositories.isEmpty else {
+                    return .none
+                }
+
+                state.destination = .createWorkspace(
+                    CreateWorkspace.State(
+                        repositories: state.repositories,
+                        selectedRepositoryIDFilter: state.selectedRepositoryIDFilter
+                    )
+                )
+                return .none
+
+            case .destination(.presented(.createWorkspace(.delegate(.workspaceCreated)))):
+                state.destination = nil
+                return .none
+
             case .initialWorkspacesResponse:
                 state.isLoadingWorkspaces = false
                 return .none
@@ -244,7 +267,11 @@ public struct Workspaces: Sendable {
                     return .none
                 }
 
-                state.alert = .failedToLoadWorkspaces(error: error)
+                guard state.destination?.createWorkspace == nil else {
+                    return .none
+                }
+
+                state.destination = .alert(.failedToLoadWorkspaces(error: error))
                 return .none
 
             case .repositoryFilterChanged:
@@ -255,15 +282,15 @@ public struct Workspaces: Sendable {
                 return reloadWorkspaces(state)
 
             case let .setWorkspacePinnedFailed(error):
-                state.alert = .failedToUpdateWorkspacePin(error: error)
+                state.destination = .alert(.failedToUpdateWorkspacePin(error: error))
                 return .none
 
             case let .setWorkspaceStatusFailed(error):
-                state.alert = .failedToUpdateWorkspaceStatus(error: error)
+                state.destination = .alert(.failedToUpdateWorkspaceStatus(error: error))
                 return .none
 
             case let .setWorkspaceUnreadFailed(error):
-                state.alert = .failedToUpdateWorkspaceUnreadStatus(error: error)
+                state.destination = .alert(.failedToUpdateWorkspaceUnreadStatus(error: error))
                 return .none
 
             case let .workspacesChanged(workspaces):
@@ -330,11 +357,11 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .alert, .settingsButtonTapped, .workspaceTapped:
+            case .destination, .settingsButtonTapped, .workspaceTapped:
                 return .none
             }
         }
-        .ifLet(\.$alert, action: \.alert)
+        .ifLet(\.$destination, action: \.destination)
     }
 
     private func updateWorkspace(
@@ -354,13 +381,13 @@ public struct Workspaces: Sendable {
     private func reloadWorkspaces(_ state: State) -> Effect<Action> {
         .run { [
             grouping = state.grouping,
-            selectedRepositoryID = state.selectedRepositoryID,
+            selectedRepositoryIDFilter = state.selectedRepositoryIDFilter,
             sort = state.sort,
             workspaces = state.$workspaces,
         ] send in
             do {
                 let query = WorkspaceWithRepository.all(
-                    repositoryID: selectedRepositoryID,
+                    repositoryID: selectedRepositoryIDFilter,
                     sortedBy: sort,
                     groupedBy: grouping
                 )
@@ -418,7 +445,9 @@ public struct Workspaces: Sendable {
     }
 }
 
-extension AlertState where Action == Workspaces.Action.Alert {
+extension Workspaces.Destination.State: Equatable {}
+
+extension AlertState where Action == Workspaces.Destination.Alert {
     static func failedToLoadWorkspaces(error: any Error) -> Self {
         AlertState {
             TextState("Failed to load workspaces")
@@ -458,6 +487,8 @@ public struct WorkspacesView: View {
     @Shared(.collapsedWorkspaceSectionIDs)
     private var collapsedSectionIDs
 
+    @Namespace private var namespace
+
     public init(store: StoreOf<Workspaces>) {
         self.store = store
     }
@@ -474,7 +505,7 @@ public struct WorkspacesView: View {
                         WorkspaceSectionView(
                             section: section,
                             showsRepositoryIcon: store.grouping == .status
-                                && store.selectedRepositoryID == nil,
+                                && store.selectedRepositoryIDFilter == nil,
                             isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
                                 .animation(.default)
                         ) { item, action in
@@ -534,9 +565,41 @@ public struct WorkspacesView: View {
             }
 
             ToolbarSpacer(.flexible, placement: .bottomBar)
+
+            // TODO: Should probably hide this
+            ToolbarItem(placement: .bottomBar) {
+                // TODO: Make it white
+                Button {
+                    store.send(.createButtonTapped)
+                } label: {
+                    Label {
+                        Text("Create")
+                    } icon: {
+                        LucideIcon(Lucide.plus, style: .body)
+                    }
+//                    .foregroundStyle(.theme(.background))
+                    // .labelStyle(.iconOnly)
+                }
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(.theme(.textPrimary))
+                .disabled(store.repositories.isEmpty)
+                .accessibilityHint("Creates a new Conductor workspace")
+                .sheet(
+                    item: $store.scope(
+                        state: \.destination?.createWorkspace,
+                        action: \.destination.createWorkspace
+                    )
+                ) { createWorkspaceStore in
+                    CreateWorkspaceView(store: createWorkspaceStore)
+                        .presentationDetents([.medium, .large])
+                        .presentationBackground(.theme(.background))
+                        .navigationTransition(.zoom(sourceID: "new-workspace", in: namespace))
+                }
+            }
+            .matchedTransitionSource(id: "new-workspace", in: namespace)
         }
         .background(.theme(.background))
-        .alert($store.scope(state: \.alert, action: \.alert))
+        .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .preferredColorScheme(.dark)
     }
 
@@ -788,11 +851,11 @@ public struct WorkspacesView: View {
         @Bindable var store: StoreOf<Workspaces>
 
         private var selectedRepositoryName: String? {
-            guard let selectedRepositoryID = store.selectedRepositoryID else {
+            guard let selectedRepositoryIDFilter = store.selectedRepositoryIDFilter else {
                 return nil
             }
-            return store.repositories.first { $0.id == selectedRepositoryID }?.displayName
-                ?? selectedRepositoryID
+            return store.repositories.first { $0.id == selectedRepositoryIDFilter }?.displayName
+                ?? selectedRepositoryIDFilter
         }
 
         var body: some View {
@@ -800,28 +863,10 @@ public struct WorkspacesView: View {
 
             Menu {
                 Menu {
-                    Picker(
-                        "Repository",
-                        selection: Binding(store.$selectedRepositoryID)
-                    ) {
-                        Text("All Repositories")
-                            .tag(String?.none)
-
-                        ForEach(store.repositories) { repository in
-                            Label {
-                                Text(verbatim: repository.displayName)
-                            } icon: {
-                                RepositoryIcon(
-                                    repository: repository,
-                                    size: 16,
-                                    relativeTo: .body
-                                )
-                            }
-                            .tag(Optional(repository.id))
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.inline)
+                    RepositoryPicker(
+                        store.repositories,
+                        selection: Binding(store.$selectedRepositoryIDFilter)
+                    )
                 } label: {
                     Text("Repository")
                     if let repositoryName {

@@ -53,7 +53,7 @@ extension SharedKey where Self == FileStorageKey<Set<String>>.Default {
 }
 
 extension SharedKey where Self == FileStorageKey<String?>.Default {
-    static var selectedRepositoryID: Self {
+    static var selectedRepositoryIDFilter: Self {
         Self[
             .fileStorage(
                 .applicationSupportDirectory
@@ -72,6 +72,18 @@ extension SharedKey where Self == FileStorageKey<WorkspaceWithRepository.Sort>.D
                     .appending(component: "workspace-sort.json")
             ),
             default: .updated,
+        ]
+    }
+}
+
+extension SharedKey where Self == FileStorageKey<String>.Default {
+    static var createWorkspaceMessage: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "create-workspace-message.json")
+            ),
+            default: ""
         ]
     }
 }

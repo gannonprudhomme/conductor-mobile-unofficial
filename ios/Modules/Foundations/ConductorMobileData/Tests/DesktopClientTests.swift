@@ -124,6 +124,12 @@ struct DesktopClientTests {
                     pinned: true
                 )
             }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.createWorkspace(
+                    repositoryID: "repository-1",
+                    prompt: "Create a workspace."
+                )
+            }
         }
     }
 
@@ -308,6 +314,99 @@ struct DesktopClientTests {
         #expect(response == nil)
     }
 
+    @Test("Creating a workspace matches the desktop API contract")
+    func createWorkspace() async throws {
+        let recordedRequest = LockIsolated<URLRequest?>(nil)
+        DesktopClientURLProtocol.handler.setValue { request in
+            recordedRequest.setValue(request)
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 202,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            try await DesktopClient.liveValue.createWorkspace(
+                repositoryID: "repository-1",
+                prompt: "Fix sheets & menus"
+            )
+        }
+
+        let request = try #require(recordedRequest.value)
+        expectNoDifference(request.url?.path, "/workspaces")
+        expectNoDifference(request.httpMethod, "POST")
+        expectNoDifference(
+            request.value(forHTTPHeaderField: "Content-Type"),
+            "application/json"
+        )
+        expectNoDifference(
+            try JSONDecoder().decode(
+                [String: String].self,
+                from: #require(request.bodyData)
+            ),
+            [
+                "prompt": "Fix sheets & menus",
+                "repository_id": "repository-1",
+            ]
+        )
+    }
+
+    @Test("Creating a workspace requires the accepted response status")
+    func createWorkspaceRequiresAcceptedStatus() async throws {
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(#"{"error":{"message":"Expected accepted"}}"#.utf8)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        await #expect(
+            throws: DesktopClientError.requestFailed(
+                statusCode: 200,
+                message: "Expected accepted"
+            )
+        ) {
+            try await withDependencies {
+                $0.defaultFileStorage = .inMemory
+                $0.urlSession = urlSession
+            } operation: {
+                @Shared(.desktopServerAddress) var desktopServerAddress
+                $desktopServerAddress.withLock { $0 = "my-mac" }
+                try await DesktopClient.liveValue.createWorkspace(
+                    repositoryID: "repository-1",
+                    prompt: ""
+                )
+            }
+        }
+    }
+
     @Test("Desktop client errors include response details")
     func errorDescriptions() {
         #expect(
@@ -348,6 +447,19 @@ struct DesktopClientTests {
                 )
             )
         }
+    }
+
+    @Test("Desktop client extracts Hummingbird error messages")
+    func errorResponseMessage() {
+        #expect(
+            DesktopClient.errorMessage(
+                from: Data(#"{"error":{"message":"Repository not found"}}"#.utf8)
+            ) == "Repository not found"
+        )
+        #expect(
+            DesktopClient.errorMessage(from: Data("Plain text error".utf8))
+                == "Plain text error"
+        )
     }
 
     @Test("Conductor decoder accepts SQLite and ISO 8601 dates")

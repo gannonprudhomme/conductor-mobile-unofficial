@@ -11,6 +11,46 @@ import SharedConductorData
 import SQLiteData
 
 enum WorkspaceRoute {
+    static func post(
+        request: Request,
+        context: Server.RequestContext,
+        database: any DatabaseWriter,
+        openURL: @escaping @Sendable (URL) async throws -> Void
+    ) async throws -> HTTPResponse.Status {
+        let body = try await request.decode(as: CreateRequest.self, context: context)
+        guard !body.repositoryID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw HTTPError(.badRequest, message: "repository_id must not be empty")
+        }
+
+        let repositoryPath = try await database.read { database in
+            try Repository
+                .find(body.repositoryID)
+                .fetchOne(database)?
+                .rootPath
+        }
+        guard let repositoryPath,
+              !repositoryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw HTTPError(.notFound, message: "Repository not found")
+        }
+
+        do {
+            try await openURL(
+                conductorDeepLink(
+                    prompt: body.prompt ?? "",
+                    repositoryPath: repositoryPath
+                )
+            )
+        } catch {
+            throw HTTPError(
+                .internalServerError,
+                message: "Could not open Conductor: \(error.localizedDescription)"
+            )
+        }
+
+        return .accepted
+    }
+
     static func patch(
         request: Request,
         context: Server.RequestContext,
@@ -112,6 +152,49 @@ enum WorkspaceRoute {
                 }
                 .update { $0.unreadCount = 0 }
                 .execute(database)
+        }
+    }
+
+    private static func conductorDeepLink(prompt: String, repositoryPath: String) -> URL {
+        URL(
+            string: "conductor://prompt=\(percentEncode(prompt))&path=\(percentEncode(repositoryPath))"
+        )!
+    }
+
+    private static func percentEncode(_ value: String) -> String {
+        value.addingPercentEncoding(
+            withAllowedCharacters: CharacterSet.alphanumerics.union(
+                CharacterSet(charactersIn: "-._~")
+            )
+        )!
+    }
+
+    static func openConductorURL(_ url: URL) async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/open")
+        process.arguments = [url.absoluteString]
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "ConductorMobileServer.OpenURL",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "/usr/bin/open exited with status \(process.terminationStatus)"
+                ]
+            )
+        }
+    }
+
+    private struct CreateRequest: Decodable, Sendable {
+        let repositoryID: String
+        let prompt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case repositoryID = "repository_id"
+            case prompt
         }
     }
 

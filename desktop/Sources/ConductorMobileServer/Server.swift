@@ -20,7 +20,8 @@ public enum Server {
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
         port: Int = 3768,
-        allowedOrigin: String? = nil
+        allowedOrigin: String? = nil,
+        openURL: @escaping @Sendable (URL) async throws -> Void = WorkspaceRoute.openConductorURL
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
@@ -49,6 +50,19 @@ public enum Server {
             )
         }
         #endif
+
+        router.post("/workspaces") { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await WorkspaceRoute.post(
+                request: request,
+                context: context,
+                database: database,
+                openURL: openURL
+            )
+        }
 
         router.patch("/workspaces/{workspaceID}") { request, context in
             guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {

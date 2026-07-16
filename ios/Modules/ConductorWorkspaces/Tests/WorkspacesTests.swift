@@ -63,7 +63,7 @@ struct WorkspacesTests {
         } operation: {
             let initialState = Workspaces.State()
             initialState.$grouping.withLock { $0 = .project }
-            initialState.$selectedRepositoryID.withLock { $0 = "repo-1" }
+            initialState.$selectedRepositoryIDFilter.withLock { $0 = "repo-1" }
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             }
@@ -83,7 +83,7 @@ struct WorkspacesTests {
             let restoredState = Workspaces.State()
             expectNoDifference(restoredState.collapsedSectionIDs, collapsedSectionIDs)
             expectNoDifference(restoredState.grouping, .project)
-            expectNoDifference(restoredState.selectedRepositoryID, "repo-1")
+            expectNoDifference(restoredState.selectedRepositoryIDFilter, "repo-1")
             expectNoDifference(restoredState.sort, .created)
         }
     }
@@ -208,7 +208,7 @@ struct WorkspacesTests {
                 any Error
             >.makeStream()
             let initialState = Workspaces.State()
-            let selectedRepositoryID = initialState.$selectedRepositoryID
+            let selectedRepositoryIDFilter = initialState.$selectedRepositoryIDFilter
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
@@ -218,11 +218,94 @@ struct WorkspacesTests {
             }
 
             let task = await store.send(.task)
-            selectedRepositoryID.withLock { $0 = "repo-1" }
+            selectedRepositoryIDFilter.withLock { $0 = "repo-1" }
 
             await store.receive(\.repositoryFilterChanged, "repo-1")
 
             await task.cancel()
+        }
+    }
+
+    @Test("Create button presents a sheet with the available repositories")
+    func createButtonPresentsSheet() async throws {
+        let repository = Repository.preview()
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Repository.insert { repository }.execute(db)
+            }
+        } operation: {
+            let state = Workspaces.State()
+            state.$selectedRepositoryIDFilter.withLock { $0 = repository.id }
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(.createButtonTapped) {
+                $0.destination = .createWorkspace(
+                    CreateWorkspace.State(
+                        repositories: [repository],
+                        selectedRepositoryIDFilter: repository.id
+                    )
+                )
+            }
+        }
+    }
+
+    @Test("Create button does nothing without repositories")
+    func createButtonWithoutRepositories() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            }
+
+            await store.send(.createButtonTapped)
+        }
+    }
+
+    @Test("Creating a workspace dismisses the sheet")
+    func workspaceCreationDismissesSheet() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let repository = Repository.preview()
+            var state = Workspaces.State()
+            state.destination = .createWorkspace(
+                CreateWorkspace.State(repositories: [repository])
+            )
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(
+                .destination(.presented(.createWorkspace(.delegate(.workspaceCreated))))
+            ) {
+                $0.destination = nil
+            }
+        }
+    }
+
+    @Test("Observation failures preserve the create sheet and its input")
+    func observationFailurePreservesCreateSheet() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let repository = Repository.preview()
+            let createWorkspace = CreateWorkspace.State(repositories: [repository])
+            createWorkspace.$prompt.withLock { $0 = "Keep this prompt" }
+            var state = Workspaces.State()
+            state.destination = .createWorkspace(createWorkspace)
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(.loadWorkspacesFailed(TestError()))
         }
     }
 
@@ -447,8 +530,8 @@ struct WorkspacesTests {
             await store.send(.workspacePinnedButtonTapped(item))
 
             await store.receive(\.setWorkspacePinnedFailed) {
-                $0.alert = .failedToUpdateWorkspacePin(
-                    error: TestError()
+                $0.destination = .alert(
+                    .failedToUpdateWorkspacePin(error: TestError())
                 )
             }
 
@@ -487,8 +570,10 @@ struct WorkspacesTests {
             await store.send(.workspacePinnedButtonTapped(item))
 
             await store.receive(\.setWorkspacePinnedFailed) {
-                $0.alert = .failedToUpdateWorkspacePin(
-                    error: URLError(.networkConnectionLost)
+                $0.destination = .alert(
+                    .failedToUpdateWorkspacePin(
+                        error: URLError(.networkConnectionLost)
+                    )
                 )
             }
         }

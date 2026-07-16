@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Hummingbird
 import HummingbirdTesting
 import NIOCore
 import SharedConductorData
@@ -215,5 +216,126 @@ struct WorkspaceRouteTests {
         #expect(state.hidden?.unreadCount == 7)
         #expect(state.workspace?.pinnedAt == nil)
         #expect(state.workspace?.manualStatus == "in-review")
+    }
+
+    @Test("Creating a workspace opens a strictly percent-encoded Conductor deep link")
+    func createWorkspace() async throws {
+        let database = try testConductorDatabase()
+        try await insertRepository(
+            id: "repository-1",
+            rootPath: "/Users/example/Projects/Conductor Mobile",
+            into: database
+        )
+        let openedURL = OpenedURL()
+        let application = Server.makeApplication(
+            database: database,
+            openURL: { await openedURL.set($0) }
+        )
+
+        try await application.test(.router) { client in
+            let body = ByteBuffer(
+                string: #"{"repository_id":"repository-1","prompt":"Fix sheets & menus"}"#
+            )
+            try await client.execute(uri: "/workspaces", method: .post, body: body) { response in
+                #expect(response.status == .accepted)
+            }
+        }
+
+        let url = await openedURL.value
+        #expect(
+            url?.absoluteString
+                == "conductor://prompt=Fix%20sheets%20%26%20menus&path=%2FUsers%2Fexample%2FProjects%2FConductor%20Mobile"
+        )
+    }
+
+    @Test("Creating a workspace rejects unusable repositories")
+    func createWorkspaceWithUnusableRepository() async throws {
+        let database = try testConductorDatabase()
+        try await insertRepository(id: "missing-path", rootPath: nil, into: database)
+        try await insertRepository(id: "blank-path", rootPath: "  ", into: database)
+        let openedURL = OpenedURL()
+        let application = Server.makeApplication(
+            database: database,
+            openURL: { await openedURL.set($0) }
+        )
+
+        try await application.test(.router) { client in
+            let cases: [(repositoryID: String, status: HTTPResponse.Status)] = [
+                ("  ", .badRequest),
+                ("missing", .notFound),
+                ("missing-path", .notFound),
+                ("blank-path", .notFound),
+            ]
+            for item in cases {
+                let body = ByteBuffer(
+                    string: #"{"repository_id":"\#(item.repositoryID)","prompt":""}"#
+                )
+                try await client.execute(
+                    uri: "/workspaces",
+                    method: .post,
+                    body: body
+                ) { response in
+                    #expect(response.status == item.status)
+                }
+            }
+        }
+
+        #expect(await openedURL.value == nil)
+    }
+
+    @Test("Creating a workspace reports URL opening failures")
+    func createWorkspaceOpenFailure() async throws {
+        let database = try testConductorDatabase()
+        try await insertRepository(
+            id: "repository-1",
+            rootPath: "/Users/example/Projects/Conductor Mobile",
+            into: database
+        )
+        let application = Server.makeApplication(
+            database: database,
+            openURL: { _ in throw OpenError() }
+        )
+
+        try await application.test(.router) { client in
+            let body = ByteBuffer(string: #"{"repository_id":"repository-1","prompt":""}"#)
+            try await client.execute(uri: "/workspaces", method: .post, body: body) { response in
+                #expect(response.status == .internalServerError)
+                #expect(String(buffer: response.body).contains("Could not open Conductor"))
+            }
+        }
+    }
+}
+
+private actor OpenedURL {
+    private(set) var value: URL?
+
+    func set(_ value: URL) {
+        self.value = value
+    }
+}
+
+private struct OpenError: LocalizedError {
+    var errorDescription: String? {
+        "The URL could not be opened."
+    }
+}
+
+private func insertRepository(
+    id: String,
+    rootPath: String?,
+    into database: any DatabaseWriter
+) async throws {
+    let date = Date(timeIntervalSince1970: 1_783_555_200)
+    try await database.write { database in
+        try Repository
+            .insert {
+                Repository(
+                    id: id,
+                    createdAt: date,
+                    rootPath: rootPath,
+                    updatedAt: date
+                )
+            }
+            .execute(database)
     }
 }
