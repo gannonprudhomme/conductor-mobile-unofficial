@@ -30,6 +30,17 @@ struct ServerTests {
         try iconData.write(to: rootURL.appending(path: "favicon.png"))
 
         let databaseURL = rootURL.appending(path: "conductor.db")
+        let pullRequestCacheURL = rootURL
+            .appending(path: "local-storage.entries/git-service-pr-v1")
+        try FileManager.default.createDirectory(
+            at: pullRequestCacheURL,
+            withIntermediateDirectories: true
+        )
+        try writePullRequestCache(
+            workspaceID: "workspace-iso",
+            isDraft: false,
+            to: pullRequestCacheURL
+        )
         let writer = try testConductorDatabase(at: databaseURL)
         try await writer.write { db in
             try db.execute(
@@ -65,7 +76,9 @@ struct ServerTests {
         let application = Server.makeApplication(
             database: database,
             port: 0,
-            allowedOrigin: "ws://localhost"
+            allowedOrigin: "ws://localhost",
+            pullRequestCacheURL: pullRequestCacheURL,
+            workspacePollInterval: .milliseconds(10)
         )
 
         try await application.test(.live) { client in
@@ -95,6 +108,10 @@ struct ServerTests {
                     initial.workspaces.first { $0.workspace.id == "workspace-iso" }?.isWorking
                         == true
                 )
+                #expect(
+                    initial.pullRequests["workspace-iso"]?.url
+                        == "https://github.com/example/repository/pull/42"
+                )
 
                 try await writer.write { database in
                     try database.execute(
@@ -114,6 +131,17 @@ struct ServerTests {
                         .workspaceName
                         == "Renamed"
                 )
+
+                try writePullRequestCache(
+                    workspaceID: "workspace-iso",
+                    isDraft: true,
+                    to: pullRequestCacheURL
+                )
+                let pullRequestChanged = try decode(
+                    WorkspaceListSnapshot.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(pullRequestChanged.pullRequests["workspace-iso"]?.isDraft == true)
             }
 
             try await client.ws("/workspaces/workspace-iso/sessions") { inbound, _, _ in
@@ -241,6 +269,27 @@ struct ServerTests {
             }
         }
     }
+}
+
+private func writePullRequestCache(
+    workspaceID: Workspace.ID,
+    isDraft: Bool,
+    to directoryURL: URL
+) throws {
+    try Data(
+        """
+        {
+          "prInfo": {
+            "prUrl": "https://github.com/example/repository/pull/42",
+            "isDraft": \(isDraft),
+            "isMerged": false,
+            "mergeStateStatus": "CLEAN",
+            "checksStatus": "passing"
+          }
+        }
+        """.utf8
+    )
+    .write(to: directoryURL.appending(path: "\(workspaceID).json"))
 }
 
 private func decode<Value: Decodable>(

@@ -5,8 +5,9 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
-import SharedConductorData
 import ConductorFoundation
+import Foundation
+import SharedConductorData
 import SQLiteData
 
 @Selection
@@ -37,6 +38,12 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
 
     public var id: Workspace.ID { workspace.id }
     public var isWorking: Bool { mobileState?.isWorking ?? false }
+    public var pullRequestStatus: MobileWorkspaceState.PullRequestStatus? {
+        mobileState?.pullRequestStatus
+    }
+    public var pullRequestURL: URL? {
+        mobileState?.pullRequestURL.flatMap(URL.init(string:))
+    }
 
     public var repositoryDisplayName: String {
         repository?.name?.nilIfEmpty

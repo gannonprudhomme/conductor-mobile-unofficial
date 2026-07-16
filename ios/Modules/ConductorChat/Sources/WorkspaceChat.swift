@@ -302,6 +302,7 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
 }
 
 public struct WorkspaceChatView: View {
+    @Environment(\.openURL) private var openURL
     @Bindable var store: StoreOf<WorkspaceChat>
     @ScaledMetric(relativeTo: .body) private var sessionPickerHeight = 52
 
@@ -344,6 +345,26 @@ public struct WorkspaceChatView: View {
             .labelStyle(.conductorExtraSmall)
         }
         .toolbar {
+            if let pullRequestURL = store.workspaceWithRepository.pullRequestURL {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            openURL(pullRequestURL)
+                        } label: {
+                            Label {
+                                Text("Open PR in GitHub")
+                            } icon: {
+                                GitHubIcon(size: 16, relativeTo: .body)
+                            }
+                        }
+                    } label: {
+                        GitHubIcon(size: 20, relativeTo: .title)
+                            .foregroundStyle(.theme(.textPrimary))
+                    }
+                    .accessibilityLabel("Pull request")
+                }
+            }
+
             if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {

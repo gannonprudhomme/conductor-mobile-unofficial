@@ -178,6 +178,23 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Add pull request state") { db in
+        try db.execute(
+            sql: """
+                ALTER TABLE "mobile_workspace_state"
+                ADD COLUMN "pull_request_url" TEXT;
+                ALTER TABLE "mobile_workspace_state"
+                ADD COLUMN "pull_request_is_draft" INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE "mobile_workspace_state"
+                ADD COLUMN "pull_request_is_merged" INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE "mobile_workspace_state"
+                ADD COLUMN "pull_request_merge_state_status" TEXT;
+                ALTER TABLE "mobile_workspace_state"
+                ADD COLUMN "pull_request_checks_status" TEXT;
+                """
+        )
+    }
+
     try migrator.migrate(database)
     return database
 }

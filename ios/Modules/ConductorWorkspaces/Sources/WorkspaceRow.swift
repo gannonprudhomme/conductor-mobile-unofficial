@@ -46,8 +46,7 @@ struct WorkspaceRow: View {
                         .tint(.theme(.textSecondary))
                         .frame(width: iconSize, height: iconSize)
                 } else {
-                    LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
-                        .foregroundStyle(.theme(.textSecondary))
+                    pullRequestIcon
                 }
             }
             .labelStyle(.conductorStandard)
@@ -59,6 +58,34 @@ struct WorkspaceRow: View {
         .buttonStyle(.plain)
         .contextMenu {
             contextMenu
+        }
+    }
+
+    @ViewBuilder private var pullRequestIcon: some View {
+        switch item.pullRequestStatus {
+        case .draft:
+            LucideIcon(Lucide.gitPullRequestDraft, size: 20, relativeTo: .body)
+                .foregroundStyle(.theme(.textSecondary))
+
+        case .failingChecks:
+            LucideIcon(Lucide.circleX, size: 20, relativeTo: .body)
+                .foregroundStyle(.theme(.gitRed))
+
+        case .readyToMerge:
+            LucideIcon(Lucide.gitPullRequest, size: 20, relativeTo: .body)
+                .foregroundStyle(.theme(.gitGreen))
+
+        case .mergeConflict:
+            LucideIcon(Lucide.gitPullRequestClosed, size: 20, relativeTo: .body)
+                .foregroundStyle(.theme(.pullRequestConflict))
+
+        case .merged:
+            LucideIcon(Lucide.gitMerge, size: 20, relativeTo: .body)
+                .foregroundStyle(.theme(.pullRequestMerged))
+
+        case nil:
+            LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
+                .foregroundStyle(.theme(.textSecondary))
         }
     }
 

@@ -390,7 +390,8 @@ public struct Workspaces: Sendable {
                         snapshot.workspaces.map {
                             MobileWorkspaceState(
                                 workspaceID: $0.workspace.id,
-                                isWorking: $0.isWorking
+                                isWorking: $0.isWorking,
+                                pullRequest: snapshot.pullRequests[$0.workspace.id]
                             )
                         }
                     }

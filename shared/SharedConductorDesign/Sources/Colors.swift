@@ -24,6 +24,8 @@ public enum ThemeColorStyle {
     case highlightForeground
     case input
     case muted
+    case pullRequestConflict
+    case pullRequestMerged
     case sidebarMutedForeground
     case statusDone
     case statusInProgress
@@ -87,6 +89,12 @@ public extension ShapeStyle where Self == Color {
 
         case .muted:
             Color(red: 33.0 / 255.0, green: 30.0 / 255.0, blue: 28.0 / 255.0)
+
+        case .pullRequestConflict:
+            Color(red: 251.0 / 255.0, green: 146.0 / 255.0, blue: 60.0 / 255.0)
+
+        case .pullRequestMerged:
+            Color(red: 192.0 / 255.0, green: 132.0 / 255.0, blue: 252.0 / 255.0)
 
         case .sidebarMutedForeground:
             Color.white.opacity(0.6)

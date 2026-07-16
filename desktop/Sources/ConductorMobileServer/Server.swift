@@ -20,7 +20,9 @@ public enum Server {
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
         port: Int = 3768,
-        allowedOrigin: String? = nil
+        allowedOrigin: String? = nil,
+        pullRequestCacheURL: URL? = nil,
+        workspacePollInterval: Duration = .seconds(1)
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
@@ -63,17 +65,40 @@ public enum Server {
         }
 
         webSocketRouter.ws("/workspaces", shouldUpgrade: shouldUpgradeToWebSocket) { inbound, outbound, _ in
-            try await streamSnapshots(
-                inbound: inbound,
-                outbound: outbound,
-                databaseChanges: databaseChanges
-            ) {
-                try await database.read { database in
-                    try WorkspaceListSnapshot(
-                        repositories: Repository.orderedByDisplayOrder.fetchAll(database),
-                        workspaces: WorkspaceSnapshot.mostRecentlyUpdated.fetchAll(database)
+            let loadSnapshot: @Sendable () async throws -> WorkspaceListSnapshot = {
+                let (repositories, workspaces) = try await database.read { database in
+                    let workspaces = try WorkspaceSnapshot.mostRecentlyUpdated.fetchAll(database)
+                    return (
+                        try Repository.orderedByDisplayOrder.fetchAll(database),
+                        workspaces
                     )
                 }
+                return WorkspaceListSnapshot(
+                    repositories: repositories,
+                    workspaces: workspaces,
+                    pullRequests: PullRequestCache.snapshots(
+                        for: workspaces.map(\.workspace.id),
+                        at: pullRequestCacheURL
+                    )
+                )
+            }
+
+            if pullRequestCacheURL == nil {
+                try await streamSnapshots(
+                    inbound: inbound,
+                    outbound: outbound,
+                    databaseChanges: databaseChanges,
+                    loadSnapshot: loadSnapshot
+                )
+            } else {
+                // Conductor updates its normalized PR cache independently of SQLite. Poll the
+                // combined snapshot so both database and cache-only changes reach the phone.
+                try await streamPolledSnapshots(
+                    inbound: inbound,
+                    outbound: outbound,
+                    interval: workspacePollInterval,
+                    loadSnapshot: loadSnapshot
+                )
             }
         }
 
@@ -153,7 +178,15 @@ public enum Server {
         while !Task.isCancelled {
             do {
                 let database = try ConductorDatabase.open(at: databaseURL)
-                try await makeApplication(database: database, port: port).run()
+                let pullRequestCacheURL = databaseURL
+                    .deletingLastPathComponent()
+                    .appending(path: "local-storage.entries/git-service-pr-v1")
+                try await makeApplication(
+                    database: database,
+                    port: port,
+                    pullRequestCacheURL: pullRequestCacheURL
+                )
+                .run()
             } catch where Task.isCancelled {
                 throw CancellationError()
             } catch {
@@ -212,6 +245,44 @@ public enum Server {
             }
 
             // Return as soon as one direction closes or fails, then stop its surviving sibling.
+            defer { group.cancelAll() }
+            _ = try await group.next()
+        }
+    }
+
+    private static func streamPolledSnapshots<Snapshot>(
+        inbound: WebSocketInboundStream,
+        outbound: WebSocketOutboundWriter,
+        interval: Duration,
+        loadSnapshot: @escaping @Sendable () async throws -> Snapshot
+    ) async throws where Snapshot: Encodable & Equatable & Sendable {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for try await _ in inbound {}
+            }
+
+            group.addTask {
+                let encoder = JSONEncoder.conductor
+                var previousSnapshot = try await loadSnapshot()
+                try await outbound.writeTextMessage(
+                    String(decoding: try encoder.encode(previousSnapshot), as: UTF8.self)
+                )
+
+                while !Task.isCancelled {
+                    try await Task.sleep(for: interval)
+                    let snapshot = try await loadSnapshot()
+
+                    guard snapshot != previousSnapshot else {
+                        continue
+                    }
+
+                    try await outbound.writeTextMessage(
+                        String(decoding: try encoder.encode(snapshot), as: UTF8.self)
+                    )
+                    previousSnapshot = snapshot
+                }
+            }
+
             defer { group.cancelAll() }
             _ = try await group.next()
         }
