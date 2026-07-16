@@ -7,8 +7,8 @@
 
 import SQLiteData
 
-/// Polls SQLite's connection-local `data_version` and broadcasts invalidations to WebSocket
-/// subscribers using one shared polling task.
+/// Polls SQLite's connection-local `data_version` and total change count, then broadcasts invalidations
+/// to WebSocket subscribers using one shared polling task.
 ///
 /// This is an actor because sockets subscribe and disconnect concurrently while the polling task
 /// reads and mutates the same continuation collection, version, and task lifecycle state. Actor
@@ -17,10 +17,10 @@ actor DatabaseChangeObserver {
     typealias Changes = AsyncThrowingStream<Void, any Error>
 
     private let pollInterval: Duration
-    private let readDataVersion: @Sendable () throws -> Int
+    private let readDatabaseVersion: @Sendable () throws -> DatabaseVersion
     private var continuations: [Int: Changes.Continuation] = [:]
     /// The last observed database version, established when the first subscriber arrives.
-    private var dataVersion: Int?
+    private var databaseVersion: DatabaseVersion?
     private var nextSubscriberID = 0
     /// Exists only while there is at least one subscriber.
     private var pollingTask: Task<Void, Never>?
@@ -29,28 +29,48 @@ actor DatabaseChangeObserver {
         database: DatabaseQueue,
         pollInterval: Duration = .milliseconds(3)
     ) {
-        self.init(pollInterval: pollInterval) {
-            // This scalar read does not need a transactionally consistent snapshot. Avoiding the
+        self.init(pollInterval: pollInterval, readDatabaseVersion: {
+            // These scalar reads do not need a transactionally consistent snapshot. Avoiding the
             // transaction that `read` creates keeps high-frequency polling inexpensive.
             try database.unsafeRead { database in
-                try #sql("PRAGMA data_version", as: Int.self).fetchOne(database) ?? 0
+                DatabaseVersion(
+                    // `data_version` changes when another connection commits.
+                    dataVersion: try #sql("PRAGMA data_version", as: Int.self)
+                        .fetchOne(database) ?? 0,
+                    // `data_version` deliberately ignores this connection's own commits. Pair it
+                    // with the cumulative count so server-side fallback writes also invalidate
+                    // subscribers. Without this value, those writes could leave sockets stale.
+                    totalChangesCount: database.totalChangesCount
+                )
             }
-        }
+        })
     }
 
     init(
         pollInterval: Duration,
         readDataVersion: @escaping @Sendable () throws -> Int
     ) {
+        self.init(pollInterval: pollInterval, readDatabaseVersion: {
+            DatabaseVersion(
+                dataVersion: try readDataVersion(),
+                totalChangesCount: 0
+            )
+        })
+    }
+
+    private init(
+        pollInterval: Duration,
+        readDatabaseVersion: @escaping @Sendable () throws -> DatabaseVersion
+    ) {
         self.pollInterval = pollInterval
-        self.readDataVersion = readDataVersion
+        self.readDatabaseVersion = readDatabaseVersion
     }
 
     func changes() throws -> Changes {
         // Establish a baseline once per polling lifetime so existing data is not reported as a
         // new change and all subscribers compare against the same version.
         if pollingTask == nil {
-            dataVersion = try readDataVersion()
+            databaseVersion = try readDatabaseVersion()
         }
 
         let subscriberID = nextSubscriberID
@@ -85,12 +105,12 @@ actor DatabaseChangeObserver {
         do {
             while !Task.isCancelled {
                 try await Task.sleep(for: pollInterval)
-                let nextDataVersion = try readDataVersion()
-                guard nextDataVersion != dataVersion else {
+                let nextDatabaseVersion = try readDatabaseVersion()
+                guard nextDatabaseVersion != databaseVersion else {
                     continue
                 }
 
-                dataVersion = nextDataVersion
+                databaseVersion = nextDatabaseVersion
                 for continuation in continuations.values {
                     continuation.yield(())
                 }
@@ -105,9 +125,15 @@ actor DatabaseChangeObserver {
 
         pollingTask = nil
         if continuations.isEmpty {
-            dataVersion = nil
+            databaseVersion = nil
         }
         startPollingIfNeeded()
+    }
+
+    private struct DatabaseVersion: Equatable {
+        let dataVersion: Int
+        /// Catches writes made through the same connection that reads `dataVersion`.
+        let totalChangesCount: Int
     }
 
     private func removeContinuation(for subscriberID: Int) {

@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import Dependencies
 import Foundation
 import Hummingbird
 import HummingbirdWebSocket
@@ -12,14 +13,41 @@ import SharedConductorData
 import SQLiteData
 
 public enum Server {
-    /// Starts the server in the desktop app process.
-    public static func run(databaseURL: URL) async throws {
-        try await retryingServer(databaseURL: databaseURL, port: 3768)
+    public static func run(
+        databaseURL: URL,
+        workspaceUIHookSource: String
+    ) async throws {
+        @Dependency(\.workspaceUIHook) var workspaceUIHookDependency
+        let workspaceUIHook = workspaceUIHookDependency
+
+        // Keep the LAN mobile API separate from the loopback-only browser hook.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await retryingServer(name: "conductor-mobile-api") {
+                    let database = try ConductorDatabase.open(at: databaseURL)
+                    try await makeApplication(database: database).run()
+                }
+            }
+
+            group.addTask {
+                try await retryingServer(name: "workspace-ui-hook") {
+                    await workspaceUIHook.listenerUnavailable()
+                } run: {
+                    try await makeWorkspaceUIHookApplication(
+                        hookSource: workspaceUIHookSource
+                    )
+                    .run()
+                }
+            }
+            try await group.waitForAll()
+        }
     }
 
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
-        port: Int = 3768,
+        // Five seconds tolerates a slow Conductor UI write without holding the request indefinitely.
+        workspaceMutationTimeout: Duration = .seconds(5),
+        port: Int = 3_768,
         allowedOrigin: String? = nil
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
@@ -58,7 +86,8 @@ public enum Server {
             return try await WorkspaceRoute.patch(
                 request: request,
                 context: context,
-                database: database
+                database: database,
+                persistenceTimeout: workspaceMutationTimeout
             )
         }
 
@@ -147,21 +176,42 @@ public enum Server {
         )
     }
 
-    /// Opens Conductor's database and runs Hummingbird, retrying because Conductor may still be
-    /// starting or temporarily replacing its database.
-    private static func retryingServer(databaseURL: URL, port: Int) async throws {
+    static func makeWorkspaceUIHookApplication( // only non-private for tests
+        hookSource: String,
+        port: Int = 3_769
+    ) -> Application<RouterResponder<RequestContext>> {
+        let router = Router(context: RequestContext.self)
+        router.get("/workspace-ui-hook/hook.js") { request, _ in
+            WorkspaceUIHookRoute.getHookFileContents(request: request, source: hookSource)
+        }
+        router.get("/workspace-ui-hook/events") { request, _ in
+            await WorkspaceUIHookRoute.events(request: request)
+        }
+
+        return Application(
+            router: router,
+            configuration: .init(
+                address: .hostname("127.0.0.1", port: port),
+                serverName: "Conductor Mobile Workspace UI Hook"
+            )
+        )
+    }
+
+    private static func retryingServer(
+        name: String,
+        onFailure: @Sendable () async -> Void = {},
+        run: @Sendable () async throws -> Void
+    ) async throws {
+        // Both listeners recover from transient startup failures without restarting the companion.
         while !Task.isCancelled {
             do {
-                let database = try ConductorDatabase.open(at: databaseURL)
-                try await makeApplication(database: database, port: port).run()
+                try await run()
             } catch where Task.isCancelled {
                 throw CancellationError()
             } catch {
+                await onFailure()
                 FileHandle.standardError.write(
-                    Data(
-                        "conductor-mobile-server unavailable; retrying: \(error)\n"
-                            .utf8
-                    )
+                    Data("\(name) unavailable; retrying: \(error)\n".utf8)
                 )
                 try await Task.sleep(for: .seconds(2))
             }

@@ -171,14 +171,13 @@ public struct Workspaces: Sendable {
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
         case repositoryFilterChanged(String?)
-        case setWorkspacePinnedFailed(any Error)
-        case setWorkspaceStatusFailed(any Error)
-        case setWorkspaceUnreadFailed(any Error)
         case sortButtonTapped(WorkspaceWithRepository.Sort)
         /// Note: `MainView` handles this action so we can keep this module decoupled from `ConductorSettings`
         case settingsButtonTapped
         case task
         case workspacesChanged([WorkspaceWithRepository])
+        case workspaceMutationFailed(any Error)
+        case workspaceMutationUsedSQLiteFallback
         case workspacePinnedButtonTapped(WorkspaceWithRepository)
         case workspaceStatusButtonTapped(WorkspaceWithRepository, Workspace.Status)
         case workspaceTapped(WorkspaceWithRepository)
@@ -190,7 +189,6 @@ public struct Workspaces: Sendable {
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.continuousClock) var clock
-    @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
     public init() {
@@ -254,18 +252,6 @@ public struct Workspaces: Sendable {
                 state.$sort.withLock { $0 = sort }
                 return reloadWorkspaces(state)
 
-            case let .setWorkspacePinnedFailed(error):
-                state.alert = .failedToUpdateWorkspacePin(error: error)
-                return .none
-
-            case let .setWorkspaceStatusFailed(error):
-                state.alert = .failedToUpdateWorkspaceStatus(error: error)
-                return .none
-
-            case let .setWorkspaceUnreadFailed(error):
-                state.alert = .failedToUpdateWorkspaceUnreadStatus(error: error)
-                return .none
-
             case let .workspacesChanged(workspaces):
                 state.sections = State.sections(
                     groupedBy: state.grouping,
@@ -273,22 +259,21 @@ public struct Workspaces: Sendable {
                 )
                 return .none
 
-            case let .workspacePinnedButtonTapped(item):
-                let pinned = item.workspace.pinnedAt == nil
-                let pinnedAt = pinned ? now.ISO8601Format() : nil
+            case let .workspaceMutationFailed(error):
+                state.alert = .failedToUpdateWorkspace(error: error)
+                return .none
 
-                return updateWorkspace(failure: Action.setWorkspacePinnedFailed) {
-                    try await database.write { db in
-                        try Workspace
-                            .find(item.id)
-                            .update {
-                                $0.pinnedAt = pinnedAt
-                            }
-                            .execute(db)
-                    }
+            case .workspaceMutationUsedSQLiteFallback:
+                state.alert = .workspaceMutationUsedSQLiteFallback
+                return .none
+
+            case let .workspacePinnedButtonTapped(item):
+                let isPinned = item.workspace.pinnedAt == nil
+
+                return updateWorkspace {
                     try await desktopClient.setWorkspacePinned(
                         workspaceID: item.id,
-                        pinned: pinned
+                        isPinned: isPinned
                     )
                 }
 
@@ -297,15 +282,7 @@ public struct Workspaces: Sendable {
                     return .none
                 }
 
-                return updateWorkspace(failure: Action.setWorkspaceStatusFailed) {
-                    try await database.write { db in
-                        try Workspace
-                            .find(item.id)
-                            .update {
-                                $0.manualStatus = #bind(status.rawValue)
-                            }
-                            .execute(db)
-                    }
+                return updateWorkspace {
                     try await desktopClient.setWorkspaceStatus(
                         workspaceID: item.id,
                         status: status
@@ -313,20 +290,12 @@ public struct Workspaces: Sendable {
                 }
 
             case let .workspaceUnreadButtonTapped(item):
-                let hasUnread = (item.workspace.unread ?? 0) == 0
+                let isUnread = (item.workspace.unread ?? 0) == 0
 
-                return updateWorkspace(failure: Action.setWorkspaceUnreadFailed) {
-                    try await database.write { db in
-                        try Workspace
-                            .find(item.id)
-                            .update {
-                                $0.unread = #bind(hasUnread ? 1 : 0)
-                            }
-                            .execute(db)
-                    }
+                return updateWorkspace {
                     try await desktopClient.setWorkspaceUnread(
                         workspaceID: item.id,
-                        unread: hasUnread
+                        isUnread: isUnread
                     )
                 }
 
@@ -338,15 +307,17 @@ public struct Workspaces: Sendable {
     }
 
     private func updateWorkspace(
-        failure: @escaping @Sendable (any Error) -> Action,
-        _ operation: @escaping @Sendable () async throws -> Void
+        _ operation: @escaping @Sendable () async throws -> WorkspaceMutationPath
     ) -> Effect<Action> {
+        // Leave the cache untouched because the authoritative workspace snapshot owns the UI.
         .run { send in
             do {
-                try await operation()
+                if try await operation() == .sqliteFallback {
+                    await send(.workspaceMutationUsedSQLiteFallback)
+                }
             } catch {
                 Logger.workspace.error("Failed to update workspace: \(error)")
-                await send(failure(error))
+                await send(.workspaceMutationFailed(error))
             }
         }
     }
@@ -427,27 +398,23 @@ extension AlertState where Action == Workspaces.Action.Alert {
         }
     }
 
-    static func failedToUpdateWorkspacePin(error: any Error) -> Self {
+    static func failedToUpdateWorkspace(error: any Error) -> Self {
         AlertState {
-            TextState("Failed to update workspace pin")
+            TextState("Failed to update workspace")
         } message: {
             TextState(error.localizedDescription)
         }
     }
 
-    static func failedToUpdateWorkspaceStatus(error: any Error) -> Self {
+    static var workspaceMutationUsedSQLiteFallback: Self {
         AlertState {
-            TextState("Failed to update workspace status")
+            TextState("Workspace change saved")
         } message: {
-            TextState(error.localizedDescription)
-        }
-    }
-
-    static func failedToUpdateWorkspaceUnreadStatus(error: any Error) -> Self {
-        AlertState {
-            TextState("Failed to update workspace unread status")
-        } message: {
-            TextState(error.localizedDescription)
+            TextState(
+                "The change was saved to Conductor's database, but the open Conductor window "
+                    + "may remain stale until Conductor reloads. Reconnect the Workspace UI hook "
+                    + "for live updates."
+            )
         }
     }
 }

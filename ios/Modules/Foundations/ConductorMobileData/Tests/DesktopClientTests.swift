@@ -121,7 +121,7 @@ struct DesktopClientTests {
             await #expect(throws: DesktopClientError.invalidServerAddress) {
                 try await DesktopClient.liveValue.setWorkspacePinned(
                     workspaceID: "workspace-1",
-                    pinned: true
+                    isPinned: true
                 )
             }
         }
@@ -401,6 +401,44 @@ struct DesktopClientTests {
                 DesktopClient.repositoryIconURL(for: repository)?.absoluteString,
                 "http://my-mac:4000/repositories/repository-1/icon"
             )
+        }
+    }
+
+    @Test("Workspace mutations map only exact 204 and 202 responses")
+    func workspaceMutationResponses() throws {
+        for (statusCode, expectedPath) in [
+            (204, WorkspaceMutationPath.hook),
+            (202, .sqliteFallback),
+        ] {
+            #expect(
+                try DesktopClient.getWorkspaceMutationPathFromStatusCode(statusCode: statusCode)
+                    == expectedPath
+            )
+        }
+        for statusCode in [200, 201, 206, 400, 409, 500] {
+            #expect(
+                throws: DesktopClientError.requestFailed(
+                    statusCode: statusCode,
+                    message: "error"
+                )
+            ) {
+                try DesktopClient.getWorkspaceMutationPathFromStatusCode(
+                    statusCode: statusCode,
+                    data: Data("error".utf8)
+                )
+            }
+        }
+    }
+
+    @Test("Workspace mutation bodies encode exactly one absolute field")
+    func workspaceMutationBodies() throws {
+        let status = Workspace.Status.inReview.rawValue
+        for (body, expectedJSON) in [
+            (WorkspacePatchBody(isPinned: true), #"{"pinned":true}"#),
+            (WorkspacePatchBody(status: status), #"{"status":"in-review"}"#),
+            (WorkspacePatchBody(isUnread: false), #"{"unread":false}"#),
+        ] {
+            #expect(String(decoding: try JSONEncoder().encode(body), as: UTF8.self) == expectedJSON)
         }
     }
 }
