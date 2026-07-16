@@ -39,6 +39,15 @@ struct DesktopClientTests {
         )
         expectNoDifference(
             DesktopClientError.isConnectionFailure(
+                NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(POSIXErrorCode.ECONNABORTED.rawValue)
+                )
+            ),
+            true
+        )
+        expectNoDifference(
+            DesktopClientError.isConnectionFailure(
                 DesktopClientError.requestFailed(statusCode: 503, message: "Unavailable")
             ),
             false

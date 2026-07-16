@@ -92,8 +92,11 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
 
     public static func isConnectionFailure(_ error: any Error) -> Bool {
         let nsError = error as NSError
+        // iOS can abort a WebSocket while the app is suspended. Treat that like other transient
+        // transport loss so observations reconnect instead of presenting an alert.
         if nsError.domain == NSPOSIXErrorDomain,
-           nsError.code == Int(POSIXErrorCode.ENOTCONN.rawValue) {
+           nsError.code == Int(POSIXErrorCode.ECONNABORTED.rawValue)
+                || nsError.code == Int(POSIXErrorCode.ENOTCONN.rawValue) {
             return true
         }
 
