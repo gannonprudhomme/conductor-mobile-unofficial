@@ -38,7 +38,6 @@ public struct Chat: Sendable {
 
         /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
         var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
-        var displayedContentRevision = 0
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
 
         /// The turns + parsed rows (e.g. `Message.content` -> `AgentEvent`)
@@ -68,14 +67,14 @@ public struct Chat: Sendable {
             )
         }
 
-        init(session: Session) {
+        init(session: Session, messages: [Message] = []) {
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
                 animation: .default
             )
             self._messages = FetchAll(
-                wrappedValue: [],
+                wrappedValue: messages,
                 Message
                     .where { $0.sessionID.eq(session.id) }
                     .order {
@@ -88,8 +87,8 @@ public struct Chat: Sendable {
             )
         }
 
-        /// `turns` and `rows` are derived presentation caches. `session` captures status-driven
-        /// changes, while the revision records when message-driven rebuilding of both completes.
+        /// `turns` and `rows` are derived presentation caches, while `session` captures
+        /// status-driven changes.
         public static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
@@ -101,7 +100,6 @@ public struct Chat: Sendable {
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
                     == rhs.confirmedMessagesAwaitingInitialSnapshot
-                && lhs.displayedContentRevision == rhs.displayedContentRevision
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
         }
 
@@ -163,7 +161,6 @@ public struct Chat: Sendable {
                     reusing: state.turns ?? []
                 )
                 state.updateRows(sessionStatus: state.session.status)
-                state.displayedContentRevision += 1
                 return .none
 
             case let .initialMessagesResponse(messages):
@@ -182,7 +179,6 @@ public struct Chat: Sendable {
                     reusing: state.turns ?? []
                 )
                 state.updateRows(sessionStatus: state.session.status)
-                state.displayedContentRevision += 1
                 state.isLoadingMessages = false
                 return .none
 
@@ -371,147 +367,78 @@ public struct Chat: Sendable {
 struct ChatView: View {
     @Bindable var store: StoreOf<Chat>
     let directoryName: String
-    @State private var scrollState = ScrollState()
-    @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: ChatRowLayout.stackSpacing) {
-                ChatRows(
-                    rows: store.rows ?? [],
-                    turnSummaryTapped: {
-                        store.send(.turnSummaryTapped($0), animation: .default)
-                    }
-                )
-
-                Color.clear
-                    .frame(height: 1)
-                    .onScrollVisibilityChange { isVisible in
-                        guard scrollState.isBottomMarkerVisible != isVisible else {
-                            return
-                        }
-
-                        scrollState.isBottomMarkerVisible = isVisible
-                    }
-            }
-            .scrollTargetLayout()
-        }
-        .overlay {
-            if store.isLoadingMessages {
-                ProgressView()
-                    .progressViewStyle(.network)
-                    .tint(.theme(.textSecondary))
-                    .frame(width: 32, height: 32)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .background(.theme(.background))
-            } else if store.shouldShowEmptyChat {
-                EmptyChatView(directoryName: directoryName)
-            }
-        }
-        .scrollPosition($scrollPosition)
-        .scrollDismissesKeyboard(.interactively)
-        .defaultScrollAnchor(.bottom)
-        .background {
-            Color.theme(.background)
-                .ignoresSafeArea()
-        }
-        .safeAreaBar(edge: .bottom) {
-            VStack(spacing: 8) {
-                if store.connectionStatus != .connected {
-                    Label {
-                        Text("Reconnecting")
-                    } icon: {
-                        ProgressView()
-                            .progressViewStyle(.network)
-                            .tint(.theme(.textSecondary))
-                            .controlSize(.mini)
-                    }
-                        .labelStyle(.conductorSmall)
-                        .font(.theme(.small))
-                        .foregroundStyle(.theme(.textSecondary))
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+        scrollView
+            .overlay {
+                if store.isLoadingMessages {
+                    ProgressView()
+                        .progressViewStyle(.network)
+                        .tint(.theme(.textSecondary))
+                        .frame(width: 32, height: 32)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .background(.theme(.background))
+                } else if store.shouldShowEmptyChat {
+                    EmptyChatView(directoryName: directoryName)
                 }
-
-                ChatTextField(
-                    text: $store.messageDraft,
-                    agentType: store.session.agentType,
-                    isSendInFlight: store.isMessageSendInFlight,
-                    isStopInFlight: store.isStopInFlight,
-                    isWorking: store.session.status == .working,
-                    model: store.session.model,
-                    onSendTapped: { store.send(.sendButtonTapped) },
-                    onStopTapped: { store.send(.stopButtonTapped) }
-                )
             }
-            .animation(.default, value: store.connectionStatus)
-        }
-        .onChange(of: store.displayedContentRevision) {
-            displayedContentRevisionChanged()
-        }
-        .onChange(of: store.session.status) { _, status in
-            sessionStatusChanged(status)
-        }
-        .task(id: store.session.id) {
-            await store.send(.task).finish()
-        }
-        .preferredColorScheme(.dark)
+            .background {
+                Color.theme(.background)
+                    .ignoresSafeArea()
+            }
+            .safeAreaBar(edge: .bottom) {
+                VStack(spacing: 8) {
+                    if store.connectionStatus != .connected {
+                        Label {
+                            Text("Reconnecting")
+                        } icon: {
+                            ProgressView()
+                                .progressViewStyle(.network)
+                                .tint(.theme(.textSecondary))
+                                .controlSize(.mini)
+                        }
+                            .labelStyle(.conductorSmall)
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textSecondary))
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    ChatTextField(
+                        text: $store.messageDraft,
+                        agentType: store.session.agentType,
+                        isSendInFlight: store.isMessageSendInFlight,
+                        isStopInFlight: store.isStopInFlight,
+                        isWorking: store.session.status == .working,
+                        model: store.session.model,
+                        onSendTapped: { store.send(.sendButtonTapped) },
+                        onStopTapped: { store.send(.stopButtonTapped) }
+                    )
+                }
+                .animation(.default, value: store.connectionStatus)
+            }
+            .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
+            .onChange(of: store.session.status) { _, status in
+                store.send(.sessionStatusChanged(status))
+            }
+            .task(id: store.session.id) {
+                await store.send(.task).finish()
+            }
+            .preferredColorScheme(.dark)
     }
 
-    private func displayedContentRevisionChanged() {
-        switch scrollState.displayedContentChanged(hasRows: store.rows?.isEmpty == false) {
-        case .initial:
-            withAnimation(nil) {
-                scrollPosition.scrollTo(edge: .bottom)
-            }
-            
-            Task { // TODO: Not convinced this helps but it doesn't hurt
-                await Task.yield()
-                scrollPosition.scrollTo(edge: .bottom)
-            }
-        case .subsequent:
-            withAnimation(.default) {
-                scrollPosition.scrollTo(edge: .bottom)
-            }
-        case .none:
-            return
-        }
-    }
-
-    private func sessionStatusChanged(_ status: Session.Status) {
-        store.send(.sessionStatusChanged(status))
-        guard status == .working, scrollState.isBottomMarkerVisible else {
-            return
-        }
-
-        withAnimation {
-            scrollPosition.scrollTo(edge: .bottom)
-        }
-    }
-
-    @MainActor
-    final class ScrollState {
-        var hasDisplayedContent = false
-        var isBottomMarkerVisible = true
-
-        enum DisplayedContentScroll: Equatable {
-            case none
-            case initial
-            case subsequent
-        }
-
-        func displayedContentChanged(hasRows: Bool) -> DisplayedContentScroll {
-            guard hasRows else {
-                return .none
-            }
-
-            let isInitialLoad = !hasDisplayedContent
-            hasDisplayedContent = true
-            guard isInitialLoad || isBottomMarkerVisible else {
-                return .none
-            }
-
-            return isInitialLoad ? .initial : .subsequent
+    private var scrollView: some View {
+        GeometryReader { proxy in
+            ChatCollectionView(
+                sessionID: store.session.id,
+                rows: store.rows ?? [],
+                safeAreaInsets: proxy.safeAreaInsets,
+                turnSummaryTapped: {
+                    store.send(.turnSummaryTapped($0), animation: .default)
+                }
+            )
+            // Draw beneath every bar and the keyboard; the proxy insets keep rows unobscured.
+            .ignoresSafeArea(edges: [.top, .bottom])
         }
     }
 
@@ -533,57 +460,6 @@ struct ChatView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-    }
-
-    private struct ChatRows: View {
-        let rows: [DisplayedChatRowWithPadding]
-        let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
-
-        var body: some View {
-            ForEach(rows) { row in
-                ChatRowView(
-                    row: row.content,
-                    turnSummaryTapped: turnSummaryTapped
-                )
-                    .padding(.horizontal, ChatRowLayout.horizontalPadding)
-                    .padding(.top, row.topPadding)
-                    .padding(.bottom, row.bottomPadding)
-            }
-        }
-    }
-
-    private struct ChatRowView: View {
-        let row: DisplayedChatRow
-        let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
-
-        var body: some View {
-            switch row {
-            case .humanMessage(let message):
-                HumanMessageRowView(row: message)
-            case let .assistantTextChunk(_, chunk, isMostRecentTextInTurn):
-                AssistantMessageTextView(
-                    chunk: chunk,
-                    isMostRecentTextInTurn: isMostRecentTextInTurn
-                )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            case .assistantToolCall(_, let toolCall):
-                ToolCallRowView(toolCall: toolCall)
-                    .foregroundStyle(.theme(.textPrimary))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            case .assistantError(_, let message):
-                Text("Error: \(message)")
-                    .foregroundStyle(.theme(.destructive))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            case .turnInProgress(let row):
-                TurnInProgressView(row: row)
-            case .turnSummary(let summary):
-                TurnSummaryRowView(summary: summary) {
-                    turnSummaryTapped(summary.id)
-                }
-            case .turnFooter(let footer):
-                TurnCompletedFooterRowView(footer: footer)
-            }
         }
     }
 }

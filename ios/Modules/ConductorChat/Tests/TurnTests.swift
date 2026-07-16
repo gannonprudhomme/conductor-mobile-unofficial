@@ -274,7 +274,7 @@ struct TurnTests {
         )
     }
 
-    @Test("Assistant Markdown chunks become stable outer lazy-stack rows")
+    @Test("Assistant Markdown chunks become stable collection-view rows")
     func flattenedMarkdownChunks() {
         let source = (1...3)
             .map { String($0) + String(repeating: "a", count: 699) }

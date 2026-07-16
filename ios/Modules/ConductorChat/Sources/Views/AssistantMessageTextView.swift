@@ -37,8 +37,8 @@ struct AssistantMessageTextView: View {
             // (Gannon: this is likely overly defensive but doesn't hurt to have. Probably added this while it was optimizing the rendering autonomously)
             .font(.theme(.body))
             .textSelection(.enabled)
-            // Each chunk is a separate LazyVStack row, so MarkdownUI cannot preserve the original margin between blocks on opposite sides of a chunk boundary.
-            // Restore only the portion not already supplied by the stack's normal inter-row spacing.
+            // Each chunk is a separate hosted row, so MarkdownUI cannot preserve the original margin between blocks on opposite sides of a chunk boundary.
+            // Restore only the portion not already supplied by the chat layout's normal inter-row spacing.
             .padding(
                 .top,
                 chunk.spacingBefore.additionalTopPadding(

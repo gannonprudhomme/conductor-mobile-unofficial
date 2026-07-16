@@ -11,8 +11,8 @@ import ConductorMobileData
 import IssueReporting
 import MarkdownUI
 
-/// This is solely a representation for UI / displaying in chat,
-/// Thus it is structured in a way which plays to the strengths of a `LazyVStack`.
+/// This is solely a representation for displaying chat. It is structured as stable,
+/// independently renderable rows for the chat collection view.
 ///
 /// E.g. handling conditionals in the data layer (here) instead of in a `View`
 /// For more details on what I mean, see: https://wwdc.ai/2026/321
@@ -93,7 +93,7 @@ struct Turn: Identifiable {
                     }
 
                     /// The original Markdown margin that must be reconstructed before this chunk.
-                    /// Splitting one Markdown document into separate lazy rows prevents MarkdownUI
+                    /// Splitting one Markdown document into separate hosted rows prevents MarkdownUI
                     /// from applying its normal margin across the chunk boundary.
                     enum Spacing: Equatable {
                         case none
@@ -101,7 +101,7 @@ struct Turn: Identifiable {
                         case heading
                         case thematicBreak
 
-                        /// Returns only the padding not already supplied by the outer lazy stack.
+                        /// Returns only the padding not already supplied by the chat row layout.
                         /// For example, a 1.5-em heading margin at a 16-point root font is 24 points.
                         /// If the stack already provides 16 points, this returns 8.
                         func additionalTopPadding(
@@ -411,10 +411,11 @@ private extension AgentEvent.SystemEvent {
     }
 }
 
-/// One physical row in the outer `LazyVStack`.
+/// One physical row in the chat collection view.
 ///
 /// `Turn.Row` preserves the logical message structure, where one assistant text message owns every Markdown chunk.
-/// `DisplayedChatRow` is the flattened rendering structure: it expands those chunks into separate rows so SwiftUI can create them lazily near the viewport.
+/// `DisplayedChatRow` is the flattened rendering structure: it expands those chunks into separate,
+/// reusable collection-view rows while retaining SwiftUI for their content.
 ///
 /// Basically meaning: this is pretty much identical to `Turn.Row`, except that this:
 /// - Splits `Turn.Row.assistantMessage` into potentially multiple Markdown rows (for performance), depending on how big it is
@@ -633,7 +634,7 @@ extension Turn {
         return nil
     }
 
-    /// Projects this turn's logical message rows into the physical rows consumed by `ChatRows`.
+    /// Projects this turn's logical message rows into physical chat rows.
     ///
     /// `flattenedChatRows(activeTurnID:expandedSummaryIDs:)` calls this whenever `Chat.State`
     /// rebuilds its cached presentation rows. Active turns remain fully expanded so streaming
@@ -712,7 +713,7 @@ extension Turn {
         return displayedRows
     }
 
-    /// Projects a human-message segment into the rows consumed by `ChatRows`.
+    /// Projects a human-message segment into physical chat rows.
     /// Keeping logical assistant rows until this point lets the summary count messages and tools
     /// before chunk expansion.
     private static func displayedRowsForSegment(
