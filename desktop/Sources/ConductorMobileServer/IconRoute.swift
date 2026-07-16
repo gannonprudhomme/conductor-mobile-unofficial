@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+#if canImport(AppKit)
 import AppKit
 import Foundation
 import Hummingbird
@@ -171,3 +172,4 @@ enum IconRoute {
         "src/assets/icon.png",
     ]
 }
+#endif

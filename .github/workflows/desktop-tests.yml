@@ -1,0 +1,19 @@
+name: Desktop tests
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: swift:6.3
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install SQLite development files
+        run: |
+          apt-get update
+          apt-get install --yes libsqlite3-dev
+      - name: Run desktop tests
+        run: swift test --package-path desktop
