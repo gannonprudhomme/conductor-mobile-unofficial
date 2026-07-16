@@ -387,8 +387,11 @@ extension ChatCollectionView {
         /// Records correction work that could not run during a snapshot or user interaction.
         private(set) var needsScrollCorrection = false
 
-        /// Keeps an explicit send request authoritative until geometry can be reconciled.
+        /// Keeps an explicit send request authoritative until changed rows are reconciled.
         private(set) var needsScrollToBottom = false
+
+        /// Whether the next successful changed-row reconciliation consumes the send request.
+        private var shouldConsumeScrollToBottomRequest = false
 
         /// The last row values accepted by `render`, used for idempotence and transition policy.
         private var renderedRows: [DisplayedChatRowWithPadding] = []
@@ -496,6 +499,7 @@ extension ChatCollectionView {
             dataSource = nil
             needsScrollCorrection = false
             needsScrollToBottom = false
+            shouldConsumeScrollToBottomRequest = false
             renderedRows = []
             rowsByID = [:]
             scrollPolicy = ScrollPolicy()
@@ -539,6 +543,7 @@ extension ChatCollectionView {
             if shouldScrollToBottom {
                 scrollPolicy.scrollToBottomRequested()
                 needsScrollToBottom = true
+                shouldConsumeScrollToBottomRequest = false
                 viewportAnchor = nil
                 stopNativeScrollAnimation(in: collectionView)
             }
@@ -552,6 +557,10 @@ extension ChatCollectionView {
                     )
                 }
                 return
+            }
+
+            if needsScrollToBottom {
+                shouldConsumeScrollToBottomRequest = true
             }
 
             // Classify offset animation before mutating retained rows. Diffable structural animation
@@ -749,6 +758,7 @@ extension ChatCollectionView {
             }
             initialScrollItemID = nil
             needsScrollToBottom = false
+            shouldConsumeScrollToBottomRequest = false
             viewportAnchor = nil
         }
 
@@ -758,6 +768,7 @@ extension ChatCollectionView {
             // delegate callbacks that must not be interpreted as the user leaving the bottom.
             guard initialScrollItemID == nil,
                   !isApplyingCoordinatorOffset,
+                  !needsScrollToBottom,
                   !scrollView.isScrollAnimating
             else {
                 return
@@ -858,7 +869,6 @@ extension ChatCollectionView {
             }
 
             if needsScrollToBottom {
-                needsScrollToBottom = false
                 scrollPolicy.scrollToBottomRequested()
                 viewportAnchor = nil
             }
@@ -867,6 +877,11 @@ extension ChatCollectionView {
             // also handles short content, whose true bottom may be the negative top inset.
             scrollToInitialItemIfNeeded(in: collectionView)
             correctScrollPosition(in: collectionView)
+
+            if shouldConsumeScrollToBottomRequest {
+                needsScrollToBottom = false
+                shouldConsumeScrollToBottomRequest = false
+            }
 
             // Keep the initial target until UIKit confirms that it is both visible and bottom-pinned.
             // Estimated self-sizing can require more than one layout reconciliation to reach this.

@@ -344,8 +344,11 @@ struct ChatCollectionViewTests {
             collectionView,
             willDecelerate: false
         )
-        #expect(!coordinator.needsScrollToBottom)
+        #expect(coordinator.needsScrollToBottom)
         #expect(!coordinator.needsScrollCorrection)
+
+        coordinator.scrollViewWillBeginDragging(collectionView)
+        #expect(!coordinator.needsScrollToBottom)
     }
 
     @Test("Immediate row changes, dragging, and empty content stop native animation")
