@@ -464,6 +464,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.messageConfirmed) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [sentMessage]
@@ -498,6 +499,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.sendMessageResponse) {
                 $0.messageDraft = ""
@@ -529,6 +531,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.send(.binding(.set(\.messageDraft, "Only run unit tests."))) {
                 $0.messageDraft = "Only run unit tests."
@@ -581,6 +584,7 @@ struct ChatTests {
             }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.messageConfirmed) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
@@ -625,6 +629,7 @@ struct ChatTests {
 
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.messageConfirmed) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
@@ -655,6 +660,7 @@ struct ChatTests {
 
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
             }
             await store.receive(\.sendMessageResponse) {
                 $0.isMessageSendInFlight = false

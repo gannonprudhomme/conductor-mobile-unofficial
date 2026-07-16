@@ -35,6 +35,12 @@ struct ChatCollectionViewTests {
             .preserveViewport
         )
 
+        policy.scrollToBottomRequested()
+        expectNoDifference(
+            policy.rowsWillChange(hasRows: true),
+            .bottom(isInitial: false)
+        )
+
         expectNoDifference(
             policy.rowsWillChange(hasRows: false),
             .none
@@ -313,6 +319,32 @@ struct ChatCollectionViewTests {
 
         collectionView.isDeceleratingForTests = false
         coordinator.scrollViewDidEndDecelerating(collectionView)
+        #expect(!coordinator.needsScrollCorrection)
+    }
+
+    @Test("Sending resumes bottom follow even before rows change")
+    func sendResumesBottomFollow() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        collectionView.isDraggingForTests = true
+        coordinator.render(
+            rows: [],
+            scrollToBottomRequest: 1,
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        #expect(coordinator.needsScrollToBottom)
+
+        collectionView.isDraggingForTests = false
+        coordinator.scrollViewDidEndDragging(
+            collectionView,
+            willDecelerate: false
+        )
+        #expect(!coordinator.needsScrollToBottom)
         #expect(!coordinator.needsScrollCorrection)
     }
 

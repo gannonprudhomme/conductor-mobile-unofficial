@@ -16,6 +16,9 @@ struct ChatCollectionView: UIViewRepresentable {
     /// The complete ordered presentation model for the collection view's single section.
     let rows: [DisplayedChatRowWithPadding]
 
+    /// Changes whenever an accepted send should resume bottom-following.
+    let scrollToBottomRequest: Int
+
     /// Retrieved from GeometryProxy
     let safeAreaInsets: EdgeInsets
 
@@ -69,6 +72,7 @@ struct ChatCollectionView: UIViewRepresentable {
         context.coordinator.updateContentInset(contentInset, in: collectionView)
         context.coordinator.render(
             rows: rows,
+            scrollToBottomRequest: scrollToBottomRequest,
             animation: context.transaction.animation,
             turnSummaryTapped: turnSummaryTapped,
             in: collectionView
@@ -136,6 +140,11 @@ extension ChatCollectionView {
 
         /// Whether new content should continue following the bottom.
         var isFollowingBottom = true
+
+        /// Makes the current bottom authoritative again after the user sends a message.
+        mutating func scrollToBottomRequested() {
+            isFollowingBottom = true
+        }
 
         /// Records an incoming row set and returns the placement policy to use after its snapshot.
         mutating func rowsWillChange(hasRows: Bool) -> UpdateIntent {
@@ -378,8 +387,14 @@ extension ChatCollectionView {
         /// Records correction work that could not run during a snapshot or user interaction.
         private(set) var needsScrollCorrection = false
 
+        /// Keeps an explicit send request authoritative until geometry can be reconciled.
+        private(set) var needsScrollToBottom = false
+
         /// The last row values accepted by `render`, used for idempotence and transition policy.
         private var renderedRows: [DisplayedChatRowWithPadding] = []
+
+        /// Last explicit request consumed from SwiftUI.
+        private var scrollToBottomRequest = 0
 
         /// Current content lookup used when the cell registration configures a stable item ID.
         private var rowsByID: [DisplayedChatRow.ID: DisplayedChatRowWithPadding] = [:]
@@ -480,8 +495,11 @@ extension ChatCollectionView {
             collectionView = nil
             dataSource = nil
             needsScrollCorrection = false
+            needsScrollToBottom = false
             renderedRows = []
             rowsByID = [:]
+            scrollPolicy = ScrollPolicy()
+            scrollToBottomRequest = 0
             isApplyingCoordinatorOffset = false
             shouldAnimateNextBottomCorrection = false
             initialScrollItemID = nil
@@ -504,6 +522,7 @@ extension ChatCollectionView {
         /// IDs in that snapshot, and lets only its generation-safe completion reconcile geometry.
         func render(
             rows: [DisplayedChatRowWithPadding],
+            scrollToBottomRequest: Int = 0,
             animation: Animation?,
             turnSummaryTapped: @escaping @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void,
             in collectionView: UICollectionView
@@ -515,8 +534,23 @@ extension ChatCollectionView {
             // The action may capture a newer Store even when the visual rows did not change.
             self.turnSummaryTapped = turnSummaryTapped
 
+            let shouldScrollToBottom = self.scrollToBottomRequest != scrollToBottomRequest
+            self.scrollToBottomRequest = scrollToBottomRequest
+            if shouldScrollToBottom {
+                scrollPolicy.scrollToBottomRequested()
+                needsScrollToBottom = true
+                viewportAnchor = nil
+                stopNativeScrollAnimation(in: collectionView)
+            }
+
             let previousRows = renderedRows
             guard previousRows != rows else {
+                if shouldScrollToBottom {
+                    reconcileScrollPosition(
+                        in: collectionView,
+                        shouldLayoutIfNeeded: true
+                    )
+                }
                 return
             }
 
@@ -525,14 +559,15 @@ extension ChatCollectionView {
             let intent = scrollPolicy.rowsWillChange(hasRows: !rows.isEmpty)
             let isInitialContent = intent == .bottom(isInitial: true)
             let isInteractionActive = isInteracting(with: collectionView)
-            let shouldAnimateBottom = ChatCollectionView.shouldAnimateBottomFollow(
-                from: previousRows,
-                to: rows,
-                isInitialContent: isInitialContent,
-                isFollowingBottom: scrollPolicy.isFollowingBottom,
-                isInteractionActive: isInteractionActive,
-                isReduceMotionEnabled: UIAccessibility.isReduceMotionEnabled
-            )
+            let shouldAnimateBottom = !shouldScrollToBottom
+                && ChatCollectionView.shouldAnimateBottomFollow(
+                    from: previousRows,
+                    to: rows,
+                    isInitialContent: isInitialContent,
+                    isFollowingBottom: scrollPolicy.isFollowingBottom,
+                    isInteractionActive: isInteractionActive,
+                    isReduceMotionEnabled: UIAccessibility.isReduceMotionEnabled
+                )
 
             // Any immediate transition stops active programmatic scrolling.
             if !shouldAnimateBottom {
@@ -614,7 +649,9 @@ extension ChatCollectionView {
                 // calculating offsets. Ordinary bottom follow can use the completed snapshot layout.
                 reconcileScrollPosition(
                     in: collectionView,
-                    shouldLayoutIfNeeded: initialScrollItemID != nil || shouldRestoreViewport
+                    shouldLayoutIfNeeded: initialScrollItemID != nil
+                        || shouldRestoreViewport
+                        || needsScrollToBottom
                 )
             }
         }
@@ -711,6 +748,7 @@ extension ChatCollectionView {
                 stopNativeScrollAnimation(in: collectionView)
             }
             initialScrollItemID = nil
+            needsScrollToBottom = false
             viewportAnchor = nil
         }
 
@@ -773,7 +811,7 @@ extension ChatCollectionView {
 
             // Initial placement has not established user intent yet. Finish it before deriving
             // bottom-follow state from the current offset.
-            if initialScrollItemID != nil {
+            if initialScrollItemID != nil || needsScrollToBottom {
                 reconcileScrollPosition(
                     in: collectionView,
                     shouldLayoutIfNeeded: true
@@ -817,6 +855,12 @@ extension ChatCollectionView {
                 performCoordinatorOffsetChange {
                     collectionView.layoutIfNeeded()
                 }
+            }
+
+            if needsScrollToBottom {
+                needsScrollToBottom = false
+                scrollPolicy.scrollToBottomRequested()
+                viewportAnchor = nil
             }
 
             // Initial item placement handles long content efficiently; the following correction

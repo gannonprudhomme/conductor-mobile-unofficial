@@ -35,6 +35,7 @@ public struct Chat: Sendable {
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
         var isStopInFlight = false
+        var scrollToBottomRequest = 0
 
         /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
         var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
@@ -98,6 +99,7 @@ public struct Chat: Sendable {
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
+                && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
                     == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
@@ -207,6 +209,7 @@ public struct Chat: Sendable {
                 }
 
                 state.isMessageSendInFlight = true
+                state.scrollToBottomRequest &+= 1
                 return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
                     let result = await Result {
                         if let canonicalMessage = try await desktopClient.sendMessage(
@@ -431,6 +434,7 @@ struct ChatView: View {
         GeometryReader { proxy in
             ChatCollectionView(
                 rows: store.rows ?? [],
+                scrollToBottomRequest: store.scrollToBottomRequest,
                 safeAreaInsets: proxy.safeAreaInsets,
                 turnSummaryTapped: {
                     store.send(.turnSummaryTapped($0), animation: .default)
