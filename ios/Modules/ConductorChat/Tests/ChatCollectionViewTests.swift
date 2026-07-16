@@ -17,36 +17,32 @@ struct ChatCollectionViewTests {
         var policy = ChatCollectionView.ScrollPolicy()
 
         expectNoDifference(
-            policy.rowsWillChange(sessionID: "one", hasRows: false),
+            policy.rowsWillChange(hasRows: false),
             .none
         )
         expectNoDifference(
-            policy.rowsWillChange(sessionID: "one", hasRows: true),
+            policy.rowsWillChange(hasRows: true),
             .bottom(isInitial: true)
         )
         expectNoDifference(
-            policy.rowsWillChange(sessionID: "one", hasRows: true),
+            policy.rowsWillChange(hasRows: true),
             .bottom(isInitial: false)
         )
 
         policy.isFollowingBottom = false
         expectNoDifference(
-            policy.rowsWillChange(sessionID: "one", hasRows: true),
+            policy.rowsWillChange(hasRows: true),
             .preserveViewport
         )
 
         expectNoDifference(
-            policy.rowsWillChange(sessionID: "one", hasRows: false),
+            policy.rowsWillChange(hasRows: false),
             .none
         )
         #expect(!policy.hasDisplayedContent)
         #expect(policy.isFollowingBottom)
         expectNoDifference(
-            policy.rowsWillChange(sessionID: "one", hasRows: true),
-            .bottom(isInitial: true)
-        )
-        expectNoDifference(
-            policy.rowsWillChange(sessionID: "two", hasRows: true),
+            policy.rowsWillChange(hasRows: true),
             .bottom(isInitial: true)
         )
     }
@@ -163,26 +159,223 @@ struct ChatCollectionViewTests {
         )
     }
 
-    @Test("Bottom animation is interrupted only when scrolling moves away from its target")
-    func bottomAnimationInterruption() {
+    @Test("Only message growth and working-row insertion animate bottom follow")
+    func bottomFollowAnimationPolicy() {
+        let message = displayedRow(
+            .humanMessage(.init(id: "message", content: "Before"))
+        )
+        let changedMessage = displayedRow(
+            .humanMessage(.init(id: "message", content: "After"))
+        )
+        let appendedMessage = displayedRow(
+            .humanMessage(.init(id: "appended", content: "Next"))
+        )
+        let progress = displayedRow(
+            .turnInProgress(.init(id: "turn", startedAt: .distantPast))
+        )
+        let collapsedSummary = displayedRow(
+            .turnSummary(
+                .init(
+                    id: "summary",
+                    isExpanded: false,
+                    toolCallCount: 1,
+                    messageCount: 1,
+                    toolIcons: []
+                )
+            )
+        )
+        let expandedSummary = displayedRow(
+            .turnSummary(
+                .init(
+                    id: "summary",
+                    isExpanded: true,
+                    toolCallCount: 1,
+                    messageCount: 1,
+                    toolIcons: []
+                )
+            )
+        )
+
         #expect(
-            !ChatCollectionView.shouldInterruptBottomAnimation(
-                previousDistanceToTarget: 100,
-                currentDistanceToTarget: 80
+            ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message],
+                to: [changedMessage]
             )
         )
         #expect(
-            !ChatCollectionView.shouldInterruptBottomAnimation(
-                previousDistanceToTarget: 100,
-                currentDistanceToTarget: 102
+            ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message],
+                to: [message, appendedMessage]
             )
         )
         #expect(
-            ChatCollectionView.shouldInterruptBottomAnimation(
-                previousDistanceToTarget: 100,
-                currentDistanceToTarget: 102.1
+            ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message],
+                to: [message, progress]
             )
         )
+        #expect(
+            !ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message, collapsedSummary],
+                to: [message, expandedSummary, appendedMessage]
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message, progress],
+                to: [message]
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message],
+                to: [message]
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateBottomFollow(
+                from: [],
+                to: [message],
+                isInitialContent: true
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message],
+                to: [changedMessage],
+                isInteractionActive: true
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateBottomFollow(
+                from: [message],
+                to: [changedMessage],
+                isReduceMotionEnabled: true
+            )
+        )
+    }
+
+    @Test("Only the newest snapshot application can complete")
+    func snapshotApplicationState() {
+        var state = ChatCollectionView.SnapshotApplicationState()
+
+        let firstA = state.begin()
+        let b = state.begin()
+        let secondA = state.begin()
+
+        let didCompleteFirstA = state.complete(firstA)
+        let didCompleteB = state.complete(b)
+        #expect(!didCompleteFirstA)
+        #expect(!didCompleteB)
+        #expect(state.isPending)
+        let didCompleteSecondA = state.complete(secondA)
+        #expect(didCompleteSecondA)
+        #expect(!state.isPending)
+
+        let beforeInvalidation = state.begin()
+        state.invalidate()
+        let didCompleteBeforeInvalidation = state.complete(beforeInvalidation)
+        #expect(!didCompleteBeforeInvalidation)
+        #expect(!state.isPending)
+    }
+
+    @Test("Scroll correction waits for interaction to finish")
+    func deferredScrollCorrection() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        collectionView.isTrackingForTests = true
+        coordinator.collectionViewDidLayout(collectionView)
+        #expect(coordinator.needsScrollCorrection)
+
+        let panGestureRecognizer = TestPanGestureRecognizer()
+        panGestureRecognizer.stateForTests = .ended
+        coordinator.scrollPanGestureDidChange(panGestureRecognizer)
+        #expect(coordinator.needsScrollCorrection)
+
+        collectionView.isTrackingForTests = false
+        coordinator.scrollPanGestureDidChange(panGestureRecognizer)
+        #expect(!coordinator.needsScrollCorrection)
+
+        collectionView.isDraggingForTests = true
+        coordinator.collectionViewDidLayout(collectionView)
+        #expect(coordinator.needsScrollCorrection)
+
+        collectionView.isDraggingForTests = false
+        collectionView.isDeceleratingForTests = true
+        coordinator.scrollViewDidEndDragging(
+            collectionView,
+            willDecelerate: true
+        )
+        #expect(coordinator.needsScrollCorrection)
+
+        collectionView.isDeceleratingForTests = false
+        coordinator.scrollViewDidEndDecelerating(collectionView)
+        #expect(!coordinator.needsScrollCorrection)
+    }
+
+    @Test("Immediate row changes, dragging, and empty content stop native animation")
+    func nativeScrollAnimationCancellation() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        let message = displayedRow(
+            .humanMessage(.init(id: "message", content: "Message"))
+        )
+        let collapsedSummary = displayedRow(
+            .turnSummary(
+                .init(
+                    id: "summary",
+                    isExpanded: false,
+                    toolCallCount: 1,
+                    messageCount: 1,
+                    toolIcons: []
+                )
+            )
+        )
+        let expandedSummary = displayedRow(
+            .turnSummary(
+                .init(
+                    id: "summary",
+                    isExpanded: true,
+                    toolCallCount: 1,
+                    messageCount: 1,
+                    toolIcons: []
+                )
+            )
+        )
+        coordinator.render(
+            rows: [message, collapsedSummary],
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+
+        collectionView.isScrollAnimatingForTests = true
+        coordinator.render(
+            rows: [message, expandedSummary],
+            animation: .default,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        #expect(collectionView.stopScrollingCount == 1)
+
+        collectionView.isScrollAnimatingForTests = true
+        coordinator.scrollViewWillBeginDragging(collectionView)
+        #expect(collectionView.stopScrollingCount == 2)
+
+        collectionView.isScrollAnimatingForTests = true
+        coordinator.render(
+            rows: [],
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        #expect(collectionView.stopScrollingCount == 3)
     }
 
     @Test("Viewport restoration uses the first surviving anchor and clamps its offset")
@@ -226,5 +419,54 @@ struct ChatCollectionViewTests {
                 maximumOffsetY: 500
             ) { _ in nil } == nil
         )
+    }
+}
+
+private func displayedRow(
+    _ content: DisplayedChatRow
+) -> DisplayedChatRowWithPadding {
+    DisplayedChatRowWithPadding(
+        content: content,
+        topPadding: 0,
+        bottomPadding: 0
+    )
+}
+
+private final class TestCollectionView: UICollectionView {
+    var isTrackingForTests = false
+    var isDraggingForTests = false
+    var isDeceleratingForTests = false
+    var isScrollAnimatingForTests = false
+    var stopScrollingCount = 0
+
+    override var isTracking: Bool { isTrackingForTests }
+    override var isDragging: Bool { isDraggingForTests }
+    override var isDecelerating: Bool { isDeceleratingForTests }
+    override var isScrollAnimating: Bool { isScrollAnimatingForTests }
+
+    init() {
+        super.init(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 844),
+            collectionViewLayout: UICollectionViewFlowLayout()
+        )
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func stopScrollingAndZooming() {
+        stopScrollingCount += 1
+        isScrollAnimatingForTests = false
+    }
+}
+
+private final class TestPanGestureRecognizer: UIPanGestureRecognizer {
+    var stateForTests: UIGestureRecognizer.State = .possible
+
+    override var state: UIGestureRecognizer.State {
+        get { stateForTests }
+        set { stateForTests = newValue }
     }
 }

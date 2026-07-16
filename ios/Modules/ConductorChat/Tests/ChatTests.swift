@@ -34,7 +34,7 @@ struct ChatTests {
         }
     }
 
-    @Test("State equality tracks presentation changes but not derived caches")
+    @Test("State equality tracks presentation state but not derived caches")
     func stateEquality() throws {
         try withDependencies {
             try $0.bootstrapDatabase()
@@ -45,13 +45,6 @@ struct ChatTests {
             changedCaches.rows = []
 
             #expect(original == changedCaches)
-
-            changedCaches.displayedContentRevision += 1
-            #expect(original != changedCaches)
-
-            var changedRowsRevision = original
-            changedRowsRevision.displayedRowsRevision += 1
-            #expect(original != changedRowsRevision)
 
             var changedExpansion = original
             changedExpansion.expandedSummaryIDs.insert("turn-1:human-1")
@@ -153,19 +146,14 @@ struct ChatTests {
 
             await store.receive(\.messagesUpdated) {
                 $0.isMessageSnapshotEmpty = true
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
             }
             #expect(try #require(store.state.turns).isEmpty)
             #expect(try #require(store.state.rows).isEmpty)
-            #expect(store.state.displayedContentRevision == 1)
             #expect(connectionCount.value == 1)
 
             firstContinuation.yield([])
             await store.receive(\.initialMessagesResponse) {
                 $0.isLoadingMessages = false
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
             }
 
             firstContinuation.finish(throwing: TestError())
@@ -230,10 +218,7 @@ struct ChatTests {
 
         let task = await store.send(.task)
 
-        await store.receive(\.messagesUpdated) {
-            $0.displayedContentRevision += 1
-            $0.displayedRowsRevision += 1
-        }
+        await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -247,13 +232,8 @@ struct ChatTests {
         continuation.yield([lateMessage, updatedEarlyMessage])
         await store.receive(\.initialMessagesResponse) {
             $0.isLoadingMessages = false
-            $0.displayedContentRevision += 1
-            $0.displayedRowsRevision += 1
         }
-        await store.receive(\.messagesUpdated) {
-            $0.displayedContentRevision += 1
-            $0.displayedRowsRevision += 1
-        }
+        await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -263,13 +243,8 @@ struct ChatTests {
                 .init(id: "late", content: "Message late"),
             ]
         )
-        #expect(store.state.displayedContentRevision == 3)
-
         continuation.yield([updatedLateMessage])
-        await store.receive(\.messagesUpdated) {
-            $0.displayedContentRevision += 1
-            $0.displayedRowsRevision += 1
-        }
+        await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -279,8 +254,6 @@ struct ChatTests {
                 .init(id: "late", content: "Updated late message"),
             ]
         )
-        #expect(store.state.displayedContentRevision == 4)
-
         let storedMessages = try await database.read { db in
             try Message
                 .where { $0.sessionID.eq(session.id) }
@@ -321,10 +294,7 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.messagesUpdated([message])) {
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
-            }
+            await store.send(.messagesUpdated([message]))
             try expectHumanPresentationCaches(
                 store.state,
                 turnID: "turn-1",
@@ -332,10 +302,7 @@ struct ChatTests {
                 messages: [.init(id: "human-1", content: "Hello")]
             )
 
-            await store.send(.sessionStatusChanged(.working)) {
-                $0.displayedRowsRevision += 1
-            }
-            #expect(store.state.displayedContentRevision == 1)
+            await store.send(.sessionStatusChanged(.working))
             expectNoDifference(
                 try #require(store.state.rows).map(DisplayedRowProjection.init),
                 [
@@ -344,10 +311,7 @@ struct ChatTests {
                 ]
             )
 
-            await store.send(.sessionStatusChanged(.idle)) {
-                $0.displayedRowsRevision += 1
-            }
-            #expect(store.state.displayedContentRevision == 1)
+            await store.send(.sessionStatusChanged(.idle))
             try expectHumanPresentationCaches(
                 store.state,
                 turnID: "turn-1",
@@ -382,10 +346,7 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.messagesUpdated(messages)) {
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
-            }
+            await store.send(.messagesUpdated(messages))
             expectNoDifference(store.state.messages, [message])
             #expect(store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
@@ -393,8 +354,6 @@ struct ChatTests {
             await store.send(.initialMessagesResponse([])) {
                 $0.isLoadingMessages = false
                 $0.isMessageSnapshotEmpty = true
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
             }
             expectNoDifference(store.state.messages, [message])
             #expect(try #require(store.state.turns).isEmpty)
@@ -424,8 +383,6 @@ struct ChatTests {
 
             await store.send(.initialMessagesResponse([message])) {
                 $0.isLoadingMessages = false
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
             }
 
             #expect(!store.state.isMessageSnapshotEmpty)
@@ -464,8 +421,6 @@ struct ChatTests {
             await store.send(.initialMessagesResponse([])) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = []
                 $0.isLoadingMessages = false
-                $0.displayedContentRevision += 1
-                $0.displayedRowsRevision += 1
             }
             #expect(!store.state.shouldShowEmptyChat)
             try expectHumanPresentationCaches(
@@ -879,7 +834,6 @@ struct ChatTests {
 
             await store.send(.turnSummaryTapped(summaryID)) {
                 $0.expandedSummaryIDs = [summaryID]
-                $0.displayedRowsRevision += 1
                 $0.rows = [turn].flattenedChatRows(
                     activeTurnID: nil,
                     expandedSummaryIDs: [summaryID]
@@ -897,7 +851,6 @@ struct ChatTests {
 
             await store.send(.turnSummaryTapped(summaryID)) {
                 $0.expandedSummaryIDs = []
-                $0.displayedRowsRevision += 1
                 $0.rows = [turn].flattenedChatRows(activeTurnID: nil)
             }
             expectNoDifference(

@@ -7,6 +7,7 @@ Before iOS work, use every repo-local skill matching the task:
 - `$ios-development` for the toolchain, builds, XcodeGen, targets, packages, and module structure.
 - `$swift-style` for every Swift source or test file.
 - `$swiftui` for views, previews, styling, layout, animation, feedback, and presentation.
+- `$modern-uikit` for collection views, hosted SwiftUI rows, scroll behavior, and UIKit performance validation.
 - `$tca` for feature domains, reducers, bindings, effects, dependencies, and navigation.
 - `$swift-data` for records, persistence, database access, and typed queries.
 - `$swift-testing` for tests, test targets, fixtures, and test-support code.

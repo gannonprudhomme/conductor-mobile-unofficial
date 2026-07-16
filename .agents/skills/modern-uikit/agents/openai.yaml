@@ -1,0 +1,4 @@
+interface:
+  display_name: "Modern UIKit"
+  short_description: "Build UIKit surfaces with SwiftUI interop"
+  default_prompt: "Use $modern-uikit to teach me the smallest modern UIKit approach for this iOS surface while keeping SwiftUI where it fits."

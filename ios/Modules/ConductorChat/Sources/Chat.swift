@@ -369,7 +369,7 @@ struct ChatView: View {
     let directoryName: String
 
     var body: some View {
-        scrollView
+        collectionView
             .overlay {
                 if store.isLoadingMessages {
                     ProgressView()
@@ -427,10 +427,9 @@ struct ChatView: View {
             .preferredColorScheme(.dark)
     }
 
-    private var scrollView: some View {
+    private var collectionView: some View {
         GeometryReader { proxy in
             ChatCollectionView(
-                sessionID: store.session.id,
                 rows: store.rows ?? [],
                 safeAreaInsets: proxy.safeAreaInsets,
                 turnSummaryTapped: {

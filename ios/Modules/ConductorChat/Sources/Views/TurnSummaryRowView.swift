@@ -10,6 +10,8 @@ import LucideIcons
 import SwiftUI
 
 struct TurnSummaryRowView: View {
+    @Environment(\.accessibilityReduceMotion) private var isReduceMotionEnabled
+
     let summary: DisplayedChatRow.TurnSummary
     let action: @MainActor () -> Void
 
@@ -31,13 +33,20 @@ struct TurnSummaryRowView: View {
             .labelStyle(.conductorSmall)
             .frame(maxWidth: .infinity, alignment: .leading)
             // Preserve an approximately 44-point tap target without adding layout height.
-            .contentShape(.interaction, Rectangle().inset(by: -14))
+            .contentShape(
+                .interaction,
+                Rectangle().inset(by: -ChatRowLayout.summaryHitTargetExpansion)
+            )
         }
         .buttonStyle(.plain)
         .foregroundStyle(.theme(.textSecondary))
         .sensoryFeedback(.selection, trigger: summary.isExpanded)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(summary.isExpanded ? "Expanded" : "Collapsed")
+        .animation(
+            isReduceMotionEnabled ? nil : .default,
+            value: summary.isExpanded
+        )
     }
 
     private var title: String {

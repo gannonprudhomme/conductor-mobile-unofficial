@@ -81,15 +81,26 @@ struct Turn: Identifiable {
                     }
                 }
 
-                struct Chunk: Identifiable {
+                // As an associated value of `DisplayedChatRow`, this supports comparing old and
+                // new same-ID rows so the collection view reconfigures only changed streaming content.
+                struct Chunk: Equatable, Identifiable {
                     let id: Int
+                    // TODO: Added solely for Equatable conformance
+                    let source: String
                     let markdown: MarkdownContent
                     let spacingBefore: Spacing
 
                     init(id: Int, source: String, spacingBefore: Spacing) {
                         self.id = id
+                        self.source = source
                         self.markdown = MarkdownContent(source)
                         self.spacingBefore = spacingBefore
+                    }
+
+                    static func == (lhs: Self, rhs: Self) -> Bool {
+                        lhs.id == rhs.id
+                            && lhs.source == rhs.source
+                            && lhs.spacingBefore == rhs.spacingBefore
                     }
 
                     /// The original Markdown margin that must be reconstructed before this chunk.
@@ -420,7 +431,7 @@ private extension AgentEvent.SystemEvent {
 /// Basically meaning: this is pretty much identical to `Turn.Row`, except that this:
 /// - Splits `Turn.Row.assistantMessage` into potentially multiple Markdown rows (for performance), depending on how big it is
 /// - Includes `turnSummary`, `turnInProgress`, and `turnFooter`, which are not actual `Message`s, but are derived from them.
-enum DisplayedChatRow: Identifiable {
+enum DisplayedChatRow: Equatable, Identifiable {
     case humanMessage(Turn.Row.HumanMessageRow)
     case assistantTextChunk(
         messageID: String,
@@ -527,6 +538,7 @@ enum ChatRowLayout {
     static let stackSpacing: CGFloat = 4
     static let horizontalPadding: CGFloat = 16
     static let interRowSpacing = stackSpacing
+    static let summaryHitTargetExpansion: CGFloat = 14
 
     static func calculatePadding(
         for row: DisplayedChatRow,
@@ -537,7 +549,7 @@ enum ChatRowLayout {
         case .humanMessage:
             return (12, 12)
         case .assistantTextChunk(_, let chunk, _):
-            // Markdown chunks and consecutive assistant messages are separate lazy-stack rows.
+            // Markdown chunks and consecutive assistant messages are separate rendered rows.
             // Look ahead so adjacent assistant text shares one outer message margin.
             let shouldCollapseBottomPadding = if index < rows.index(before: rows.endIndex) {
                 switch rows[index + 1] {
@@ -558,8 +570,8 @@ enum ChatRowLayout {
     }
 }
 
-/// A physical chat row with the outer lazy-stack spacing already resolved.
-struct DisplayedChatRowWithPadding: Identifiable {
+/// A physical chat row with its outer renderer spacing already resolved.
+struct DisplayedChatRowWithPadding: Equatable, Identifiable {
     let content: DisplayedChatRow
     let topPadding: CGFloat
     let bottomPadding: CGFloat
@@ -568,10 +580,10 @@ struct DisplayedChatRowWithPadding: Identifiable {
 }
 
 extension Array where Element == Turn {
-    /// Flattens the turns and assistant Markdown chunks into the rows consumed by `ChatRows`.
+    /// Flattens the turns and assistant Markdown chunks into the rows consumed by the chat renderer.
     ///
-    /// The progress indicator and spacing are inserted here so each element in the lazy
-    /// stack's `ForEach` always produces exactly one configured view.
+    /// Progress and spacing are inserted here so each collection item represents exactly one
+    /// hosted view, including the active turn state.
     func flattenedChatRows(
         activeTurnID: Turn.ID?,
         expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
