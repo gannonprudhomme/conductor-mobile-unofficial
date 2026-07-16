@@ -41,7 +41,7 @@ public struct Chat: Sendable {
         var displayedContentRevision = 0
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
 
-        /// The turns + parsed rows (e.g. `Message.content` -> `CodexEvent`)
+        /// The turns + parsed rows (e.g. `Message.content` -> `AgentEvent`)
         ///
         /// We store this as this is *really* the source of truth in a sense for the rows we display.
         /// Whereas ``rows`` below may not contain all possible message rows, e.g. rows that are collapsible behind a "turn summary".
@@ -581,6 +581,8 @@ struct ChatView: View {
                 TurnSummaryRowView(summary: summary) {
                     turnSummaryTapped(summary.id)
                 }
+            case .turnFooter(let footer):
+                TurnCompletedFooterRowView(footer: footer)
             }
         }
     }

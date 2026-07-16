@@ -962,6 +962,7 @@ private enum DisplayedRowProjection: Equatable {
     case assistant(id: String)
     case turnInProgress(id: String, startedAt: Date)
     case turnSummary(id: String, isExpanded: Bool)
+    case turnFooter(id: String)
 
     init(_ row: DisplayedChatRowWithPadding) {
         self.init(row.content)
@@ -977,6 +978,8 @@ private enum DisplayedRowProjection: Equatable {
             .turnInProgress(id: progress.id, startedAt: progress.startedAt)
         case .turnSummary(let summary):
             .turnSummary(id: summary.id, isExpanded: summary.isExpanded)
+        case .turnFooter(let footer):
+            .turnFooter(id: footer.id)
         }
     }
 }

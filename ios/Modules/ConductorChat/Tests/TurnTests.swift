@@ -34,9 +34,13 @@ struct TurnTests {
             from: Data(Self.completeTurnJSON.utf8)
         )
         let startedAt = try #require(messages.first?.sentAt)
+        let finishedAt = try #require(messages.last?.sentAt)
+        let turns = Turn.parse(messages: messages)
+
+        #expect(try #require(turns.first).finishedAt == finishedAt)
 
         expectNoDifference(
-            Turn.parse(messages: messages).map(\.testProjection),
+            turns.map(\.testProjection),
             [
                 TurnProjection(
                     id: "42a0e1cf-2f00-47fb-9f60-e3192a155ac4",
@@ -488,6 +492,42 @@ struct TurnTests {
         )
     }
 
+    @Test("Completed turn footer copies the full final message across Markdown chunks")
+    func completedTurnFooter() throws {
+        let source = (1...3)
+            .map { "## Section \($0)\n\n" + String(repeating: "a", count: 700) }
+            .joined(separator: "\n\n")
+        let turn = Turn(
+            id: "turn-1",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            finishedAt: Date(timeIntervalSince1970: 1_024),
+            rows: [
+                .assistantMessage(
+                    .text(
+                        messageID: "final",
+                        content: .init(source),
+                        isMostRecentTextInTurn: true
+                    )
+                ),
+            ]
+        )
+        let rows = [turn].flattenedChatRows(activeTurnID: nil)
+        let footerRow = try #require(rows.last)
+        let finalMessageRow = try #require(rows.dropLast().last)
+        guard case let .turnFooter(footer) = footerRow.content else {
+            Issue.record("Expected a completed turn footer")
+            return
+        }
+
+        #expect(rows.dropLast().count > 1)
+        #expect(finalMessageRow.bottomPadding == 0)
+        #expect(footerRow.topPadding == 8)
+        #expect(footerRow.bottomPadding == 12)
+        #expect(footer.id == turn.id)
+        #expect(footer.elapsedTime == 24)
+        #expect(footer.copyableText == source)
+    }
+
     @Test("Completed turns derive independently expandable segments in source order")
     func completedTurnProjection() {
         let human1 = Turn.Row.humanMessageRow(.init(id: "human-1", content: "Build it"))
@@ -721,7 +761,87 @@ struct TurnTests {
                 "human:human",
                 "summary:active:human",
                 "assistant:continuation:chunk:0",
+                "turn-footer:active",
             ]
+        )
+    }
+
+    @Test("A continuation interrupted after an earlier result has no footer")
+    func interruptedContinuation() throws {
+        let turnID = "interrupted"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Start", turnID: turnID),
+            makeEventMessage(
+                id: "first",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"First response"}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "result",
+                event: #"{"type":"result","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "continuation",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Still working"}]}}"#,
+                turnID: turnID
+            ),
+        ]
+        let turns = Turn.parse(messages: messages)
+
+        #expect(try #require(turns.first).finishedAt == nil)
+        #expect(
+            !turns.flattenedChatRows(activeTurnID: nil)
+                .map(\.id)
+                .contains("turn-footer:\(turnID)")
+        )
+    }
+
+    @Test("An idle system event after a result preserves the completed footer")
+    func idleSystemEventAfterResult() throws {
+        try expectCompletedFooter(
+            after: #"{"type":"system","subtype":"session_state_changed","state":"idle"}"#,
+            eventID: "idle"
+        )
+    }
+
+    @Test("A tool result after a result preserves the completed footer")
+    func toolResultAfterResult() throws {
+        try expectCompletedFooter(
+            after: #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"item_1","content":"done","is_error":false}]}}"#,
+            eventID: "tool-result"
+        )
+    }
+
+    private func expectCompletedFooter(after event: String, eventID: String) throws {
+        let turnID = "completed"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Finish", turnID: turnID),
+            makeEventMessage(
+                id: "assistant",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Final response"}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "result",
+                event: #"{"type":"result","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(id: eventID, event: event, turnID: turnID),
+        ]
+        let footerRow = try #require(
+            Turn.parse(messages: messages)
+                .flattenedChatRows(activeTurnID: nil)
+                .last
+        )
+        guard case let .turnFooter(footer) = footerRow.content else {
+            Issue.record("Expected a completed turn footer")
+            return
+        }
+
+        expectNoDifference(
+            footer,
+            .init(id: turnID, elapsedTime: 0, copyableText: "Final response")
         )
     }
 
@@ -1061,6 +1181,7 @@ private enum DisplayedRowProjection: Equatable {
     case assistant(id: String)
     case turnInProgress(id: String)
     case summary(rowID: String, summary: DisplayedChatRow.TurnSummary)
+    case footer(DisplayedChatRow.TurnFooter)
 
     init(_ row: DisplayedChatRowWithPadding) {
         self.init(row.content)
@@ -1076,6 +1197,8 @@ private enum DisplayedRowProjection: Equatable {
             .turnInProgress(id: progress.id)
         case .turnSummary(let summary):
             .summary(rowID: row.id, summary: summary)
+        case .turnFooter(let footer):
+            .footer(footer)
         }
     }
 }

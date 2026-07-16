@@ -1,5 +1,5 @@
 //
-//  CodexEventTests.swift
+//  AgentEventTests.swift
 //  ConductorMobileDataTests
 //
 //  Created by Gannon Prudomme on 7/12/26.
@@ -10,15 +10,15 @@ import Foundation
 @testable import ConductorMobileData
 import Testing
 
-@Suite("Codex event decoding")
-struct CodexEventTests {
+@Suite("Agent event decoding")
+struct AgentEventTests {
     @Test("Assistant events decode every observed content block")
     func assistantEvents() throws {
         let events = try [
             #"{"type":"assistant","session_id":"019cb186-53df-7aa0-9361-725d0c70a4fb","message":{"role":"assistant","content":[{"type":"text","text":"Ready."}]}}"#,
             #"{"type":"assistant","session_id":"019c5efa-3487-7500-8305-914f0ec7e314","message":{"role":"assistant","content":[{"type":"thinking","thinking":"[reasoning text intentionally omitted]"}]}}"#,
             #"{"type":"assistant","session_id":"019cc647-f80f-74b3-815d-9d7ec5d66392","message":{"role":"assistant","content":[{"type":"tool_use","id":"item_1","name":"Bash","input":{"command":"pwd"}}]}}"#,
-        ].map(decodeCodexEvent)
+        ].map(decodeAgentEvent)
 
         expectNoDifference(
             events,
@@ -65,7 +65,7 @@ struct CodexEventTests {
         let events = try [
             #"{"type":"user","session_id":"019c5eec-0a6f-73b3-a7d2-0c5fd960f6f6","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"item_2","content":"","is_error":false}]}}"#,
             #"{"type":"user","session_id":"019cc69b-6178-7582-88c8-17c7d39db9aa","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"item_94","content":"  PID COMMAND\n","is_error":true}]}}"#,
-        ].map(decodeCodexEvent)
+        ].map(decodeAgentEvent)
 
         expectNoDifference(
             events,
@@ -104,9 +104,20 @@ struct CodexEventTests {
             #"{"type":"system","session_id":"019c5eec-0a6f-73b3-a7d2-0c5fd960f6f6"}"#,
             #"{"type":"system","subtype":"status","status":"compacting","session_id":"019ed317-f1d4-7e90-b540-5ba1c687b2b5"}"#,
             #"{"type":"system","subtype":"compact_boundary","session_id":"019eff98-3912-7a00-81ce-f11cfd862e6f","content":"Compacted from 143,300 to 4,499 tokens"}"#,
-        ].map(decodeCodexEvent)
+            #"{"type":"system","subtype":"session_state_changed","state":"running"}"#,
+            #"{"type":"system","subtype":"session_state_changed","state":"idle"}"#,
+        ].map(decodeAgentEvent)
 
-        expectNoDifference(events, [.system, .system, .system])
+        expectNoDifference(
+            events,
+            [
+                .system(.init(subtype: nil, state: nil)),
+                .system(.init(subtype: .status, state: nil)),
+                .system(.init(subtype: .compactBoundary, state: nil)),
+                .system(.init(subtype: .sessionStateChanged, state: .running)),
+                .system(.init(subtype: .sessionStateChanged, state: .idle)),
+            ]
+        )
     }
 
     @Test("Result events decode with and without SDK metadata")
@@ -135,7 +146,7 @@ struct CodexEventTests {
               }
             }
             """,
-        ].map(decodeCodexEvent)
+        ].map(decodeAgentEvent)
 
         expectNoDifference(
             events,
@@ -162,7 +173,7 @@ struct CodexEventTests {
             #"{"type":"error","content":"aborted by user"}"#,
             #"{"type":"error","session_id":"019f4a3a-c655-7292-8f58-27b5ee411796","content":"Selected model is at capacity. Please try a different model.","willRetry":false,"errorInfo":"serverOverloaded"}"#,
             #"{"type":"error","session_id":"019f49e6-34e1-7fe3-bbfa-2d011e16f4c7","content":"Reconnecting... 2/5","willRetry":true,"errorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"request timed out"}"#,
-        ].map(decodeCodexEvent)
+        ].map(decodeAgentEvent)
 
         expectNoDifference(
             events,
@@ -204,13 +215,13 @@ struct CodexEventTests {
 
     @Test("Unknown event and content types retain their complete JSON")
     func unknownValues() throws {
-        let event = try decodeCodexEvent(
+        let event = try decodeAgentEvent(
             #"{"type":"future_event","payload":{"enabled":true,"count":2}}"#
         )
-        let assistantEvent = try decodeCodexEvent(
+        let assistantEvent = try decodeAgentEvent(
             #"{"type":"assistant","message":{"content":[{"type":"future_block","value":42}]}}"#
         )
-        let userEvent = try decodeCodexEvent(
+        let userEvent = try decodeAgentEvent(
             #"{"type":"user","message":{"content":[{"type":"future_result","value":42}]}}"#
         )
 
@@ -288,12 +299,12 @@ struct CodexEventTests {
 
         for event in invalidEvents {
             #expect(throws: DecodingError.self) {
-                try decodeCodexEvent(event)
+                try decodeAgentEvent(event)
             }
         }
     }
 }
 
-private func decodeCodexEvent(_ json: String) throws -> CodexEvent {
-    try JSONDecoder().decode(CodexEvent.self, from: Data(json.utf8))
+private func decodeAgentEvent(_ json: String) throws -> AgentEvent {
+    try JSONDecoder().decode(AgentEvent.self, from: Data(json.utf8))
 }

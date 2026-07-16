@@ -1,5 +1,5 @@
 //
-//  CodexEvent.swift
+//  AgentEvent.swift
 //  ConductorMobileData
 //
 //  Created by Gannon Prudomme on 7/10/26.
@@ -7,28 +7,31 @@
 
 import Foundation
 
-/// Parsed from ``Message/content`` whenever ``Message/role`` == ``Message/Role/assistant`` && {something}
-public enum CodexEvent: Decodable, Equatable {
+/// A normalized agent protocol event stored in ``Message/content`` for assistant-role rows.
+///
+/// Conductor stores Claude and Codex output in this shared envelope before the mobile sidecar
+/// relays each message unchanged. Some system subtypes remain specific to one agent runtime.
+public enum AgentEvent: Decodable, Equatable {
     case assistant(AssistantEvent)
     case user(UserEvent)
-    case system
+    case system(SystemEvent)
     /// The turn finished
     case result(ResultEvent)
     /// Failure or retry status
     case error(ErrorEvent)
     case unknown([String: JSONValue])
-    
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(EventType.self, forKey: .type)
-        
+
         switch type {
         case .assistant:
             self = .assistant(try AssistantEvent(from: decoder))
         case .user:
             self = .user(try UserEvent(from: decoder))
         case .system:
-            self = .system
+            self = .system(try SystemEvent(from: decoder))
         case .result:
             self = .result(try ResultEvent(from: decoder))
         case .error:
@@ -41,7 +44,7 @@ public enum CodexEvent: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case type
     }
-    
+
     public struct EventType: Codable, Hashable, RawRepresentable, Sendable {
         public var rawValue: String
 
@@ -55,28 +58,28 @@ public enum CodexEvent: Decodable, Equatable {
         public static let result = Self(rawValue: "result")
         public static let error = Self(rawValue: "error")
     }
-    
+
     public struct AssistantEvent: Decodable, Hashable, Sendable {
         // public let type: EventType
         // public let sessionID: String?
         public let message: AssistantMessage
-        
+
         /// `Message.content(parsed).message`
         public struct AssistantMessage: Decodable, Hashable, Sendable {
             // public let role: Role // Doubt we need this, it's the same thing as the `type`
             public let content: [AssistantMessageContent]
-            
+
             public enum AssistantMessageContent: Decodable, Hashable, Sendable {
                 case text(TextBlock)
                 case thinking(ThinkingBlock)
                 case toolUse(ToolUseBlock)
                 // TODO: This makes me wonder if we should be doing the struct approach? but idk
                 case unknown([String: JSONValue])
-                
+
                 public init(from decoder: any Decoder) throws {
-                    let container = try decoder.container(keyedBy: CodexEvent.AssistantEvent.AssistantMessage.AssistantMessageContent.CodingKeys.self)
+                    let container = try decoder.container(keyedBy: AgentEvent.AssistantEvent.AssistantMessage.AssistantMessageContent.CodingKeys.self)
                     let type = try container.decode(AssistantMessageContentType.self, forKey: .type)
-                    
+
                     switch type {
                     case .text:
                         self = .text(try TextBlock(from: decoder))
@@ -88,43 +91,43 @@ public enum CodexEvent: Decodable, Equatable {
                         self = .unknown(try [String: JSONValue].init(from: decoder))
                     }
                 }
-                
+
                 public struct TextBlock: Codable, Hashable, Sendable {
                     // public let type: AssistantMessageContentType
                     public let text: String
                 }
-                
+
                 public struct ThinkingBlock: Codable, Hashable, Sendable {
                     // public let type: AssistantMessageContentType
                     public let thinking: String
                 }
-                
+
                 public struct ToolUseBlock: Codable, Hashable, Sendable/*, Identifiable*/ {
                     // public let type: AssistantMessageContentType
-                    
+
                     /// `id` is important! It is used to match up with a `user` (aka environment) `ToolResultBlock.toolUseID`
                     /// Aka to match usage of a tool -> result of the tool
                     public let id: String
                     public let name: String
                     public let input: [String: JSONValue]
                 }
-                
+
                 private struct AssistantMessageContentType: Codable, Hashable, RawRepresentable {
                     let rawValue: String
-                    
+
                     static let text = Self(rawValue: "text")
                     static let thinking = Self(rawValue: "thinking")
                     static let toolUse = Self(rawValue: "tool_use")
                 }
-                
+
                 private enum CodingKeys: String, CodingKey {
                     case type
                 }
-                
+
             }
         }
     }
-    
+
     public struct UserEvent: Decodable, Hashable, Sendable {
         // public let type: EventType // Don't need it
         public let sessionID: String?
@@ -134,19 +137,19 @@ public enum CodexEvent: Decodable, Equatable {
             case sessionID = "session_id"
             case message
         }
-        
+
         public struct UserMessage: Decodable, Hashable, Sendable {
             // public let role: Role
             public let content: [UserMessageContent]
-            
+
             public enum UserMessageContent: Decodable, Hashable, Sendable {
                 case toolResult(ToolResultBlock)
                 case unknown([String: JSONValue])
-                
+
                 public init(from decoder: any Decoder) throws {
-                    let container = try decoder.container(keyedBy: CodexEvent.UserEvent.UserMessage.UserMessageContent.CodingKeys.self)
+                    let container = try decoder.container(keyedBy: AgentEvent.UserEvent.UserMessage.UserMessageContent.CodingKeys.self)
                     let type = try container.decode(UserMessageContentType.self, forKey: .type)
-                    
+
                     switch type {
                     case .toolResult:
                         self = .toolResult(try ToolResultBlock(from: decoder))
@@ -160,7 +163,7 @@ public enum CodexEvent: Decodable, Equatable {
                     public let toolUseID: String
                     public let content: String
                     public let isError: Bool
-                    
+
                     private enum CodingKeys: String, CodingKey {
                         // case type
                         case toolUseID = "tool_use_id"
@@ -168,81 +171,91 @@ public enum CodexEvent: Decodable, Equatable {
                         case isError = "is_error"
                     }
                 }
-                
+
                 private struct UserMessageContentType: RawRepresentable, Codable, Hashable {
                     let rawValue: String
-                    
+
                     static let toolResult = Self(rawValue: "tool_result")
                 }
-                
+
                 private enum CodingKeys: String, CodingKey {
                     case type
                 }
             }
         }
     }
-    
-    /*
-    public enum SystemEvent: Decodable, Hashable, Sendable {
-        /**
-         ```
-         {
-           "type": "system",
-           "session_id": "019c5eec-0a6f-73b3-a7d2-0c5fd960f6f6"
-         }
-         ```
-         */
-         case lifecyleMarker(sessionID: String) // fuck if I know
-        /**
-         ```
-         {
-           "type": "system",
-           "subtype": "status",
-           "status": "compacting",
-           "session_id": "019ed317-f1d4-7e90-b540-5ba1c687b2b5"
-         }
-         ```
-         */
-        case compacting
-        /**
-         ```
-         {
-           "type": "system",
-           "subtype": "compact_boundary",
-           "session_id": "019eff98-3912-7a00-81ce-f11cfd862e6f",
-           "content": "Compacted from 143,300 to 4,499 tokens"
-         }
-         ```
-         */
-        case compactBoundary
-        case unknown([String: JSONValue])
+
+    public struct SystemEvent: Decodable, Hashable, Sendable {
+        public let subtype: Subtype?
+        public let state: State?
+
+        public struct Subtype: Codable, Hashable, RawRepresentable, Sendable {
+            public var rawValue: String
+
+            public init(rawValue: String) {
+                self.rawValue = rawValue
+            }
+
+            /// The agent session initialized with its model, tools, skills, and MCP configuration.
+            public static let initialization = Self(rawValue: "init")
+            /// Runtime status changed, such as beginning compaction or changing permission mode.
+            public static let status = Self(rawValue: "status")
+            /// Compaction finished and the preceding context was replaced by a summary.
+            public static let compactBoundary = Self(rawValue: "compact_boundary")
+            /// Claude reported an updated estimate of tokens used by its current thinking block.
+            public static let thinkingTokens = Self(rawValue: "thinking_tokens")
+            /// Claude started a local agent or shell task.
+            public static let taskStarted = Self(rawValue: "task_started")
+            /// A Claude subagent reported its latest tool and token usage while running.
+            public static let taskProgress = Self(rawValue: "task_progress")
+            /// A background Claude task completed or failed and published its result location.
+            public static let taskNotification = Self(rawValue: "task_notification")
+            /// A Claude task changed status or moved between foreground and background execution.
+            public static let taskUpdated = Self(rawValue: "task_updated")
+            /// The agent session moved between running, idle, and waiting for user action.
+            public static let sessionStateChanged = Self(rawValue: "session_state_changed")
+        }
+
+        public struct State: Codable, Hashable, RawRepresentable, Sendable {
+            public var rawValue: String
+
+            public init(rawValue: String) {
+                self.rawValue = rawValue
+            }
+
+            /// The agent is actively processing a turn.
+            public static let running = Self(rawValue: "running")
+            /// The agent has no active turn.
+            public static let idle = Self(rawValue: "idle")
+            /// The agent paused until the user answers a prompt or grants permission.
+            public static let requiresAction = Self(rawValue: "requires_action")
+        }
     }
-    */
-    
+
     public struct ResultEvent: Decodable, Hashable, Sendable {
         // public let type: EventType
         public let sessionID: String?
         public let usage: Usage
         // public let conductorSDKMetadata: JSONValue
-        
+
         public struct Usage: Codable, Hashable, Sendable {
             public let inputTokens: Int
             public let outputTokens: Int
             public let cacheReadInputTokens: Int
-            
+
             private enum CodingKeys: String, CodingKey {
                 case inputTokens = "input_tokens"
                 case outputTokens = "output_tokens"
                 case cacheReadInputTokens = "cache_read_input_tokens"
             }
         }
-        
+
         private enum CodingKeys: String, CodingKey {
             case sessionID = "session_id"
             case usage
         }
     }
-    
+
     // TODO: Feel like there's a better way to represent this (e.g. an enum), but might be better for the layer above (reducer)
     public struct ErrorEvent: Decodable, Hashable, Sendable {
         // public let type: EventType
@@ -251,7 +264,7 @@ public enum CodexEvent: Decodable, Equatable {
         public let errorInfo: JSONValue?
         public let additionalDetails: String?
         public let willRetry: Bool?
-        
+
         private enum CodingKeys: String, CodingKey {
             // case type
             case sessionID = "session_id"
@@ -261,15 +274,15 @@ public enum CodexEvent: Decodable, Equatable {
             case willRetry
         }
     }
-    
+
     /*
     public struct Role: RawRepresentable, Codable, Hashable, Sendable {
         public let rawValue: String
-        
+
         public init(rawValue: String) {
             self.rawValue = rawValue
         }
-        
+
         public static let assistant = Self(rawValue: "assistant")
         public static let user = Self(rawValue: "user")
     }

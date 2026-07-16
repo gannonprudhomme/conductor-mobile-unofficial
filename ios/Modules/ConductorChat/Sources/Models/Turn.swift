@@ -19,6 +19,7 @@ import MarkdownUI
 struct Turn: Identifiable {
     let id: String
     let startedAt: Date
+    private(set) var finishedAt: Date? = nil
     private(set) var rows: [Row]
     
     /// The first parsed representation of a parsed ``Message``
@@ -46,8 +47,9 @@ struct Turn: Identifiable {
 
             /// Parsed when an assistant message's source changes, then reused by later snapshots.
             struct TextContent {
-                /// Retained only to decide whether the next snapshot can reuse these parsed chunks.
-                private let source: String
+                /// The complete Markdown source, retained independently of its render chunks so
+                /// copying the final message never loses content at a lazy-row boundary.
+                let source: String
                 let chunks: [Chunk]
 
                 init(_ source: String) {
@@ -154,7 +156,7 @@ struct Turn: Identifiable {
                 case mcp(toolUseID: String, name: String)
                 case unknown(toolUseID: String, name: String, input: [String: JSONValue])
       
-                init(from toolUseBlock: CodexEvent.AssistantEvent.AssistantMessage.AssistantMessageContent.ToolUseBlock) {
+                init(from toolUseBlock: AgentEvent.AssistantEvent.AssistantMessage.AssistantMessageContent.ToolUseBlock) {
                     let (toolUseID, input) = (toolUseBlock.id, toolUseBlock.input)
                     let unknown = Self.unknown(toolUseID: toolUseID, name: toolUseBlock.name, input: toolUseBlock.input)
                     
@@ -270,24 +272,43 @@ extension Turn {
                 }
             }
 
-        let turnRows: [(turnID: String, startedAt: Date, row: Turn.Row)] = messages.compactMap { message in
+        var turns: [Turn] = []
+        var indexByTurnID: [String: Int] = [:]
+        var mostRecentTextRowIndexByTurnID: [String: Int] = [:]
+
+        for message in messages {
             guard let role = message.role, let content = message.content, let turnID = message.turnID else {
                 reportIssue("message.content was nil for \(message)")
-                return nil
+                continue
             }
 
-            let startedAt = message.sentAt ?? message.createdAt
+            let occurredAt = message.sentAt ?? message.createdAt
+            let existingTurnIndex = indexByTurnID[turnID]
+            let row: Row
 
             switch role {
             case .user:
-                let row = Turn.Row.HumanMessageRow(id: message.id, content: content)
+                if let existingTurnIndex {
+                    turns[existingTurnIndex].finishedAt = nil
+                }
 
-                return (turnID: turnID, startedAt: startedAt, row: Turn.Row.humanMessageRow(row))
+                row = .humanMessageRow(.init(id: message.id, content: content))
             case .assistant:
                 do {
-                    let codexEvent: CodexEvent = try JSONDecoder().decode(CodexEvent.self, from: Data(content.utf8))
+                    let agentEvent: AgentEvent = try JSONDecoder().decode(AgentEvent.self, from: Data(content.utf8))
 
-                    let row: Turn.Row.AssistantMessage? = switch codexEvent {
+                    if case .result = agentEvent {
+                        if let existingTurnIndex {
+                            turns[existingTurnIndex].finishedAt = occurredAt
+                        }
+                        continue
+                    }
+
+                    if agentEvent.isContinuationActivity, let existingTurnIndex {
+                        turns[existingTurnIndex].finishedAt = nil
+                    }
+
+                    let assistantRow: Row.AssistantMessage? = switch agentEvent {
                     case .assistant(let assistantEvent):
                         if let firstContent = assistantEvent.message.content.first {
                             switch firstContent {
@@ -310,36 +331,30 @@ extension Turn {
                         }
                     case .error(let errorEvent):
                         .error(messageID: message.id, message: errorEvent.content)
-                    case .user, .system, .result, .unknown:
+                    case .user, .system, .unknown, .result:
                         nil
                     }
 
-                    guard let row else {
-                        return nil
+                    guard let assistantRow else {
+                        continue
                     }
 
-                    return (turnID: turnID, startedAt: startedAt, row: Turn.Row.assistantMessage(row))
+                    row = .assistantMessage(assistantRow)
                 } catch {
-                    reportIssue("Couldn't decode CodexEvent with error: \(error)")
-                    return nil
+                    reportIssue("Couldn't decode AgentEvent with error: \(error)")
+                    continue
                 }
             default:
-                return nil
+                continue
             }
-        }
-        
-        var turns: [Turn] = []
-        var indexByTurnID: [String: Int] = [:]
-        var mostRecentTextRowIndexByTurnID: [String: Int] = [:]
 
-        for (turnID, startedAt, row) in turnRows {
             let turnIndex: Int
-            if let index = indexByTurnID[turnID] {
-                turnIndex = index
+            if let existingTurnIndex {
+                turnIndex = existingTurnIndex
             } else {
                 turnIndex = turns.count
                 indexByTurnID[turnID] = turnIndex
-                turns.append(Turn(id: turnID, startedAt: startedAt, rows: []))
+                turns.append(Turn(id: turnID, startedAt: occurredAt, rows: []))
             }
 
             // Store whether each text row is the turn's most recent so rendering remains O(1),
@@ -363,6 +378,39 @@ extension Turn {
     }
 }
 
+private extension AgentEvent {
+    /// Whether this event proves the agent resumed work after an earlier result.
+    /// Continuation activity invalidates that result's completion time, while passive lifecycle
+    /// and bookkeeping events can arrive afterward without reopening the turn.
+    var isContinuationActivity: Bool {
+        switch self {
+        case .assistant, .error, .unknown:
+            true
+        case .system(let event):
+            event.isContinuationActivity
+        case .user, .result:
+            false
+        }
+    }
+}
+
+private extension AgentEvent.SystemEvent {
+    var isContinuationActivity: Bool {
+        guard let subtype else {
+            return true
+        }
+
+        return switch subtype {
+        case .sessionStateChanged:
+            state == .running
+        case .thinkingTokens, .taskStarted, .taskProgress, .taskNotification, .taskUpdated:
+            false
+        default:
+            true
+        }
+    }
+}
+
 /// One physical row in the outer `LazyVStack`.
 ///
 /// `Turn.Row` preserves the logical message structure, where one assistant text message owns every Markdown chunk.
@@ -370,7 +418,7 @@ extension Turn {
 ///
 /// Basically meaning: this is pretty much identical to `Turn.Row`, except that this:
 /// - Splits `Turn.Row.assistantMessage` into potentially multiple Markdown rows (for performance), depending on how big it is
-/// - Includes `turnSummary` and `turnInProgress` which are not actual `Message`s, but are derived from them.
+/// - Includes `turnSummary`, `turnInProgress`, and `turnFooter`, which are not actual `Message`s, but are derived from them.
 enum DisplayedChatRow: Identifiable {
     case humanMessage(Turn.Row.HumanMessageRow)
     case assistantTextChunk(
@@ -382,6 +430,13 @@ enum DisplayedChatRow: Identifiable {
     case assistantError(messageID: String, message: String)
     case turnInProgress(Turn.Row.TurnInProgress)
     case turnSummary(TurnSummary)
+    case turnFooter(TurnFooter)
+
+    struct TurnFooter: Equatable, Identifiable {
+        let id: Turn.ID
+        let elapsedTime: TimeInterval
+        let copyableText: String
+    }
 
     struct TurnSummary: Equatable, Identifiable {
         let id: String
@@ -435,6 +490,8 @@ enum DisplayedChatRow: Identifiable {
             "turn-in-progress:\(row.id)"
         case .turnSummary(let summary):
             "summary:\(summary.id)"
+        case .turnFooter(let footer):
+            "turn-footer:\(footer.id)"
         }
     }
 }
@@ -481,17 +538,19 @@ enum ChatRowLayout {
         case .assistantTextChunk(_, let chunk, _):
             // Markdown chunks and consecutive assistant messages are separate lazy-stack rows.
             // Look ahead so adjacent assistant text shares one outer message margin.
-            let isFollowedByAssistantText = if index < rows.index(before: rows.endIndex) {
+            let shouldCollapseBottomPadding = if index < rows.index(before: rows.endIndex) {
                 switch rows[index + 1] {
-                case .assistantTextChunk: true
+                case .assistantTextChunk, .turnFooter: true
                 default: false
                 }
             } else {
                 false
             }
-            return (chunk.id == 0 ? 8 : 0, isFollowedByAssistantText ? 0 : 8)
+            return (chunk.id == 0 ? 8 : 0, shouldCollapseBottomPadding ? 0 : 8)
         case .assistantToolCall:
             return (0, 4)
+        case .turnFooter:
+            return (8, 0)
         case .assistantError, .turnInProgress, .turnSummary:
             return (0, 0)
         }
@@ -529,6 +588,8 @@ extension Array where Element == Turn {
                         .init(id: turn.id, startedAt: turn.startedAt)
                     ),
                 ]
+            } else if let footer = turn.completedTurnFooter() {
+                projectedRows + [.turnFooter(footer)]
             } else {
                 projectedRows
             }
@@ -551,6 +612,27 @@ extension Array where Element == Turn {
 }
 
 extension Turn {
+    fileprivate func completedTurnFooter() -> DisplayedChatRow.TurnFooter? {
+        guard let finishedAt else {
+            return nil
+        }
+
+        for row in rows.reversed() {
+            guard case let .assistantMessage(.text(_, content, _)) = row,
+                  !content.source.isEmpty else {
+                continue
+            }
+
+            return .init(
+                id: id,
+                elapsedTime: max(0, finishedAt.timeIntervalSince(startedAt)),
+                copyableText: content.source
+            )
+        }
+
+        return nil
+    }
+
     /// Projects this turn's logical message rows into the physical rows consumed by `ChatRows`.
     ///
     /// `flattenedChatRows(activeTurnID:expandedSummaryIDs:)` calls this whenever `Chat.State`
