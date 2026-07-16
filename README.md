@@ -63,7 +63,7 @@ Press `Install proxy`, restart Conductor, and make sure `Bridge running` says `R
 
 ## Setup
 
-When you open the iOS app it'll immediately open the Settings screen in order to connect to your Mac. You can use your laptop's local IP address if you only want access over LAN, but assuming you want to install it remotely I recommend installing [Tailscale](https://tailscale.com/), it's free and _very_ easy to set up.
+When you open the iOS app it'll immediately open the Settings screen in order to connect to your Mac. You can use your laptop's local IP address if you only want access over LAN. Howveer, assuming you want to access Conductor remotely, I recommend installing [Tailscale](https://tailscale.com/). It's free and quick & easy to setup.
 
 1. Download Tailscale on your iPhone and Mac, sign in on both devices, and turn it on on both
   a. It's recommended to enable `VPN on Demand` on the iOS app.
