@@ -5,7 +5,11 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import Accessibility
+import AppKit
 import ConductorBridge
+import ConductorMobileServer
+import Dependencies
 import Observation
 import SharedConductorDesign
 import SwiftUI
@@ -18,6 +22,9 @@ private final class SidecarProxyModel {
     var isBridgeMutationInFlight = false
 
     private let installer = BridgeInstallerClient()
+    private let workspaceUIHookLoaderSource: String?
+    @ObservationIgnored
+    @Dependency(\.workspaceUIHook) private var workspaceUIHook
 
     func monitorBridgeStatus() async {
         while !Task.isCancelled {
@@ -179,4 +186,13 @@ struct SidecarProxyView: View {
             .fill(.theme(.border))
             .frame(height: 1)
     }
+}
+
+#Preview("Sidecar proxy") {
+    SidecarProxyView(
+        startupErrorMessage: nil,
+        workspaceUIHookLoaderSource: "preview loader",
+        shouldMonitorBridgeStatus: false
+    )
+    .frame(width: 800, height: 600)
 }

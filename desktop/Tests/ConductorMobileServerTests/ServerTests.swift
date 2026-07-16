@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import Dependencies
 import Foundation
 import HummingbirdTesting
 import HummingbirdWSClient
@@ -62,165 +63,169 @@ struct ServerTests {
             )
         }
         let database = try ConductorDatabase.open(at: databaseURL)
-        let application = Server.makeApplication(
-            database: database,
-            port: 0,
-            allowedOrigin: "ws://localhost"
-        )
+        try await withDependencies {
+            $0.workspaceUIHook = .liveValue
+        } operation: {
+            let application = Server.makeApplication(
+                database: database,
+                port: 0,
+                allowedOrigin: "ws://localhost"
+            )
 
-        try await application.test(.live) { client in
-            try await client.execute(uri: "/ping", method: .get) { response in
-                #expect(response.status == .noContent)
-            }
-
-            for uri in [
-                "/sessions",
-                "/repositories",
-                "/workspaces",
-            ] {
-                try await client.execute(uri: uri, method: .get) { response in
-                    #expect(response.status == .notFound)
+            try await application.test(.live) { client in
+                try await client.execute(uri: "/ping", method: .get) { response in
+                    #expect(response.status == .noContent)
                 }
-            }
 
-            try await client.ws("/workspaces") { inbound, _, _ in
-                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
-                let initial = try decode(
-                    WorkspaceListSnapshot.self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(initial.repositories.map(\.id) == ["repository-1"])
-                #expect(initial.workspaces.count == 2)
-                #expect(
-                    initial.workspaces.first { $0.workspace.id == "workspace-iso" }?.isWorking
-                        == true
-                )
+                for uri in [
+                    "/sessions",
+                    "/repositories",
+                    "/workspaces",
+                ] {
+                    try await client.execute(uri: uri, method: .get) { response in
+                        #expect(response.status == .notFound)
+                    }
+                }
 
-                try await writer.write { database in
-                    try database.execute(
-                        sql: """
-                            UPDATE workspaces
-                            SET workspace_name = 'Renamed', updated_at = '2026-07-09T00:00:04Z'
-                            WHERE id = 'workspace-iso'
-                            """
+                try await client.ws("/workspaces") { inbound, _, _ in
+                    var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                    let initial = try decode(
+                        WorkspaceListSnapshot.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(initial.repositories.map(\.id) == ["repository-1"])
+                    #expect(initial.workspaces.count == 2)
+                    #expect(
+                        initial.workspaces.first { $0.workspace.id == "workspace-iso" }?.isWorking
+                            == true
+                    )
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: """
+                                UPDATE workspaces
+                                SET workspace_name = 'Renamed', updated_at = '2026-07-09T00:00:04Z'
+                                WHERE id = 'workspace-iso'
+                                """
+                        )
+                    }
+                    let changed = try decode(
+                        WorkspaceListSnapshot.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(
+                        changed.workspaces.first { $0.workspace.id == "workspace-iso" }?.workspace
+                            .workspaceName
+                            == "Renamed"
+                    )
+
+                    try await client.execute(
+                        uri: "/workspaces/workspace-iso",
+                        method: .patch,
+                        headers: [
+                            .contentType: "application/json",
+                            .origin: "ws://localhost",
+                        ],
+                        body: ByteBuffer(string: #"{"status":"in-review"}"#)
+                    ) { response in
+                        #expect(response.status == .accepted)
+                    }
+                    let fallback = try decode(
+                        WorkspaceListSnapshot.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(
+                        fallback.workspaces.first { $0.workspace.id == "workspace-iso" }?.workspace
+                            .manualStatus
+                            == Workspace.Status.inReview.rawValue
                     )
                 }
-                let changed = try decode(
-                    WorkspaceListSnapshot.self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(
-                    changed.workspaces.first { $0.workspace.id == "workspace-iso" }?.workspace
-                        .workspaceName
-                        == "Renamed"
-                )
 
+                try await client.ws("/workspaces/workspace-iso/sessions") { inbound, _, _ in
+                    var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                    let initial = try decode(
+                        [Session].self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(initial.map(\.id) == ["session-1"])
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: "UPDATE repos SET name = 'Unrelated' WHERE id = 'repository-1'"
+                        )
+                    }
+                    try await Task.sleep(for: .milliseconds(150))
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: """
+                                UPDATE sessions
+                                SET title = 'Updated', updated_at = '2026-07-09T00:00:05Z'
+                                WHERE id = 'session-1'
+                                """
+                        )
+                    }
+                    let changed = try decode(
+                        [Session].self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(changed.first?.title == "Updated")
+                }
+
+                try await client.ws(
+                    "/workspaces/workspace-iso/sessions/session-1/messages"
+                ) { inbound, _, _ in
+                    var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                    let initial = try decode(
+                        [Message].self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(initial.map(\.id) == ["message-1"])
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: """
+                                INSERT INTO session_messages (
+                                  id, session_id, role, content, created_at, sent_at
+                                ) VALUES (
+                                  'message-2', 'session-1', 'assistant', 'Done.',
+                                  '2026-07-09T00:00:06Z', '2026-07-09T00:00:07Z'
+                                )
+                                """
+                        )
+                    }
+                    let changed = try decode(
+                        [Message].self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(changed.map(\.id) == ["message-2"])
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: """
+                                UPDATE session_messages
+                                SET content = 'Updated.'
+                                WHERE id = 'message-1'
+                                """
+                        )
+                    }
+                    let updated = try decode(
+                        [Message].self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(updated.map(\.id) == ["message-1"])
+                    #expect(updated.first?.content == "Updated.")
+                }
+
+                #if canImport(AppKit)
                 try await client.execute(
-                    uri: "/workspaces/workspace-iso",
-                    method: .patch,
-                    headers: [
-                        .contentType: "application/json",
-                        .origin: "ws://localhost",
-                    ],
-                    body: ByteBuffer(string: #"{"status":"in-review"}"#)
+                    uri: "/repositories/repository-1/icon",
+                    method: .get
                 ) { response in
-                    #expect(response.status == .accepted)
+                    #expect(response.status == .ok)
                 }
-                let fallback = try decode(
-                    WorkspaceListSnapshot.self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(
-                    fallback.workspaces.first { $0.workspace.id == "workspace-iso" }?.workspace
-                        .manualStatus
-                        == Workspace.Status.inReview.rawValue
-                )
+                #endif
             }
-
-            try await client.ws("/workspaces/workspace-iso/sessions") { inbound, _, _ in
-                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
-                let initial = try decode(
-                    [Session].self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(initial.map(\.id) == ["session-1"])
-
-                try await writer.write { database in
-                    try database.execute(
-                        sql: "UPDATE repos SET name = 'Unrelated' WHERE id = 'repository-1'"
-                    )
-                }
-                try await Task.sleep(for: .milliseconds(150))
-
-                try await writer.write { database in
-                    try database.execute(
-                        sql: """
-                            UPDATE sessions
-                            SET title = 'Updated', updated_at = '2026-07-09T00:00:05Z'
-                            WHERE id = 'session-1'
-                            """
-                    )
-                }
-                let changed = try decode(
-                    [Session].self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(changed.first?.title == "Updated")
-            }
-
-            try await client.ws(
-                "/workspaces/workspace-iso/sessions/session-1/messages"
-            ) { inbound, _, _ in
-                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
-                let initial = try decode(
-                    [Message].self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(initial.map(\.id) == ["message-1"])
-
-                try await writer.write { database in
-                    try database.execute(
-                        sql: """
-                            INSERT INTO session_messages (
-                              id, session_id, role, content, created_at, sent_at
-                            ) VALUES (
-                              'message-2', 'session-1', 'assistant', 'Done.',
-                              '2026-07-09T00:00:06Z', '2026-07-09T00:00:07Z'
-                            )
-                            """
-                    )
-                }
-                let changed = try decode(
-                    [Message].self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(changed.map(\.id) == ["message-2"])
-
-                try await writer.write { database in
-                    try database.execute(
-                        sql: """
-                            UPDATE session_messages
-                            SET content = 'Updated.'
-                            WHERE id = 'message-1'
-                            """
-                    )
-                }
-                let updated = try decode(
-                    [Message].self,
-                    from: try #require(await iterator.next())
-                )
-                #expect(updated.map(\.id) == ["message-1"])
-                #expect(updated.first?.content == "Updated.")
-            }
-
-            #if canImport(AppKit)
-            try await client.execute(
-                uri: "/repositories/repository-1/icon",
-                method: .get
-            ) { response in
-                #expect(response.status == .ok)
-            }
-            #endif
         }
     }
 

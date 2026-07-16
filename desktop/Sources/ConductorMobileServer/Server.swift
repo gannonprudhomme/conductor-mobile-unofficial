@@ -12,9 +12,31 @@ import SharedConductorData
 import SQLiteData
 
 public enum Server {
-    /// Starts the server in the desktop app process.
-    public static func run(databaseURL: URL) async throws {
-        try await retryingServer(databaseURL: databaseURL, port: 3768)
+                try await retryingServer(name: "conductor-mobile-api") {
+                    let database = try ConductorDatabase.open(at: databaseURL)
+                    try await makeApplication(
+                        database: database,
+                        workspaceUIHookBroker: workspaceUIHookBroker,
+                        port: configuration.mobileAPIPort
+                    )
+                    .run()
+                }
+            }
+
+            group.addTask {
+                try await retryingServer(name: "workspace-ui-hook") {
+                    await workspaceUIHookBroker.listenerUnavailable()
+                } run: {
+                    try await makeWorkspaceUIHookApplication(
+                        broker: workspaceUIHookBroker,
+                        hookSource: workspaceUIHookSource,
+                        port: configuration.workspaceUIHookPort
+                    )
+                    .run()
+                }
+            }
+            try await group.waitForAll()
+        }
     }
 
     static func makeApplication( // only non-private for tests
@@ -147,21 +169,22 @@ public enum Server {
         )
     }
 
-    /// Opens Conductor's database and runs Hummingbird, retrying because Conductor may still be
-    /// starting or temporarily replacing its database.
-    private static func retryingServer(databaseURL: URL, port: Int) async throws {
+
+    private static func retryingServer(
+        name: String,
+        onFailure: @Sendable () async -> Void = {},
+        run: @Sendable () async throws -> Void
+    ) async throws {
+        // Both listeners recover from transient startup failures without restarting the companion.
         while !Task.isCancelled {
             do {
-                let database = try ConductorDatabase.open(at: databaseURL)
-                try await makeApplication(database: database, port: port).run()
+                try await run()
             } catch where Task.isCancelled {
                 throw CancellationError()
             } catch {
+                await onFailure()
                 FileHandle.standardError.write(
-                    Data(
-                        "conductor-mobile-server unavailable; retrying: \(error)\n"
-                            .utf8
-                    )
+                    Data("\(name) unavailable; retrying: \(error)\n".utf8)
                 )
                 try await Task.sleep(for: .seconds(2))
             }

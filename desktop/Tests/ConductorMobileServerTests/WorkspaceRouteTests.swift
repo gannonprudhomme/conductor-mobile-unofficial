@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/13/26.
 //
 
+import Dependencies
 import Foundation
 import HummingbirdTesting
 import NIOCore
@@ -18,8 +19,8 @@ struct WorkspaceRouteTests {
     @Test("Live mutations return only after Conductor persists them")
     func liveMutations() async throws {
         let (database, workspace, activeSession, _, _) = try await workspaceRouteDatabase()
-        let broker = WorkspaceUIHookBroker()
-        let connection = await broker.connect()
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
         let browser = Task {
             var events = connection.events.makeAsyncIterator()
 
@@ -49,24 +50,24 @@ struct WorkspaceRouteTests {
                     .execute(database)
             }
         }
-        let application = Server.makeApplication(
-            database: database,
-            workspaceUIHookBroker: broker
-        )
-
-        try await application.test(.router) { client in
-            for body in [
-                #"{"pinned":true}"#,
-                #"{"status":"in-review"}"#,
-                #"{"unread":true}"#,
-            ] {
-                try await client.execute(
-                    uri: "/workspaces/\(workspace.id)",
-                    method: .patch,
-                    body: ByteBuffer(string: body)
-                ) { response in
-                    #expect(response.status == .noContent)
-                    #expect(response.body.readableBytes == 0)
+        try await withDependencies {
+            $0.workspaceUIHook = uiHook
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                for body in [
+                    #"{"pinned":true}"#,
+                    #"{"status":"in-review"}"#,
+                    #"{"unread":true}"#,
+                ] {
+                    try await client.execute(
+                        uri: "/workspaces/\(workspace.id)",
+                        method: .patch,
+                        body: ByteBuffer(string: body)
+                    ) { response in
+                        #expect(response.status == .noContent)
+                        #expect(response.body.readableBytes == 0)
+                    }
                 }
             }
         }
@@ -87,22 +88,25 @@ struct WorkspaceRouteTests {
     func fallbackMutations() async throws {
         let (database, workspace, activeSession, olderSession, hiddenSession) =
             try await workspaceRouteDatabase()
-        let application = Server.makeApplication(database: database)
-
-        try await application.test(.router) { client in
-            for body in [
-                #"{"unread":false}"#,
-                #"{"pinned":true}"#,
-                #"{"status":"in-review"}"#,
-                #"{"unread":true}"#,
-            ] {
-                try await client.execute(
-                    uri: "/workspaces/\(workspace.id)",
-                    method: .patch,
-                    body: ByteBuffer(string: body)
-                ) { response in
-                    #expect(response.status == .accepted)
-                    #expect(response.body.readableBytes == 0)
+        try await withDependencies {
+            $0.workspaceUIHook = .liveValue
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                for body in [
+                    #"{"unread":false}"#,
+                    #"{"pinned":true}"#,
+                    #"{"status":"in-review"}"#,
+                    #"{"unread":true}"#,
+                ] {
+                    try await client.execute(
+                        uri: "/workspaces/\(workspace.id)",
+                        method: .patch,
+                        body: ByteBuffer(string: body)
+                    ) { response in
+                        #expect(response.status == .accepted)
+                        #expect(response.body.readableBytes == 0)
+                    }
                 }
             }
         }
@@ -163,15 +167,18 @@ struct WorkspaceRouteTests {
         try await database.write { database in
             try Workspace.insert { workspace }.execute(database)
         }
-        let application = Server.makeApplication(database: database)
-
-        try await application.test(.router) { client in
-            try await client.execute(
-                uri: "/workspaces/\(workspace.id)",
-                method: .patch,
-                body: ByteBuffer(string: #"{"unread":true}"#)
-            ) { response in
-                #expect(response.status == .conflict)
+        try await withDependencies {
+            $0.workspaceUIHook = .liveValue
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: #"{"unread":true}"#)
+                ) { response in
+                    #expect(response.status == .conflict)
+                }
             }
         }
     }
@@ -179,26 +186,28 @@ struct WorkspaceRouteTests {
     @Test("An enqueued command times out without falling back")
     func liveTimeout() async throws {
         let (database, workspace, _, _, _) = try await workspaceRouteDatabase()
-        let broker = WorkspaceUIHookBroker()
-        let connection = await broker.connect()
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
         let browser = Task {
             var events = connection.events.makeAsyncIterator()
             _ = try #require(await events.next())
-            await broker.disconnect(connectionID: connection.id)
+            await uiHook.disconnect(connectionID: connection.id)
         }
-        let application = Server.makeApplication(
-            database: database,
-            workspaceUIHookBroker: broker,
-            workspaceMutationTimeout: .milliseconds(20)
-        )
-
-        try await application.test(.router) { client in
-            try await client.execute(
-                uri: "/workspaces/\(workspace.id)",
-                method: .patch,
-                body: ByteBuffer(string: #"{"pinned":true}"#)
-            ) { response in
-                #expect(response.status == .gatewayTimeout)
+        try await withDependencies {
+            $0.workspaceUIHook = uiHook
+        } operation: {
+            let application = Server.makeApplication(
+                database: database,
+                workspaceMutationTimeout: .milliseconds(20)
+            )
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: #"{"pinned":true}"#)
+                ) { response in
+                    #expect(response.status == .gatewayTimeout)
+                }
             }
         }
         try await browser.value

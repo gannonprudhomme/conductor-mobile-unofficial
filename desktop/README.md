@@ -47,10 +47,8 @@ unsandboxed because runtime-proxy installation modifies the external
 The companion runs the mobile API on `0.0.0.0:3768` and the Workspace UI Hook
 on a separate loopback-only listener at `127.0.0.1:3769`.
 
-Debug and test builds may set `CONDUCTOR_MOBILE_API_PORT`. The hook uses the
-next port, so an override of `3778` produces `127.0.0.1:3779`. Invalid values
-fail before either listener starts. Release builds always use `3768` and
-`3769`, and the companion never reads `CONDUCTOR_PORT`.
+Both ports are fixed; the companion does not read `CONDUCTOR_PORT` or a custom
+mobile API port environment variable.
 
 The macOS window's Workspace UI Hook row reports whether Conductor's browser is
 connected. Copy Loader is user initiated; its information button explains how
@@ -59,7 +57,7 @@ one cache-busted import of the current bundled hook from the companion. The hook
 keeps native `EventSource` reconnection; it does not substitute a WebSocket.
 
 `PATCH /workspaces/{workspaceID}` accepts exactly one of `unread`, `pinned`, or
-`status`. While the hook is connected, the broker sends a one-way SSE command
+`status`. While the hook is connected, it sends a one-way SSE command
 and returns `204 No Content` once Conductor's SQLite state reflects the requested
 value. A StructuredQueries SQLite fallback is allowed only when the command was
 definitely not delivered and returns `202 Accepted`. Once a command has been

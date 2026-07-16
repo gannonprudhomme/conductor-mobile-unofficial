@@ -18,7 +18,10 @@ struct ConductorDesktopApp: App {
 
     var body: some Scene {
         Window("Conductor Mobile Proxy (unofficial)", id: "main") {
-            SidecarProxyView()
+            SidecarProxyView(
+                startupErrorMessage: appDelegate.startupErrorMessage,
+                workspaceUIHookLoaderSource: appDelegate.workspaceUIHookLoaderSource
+            )
                 .background(WindowConfigurator())
         }
         .defaultSize(width: 800, height: 600)
@@ -28,14 +31,46 @@ struct ConductorDesktopApp: App {
 
 @MainActor
 private final class AppDelegate: NSObject, NSApplicationDelegate {
+    let startupErrorMessage: String?
+    let workspaceUIHookLoaderSource: String?
+
+    private let workspaceUIHookSource: String?
     private var serverTask: Task<Void, Never>?
+
+    override init() {
+        // Load the javascript files from the bundle
+        do {
+            let hookSource = try Self.resource(named: "browser-hook", extension: "mjs")
+            let loaderSource = try Self.resource(named: "bootstrap-loader", extension: "js")
+            self.workspaceUIHookLoaderSource = loaderSource
+            self.workspaceUIHookSource = hookSource
+            self.startupErrorMessage = nil
+        } catch {
+            self.workspaceUIHookLoaderSource = nil
+            self.workspaceUIHookSource = nil
+            self.startupErrorMessage = "Could not start the companion: \(error)"
+        }
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         LoggingSystem.bootstrap(LoggingOSLog.init)
 
+        guard let workspaceUIHookSource else {
+            if let startupErrorMessage {
+                FileHandle.standardError.write(
+                    Data("conductor-mobile-server: \(startupErrorMessage)\n".utf8)
+                )
+            }
+            return
+        }
+
         serverTask = Task {
             do {
-                try await Server.run(databaseURL: Self.databaseURL)
+                try await Server.run(
+                    databaseURL: Self.databaseURL,
+                    workspaceUIHookSource: workspaceUIHookSource
+                )
             } catch is CancellationError {
             } catch {
                 FileHandle.standardError.write(
@@ -63,6 +98,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return source
     }
 
+    private struct StartupError: Error, CustomStringConvertible {
+        let description: String
+    }
 }
 
 private struct WindowConfigurator: NSViewRepresentable {

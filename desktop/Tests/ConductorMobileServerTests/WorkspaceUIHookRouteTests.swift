@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/14/26.
 //
 
+import Dependencies
 import HummingbirdTesting
 import HTTPTypes
 import Testing
@@ -14,10 +15,7 @@ import Testing
 struct WorkspaceUIHookRouteTests {
     @Test("Hook script admits only Conductor or narrow originless script loads")
     func hookAdmission() async throws {
-        let application = Server.makeWorkspaceUIHookApplication(
-            broker: WorkspaceUIHookBroker(),
-            hookSource: "hook();"
-        )
+        let application = Server.makeWorkspaceUIHookApplication(hookSource: "hook();")
 
         try await application.test(.router) { client in
             try await client.execute(
@@ -72,51 +70,51 @@ struct WorkspaceUIHookRouteTests {
 
     @Test("Events require the exact Conductor origin")
     func eventsAdmission() async throws {
-        let broker = WorkspaceUIHookBroker()
-        let application = Server.makeWorkspaceUIHookApplication(
-            broker: broker,
-            hookSource: "hook();"
-        )
+        let uiHook = WorkspaceUIHook.liveValue
+        try await withDependencies {
+            $0.workspaceUIHook = uiHook
+        } operation: {
+            let application = Server.makeWorkspaceUIHookApplication(hookSource: "hook();")
+            try await application.test(.router) { client in
+                for headers: HTTPFields in [
+                    [:],
+                    [.origin: "https://malicious.example"],
+                ] {
+                    try await client.execute(
+                        uri: "/workspace-ui-hook/events",
+                        method: .get,
+                        headers: headers
+                    ) { response in
+                        #expect(response.status == .forbidden)
+                        #expect(response.headers[.accessControlAllowOrigin] == nil)
+                        #expect(response.headers[.cacheControl] == "no-cache, no-transform")
+                        #expect(response.headers[.vary] == "Origin")
+                    }
+                }
 
-        try await application.test(.router) { client in
-            for headers: HTTPFields in [
-                [:],
-                [.origin: "https://malicious.example"],
-            ] {
+                let disconnect = Task {
+                    while !(await uiHook.isConnected()) {
+                        await Task.yield()
+                    }
+                    await uiHook.listenerUnavailable()
+                }
                 try await client.execute(
                     uri: "/workspace-ui-hook/events",
                     method: .get,
-                    headers: headers
+                    headers: [.origin: WorkspaceUIHookRoute.origin]
                 ) { response in
-                    #expect(response.status == .forbidden)
-                    #expect(response.headers[.accessControlAllowOrigin] == nil)
+                    #expect(response.status == .ok)
+                    #expect(response.headers[.accessControlAllowOrigin] == WorkspaceUIHookRoute.origin)
                     #expect(response.headers[.cacheControl] == "no-cache, no-transform")
+                    #expect(response.headers[.connection] == "keep-alive")
+                    #expect(response.headers[.contentType] == "text/event-stream; charset=utf-8")
                     #expect(response.headers[.vary] == "Origin")
                 }
+                await disconnect.value
             }
-
-            let disconnect = Task {
-                while !(await broker.isConnected) {
-                    await Task.yield()
-                }
-                await broker.listenerUnavailable()
-            }
-            try await client.execute(
-                uri: "/workspace-ui-hook/events",
-                method: .get,
-                headers: [.origin: WorkspaceUIHookRoute.origin]
-            ) { response in
-                #expect(response.status == .ok)
-                #expect(response.headers[.accessControlAllowOrigin] == WorkspaceUIHookRoute.origin)
-                #expect(response.headers[.cacheControl] == "no-cache, no-transform")
-                #expect(response.headers[.connection] == "keep-alive")
-                #expect(response.headers[.contentType] == "text/event-stream; charset=utf-8")
-                #expect(response.headers[.vary] == "Origin")
-            }
-            await disconnect.value
         }
 
-        #expect(await broker.isConnected == false)
+        #expect(await uiHook.isConnected() == false)
     }
 }
 
