@@ -365,9 +365,8 @@ struct WorkspaceChatTests {
                 }
             }
 
-            await store.send(.chat(.binding(.set(\.messageDraft, "Run the tests.")))) {
-                $0.chat?.messageDraft = "Run the tests."
-            }
+            let chat = try #require(store.state.chat)
+            chat.$messageDraft.withLock { $0 = "Run the tests." }
             await store.send(.chat(.sendButtonTapped)) {
                 $0.chat?.isMessageSendInFlight = true
                 $0.chat?.scrollToBottomRequest = 1

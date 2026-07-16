@@ -27,10 +27,11 @@ public struct Chat: Sendable {
         @Shared(.desktopConnectionStatus)
         var connectionStatus
 
+        @Shared var messageDraft: String
+
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
 
-        var messageDraft = ""
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
@@ -69,6 +70,8 @@ public struct Chat: Sendable {
         }
 
         init(session: Session, messages: [Message] = []) {
+            @Shared(.messageDrafts) var messageDrafts
+            self._messageDraft = $messageDrafts[draftFor: session.id]
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -109,7 +112,7 @@ public struct Chat: Sendable {
         var sessionID: Session.ID { session.id }
     }
 
-    public enum Action: BindableAction {
+    public enum Action {
         case task
         case initialMessagesResponse([Message])
         case loadMessagesFailed(any Error)
@@ -132,7 +135,6 @@ public struct Chat: Sendable {
             result: Result<Void, any Error>
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
-        case binding(BindingAction<State>)
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -141,8 +143,6 @@ public struct Chat: Sendable {
     init() { }
 
     public var body: some ReducerOf<Self> {
-        BindingReducer()
-
         Reduce { state, action in
             switch action {
             case .task:
@@ -251,7 +251,7 @@ public struct Chat: Sendable {
                 switch result {
                 case let .success(message):
                     if state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines) == message {
-                        state.messageDraft = ""
+                        state.$messageDraft.withLock { $0 = "" }
                     }
                     return .none
 
@@ -298,7 +298,7 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case .binding, .loadMessagesFailed:
+            case .loadMessagesFailed:
                 return .none
             }
         }
@@ -367,8 +367,27 @@ public struct Chat: Sendable {
     }
 }
 
+private extension Dictionary where Key == Session.ID, Value == String {
+    subscript(draftFor sessionID: Session.ID) -> String {
+        get { self[sessionID, default: ""] }
+        set { self[sessionID] = newValue.isEmpty ? nil : newValue }
+    }
+}
+
+private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.Default {
+    static var messageDrafts: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "message-drafts.json")
+            ),
+            default: [:],
+        ]
+    }
+}
+
 struct ChatView: View {
-    @Bindable var store: StoreOf<Chat>
+    let store: StoreOf<Chat>
     let directoryName: String
 
     var body: some View {
@@ -408,7 +427,7 @@ struct ChatView: View {
                     }
 
                     ChatTextField(
-                        text: $store.messageDraft,
+                        text: Binding(store.$messageDraft),
                         agentType: store.session.agentType,
                         isSendInFlight: store.isMessageSendInFlight,
                         isStopInFlight: store.isStopInFlight,

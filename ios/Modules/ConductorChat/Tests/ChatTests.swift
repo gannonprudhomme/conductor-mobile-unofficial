@@ -60,6 +60,25 @@ struct ChatTests {
         }
     }
 
+    @Test("Message drafts are restored per session")
+    func messageDraftsAreRestoredPerSession() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let firstSession = Session.preview(id: "first")
+            let secondSession = Session.preview(id: "second")
+            let store = TestStore(initialState: Chat.State(session: firstSession)) {
+                Chat()
+            }
+
+            store.state.$messageDraft.withLock { $0 = "First draft" }
+
+            #expect(Chat.State(session: firstSession).messageDraft == "First draft")
+            #expect(Chat.State(session: secondSession).messageDraft.isEmpty)
+        }
+    }
+
     @Test("Messages are limited to the selected session and ordered chronologically")
     func messagesAreScopedAndOrdered() async throws {
         let earlyMessage = try makeMessage(
@@ -435,6 +454,7 @@ struct ChatTests {
     @Test("Sending persists the canonical message before completing")
     func messageSendSucceeds() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             @Dependency(\.defaultDatabase) var database
@@ -459,9 +479,7 @@ struct ChatTests {
                 }
             }
 
-            await store.send(.binding(.set(\.messageDraft, "  Please run the tests.  "))) {
-                $0.messageDraft = "  Please run the tests.  "
-            }
+            store.state.$messageDraft.withLock { $0 = "  Please run the tests.  " }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
@@ -470,7 +488,7 @@ struct ChatTests {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [sentMessage]
             }
             await store.receive(\.sendMessageResponse) {
-                $0.messageDraft = ""
+                $0.$messageDraft.withLock { $0 = "" }
                 $0.isMessageSendInFlight = false
             }
             await store.finish()
@@ -485,6 +503,7 @@ struct ChatTests {
     @Test("A legacy send response still completes successfully")
     func legacyMessageSendSucceeds() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             let session = Session.preview()
@@ -494,15 +513,13 @@ struct ChatTests {
                 $0.desktopClient.sendMessage = { _, _, _ in nil }
             }
 
-            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
-                $0.messageDraft = "Run the tests."
-            }
+            store.state.$messageDraft.withLock { $0 = "Run the tests." }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
             await store.receive(\.sendMessageResponse) {
-                $0.messageDraft = ""
+                $0.$messageDraft.withLock { $0 = "" }
                 $0.isMessageSendInFlight = false
             }
         }
@@ -511,6 +528,7 @@ struct ChatTests {
     @Test("A send response preserves a draft edited while the request was in flight")
     func editedDraftIsPreserved() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             let session = Session.preview()
@@ -526,16 +544,12 @@ struct ChatTests {
                 }
             }
 
-            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
-                $0.messageDraft = "Run the tests."
-            }
+            store.state.$messageDraft.withLock { $0 = "Run the tests." }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
-            await store.send(.binding(.set(\.messageDraft, "Only run unit tests."))) {
-                $0.messageDraft = "Only run unit tests."
-            }
+            store.state.$messageDraft.withLock { $0 = "Only run unit tests." }
 
             responseContinuation.yield(Optional<Message>.none)
             await store.receive(\.sendMessageResponse) {
@@ -549,6 +563,7 @@ struct ChatTests {
     @Test("An observed message wins over the HTTP response with the same ID")
     func observedMessageWins() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             @Dependency(\.defaultDatabase) var database
@@ -579,9 +594,7 @@ struct ChatTests {
                 $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
             }
 
-            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
-                $0.messageDraft = "Run the tests."
-            }
+            store.state.$messageDraft.withLock { $0 = "Run the tests." }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
@@ -590,7 +603,7 @@ struct ChatTests {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
             }
             await store.receive(\.sendMessageResponse) {
-                $0.messageDraft = ""
+                $0.$messageDraft.withLock { $0 = "" }
                 $0.isMessageSendInFlight = false
             }
             await store.finish()
@@ -606,6 +619,7 @@ struct ChatTests {
     func messageReconciliationFailureStillCompletes() async throws {
         let database = try appDatabase()
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             $0.defaultDatabase = database
         } operation: {
             let session = Session.preview()
@@ -622,9 +636,7 @@ struct ChatTests {
                 $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
             }
 
-            await store.send(.binding(.set(\.messageDraft, "Run the tests."))) {
-                $0.messageDraft = "Run the tests."
-            }
+            store.state.$messageDraft.withLock { $0 = "Run the tests." }
             try database.close()
 
             await store.send(.sendButtonTapped) {
@@ -635,7 +647,7 @@ struct ChatTests {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
             }
             await store.receive(\.sendMessageResponse) {
-                $0.messageDraft = ""
+                $0.$messageDraft.withLock { $0 = "" }
                 $0.isMessageSendInFlight = false
             }
             await store.finish()
@@ -645,11 +657,12 @@ struct ChatTests {
     @Test("A send failure keeps the message draft")
     func messageSendFails() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             let session = try makeSession()
-            var state = Chat.State(session: session)
-            state.messageDraft = "Please try this again."
+            let state = Chat.State(session: session)
+            state.$messageDraft.withLock { $0 = "Please try this again." }
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
