@@ -20,11 +20,24 @@ private final class SidecarProxyModel {
     var status = BridgeStatus()
     var errorMessage: String?
     var isBridgeMutationInFlight = false
+    var isShowingError = false
+    var isWorkspaceUIHookConnected = false
 
     private let installer = BridgeInstallerClient()
     private let workspaceUIHookLoaderSource: String?
     @ObservationIgnored
     @Dependency(\.workspaceUIHook) private var workspaceUIHook
+
+    init(
+        startupErrorMessage: String?,
+        workspaceUIHookLoaderSource: String?
+    ) {
+        self.workspaceUIHookLoaderSource = workspaceUIHookLoaderSource
+        if let startupErrorMessage {
+            errorMessage = startupErrorMessage
+            isShowingError = true
+        }
+    }
 
     func monitorBridgeStatus() async {
         while !Task.isCancelled {
@@ -55,31 +68,80 @@ private final class SidecarProxyModel {
 
             await refreshBridgeStatus()
         } catch {
-            errorMessage = "Could not update bridge installation: \(error.localizedDescription)"
+            presentError("Could not update bridge installation: \(error)")
         }
     }
 
+    func copyLoaderButtonTapped(onSuccess: () -> Void) {
+        guard let workspaceUIHookLoaderSource else {
+            presentError("The Workspace UI Hook loader is unavailable.")
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(workspaceUIHookLoaderSource, forType: .string) else {
+            presentError("Could not copy the Workspace UI Hook loader.")
+            return
+        }
+        onSuccess()
+    }
+
+    func errorDismissed() {
+        isShowingError = false
+        errorMessage = nil
+    }
+
     private func refreshBridgeStatus() async {
+        // Sample hook state alongside existing bridge polling instead of maintaining a subscriber.
+        isWorkspaceUIHookConnected = await workspaceUIHook.isConnected()
+
         do {
             status = try await installer.status()
         } catch is CancellationError {
         } catch {
-            errorMessage = "Could not refresh bridge status: \(error.localizedDescription)"
+            presentError("Could not refresh bridge status: \(error)")
         }
+    }
+
+    private func presentError(_ message: String) {
+        errorMessage = message
+        isShowingError = true
     }
 }
 
 struct SidecarProxyView: View {
-    @State private var model = SidecarProxyModel()
+    @State private var isShowingLoaderCopied = false
+    @State private var isShowingWorkspaceUIHookInstructions = false
+    @State private var model: SidecarProxyModel
+    private let shouldMonitorBridgeStatus: Bool
+
+    init(
+        startupErrorMessage: String?,
+        workspaceUIHookLoaderSource: String?,
+        shouldMonitorBridgeStatus: Bool = true
+    ) {
+        self.shouldMonitorBridgeStatus = shouldMonitorBridgeStatus
+        _model = State(
+            initialValue: SidecarProxyModel(
+                startupErrorMessage: startupErrorMessage,
+                workspaceUIHookLoaderSource: workspaceUIHookLoaderSource
+            )
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            Text("Sidecar proxy")
+            Text("Conductor Mobile companion")
                 .font(.theme(.heading).weight(.regular))
                 .foregroundStyle(.theme(.foreground))
                 .frame(minHeight: 32, alignment: .leading)
 
             VStack(spacing: 16) {
+                workspaceUIHookRow
+
+                separator
+
                 installationRow
 
                 separator
@@ -93,16 +155,6 @@ struct SidecarProxyView: View {
                 separator
 
                 bridgeConnectionStatusRow
-
-                if let errorMessage = model.errorMessage {
-                    separator
-
-                    MenuRow(title: Text("Error")) {
-                        Text(errorMessage)
-                            .font(.theme(.small))
-                            .foregroundStyle(.theme(.destructive))
-                    }
-                }
             }
         }
         .frame(maxWidth: 980, maxHeight: .infinity, alignment: .topLeading)
@@ -113,13 +165,79 @@ struct SidecarProxyView: View {
                 .ignoresSafeArea()
         }
         .preferredColorScheme(.dark)
-        .task { await model.monitorBridgeStatus() }
+        .task {
+            guard shouldMonitorBridgeStatus else {
+                return
+            }
+            await model.monitorBridgeStatus()
+        }
+        .sheet(isPresented: $isShowingWorkspaceUIHookInstructions) {
+            WorkspaceUIHookInstructionsView()
+        }
+        .alert(
+            "Conductor Mobile Proxy",
+            isPresented: $model.isShowingError,
+            presenting: model.errorMessage
+        ) { _ in
+            Button("OK") { model.errorDismissed() }
+        } message: { errorMessage in
+            Text(errorMessage)
+        }
+    }
+
+    private var workspaceUIHookRow: some View {
+        MenuRow(
+            title: Text("Workspace UI Hook"),
+            subtitle: Text("Runs workspace changes through Conductor’s loaded frontend services.")
+        ) {
+            HStack(spacing: 8) {
+                StatusTag(
+                    title: model.isWorkspaceUIHookConnected
+                        ? "Connected"
+                        : "Not Connected",
+                    isEnabled: model.isWorkspaceUIHookConnected
+                )
+
+                ChipButton(
+                    title: "Copy Loader",
+                    icon: Lucide.copy,
+                    isConfirmed: isShowingLoaderCopied
+                ) {
+                    copyLoaderButtonTapped()
+                }
+                .disabled(isShowingLoaderCopied)
+                .task(id: isShowingLoaderCopied) {
+                    guard isShowingLoaderCopied else {
+                        return
+                    }
+                    // Keep success visible long enough to read without delaying the pasteboard write.
+                    try? await Task.sleep(for: .milliseconds(350))
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    isShowingLoaderCopied = false
+                }
+
+                Button {
+                    isShowingWorkspaceUIHookInstructions = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.theme(.textSecondary))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Workspace UI Hook setup instructions")
+                .accessibilityLabel("Workspace UI Hook setup instructions")
+            }
+        }
     }
 
     private var installationRow: some View {
         MenuRow(
             title: Text("Installation"),
-            subtitle: Text("Install the conductor sidecar proxy to enable")
+            subtitle: Text("Optional runtime proxy; independent of the Workspace UI Hook.")
         ) {
             ChipButton(
                 title: model.status.isInstalledInApplications
@@ -132,6 +250,13 @@ struct SidecarProxyView: View {
                 Task { await model.installButtonTapped() }
             }
             .disabled(model.isBridgeMutationInFlight)
+        }
+    }
+
+    private func copyLoaderButtonTapped() {
+        model.copyLoaderButtonTapped {
+            isShowingLoaderCopied = true
+            AccessibilityNotification.Announcement("Copied").post()
         }
     }
 

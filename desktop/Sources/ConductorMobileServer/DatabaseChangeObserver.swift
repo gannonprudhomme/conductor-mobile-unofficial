@@ -7,7 +7,7 @@
 
 import SQLiteData
 
-/// Polls SQLite's connection-local `data_version` and change count, then broadcasts invalidations
+/// Polls SQLite's connection-local `data_version` and total change count, then broadcasts invalidations
 /// to WebSocket subscribers using one shared polling task.
 ///
 /// This is an actor because sockets subscribe and disconnect concurrently while the polling task
@@ -34,8 +34,12 @@ actor DatabaseChangeObserver {
             // transaction that `read` creates keeps high-frequency polling inexpensive.
             try database.unsafeRead { database in
                 DatabaseVersion(
+                    // `data_version` changes when another connection commits.
                     dataVersion: try #sql("PRAGMA data_version", as: Int.self)
                         .fetchOne(database) ?? 0,
+                    // `data_version` deliberately ignores this connection's own commits. Pair it
+                    // with the cumulative count so server-side fallback writes also invalidate
+                    // subscribers. Without this value, those writes could leave sockets stale.
                     totalChangesCount: database.totalChangesCount
                 )
             }
@@ -128,6 +132,7 @@ actor DatabaseChangeObserver {
 
     private struct DatabaseVersion: Equatable {
         let dataVersion: Int
+        /// Catches writes made through the same connection that reads `dataVersion`.
         let totalChangesCount: Int
     }
 

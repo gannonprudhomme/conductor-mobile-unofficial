@@ -28,7 +28,6 @@ isolatedTest("loader reports the original connection error", async () => {
   defineGlobal("__workspaceHookImport", async () => { throw connectionError; });
   const source = await fs.readFile(new URL("./bootstrap-loader.js", import.meta.url), "utf8");
   Function(source
-    .replace("__CONDUCTOR_MOBILE_SERVER_PORT__", "3769")
     .replace("import(hookURL.href)", "globalThis.__workspaceHookImport(hookURL.href)"))();
 
   await waitUntil(() => errors.length === 1);

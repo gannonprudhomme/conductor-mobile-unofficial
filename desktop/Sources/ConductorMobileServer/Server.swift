@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import Dependencies
 import Foundation
 import Hummingbird
 import HummingbirdWebSocket
@@ -12,25 +13,28 @@ import SharedConductorData
 import SQLiteData
 
 public enum Server {
+    public static func run(
+        databaseURL: URL,
+        workspaceUIHookSource: String
+    ) async throws {
+        @Dependency(\.workspaceUIHook) var workspaceUIHookDependency
+        let workspaceUIHook = workspaceUIHookDependency
+
+        // Keep the LAN mobile API separate from the loopback-only browser hook.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
                 try await retryingServer(name: "conductor-mobile-api") {
                     let database = try ConductorDatabase.open(at: databaseURL)
-                    try await makeApplication(
-                        database: database,
-                        workspaceUIHookBroker: workspaceUIHookBroker,
-                        port: configuration.mobileAPIPort
-                    )
-                    .run()
+                    try await makeApplication(database: database).run()
                 }
             }
 
             group.addTask {
                 try await retryingServer(name: "workspace-ui-hook") {
-                    await workspaceUIHookBroker.listenerUnavailable()
+                    await workspaceUIHook.listenerUnavailable()
                 } run: {
                     try await makeWorkspaceUIHookApplication(
-                        broker: workspaceUIHookBroker,
-                        hookSource: workspaceUIHookSource,
-                        port: configuration.workspaceUIHookPort
+                        hookSource: workspaceUIHookSource
                     )
                     .run()
                 }
@@ -41,7 +45,9 @@ public enum Server {
 
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
-        port: Int = 3768,
+        // Five seconds tolerates a slow Conductor UI write without holding the request indefinitely.
+        workspaceMutationTimeout: Duration = .seconds(5),
+        port: Int = 3_768,
         allowedOrigin: String? = nil
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
@@ -80,7 +86,8 @@ public enum Server {
             return try await WorkspaceRoute.patch(
                 request: request,
                 context: context,
-                database: database
+                database: database,
+                persistenceTimeout: workspaceMutationTimeout
             )
         }
 
@@ -169,6 +176,26 @@ public enum Server {
         )
     }
 
+    static func makeWorkspaceUIHookApplication( // only non-private for tests
+        hookSource: String,
+        port: Int = 3_769
+    ) -> Application<RouterResponder<RequestContext>> {
+        let router = Router(context: RequestContext.self)
+        router.get("/workspace-ui-hook/hook.js") { request, _ in
+            WorkspaceUIHookRoute.getHookFileContents(request: request, source: hookSource)
+        }
+        router.get("/workspace-ui-hook/events") { request, _ in
+            await WorkspaceUIHookRoute.events(request: request)
+        }
+
+        return Application(
+            router: router,
+            configuration: .init(
+                address: .hostname("127.0.0.1", port: port),
+                serverName: "Conductor Mobile Workspace UI Hook"
+            )
+        )
+    }
 
     private static func retryingServer(
         name: String,

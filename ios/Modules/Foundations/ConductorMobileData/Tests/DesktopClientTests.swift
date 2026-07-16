@@ -383,7 +383,10 @@ struct DesktopClientTests {
             (204, WorkspaceMutationPath.hook),
             (202, .sqliteFallback),
         ] {
-            #expect(try DesktopClient.workspaceMutationPath(statusCode: statusCode) == expectedPath)
+            #expect(
+                try DesktopClient.getWorkspaceMutationPathFromStatusCode(statusCode: statusCode)
+                    == expectedPath
+            )
         }
         for statusCode in [200, 201, 206, 400, 409, 500] {
             #expect(
@@ -392,7 +395,7 @@ struct DesktopClientTests {
                     message: "error"
                 )
             ) {
-                try DesktopClient.workspaceMutationPath(
+                try DesktopClient.getWorkspaceMutationPathFromStatusCode(
                     statusCode: statusCode,
                     data: Data("error".utf8)
                 )

@@ -310,7 +310,7 @@ extension DesktopClient: DependencyKey {
             throw DesktopClientError.invalidResponse
         }
 
-        return try workspaceMutationPath(
+        return try getWorkspaceMutationPathFromStatusCode(
             statusCode: response.statusCode,
             data: data
         )
@@ -328,7 +328,7 @@ extension DesktopClient: DependencyKey {
         return request
     }
 
-    static func workspaceMutationPath(
+    static func getWorkspaceMutationPathFromStatusCode(
         statusCode: Int,
         data: Data = Data()
     ) throws -> WorkspaceMutationPath {
