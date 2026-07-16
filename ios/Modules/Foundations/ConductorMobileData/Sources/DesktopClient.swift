@@ -175,12 +175,12 @@ extension DesktopClient: DependencyKey {
         }
     }
 
-    private static var baseURL: URL {
+    private static func baseURL() throws -> URL {
         @Shared(.desktopServerAddress) var desktopServerAddress
         guard let desktopServerAddress,
               let baseURL = serverURL(scheme: "http", address: desktopServerAddress)
         else {
-            preconditionFailure("The desktop server address must be configured before use.")
+            throw DesktopClientError.invalidServerAddress
         }
         return baseURL
     }
@@ -188,7 +188,8 @@ extension DesktopClient: DependencyKey {
     /// `scheme`` is either `http` or `ws`
     static func serverURL(scheme: String, address: String) -> URL? {
         guard var components = URLComponents(string: "\(scheme)://\(address)"),
-              components.host != nil
+              let host = components.host,
+              !host.isEmpty
         else {
             return nil
         }
@@ -241,22 +242,22 @@ extension DesktopClient: DependencyKey {
     }
 
     // POST /workspaces/{workspaceID}/sessions/{sessionID}/messages
-    private static func messagesURL(workspaceID: String, sessionID: String) -> URL {
-        sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+    private static func messagesURL(workspaceID: String, sessionID: String) throws -> URL {
+        try sessionURL(workspaceID: workspaceID, sessionID: sessionID)
             .appending(path: "messages")
     }
 
     // POST /workspaces/{workspaceID}/sessions/{sessionID}
-    private static func sessionURL(workspaceID: String, sessionID: String) -> URL {
-        baseURL
+    private static func sessionURL(workspaceID: String, sessionID: String) throws -> URL {
+        try baseURL()
             .appending(path: "workspaces")
             .appending(path: workspaceID)
             .appending(path: "sessions")
             .appending(path: sessionID)
     }
 
-    private static func workspaceURL(workspaceID: String) -> URL {
-        baseURL
+    private static func workspaceURL(workspaceID: String) throws -> URL {
+        try baseURL()
             .appending(path: "workspaces")
             .appending(path: workspaceID)
     }
@@ -336,8 +337,11 @@ private struct WorkspacePatchBody: Encodable, Sendable {
 
 public extension DesktopClient {
     // GET /repositories/{repositoryID}/icon
-    static func repositoryIconURL(for repository: Repository) -> URL {
-        URL(string: "\(baseURL)/repositories/\(repository.id)/icon")!
+    static func repositoryIconURL(for repository: Repository) -> URL? {
+        try? baseURL()
+            .appending(path: "repositories")
+            .appending(path: repository.id)
+            .appending(path: "icon")
     }
 }
 

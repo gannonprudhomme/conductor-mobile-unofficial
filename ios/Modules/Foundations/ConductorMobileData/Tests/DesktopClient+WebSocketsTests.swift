@@ -18,14 +18,14 @@ struct DesktopClientWebSocketsTests {
         expectNoDifference(
             DesktopClient.workspacesWebSocketURL(
                 serverAddress: "my-mac"
-            ).absoluteString,
+            )?.absoluteString,
             "ws://my-mac:3768/workspaces"
         )
         expectNoDifference(
             DesktopClient.sessionsWebSocketURL(
                 serverAddress: "my-mac",
                 workspaceID: "workspace-1"
-            ).absoluteString,
+            )?.absoluteString,
             "ws://my-mac:3768/workspaces/workspace-1/sessions"
         )
         expectNoDifference(
@@ -33,19 +33,39 @@ struct DesktopClientWebSocketsTests {
                 serverAddress: "my-mac",
                 workspaceID: "workspace-1",
                 sessionID: "session-1"
-            ).absoluteString,
+            )?.absoluteString,
             "ws://my-mac:3768/workspaces/workspace-1/sessions/session-1/messages"
         )
         expectNoDifference(
-            DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac:4000").absoluteString,
+            DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac:4000")?.absoluteString,
             "ws://my-mac:4000/workspaces"
+        )
+        expectNoDifference(
+            DesktopClient.workspacesWebSocketURL(serverAddress: ""),
+            nil
         )
     }
 
+    @Test("WebSocket observations reject invalid desktop server addresses")
+    func invalidWebSocketAddress() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "" }
+            let stream = DesktopClient.observe([String].self) { _ in nil }
+            var iterator = stream.makeAsyncIterator()
+
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await iterator.next()
+            }
+        }
+    }
+
     @Test("WebSocket tasks accept bounded full snapshots larger than Foundation's default")
-    func webSocketMaximumMessageSize() {
+    func webSocketMaximumMessageSize() throws {
         let task = URLSession.shared.webSocketTask(
-            with: URL(string: "ws://example.com/items")!
+            with: try #require(URL(string: "ws://example.com/items"))
         )
 
         _ = DesktopClient.WebSocketTaskClient(task)

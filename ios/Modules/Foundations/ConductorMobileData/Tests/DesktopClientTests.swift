@@ -106,6 +106,27 @@ struct DesktopClientTests {
         }
     }
 
+    @Test("Commands reject a missing desktop server address")
+    func commandsWithoutServerAddress() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.sendMessage(
+                    workspaceID: "workspace-1",
+                    sessionID: "session-1",
+                    message: "Run the tests."
+                )
+            }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.setWorkspacePinned(
+                    workspaceID: "workspace-1",
+                    pinned: true
+                )
+            }
+        }
+    }
+
     @Test("Sending a message returns the canonical database row")
     func sendMessage() async throws {
         let message = Message(
@@ -361,17 +382,23 @@ struct DesktopClientTests {
                 createdAt: Date(timeIntervalSince1970: 0),
                 updatedAt: Date(timeIntervalSince1970: 0)
             )
+
+            expectNoDifference(
+                DesktopClient.repositoryIconURL(for: repository),
+                nil
+            )
+
             $desktopServerAddress.withLock { $0 = "my-mac" }
 
             expectNoDifference(
-                DesktopClient.repositoryIconURL(for: repository).absoluteString,
+                DesktopClient.repositoryIconURL(for: repository)?.absoluteString,
                 "http://my-mac:3768/repositories/repository-1/icon"
             )
 
             $desktopServerAddress.withLock { $0 = "my-mac:4000" }
 
             expectNoDifference(
-                DesktopClient.repositoryIconURL(for: repository).absoluteString,
+                DesktopClient.repositoryIconURL(for: repository)?.absoluteString,
                 "http://my-mac:4000/repositories/repository-1/icon"
             )
         }

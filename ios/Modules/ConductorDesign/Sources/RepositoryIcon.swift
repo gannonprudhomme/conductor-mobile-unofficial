@@ -54,7 +54,7 @@ public struct RepositoryIcon: View {
     ) {
         self.init(
             iconName: repository?.icon,
-            faviconURL: repository.map { DesktopClient.repositoryIconURL(for: $0) },
+            faviconURL: repository.flatMap { DesktopClient.repositoryIconURL(for: $0) },
             avatarURL: repository?.githubOwnerAvatarURL,
             size: size,
             relativeTo: textStyle
