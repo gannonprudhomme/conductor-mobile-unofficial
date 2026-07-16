@@ -1,0 +1,13 @@
+name: Intentional CI failure
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail intentionally
+        run: exit 1
