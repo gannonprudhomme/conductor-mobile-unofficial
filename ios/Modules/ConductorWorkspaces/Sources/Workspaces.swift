@@ -73,6 +73,12 @@ public struct Workspaces: Sendable {
             groupedBy grouping: WorkspaceWithRepository.Grouping,
             workspaces: [WorkspaceWithRepository]
         ) -> [WorkspaceSection] {
+            // Pinned workspaces leave the grouped sections and collect into a single leading
+            // section, so group only the ones that stay behind.
+            let pinnedItems = workspaces.filter { $0.workspace.pinnedAt != nil }
+            let unpinnedItems = workspaces.filter { $0.workspace.pinnedAt == nil }
+
+            let groupedSections: [WorkspaceSection]
             switch grouping {
             case .status:
                 let initialSections = Workspace.Status.displayOrder.map { status in
@@ -82,7 +88,7 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-                return workspaces.reduce(into: initialSections) { sections, item in
+                groupedSections = unpinnedItems.reduce(into: initialSections) { sections, item in
                     let groupByType = WorkspaceSection.GroupByType.status(
                         item.workspace.status
                     )
@@ -99,7 +105,7 @@ public struct Workspaces: Sendable {
                 }
 
             case .project:
-                return workspaces.reduce(into: []) { sections, item in
+                groupedSections = unpinnedItems.reduce(into: []) { sections, item in
                     let groupByType = WorkspaceSection.GroupByType.project(
                         repositoryID: item.workspace.repositoryID,
                         repository: item.repository,
@@ -117,6 +123,13 @@ public struct Workspaces: Sendable {
                     }
                 }
             }
+
+            guard !pinnedItems.isEmpty else {
+                return groupedSections
+            }
+
+            return [WorkspaceSection(groupByType: .pinned, items: pinnedItems)]
+                + groupedSections
         }
 
         struct WorkspaceSection: Equatable, Identifiable, Sendable {
@@ -124,7 +137,15 @@ public struct Workspaces: Sendable {
             let groupByType: GroupByType
             var items: [WorkspaceWithRepository]
 
+            /// Pinned always leads the list and never collapses, so the view renders it apart
+            /// from the grouped status/project sections.
+            var isPinned: Bool {
+                if case .pinned = groupByType { return true }
+                return false
+            }
+
             enum GroupByType: Equatable, Sendable {
+                case pinned
                 case status(Workspace.Status)
                 case project(
                     repositoryID: Repository.ID?,
@@ -134,6 +155,7 @@ public struct Workspaces: Sendable {
 
                 var id: String {
                     switch self {
+                    case .pinned: "pinned"
                     case let .status(status): "status:\(status.rawValue)"
                     case let .project(repositoryID, _, _):
                         "project:\(repositoryID ?? "")"
@@ -444,14 +466,20 @@ public struct WorkspacesView: View {
         List {
             if !store.workspaces.isEmpty {
                 ForEach(store.sections) { section in
-                    WorkspaceSectionView(
-                        section: section,
-                        showsRepositoryIcon: store.grouping == .status
-                            && store.selectedRepositoryID == nil,
-                        isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
-                            .animation(.default)
-                    ) { item, action in
-                        workspaceRowAction(action, item: item)
+                    if section.isPinned {
+                        PinnedSectionView(section: section) { item, action in
+                            workspaceRowAction(action, item: item)
+                        }
+                    } else {
+                        WorkspaceSectionView(
+                            section: section,
+                            showsRepositoryIcon: store.grouping == .status
+                                && store.selectedRepositoryID == nil,
+                            isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
+                                .animation(.default)
+                        ) { item, action in
+                            workspaceRowAction(action, item: item)
+                        }
                     }
                 }
             }
@@ -501,13 +529,11 @@ public struct WorkspacesView: View {
                 }
             }
 
-//            if !store.isLoadingWorkspaces, !store.workspaces.isEmpty {
-                ToolbarItem(placement: .bottomBar) {
-                    WorkspaceFilterMenu(store: store)
-                }
+            ToolbarItem(placement: .bottomBar) {
+                WorkspaceFilterMenu(store: store)
+            }
 
-                ToolbarSpacer(.flexible, placement: .bottomBar)
-//            }
+            ToolbarSpacer(.flexible, placement: .bottomBar)
         }
         .background(.theme(.background))
         .alert($store.scope(state: \.alert, action: \.alert))
@@ -602,6 +628,31 @@ public struct WorkspacesView: View {
         }
     }
 
+    private struct PinnedSectionView: View {
+        let section: Workspaces.State.WorkspaceSection
+        let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
+        @ScaledMetric(relativeTo: .body) private var iconSize = 13.2
+
+        var body: some View {
+            Section {
+                WorkspaceRows(
+                    items: section.items,
+                    // Pinned mixes repositories, so always show the icon and keep rows flush left.
+                    showsRepositoryIcon: true,
+                    isIndented: false,
+                    action: action
+                )
+            } header: {
+                Text("Pinned")
+                    .font(.theme(.body))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.theme(.textPrimary))
+                    .textCase(nil)
+            }
+            .listSectionSpacing(16)
+        }
+    }
+
     private struct WorkspaceSectionView: View {
         let section: Workspaces.State.WorkspaceSection
         let showsRepositoryIcon: Bool
@@ -652,6 +703,11 @@ public struct WorkspacesView: View {
                     .rotationEffect(.degrees(isExpanded ? 0 : -90))
             } label: {
                 switch groupByType {
+                case .pinned:
+                    /// Pinned renders through `PinnedSectionView`, never this collapsible header.
+                    /// This is definitely a smell but w/e
+                    EmptyView()
+
                 case let .status(status):
                     StatusSectionHeader(status: status)
 
@@ -670,6 +726,7 @@ public struct WorkspacesView: View {
     private struct WorkspaceRows: View {
         let items: [WorkspaceWithRepository]
         let showsRepositoryIcon: Bool
+        var isIndented = true
         let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
 
         var body: some View {
@@ -680,7 +737,7 @@ public struct WorkspacesView: View {
                 ) { rowAction in
                     action(item, rowAction)
                 }
-                .padding(.leading, 12)
+                .padding(.leading, isIndented ? 12 : 0)
                 .listRowInsets(
                     EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
                 )
@@ -888,6 +945,22 @@ private extension DesktopClient.DeviceIcon {
 }
 
 #if DEBUG
+#Preview("Online") {
+    WorkspacesPreview(status: .connected)
+}
+
+#Preview("Connecting") {
+    WorkspacesPreview(status: .connecting)
+}
+
+#Preview("Offline") {
+    WorkspacesPreview(status: .disconnected)
+}
+
+#Preview("Loop") {
+    WorkspacesPreview(status: .connected, shouldCycleStatus: true)
+}
+
 @MainActor
 private struct WorkspacesPreview: View {
     let connectionStatus: Shared<DesktopClient.ConnectionStatus>
@@ -900,6 +973,103 @@ private struct WorkspacesPreview: View {
     ) {
         let _ = try! prepareDependencies {
             try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                let conductorMobile = Repository.preview(
+                    id: "conductor-mobile",
+                    name: "conductor-mobile"
+                )
+                let conductor = Repository.preview(
+                    id: "conductor",
+                    displayOrder: 1,
+                    name: "Conductor"
+                )
+                try Repository.upsert { [conductorMobile, conductor] }
+                    .execute(db)
+
+                let workspaces = [
+                    Workspace.preview(
+                        id: "pinned-chat",
+                        branch: "Add pinned chats",
+                        derivedStatus: Workspace.Status.inProgress.rawValue,
+                        pinnedAt: "2026-07-16T09:00:00Z",
+                        repositoryID: conductorMobile.id
+                    ),
+                    Workspace.preview(
+                        id: "pinned-settings",
+                        branch: "Refine desktop settings",
+                        derivedStatus: Workspace.Status.done.rawValue,
+                        pinnedAt: "2026-07-16T08:00:00Z",
+                        repositoryID: conductor.id
+                    ),
+                    Workspace.preview(
+                        id: "working",
+                        branch: "Stream agent responses",
+                        derivedStatus: Workspace.Status.inProgress.rawValue,
+                        repositoryID: conductorMobile.id
+                    ),
+                    Workspace.preview(
+                        id: "working-desktop",
+                        branch: "Relay desktop messages",
+                        derivedStatus: Workspace.Status.inProgress.rawValue,
+                        repositoryID: conductor.id
+                    ),
+                    Workspace.preview(
+                        id: "in-review-unread",
+                        branch: "Polish workspace filters",
+                        derivedStatus: Workspace.Status.inReview.rawValue,
+                        repositoryID: conductorMobile.id,
+                        unread: 1
+                    ),
+                    Workspace.preview(
+                        id: "in-review-desktop",
+                        branch: "Review pairing flow",
+                        derivedStatus: Workspace.Status.inReview.rawValue,
+                        repositoryID: conductor.id
+                    ),
+                    Workspace.preview(
+                        id: "backlog",
+                        branch: "Pair another Mac",
+                        derivedStatus: Workspace.Status.backlog.rawValue,
+                        repositoryID: conductor.id
+                    ),
+                    Workspace.preview(
+                        id: "backlog-mobile",
+                        branch: "Add workspace search",
+                        derivedStatus: Workspace.Status.backlog.rawValue,
+                        repositoryID: conductorMobile.id
+                    ),
+                    Workspace.preview(
+                        id: "done",
+                        branch: "Improve connection status",
+                        derivedStatus: Workspace.Status.done.rawValue,
+                        repositoryID: conductor.id
+                    ),
+                    Workspace.preview(
+                        id: "done-mobile",
+                        branch: "Cache repository icons",
+                        derivedStatus: Workspace.Status.done.rawValue,
+                        repositoryID: conductorMobile.id
+                    ),
+                    Workspace.preview(
+                        id: "canceled",
+                        branch: "Try alternate navigation",
+                        derivedStatus: Workspace.Status.canceled.rawValue,
+                        repositoryID: conductor.id
+                    ),
+                    Workspace.preview(
+                        id: "canceled-mobile",
+                        branch: "Prototype compact rows",
+                        derivedStatus: Workspace.Status.canceled.rawValue,
+                        repositoryID: conductorMobile.id
+                    ),
+                ]
+                try Workspace.upsert { workspaces }
+                    .execute(db)
+                try MobileWorkspaceState.upsert {
+                    MobileWorkspaceState(workspaceID: "working", isWorking: true)
+                }
+                .execute(db)
+            }
         }
         let (connectionStatus, store) = withDependencies {
             $0.defaultFileStorage = .inMemory
@@ -907,9 +1077,11 @@ private struct WorkspacesPreview: View {
         } operation: {
             @Shared(.desktopConnectionStatus) var connectionStatus
             $connectionStatus.withLock { $0 = status }
+            var state = Workspaces.State()
+            state.isLoadingWorkspaces = false
             return (
                 $connectionStatus,
-                Store(initialState: Workspaces.State()) {
+                Store(initialState: state) {
                     Workspaces()
                 }
             )
@@ -958,19 +1130,4 @@ private extension DesktopClient.ConnectionStatus {
     ]
 }
 
-#Preview("Loop") {
-    WorkspacesPreview(status: .connected, shouldCycleStatus: true)
-}
-
-#Preview("Online") {
-    WorkspacesPreview(status: .connected)
-}
-
-#Preview("Connecting") {
-    WorkspacesPreview(status: .connecting)
-}
-
-#Preview("Offline") {
-    WorkspacesPreview(status: .disconnected)
-}
 #endif
