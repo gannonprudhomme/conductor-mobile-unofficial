@@ -192,12 +192,14 @@ struct ServerTests {
                 #expect(updated.first?.content == "Updated.")
             }
 
+            #if canImport(AppKit)
             try await client.execute(
                 uri: "/repositories/repository-1/icon",
                 method: .get
             ) { response in
                 #expect(response.status == .ok)
             }
+            #endif
         }
     }
 
