@@ -10,6 +10,10 @@ import Foundation
 import Synchronization
 import Testing
 
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 @testable import ConductorMobileServer
 
 @Suite(.serialized)

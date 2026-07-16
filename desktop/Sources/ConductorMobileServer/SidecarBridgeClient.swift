@@ -9,6 +9,10 @@ import Dependencies
 import DependenciesMacros
 import Foundation
 
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 @DependencyClient
 struct SidecarBridgeClient: Sendable {
     var sendMessage: @Sendable (RuntimeMessageRequest) async throws -> Void

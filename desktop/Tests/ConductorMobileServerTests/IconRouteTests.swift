@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+#if canImport(AppKit)
 import AppKit
 import CustomDump
 import Foundation
@@ -357,3 +358,4 @@ struct IconRouteTests {
 
     private let pngSignature = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 }
+#endif

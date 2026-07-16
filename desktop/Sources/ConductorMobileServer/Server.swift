@@ -40,6 +40,7 @@ public enum Server {
             }
         }
 
+        #if canImport(AppKit)
         router.get("/repositories/{repositoryID}/icon") { request, context in
             try await IconRoute.response(
                 request: request,
@@ -47,6 +48,7 @@ public enum Server {
                 database: database
             )
         }
+        #endif
 
         router.patch("/workspaces/{workspaceID}") { request, context in
             guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
