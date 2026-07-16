@@ -28,6 +28,10 @@ targets:
       - path: ConductorDesktop
       - path: ConductorDesktop/icon.icns
         buildPhase: resources
+      - path: workspace-hook/bootstrap-loader.js
+        buildPhase: resources
+      - path: workspace-hook/browser-hook.mjs
+        buildPhase: resources
     info:
       path: ConductorDesktop/Info.plist
       properties:

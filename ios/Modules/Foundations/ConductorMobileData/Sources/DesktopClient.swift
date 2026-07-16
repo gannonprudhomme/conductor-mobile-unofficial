@@ -25,9 +25,9 @@ public struct DesktopClient: Sendable {
     }
     public var ping: @Sendable () async throws -> Void = { }
     public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Message?
-    public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ pinned: Bool) async throws -> Void
-    public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> Void
-    public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ unread: Bool) async throws -> Void
+    public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> WorkspaceMutationPath
+    public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> WorkspaceMutationPath
+    public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> WorkspaceMutationPath
     public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Session?
 
     public enum ConnectionStatus: Equatable, Sendable {
@@ -60,6 +60,12 @@ public extension SharedKey where Self == InMemoryKey<DesktopClient.ConnectionSta
             default: .connecting,
         ]
     }
+}
+
+// A 204 persisted through the hook; a 202 used SQLite and may leave Conductor's window stale.
+public enum WorkspaceMutationPath: Equatable, Sendable {
+    case hook
+    case sqliteFallback
 }
 
 public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
@@ -149,9 +155,9 @@ extension DesktopClient: DependencyKey {
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
                 decoding: Message.self
             )
-        } setWorkspacePinned: { workspaceID, pinned in
+        } setWorkspacePinned: { workspaceID, isPinned in
             try await patch(
-                WorkspacePatchBody(pinned: pinned),
+                WorkspacePatchBody(isPinned: isPinned),
                 at: workspaceURL(workspaceID: workspaceID)
             )
         } setWorkspaceStatus: { workspaceID, status in
@@ -159,9 +165,9 @@ extension DesktopClient: DependencyKey {
                 WorkspacePatchBody(status: status.rawValue),
                 at: workspaceURL(workspaceID: workspaceID)
             )
-        } setWorkspaceUnread: { workspaceID, unread in
+        } setWorkspaceUnread: { workspaceID, isUnread in
             try await patch(
-                WorkspacePatchBody(unread: unread),
+                WorkspacePatchBody(isUnread: isUnread),
                 at: workspaceURL(workspaceID: workspaceID)
             )
         } stopSession: { workspaceID, sessionID in
@@ -266,11 +272,7 @@ extension DesktopClient: DependencyKey {
         to url: URL,
         decoding responseType: Response.Type
     ) async throws -> Response? {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = try JSONEncoder().encode(body)
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
+        let request = try jsonRequest(method: "POST", body: body, url: url)
         let (data, response) = try await data(for: request)
         let statusCode = try validateSuccessfulHTTPResponse(response, data: data)
         guard statusCode != 204 else {
@@ -301,14 +303,48 @@ extension DesktopClient: DependencyKey {
     private static func patch<Body: Encodable & Sendable>(
         _ body: Body,
         at url: URL
-    ) async throws {
+    ) async throws -> WorkspaceMutationPath {
+        let request = try jsonRequest(method: "PATCH", body: body, url: url)
+        let (data, response) = try await data(for: request)
+        guard let response = response as? HTTPURLResponse else {
+            throw DesktopClientError.invalidResponse
+        }
+
+        return try workspaceMutationPath(
+            statusCode: response.statusCode,
+            data: data
+        )
+    }
+
+    private static func jsonRequest<Body: Encodable>(
+        method: String,
+        body: Body,
+        url: URL
+    ) throws -> URLRequest {
         var request = URLRequest(url: url)
-        request.httpMethod = "PATCH"
+        request.httpMethod = method
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
 
-        let (data, response) = try await data(for: request)
-        try validateSuccessfulHTTPResponse(response, data: data)
+    static func workspaceMutationPath(
+        statusCode: Int,
+        data: Data = Data()
+    ) throws -> WorkspaceMutationPath {
+        switch statusCode {
+        case 204:
+            return .hook
+
+        case 202:
+            return .sqliteFallback
+
+        default:
+            throw DesktopClientError.requestFailed(
+                statusCode: statusCode,
+                message: String(decoding: data, as: UTF8.self)
+            )
+        }
     }
 
     private static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -328,16 +364,25 @@ extension DesktopClient: DependencyKey {
     }
 }
 
-private struct WorkspacePatchBody: Encodable, Sendable {
-    var pinned: Bool? = nil
+struct WorkspacePatchBody: Encodable, Sendable {
+    var isPinned: Bool? = nil
     var status: String? = nil
-    var unread: Bool? = nil
+    var isUnread: Bool? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case isPinned = "pinned"
+        case isUnread = "unread"
+        case status
+    }
 }
 
 public extension DesktopClient {
     // GET /repositories/{repositoryID}/icon
     static func repositoryIconURL(for repository: Repository) -> URL {
-        URL(string: "\(baseURL)/repositories/\(repository.id)/icon")!
+        baseURL
+            .appending(path: "repositories")
+            .appending(path: repository.id)
+            .appending(path: "icon")
     }
 }
 

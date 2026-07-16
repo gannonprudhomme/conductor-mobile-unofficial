@@ -114,6 +114,27 @@ struct ServerTests {
                         .workspaceName
                         == "Renamed"
                 )
+
+                try await client.execute(
+                    uri: "/workspaces/workspace-iso",
+                    method: .patch,
+                    headers: [
+                        .contentType: "application/json",
+                        .origin: "ws://localhost",
+                    ],
+                    body: ByteBuffer(string: #"{"status":"in-review"}"#)
+                ) { response in
+                    #expect(response.status == .accepted)
+                }
+                let fallback = try decode(
+                    WorkspaceListSnapshot.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(
+                    fallback.workspaces.first { $0.workspace.id == "workspace-iso" }?.workspace
+                        .manualStatus
+                        == Workspace.Status.inReview.rawValue
+                )
             }
 
             try await client.ws("/workspaces/workspace-iso/sessions") { inbound, _, _ in

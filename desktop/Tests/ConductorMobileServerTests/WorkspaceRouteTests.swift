@@ -15,158 +15,136 @@ import Testing
 @testable import ConductorMobileServer
 
 struct WorkspaceRouteTests {
-    @Test("Workspace mutation routes update Conductor state")
-    func workspaceMutations() async throws {
-        let database = try testConductorDatabase()
-        let date = Date(timeIntervalSince1970: 1_783_555_200)
-        let workspace = Workspace(
-            id: "workspace",
-            activeSessionID: "active",
-            createdAt: date,
-            updatedAt: date
+    @Test("Live mutations return only after Conductor persists them")
+    func liveMutations() async throws {
+        let (database, workspace, activeSession, _, _) = try await workspaceRouteDatabase()
+        let broker = WorkspaceUIHookBroker()
+        let connection = await broker.connect()
+        let browser = Task {
+            var events = connection.events.makeAsyncIterator()
+
+            _ = try #require(await events.next())
+            let pinnedAt: String? = "2026-07-15T00:00:00Z"
+            try await database.write { database in
+                try Workspace
+                    .find(workspace.id)
+                    .update { $0.pinnedAt = #bind(pinnedAt) }
+                    .execute(database)
+            }
+
+            _ = try #require(await events.next())
+            let status = Workspace.Status.inReview.rawValue
+            try await database.write { database in
+                try Workspace
+                    .find(workspace.id)
+                    .update { $0.manualStatus = #bind(status) }
+                    .execute(database)
+            }
+
+            _ = try #require(await events.next())
+            try await database.write { database in
+                try Session
+                    .find(activeSession.id)
+                    .update { $0.unreadCount = 1 }
+                    .execute(database)
+            }
+        }
+        let application = Server.makeApplication(
+            database: database,
+            workspaceUIHookBroker: broker
         )
-        let emptyWorkspace = Workspace(
-            id: "empty",
-            createdAt: date,
-            updatedAt: date
-        )
-        let fallbackSession = Session(
-            id: "fallback",
-            workspaceID: emptyWorkspace.id,
-            title: "Fallback",
-            agentType: .codex,
-            isHidden: false,
-            createdAt: "2026-07-09T00:00:00Z",
-            updatedAt: "2026-07-09T00:00:04Z",
-            lastUserMessageAt: nil,
-            status: .idle,
-            model: .init(rawValue: "gpt-5"),
-            unreadCount: 0,
-            freshlyCompacted: 0,
-            contextTokenCount: 0
-        )
-        let olderSession = Session(
-            id: "older",
-            workspaceID: workspace.id,
-            title: "Older",
-            agentType: .codex,
-            isHidden: false,
-            createdAt: "2026-07-09T00:00:00Z",
-            updatedAt: "2026-07-09T00:00:01Z",
-            lastUserMessageAt: nil,
-            status: .idle,
-            model: .init(rawValue: "gpt-5"),
-            unreadCount: 3,
-            freshlyCompacted: 0,
-            contextTokenCount: 0
-        )
-        let activeSession = Session(
-            id: "active",
-            workspaceID: workspace.id,
-            title: "Active",
-            agentType: .codex,
-            isHidden: false,
-            createdAt: "2026-07-09T00:00:00Z",
-            updatedAt: "2026-07-09T00:00:02Z",
-            lastUserMessageAt: nil,
-            status: .idle,
-            model: .init(rawValue: "gpt-5"),
-            unreadCount: 0,
-            freshlyCompacted: 0,
-            contextTokenCount: 0
-        )
-        let hiddenSession = Session(
-            id: "hidden",
-            workspaceID: workspace.id,
-            title: "Hidden",
-            agentType: .codex,
-            isHidden: true,
-            createdAt: "2026-07-09T00:00:00Z",
-            updatedAt: "2026-07-09T00:00:03Z",
-            lastUserMessageAt: nil,
-            status: .idle,
-            model: .init(rawValue: "gpt-5"),
-            unreadCount: 7,
-            freshlyCompacted: 0,
-            contextTokenCount: 0
-        )
-        try await database.write { database in
-            try Workspace
-                .insert { [workspace, emptyWorkspace] }
-                .execute(database)
-            try Session
-                .insert { [olderSession, activeSession, hiddenSession, fallbackSession] }
-                .execute(database)
-            try database.execute(
-                sql: """
-                    CREATE TRIGGER update_session_recency
-                    AFTER UPDATE OF unread_count ON sessions
-                    BEGIN
-                      UPDATE sessions SET updated_at = 'triggered' WHERE id = NEW.id;
-                    END;
-                    """
+
+        try await application.test(.router) { client in
+            for body in [
+                #"{"pinned":true}"#,
+                #"{"status":"in-review"}"#,
+                #"{"unread":true}"#,
+            ] {
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: body)
+                ) { response in
+                    #expect(response.status == .noContent)
+                    #expect(response.body.readableBytes == 0)
+                }
+            }
+        }
+        try await browser.value
+
+        let state = try await database.read { database in
+            (
+                session: try Session.find(activeSession.id).fetchOne(database),
+                workspace: try Workspace.find(workspace.id).fetchOne(database)
             )
         }
+        #expect(state.session?.unreadCount == 1)
+        #expect(state.workspace?.pinnedAt == "2026-07-15T00:00:00Z")
+        #expect(state.workspace?.manualStatus == Workspace.Status.inReview.rawValue)
+    }
+
+    @Test("A definite disconnection commits each mutation through SQLite")
+    func fallbackMutations() async throws {
+        let (database, workspace, activeSession, olderSession, hiddenSession) =
+            try await workspaceRouteDatabase()
         let application = Server.makeApplication(database: database)
 
         try await application.test(.router) { client in
-            try await client.execute(
-                uri: "/workspaces/workspace",
-                method: .patch,
-                body: ByteBuffer(string: #"{"unread":false}"#)
-            ) { response in
-                #expect(response.status == .noContent)
+            for body in [
+                #"{"unread":false}"#,
+                #"{"pinned":true}"#,
+                #"{"status":"in-review"}"#,
+                #"{"unread":true}"#,
+            ] {
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: body)
+                ) { response in
+                    #expect(response.status == .accepted)
+                    #expect(response.body.readableBytes == 0)
+                }
+            }
+        }
+
+        let state = try await database.read { database in
+            (
+                active: try Session.find(activeSession.id).fetchOne(database),
+                hidden: try Session.find(hiddenSession.id).fetchOne(database),
+                older: try Session.find(olderSession.id).fetchOne(database),
+                workspace: try Workspace.find(workspace.id).fetchOne(database)
+            )
+        }
+        #expect(state.active?.unreadCount == 1)
+        #expect(state.older?.unreadCount == 0)
+        #expect(state.hidden?.unreadCount == hiddenSession.unreadCount)
+        #expect(state.workspace?.pinnedAt != nil)
+        #expect(state.workspace?.manualStatus == Workspace.Status.inReview.rawValue)
+    }
+
+    @Test("Workspace PATCH accepts exactly one valid absolute field")
+    func invalidBodies() async throws {
+        let (database, workspace, _, _, _) = try await workspaceRouteDatabase()
+        let application = Server.makeApplication(database: database)
+
+        try await application.test(.router) { client in
+            for body in [
+                "{}",
+                #"{"pinned":true,"status":"done"}"#,
+                #"{"pinned":true,"extra":false}"#,
+                #"{"extra":true}"#,
+                #"{"pinned":"true"}"#,
+                #"{"status":"unknown"}"#,
+            ] {
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: body)
+                ) { response in
+                    #expect(response.status == .badRequest)
+                }
             }
 
-            let readState = try await database.read { database in
-                (
-                    active: try Session
-                        .find(activeSession.id)
-                        .fetchOne(database),
-                    older: try Session
-                        .find(olderSession.id)
-                        .fetchOne(database),
-                    hidden: try Session
-                        .find(hiddenSession.id)
-                        .fetchOne(database)
-                )
-            }
-            #expect(readState.active?.updatedAt == activeSession.updatedAt)
-            #expect(readState.older?.updatedAt == "triggered")
-            #expect(readState.hidden?.updatedAt == hiddenSession.updatedAt)
-
-            try await client.execute(
-                uri: "/workspaces/workspace",
-                method: .patch,
-                body: ByteBuffer(
-                    string: #"{"pinned":true,"status":"in-review","unread":true}"#
-                )
-            ) { response in
-                #expect(response.status == .noContent)
-            }
-
-            let pinnedAt = try await database.read { database in
-                let workspace = try Workspace
-                    .find(workspace.id)
-                    .fetchOne(database)
-                return workspace?.pinnedAt
-            }
-            #expect(pinnedAt != nil)
-
-            try await client.execute(
-                uri: "/workspaces/workspace",
-                method: .patch,
-                body: ByteBuffer(string: #"{"pinned":false}"#)
-            ) { response in
-                #expect(response.status == .noContent)
-            }
-            try await client.execute(
-                uri: "/workspaces/workspace",
-                method: .patch,
-                body: ByteBuffer(string: #"{"pinned":true,"status":"unknown"}"#)
-            ) { response in
-                #expect(response.status == .badRequest)
-            }
             try await client.execute(
                 uri: "/workspaces/missing",
                 method: .patch,
@@ -174,46 +152,108 @@ struct WorkspaceRouteTests {
             ) { response in
                 #expect(response.status == .notFound)
             }
+        }
+    }
+
+    @Test("Fallback reports conflict when unread has no active visible session")
+    func fallbackConflict() async throws {
+        let database = try testConductorDatabase()
+        let date = Date(timeIntervalSince1970: 1_783_555_200)
+        let workspace = Workspace(id: "workspace", createdAt: date, updatedAt: date)
+        try await database.write { database in
+            try Workspace.insert { workspace }.execute(database)
+        }
+        let application = Server.makeApplication(database: database)
+
+        try await application.test(.router) { client in
             try await client.execute(
-                uri: "/workspaces/empty",
+                uri: "/workspaces/\(workspace.id)",
                 method: .patch,
                 body: ByteBuffer(string: #"{"unread":true}"#)
             ) { response in
                 #expect(response.status == .conflict)
             }
+        }
+    }
+
+    @Test("An enqueued command times out without falling back")
+    func liveTimeout() async throws {
+        let (database, workspace, _, _, _) = try await workspaceRouteDatabase()
+        let broker = WorkspaceUIHookBroker()
+        let connection = await broker.connect()
+        let browser = Task {
+            var events = connection.events.makeAsyncIterator()
+            _ = try #require(await events.next())
+            await broker.disconnect(connectionID: connection.id)
+        }
+        let application = Server.makeApplication(
+            database: database,
+            workspaceUIHookBroker: broker,
+            workspaceMutationTimeout: .milliseconds(20)
+        )
+
+        try await application.test(.router) { client in
             try await client.execute(
-                uri: "/workspaces/workspace",
+                uri: "/workspaces/\(workspace.id)",
                 method: .patch,
-                body: ByteBuffer(string: "{}")
+                body: ByteBuffer(string: #"{"pinned":true}"#)
             ) { response in
-                #expect(response.status == .badRequest)
+                #expect(response.status == .gatewayTimeout)
             }
         }
+        try await browser.value
 
-        let state = try await database.read { database in
-            (
-                active: try Session
-                    .find(activeSession.id)
-                    .fetchOne(database),
-                fallback: try Session
-                    .find(fallbackSession.id)
-                    .fetchOne(database),
-                older: try Session
-                    .find(olderSession.id)
-                    .fetchOne(database),
-                hidden: try Session
-                    .find(hiddenSession.id)
-                    .fetchOne(database),
-                workspace: try Workspace
-                    .find(workspace.id)
-                    .fetchOne(database)
-            )
+        let persistedWorkspace = try await database.read { database in
+            try Workspace.find(workspace.id).fetchOne(database)
         }
-        #expect(state.active?.unreadCount == 1)
-        #expect(state.fallback?.unreadCount == 0)
-        #expect(state.older?.unreadCount == 0)
-        #expect(state.hidden?.unreadCount == 7)
-        #expect(state.workspace?.pinnedAt == nil)
-        #expect(state.workspace?.manualStatus == "in-review")
+        #expect(persistedWorkspace?.pinnedAt == nil)
     }
+}
+
+private func workspaceRouteDatabase() async throws -> (
+    DatabaseQueue,
+    Workspace,
+    Session,
+    Session,
+    Session
+) {
+    let database = try testConductorDatabase()
+    let date = Date(timeIntervalSince1970: 1_783_555_200)
+    let workspace = Workspace(
+        id: "workspace",
+        activeSessionID: "active",
+        createdAt: date,
+        updatedAt: date
+    )
+    func session(
+        _ id: String,
+        isHidden: Bool = false,
+        unreadCount: Int = 0
+    ) -> Session {
+        Session(
+            id: id,
+            workspaceID: workspace.id,
+            title: id.capitalized,
+            agentType: .codex,
+            isHidden: isHidden,
+            createdAt: "2026-07-09T00:00:00Z",
+            updatedAt: "2026-07-09T00:00:00Z",
+            lastUserMessageAt: nil,
+            status: .idle,
+            model: .init(rawValue: "gpt-5"),
+            unreadCount: unreadCount,
+            freshlyCompacted: 0,
+            contextTokenCount: 0
+        )
+    }
+    let olderSession = session("older", unreadCount: 3)
+    let activeSession = session("active")
+    let hiddenSession = session("hidden", isHidden: true, unreadCount: 7)
+    try await database.write { database in
+        try Workspace.insert { workspace }.execute(database)
+        try Session
+            .insert { [olderSession, activeSession, hiddenSession] }
+            .execute(database)
+    }
+    return (database, workspace, activeSession, olderSession, hiddenSession)
 }

@@ -51,6 +51,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private static let databaseURL = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Library/Application Support/com.conductor.app/conductor.db")
+
+    private static func resource(named name: String, extension fileExtension: String) throws -> String {
+        guard let url = Bundle.main.url(forResource: name, withExtension: fileExtension) else {
+            throw StartupError(description: "The bundled \(name).\(fileExtension) resource is missing.")
+        }
+        let source = try String(contentsOf: url, encoding: .utf8)
+        guard !source.isEmpty else {
+            throw StartupError(description: "The bundled \(name).\(fileExtension) resource is empty.")
+        }
+        return source
+    }
+
 }
 
 private struct WindowConfigurator: NSViewRepresentable {

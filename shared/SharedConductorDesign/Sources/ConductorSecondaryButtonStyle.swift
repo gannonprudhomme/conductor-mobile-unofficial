@@ -1,6 +1,6 @@
 //
 //  ConductorSecondaryButtonStyle.swift
-//  ConductorDesign
+//  SharedConductorDesign
 //
 //  Created by Gannon Prudomme on 7/14/26.
 //

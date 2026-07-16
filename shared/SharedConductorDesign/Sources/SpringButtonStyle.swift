@@ -1,6 +1,6 @@
 //
 //  SpringButtonStyle.swift
-//  ConductorDesign
+//  SharedConductorDesign
 //
 //  Created by Gannon Prudomme on 7/14/26.
 //
@@ -18,6 +18,7 @@ public struct SpringButtonStyle: ButtonStyle {
 }
 
 struct SpringButtonStyleBody<Label: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var shouldReduceMotion
     @State private var isVisuallyPressed = false
     @State private var pressStartedAt: ContinuousClock.Instant?
 
@@ -34,14 +35,18 @@ struct SpringButtonStyleBody<Label: View>: View {
 
     var body: some View {
         label
-            .scaleEffect(isVisuallyPressed ? 0.925 : 1) // Conductor does 0.97
-            .animation(.interactiveSpring(duration: 0.150), value: isVisuallyPressed)
+            .scaleEffect(!shouldReduceMotion && isVisuallyPressed ? 0.925 : 1)
+            .animation(
+                shouldReduceMotion ? nil : .interactiveSpring(duration: 0.150),
+                value: isVisuallyPressed
+            )
             .task(id: isPressed) {
                 await pressedStateChanged()
             }
     }
 
-    private func pressedStateChanged() async { // a little sloppy but it gets the job done
+    // Keep quick taps visibly pressed for 150 ms so the spring feedback does not flash.
+    private func pressedStateChanged() async {
         let clock = ContinuousClock()
         if isPressed {
             pressStartedAt = clock.now
