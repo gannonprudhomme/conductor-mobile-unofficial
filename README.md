@@ -19,18 +19,23 @@ brew install mise xcodegen xcbeautify
 Note: You can use an [Apple Personal Team](https://developer.apple.com/help/account/basics/about-your-developer-account) to install the iOS app to your physical device, but it will expire after 7 days. For it to last longer, you'll need an Apple Developer Account ($100/yr).
 
 Steps:
-1. Clone the repo
-2. Run `mise run xcode`
-3. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
+1. Install Xcode 26
+
+  a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version will do
+  b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
+  
+2. Clone the repo
+3. Run `mise run xcode`
+4. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
 
   a. Remember to log in in Xcode -> Settings -> Accounts
 
-4. In the top-center bar select the left button (likely something like `ConductorDataTests` or something) and change it to `ConductorMobile`. Then choose your physical device
+5. In the top-center bar select the left button (likely something like `ConductorDataTests` or something) and change it to `ConductorMobile`. Then choose your physical device
 
   a. If you haven't connected it to your Mac before, you'll need to plug it in with a cable. After this initial pairing you can deploy it over Wi-Fi.
 
-5. Press Run (Cmd+R)
-6. Proceed to desktop steps
+6. Press Run (Cmd+R)
+7. Proceed to desktop steps
 
 ### Desktop Companion
 
