@@ -13,8 +13,8 @@ import SharedConductorData
 import Sharing
 
 extension DesktopClient {
-    static func workspacesWebSocketURL(serverAddress: String) -> URL {
-        serverURL(scheme: "ws", address: serverAddress)!
+    static func workspacesWebSocketURL(serverAddress: String) -> URL? {
+        serverURL(scheme: "ws", address: serverAddress)?
             .appending(path: "workspaces")
     }
 
@@ -25,8 +25,8 @@ extension DesktopClient {
         serverAddress: String,
         workspaceID: String,
         sessionID: String
-    ) -> URL {
-        serverURL(scheme: "ws", address: serverAddress)!
+    ) -> URL? {
+        serverURL(scheme: "ws", address: serverAddress)?
             .appending(path: "workspaces")
             .appending(path: workspaceID)
             .appending(path: "sessions")
@@ -35,8 +35,8 @@ extension DesktopClient {
     }
 
     /// `/workspaces/{workspaceID}/sessions`
-    static func sessionsWebSocketURL(serverAddress: String, workspaceID: String) -> URL {
-        serverURL(scheme: "ws", address: serverAddress)!
+    static func sessionsWebSocketURL(serverAddress: String, workspaceID: String) -> URL? {
+        serverURL(scheme: "ws", address: serverAddress)?
             .appending(path: "workspaces")
             .appending(path: workspaceID)
             .appending(path: "sessions")
@@ -53,7 +53,7 @@ extension DesktopClient {
             Value,
             any Error
         >.Continuation.BufferingPolicy = .bufferingNewest(1),
-        at makeURL: @escaping @Sendable (String) -> URL
+        at makeURL: @escaping @Sendable (String) -> URL?
     ) -> AsyncThrowingStream<Value, any Error> {
         @Dependency(\.urlSession) var urlSession
         @Shared(.desktopServerAddress) var desktopServerAddress
@@ -67,12 +67,18 @@ extension DesktopClient {
             .compactMap { $0 }
             // When the address actually changes, `flatMapLatest` cancels the old WebSocket stream
             // and subscribes to a new one.
-            .flatMapLatest { serverAddress in
-                webSocketStream(
+            .flatMapLatest { (serverAddress: String) -> AsyncThrowingStream<Value, any Error> in
+                guard let url = makeURL(serverAddress) else {
+                    return AsyncThrowingStream { continuation in
+                        continuation.finish(throwing: DesktopClientError.invalidServerAddress)
+                    }
+                }
+
+                return webSocketStream(
                     type,
                     bufferingPolicy: bufferingPolicy,
                     using: WebSocketTaskClient(
-                        urlSession.webSocketTask(with: makeURL(serverAddress))
+                        urlSession.webSocketTask(with: url)
                     )
                 )
             }
