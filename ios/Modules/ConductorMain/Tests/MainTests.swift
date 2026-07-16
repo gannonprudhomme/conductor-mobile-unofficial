@@ -11,6 +11,7 @@ import ConductorSettings
 import SharedConductorData
 import ConductorMobileData
 import ConductorWorkspaces
+import Sharing
 import SQLiteData
 import SwiftUI
 @testable import ConductorChat
@@ -20,12 +21,26 @@ import UIKit
 
 @MainActor
 struct MainTests {
+    @Test("A fresh install requires the server address in Settings")
+    func freshInstallRequiresServerAddress() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let state = Main.State()
+
+            #expect(state.settings?.isServerAddressMissing == true)
+        }
+    }
+
     @Test("Settings button presents settings")
     func settingsButtonPresentsSettings() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
             let store = TestStore(initialState: Main.State()) {
                 Main()
             }

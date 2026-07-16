@@ -64,6 +64,7 @@ extension DesktopClient {
 
         let values = Observations { sharedServerAddress.wrappedValue }
             .removeDuplicates()
+            .compactMap { $0 }
             // When the address actually changes, `flatMapLatest` cancels the old WebSocket stream
             // and subscribes to a new one.
             .flatMapLatest { serverAddress in

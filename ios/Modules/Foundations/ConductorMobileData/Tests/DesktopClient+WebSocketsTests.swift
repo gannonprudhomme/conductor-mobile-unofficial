@@ -17,28 +17,24 @@ struct DesktopClientWebSocketsTests {
     func webSocketURLs() {
         expectNoDifference(
             DesktopClient.workspacesWebSocketURL(
-                serverAddress: DesktopClient.defaultServerAddress
+                serverAddress: "my-mac"
             ).absoluteString,
-            "ws://192.168.0.32:3768/workspaces"
+            "ws://my-mac:3768/workspaces"
         )
         expectNoDifference(
             DesktopClient.sessionsWebSocketURL(
-                serverAddress: DesktopClient.defaultServerAddress,
+                serverAddress: "my-mac",
                 workspaceID: "workspace-1"
             ).absoluteString,
-            "ws://192.168.0.32:3768/workspaces/workspace-1/sessions"
+            "ws://my-mac:3768/workspaces/workspace-1/sessions"
         )
         expectNoDifference(
             DesktopClient.messagesWebSocketURL(
-                serverAddress: DesktopClient.defaultServerAddress,
+                serverAddress: "my-mac",
                 workspaceID: "workspace-1",
                 sessionID: "session-1"
             ).absoluteString,
-            "ws://192.168.0.32:3768/workspaces/workspace-1/sessions/session-1/messages"
-        )
-        expectNoDifference(
-            DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac").absoluteString,
-            "ws://my-mac:3768/workspaces"
+            "ws://my-mac:3768/workspaces/workspace-1/sessions/session-1/messages"
         )
         expectNoDifference(
             DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac:4000").absoluteString,

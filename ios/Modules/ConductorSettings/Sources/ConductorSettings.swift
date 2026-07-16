@@ -40,7 +40,7 @@ public struct ConductorSettings: Sendable {
             @Shared(.desktopServerAddress) var storedServerAddress
             self.deviceIcon = storedDisplayConfiguration?.icon ?? .laptop
             self.displayName = storedDisplayConfiguration?.name ?? ""
-            self.initialServerAddress = storedServerAddress
+            self.initialServerAddress = storedServerAddress ?? ""
         }
 
         var isConnectionTestInFlight: Bool {
@@ -48,13 +48,18 @@ public struct ConductorSettings: Sendable {
         }
 
         var hasChanges: Bool {
-            initialServerAddress != storedServerAddress
+            initialServerAddress != (storedServerAddress ?? "")
                 || displayName != (storedDisplayConfiguration?.name ?? "")
                 || deviceIcon != (storedDisplayConfiguration?.icon ?? .laptop)
         }
 
         var isSaveButtonDisabled: Bool {
             isConnectionTestInFlight
+                || normalizedServerAddress.isEmpty
+        }
+
+        public var isServerAddressMissing: Bool {
+            storedServerAddress == nil
         }
 
         var isServerAddressConnected: Bool {
@@ -229,6 +234,7 @@ public struct ConductorSettingsView: View {
                 testedServerAddress: store.testedServerAddress
             )
         )
+        .interactiveDismissDisabled(store.isServerAddressMissing)
         .preferredColorScheme(.dark)
     }
 
@@ -251,22 +257,24 @@ public struct ConductorSettingsView: View {
         .background(.theme(.background))
         .themedNavigationTitle("Settings", alignment: .center)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button(role: .close) {
-                    if store.hasChanges {
-                        isDiscardConfirmationPresented = true
-                    } else {
-                        dismiss()
+            if !store.isServerAddressMissing {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .close) {
+                        if store.hasChanges {
+                            isDiscardConfirmationPresented = true
+                        } else {
+                            dismiss()
+                        }
                     }
-                }
-                .foregroundStyle(.theme(.textPrimary))
-                .confirmationDialog(
-                    "Are you sure you want to discard changes?",
-                    isPresented: $isDiscardConfirmationPresented,
-                    titleVisibility: .visible
-                ) {
-                    Button("Discard changes", role: .destructive) {
-                        dismiss()
+                    .foregroundStyle(.theme(.textPrimary))
+                    .confirmationDialog(
+                        "Are you sure you want to discard changes?",
+                        isPresented: $isDiscardConfirmationPresented,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Discard changes", role: .destructive) {
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -323,7 +331,7 @@ public struct ConductorSettingsView: View {
     private var displayRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Display name")
+                Text("Host display name & icon")
                     .font(.theme(.small).weight(.medium))
                     .foregroundStyle(.theme(.textPrimary))
 
@@ -531,7 +539,7 @@ private extension DesktopClient.DeviceIcon {
 
 @MainActor
 private func settingsPreview(
-    initialServerAddress: String = DesktopClient.defaultServerAddress,
+    initialServerAddress: String = "",
     checkConnection: @escaping @Sendable (String) async throws -> Void
 ) -> some View {
     let store = withDependencies {

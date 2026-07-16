@@ -113,7 +113,6 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
 }
 
 extension DesktopClient: DependencyKey {
-    public static let defaultServerAddress = "192.168.0.32"
     static let defaultServerPort = 3_768
 
     public static var liveValue: Self {
@@ -178,7 +177,12 @@ extension DesktopClient: DependencyKey {
 
     private static var baseURL: URL {
         @Shared(.desktopServerAddress) var desktopServerAddress
-        return serverURL(scheme: "http", address: desktopServerAddress)!
+        guard let desktopServerAddress,
+              let baseURL = serverURL(scheme: "http", address: desktopServerAddress)
+        else {
+            preconditionFailure("The desktop server address must be configured before use.")
+        }
+        return baseURL
     }
 
     /// `scheme`` is either `http` or `ws`
@@ -213,13 +217,24 @@ extension DesktopClient: DependencyKey {
 
     private static func ping() async throws {
         @Shared(.desktopConnectionStatus) var connectionStatus
+        @Shared(.desktopServerAddress) var desktopServerAddress
+        guard let desktopServerAddress else {
+            return
+        }
+
         $connectionStatus.withLock {
             if $0 == .disconnected {
                 $0 = .connecting
             }
         }
 
-        var request = URLRequest(url: baseURL.appending(path: "ping"))
+        guard let url = serverURL(scheme: "http", address: desktopServerAddress)?
+            .appending(path: "ping")
+        else {
+            throw DesktopClientError.invalidServerAddress
+        }
+
+        var request = URLRequest(url: url)
         request.timeoutInterval = 3
         let (data, response) = try await data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
@@ -333,14 +348,14 @@ public extension DependencyValues {
     }
 }
 
-public extension SharedKey where Self == FileStorageKey<String>.Default {
+public extension SharedKey where Self == FileStorageKey<String?>.Default {
     static var desktopServerAddress: Self {
         Self[
             .fileStorage(
                 .applicationSupportDirectory
                     .appending(component: "desktop-server-address.json")
             ),
-            default: DesktopClient.defaultServerAddress,
+            default: nil,
         ]
     }
 }

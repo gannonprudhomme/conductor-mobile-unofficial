@@ -25,6 +25,9 @@ public struct Main: Sendable {
         public var workspaces = Workspaces.State()
 
         public init() {
+            // If we're missing the server address (aka on first launch), show the Settings screen immediately
+            let settings = ConductorSettings.State()
+            self.settings = settings.isServerAddressMissing ? settings : nil
         }
     }
 

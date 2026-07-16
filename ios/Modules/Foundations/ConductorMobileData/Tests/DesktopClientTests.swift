@@ -59,7 +59,9 @@ struct DesktopClientTests {
             $0.urlSession = urlSession
         } operation: {
             @Shared(.desktopConnectionStatus) var connectionStatus
+            @Shared(.desktopServerAddress) var desktopServerAddress
             $connectionStatus.withLock { $0 = .disconnected }
+            $desktopServerAddress.withLock { $0 = "my-mac" }
             let requestedPaths = LockIsolated<[String]>([])
             DesktopClientURLProtocol.handler.setValue { request in
                 requestedPaths.withValue { $0.append(request.url?.path ?? "") }
@@ -85,6 +87,21 @@ struct DesktopClientTests {
             await #expect(throws: URLError.self) {
                 try await client.ping()
             }
+            expectNoDifference(connectionStatus, .disconnected)
+        }
+    }
+
+    @Test("Heartbeat waits for a desktop server address")
+    func requestConnectionStatusWithoutServerAddress() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultInMemoryStorage = InMemoryStorage()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+
+            try await DesktopClient.liveValue.ping()
+
             expectNoDifference(connectionStatus, .disconnected)
         }
     }
@@ -120,9 +137,12 @@ struct DesktopClientTests {
         defer { urlSession.invalidateAndCancel() }
 
         let response = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             $0.urlSession = urlSession
         } operation: {
-            try await DesktopClient.liveValue.sendMessage(
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.sendMessage(
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
                 message: "Run the tests."
@@ -166,9 +186,12 @@ struct DesktopClientTests {
         defer { urlSession.invalidateAndCancel() }
 
         let response = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             $0.urlSession = urlSession
         } operation: {
-            try await DesktopClient.liveValue.sendMessage(
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.sendMessage(
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
                 message: "Run the tests."
@@ -205,9 +228,12 @@ struct DesktopClientTests {
         defer { urlSession.invalidateAndCancel() }
 
         let response = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             $0.urlSession = urlSession
         } operation: {
-            try await DesktopClient.liveValue.stopSession(
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.stopSession(
                 workspaceID: "workspace-1",
                 sessionID: "session-1"
             )
@@ -247,9 +273,12 @@ struct DesktopClientTests {
         defer { urlSession.invalidateAndCancel() }
 
         let response = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             $0.urlSession = urlSession
         } operation: {
-            try await DesktopClient.liveValue.stopSession(
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.stopSession(
                 workspaceID: "workspace-1",
                 sessionID: "session-1"
             )
@@ -332,12 +361,6 @@ struct DesktopClientTests {
                 createdAt: Date(timeIntervalSince1970: 0),
                 updatedAt: Date(timeIntervalSince1970: 0)
             )
-
-            expectNoDifference(
-                DesktopClient.repositoryIconURL(for: repository).absoluteString,
-                "http://192.168.0.32:3768/repositories/repository-1/icon"
-            )
-
             $desktopServerAddress.withLock { $0 = "my-mac" }
 
             expectNoDifference(

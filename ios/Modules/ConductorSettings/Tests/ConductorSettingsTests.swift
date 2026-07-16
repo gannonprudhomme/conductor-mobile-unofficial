@@ -26,7 +26,7 @@ struct ConductorSettingsTests {
             state.initialServerAddress = "draft-mac"
             #expect(state.hasChanges)
 
-            state.initialServerAddress = state.storedServerAddress
+            state.initialServerAddress = state.storedServerAddress ?? ""
             state.displayName = "Office desktop"
             #expect(state.hasChanges)
 
@@ -133,7 +133,7 @@ struct ConductorSettingsTests {
 
             expectNoDifference(
                 ConductorSettings.State().initialServerAddress,
-                DesktopClient.defaultServerAddress
+                ""
             )
         }
     }
@@ -166,7 +166,7 @@ struct ConductorSettingsTests {
 
             expectNoDifference(
                 ConductorSettings.State().initialServerAddress,
-                DesktopClient.defaultServerAddress
+                ""
             )
         }
     }
@@ -262,8 +262,8 @@ struct ConductorSettingsTests {
         }
     }
 
-    @Test("Saving without changes dismisses without testing the connection")
-    func saveWithoutChanges() async {
+    @Test("An empty server address cannot be saved")
+    func emptyServerAddress() async {
         let isDismissed = LockIsolated(false)
 
         await withDependencies {
@@ -281,9 +281,11 @@ struct ConductorSettingsTests {
             #expect(store.state.displayName.isEmpty)
             expectNoDifference(store.state.deviceIcon, .laptop)
 
+            #expect(store.state.isSaveButtonDisabled)
+            #expect(store.state.isServerAddressMissing)
             await store.send(.saveButtonTapped)
             await store.finish()
-            #expect(isDismissed.value)
+            #expect(!isDismissed.value)
             expectNoDifference(
                 ConductorSettings.State().storedDisplayConfiguration,
                 nil
@@ -318,7 +320,7 @@ struct ConductorSettingsTests {
 
             expectNoDifference(
                 ConductorSettings.State().initialServerAddress,
-                DesktopClient.defaultServerAddress
+                ""
             )
             expectNoDifference(
                 ConductorSettings.State().storedDisplayConfiguration,
