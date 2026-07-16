@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// This is definitely slop-y, but it gets the job done
+// most of the message forwarding I didn't dive deeply in
+
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
