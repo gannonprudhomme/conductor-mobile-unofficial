@@ -412,7 +412,7 @@ public struct ConductorSettingsView: View {
         .autocorrectionDisabled()
         .textContentType(.URL)
         .keyboardType(.URL)
-        .submitLabel(.go)
+        .submitLabel(.done)
         .onSubmit {
             store.send(.testButtonTapped)
         }
