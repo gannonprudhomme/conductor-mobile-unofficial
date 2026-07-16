@@ -197,18 +197,41 @@ struct WorkspacesTests {
         }
     }
 
-    @Test("Repository filter changes reload workspaces through the reducer")
-    func repositoryFilterChangesReloadWorkspaces() async throws {
+    @Test("Repository filter shows only workspaces with the selected repository ID")
+    func repositoryFilterShowsMatchingWorkspaces() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
+            @Dependency(\.defaultDatabase) var database
+            let firstRepository = Repository.preview(id: "repo-1", name: "First")
+            let secondRepository = Repository.preview(id: "repo-2", name: "Second")
+            let firstWorkspace = Workspace.preview(
+                id: "workspace-1",
+                derivedStatus: Workspace.Status.inProgress.rawValue,
+                repositoryID: firstRepository.id,
+                updatedAt: Date(timeIntervalSince1970: 2)
+            )
+            let secondWorkspace = Workspace.preview(
+                id: "workspace-2",
+                derivedStatus: Workspace.Status.inProgress.rawValue,
+                repositoryID: secondRepository.id,
+                updatedAt: Date(timeIntervalSince1970: 1)
+            )
+            try await database.write { db in
+                try Repository
+                    .insert { [firstRepository, secondRepository] }
+                    .execute(db)
+                try Workspace
+                    .insert { [firstWorkspace, secondWorkspace] }
+                    .execute(db)
+            }
+
             let (stream, _) = AsyncThrowingStream<
                 WorkspaceListSnapshot,
                 any Error
             >.makeStream()
             let initialState = Workspaces.State()
-            let selectedRepositoryID = initialState.$selectedRepositoryID
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
@@ -218,9 +241,39 @@ struct WorkspacesTests {
             }
 
             let task = await store.send(.task)
-            selectedRepositoryID.withLock { $0 = "repo-1" }
+            let firstItem = WorkspaceWithRepository(
+                workspace: firstWorkspace,
+                repository: firstRepository
+            )
+            let secondItem = WorkspaceWithRepository(
+                workspace: secondWorkspace,
+                repository: secondRepository
+            )
 
-            await store.receive(\.repositoryFilterChanged, "repo-1")
+            await store.send(.repositoryFilterButtonTapped(firstRepository.id)) {
+                $0.$selectedRepositoryID.withLock { $0 = firstRepository.id }
+            }
+            await store.receive(\.workspacesChanged) {
+                $0.sections = Workspaces.State.sections(
+                    groupedBy: .status,
+                    workspaces: [firstItem]
+                )
+            }
+            expectNoDifference(store.state.workspaces.map(\.id), [firstWorkspace.id])
+
+            await store.send(.repositoryFilterButtonTapped(nil)) {
+                $0.$selectedRepositoryID.withLock { $0 = nil }
+            }
+            await store.receive(\.workspacesChanged) {
+                $0.sections = Workspaces.State.sections(
+                    groupedBy: .status,
+                    workspaces: [firstItem, secondItem]
+                )
+            }
+            expectNoDifference(
+                store.state.workspaces.map(\.id),
+                [firstWorkspace.id, secondWorkspace.id]
+            )
 
             await task.cancel()
         }
