@@ -170,7 +170,7 @@ public struct Workspaces: Sendable {
         case groupingChanged(WorkspaceWithRepository.Grouping)
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
-        case repositoryFilterChanged(String?)
+        case repositoryFilterButtonTapped(String?)
         case sortButtonTapped(WorkspaceWithRepository.Sort)
         /// Note: `MainView` handles this action so we can keep this module decoupled from `ConductorSettings`
         case settingsButtonTapped
@@ -199,7 +199,6 @@ public struct Workspaces: Sendable {
             switch action {
             case .task:
                 let grouping = state.$grouping
-                let selectedRepositoryID = state.$selectedRepositoryID
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
@@ -209,12 +208,6 @@ public struct Workspaces: Sendable {
                             .removeDuplicates()
                             .dropFirst()
                             .map(Action.groupingChanged)
-                    },
-                    .publisher {
-                        selectedRepositoryID.publisher
-                            .removeDuplicates()
-                            .dropFirst()
-                            .map(Action.repositoryFilterChanged)
                     },
                     .publisher {
                         workspaces.publisher
@@ -245,7 +238,8 @@ public struct Workspaces: Sendable {
                 state.alert = .failedToLoadWorkspaces(error: error)
                 return .none
 
-            case .repositoryFilterChanged:
+            case let .repositoryFilterButtonTapped(repositoryID):
+                state.$selectedRepositoryID.withLock { $0 = repositoryID }
                 return reloadWorkspaces(state)
 
             case let .sortButtonTapped(sort):
@@ -769,7 +763,10 @@ public struct WorkspacesView: View {
                 Menu {
                     Picker(
                         "Repository",
-                        selection: Binding(store.$selectedRepositoryID)
+                        selection: Binding(
+                            get: { store.selectedRepositoryID },
+                            set: { store.send(.repositoryFilterButtonTapped($0), animation: .default) }
+                        )
                     ) {
                         Text("All Repositories")
                             .tag(String?.none)
