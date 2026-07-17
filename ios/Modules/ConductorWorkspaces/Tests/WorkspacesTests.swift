@@ -423,6 +423,7 @@ struct WorkspacesTests {
 
             let requests = LockIsolated<[String]>([])
             let item = workspace(id: "workspace", status: .inProgress)
+            let now = Date(timeIntervalSince1970: 1_783_555_200)
             try await database.write { db in
                 try Workspace
                     .insert { item.workspace }
@@ -432,19 +433,32 @@ struct WorkspacesTests {
                 Workspaces()
             } withDependencies: {
                 $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
+                    let workspace = try await database.read { db in
+                        try Workspace.find(workspaceID).fetchOne(db)
+                    }
+                    #expect(workspace?.pinnedAt == now.ISO8601Format())
                     requests.withValue { $0.append("pinned:\(workspaceID):\(isPinned)") }
                     return .hook
                 }
                 $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    let workspace = try await database.read { db in
+                        try Workspace.find(workspaceID).fetchOne(db)
+                    }
+                    #expect(workspace?.manualStatus == status.rawValue)
                     requests.withValue {
                         $0.append("status:\(workspaceID):\(status.rawValue)")
                     }
                     return .hook
                 }
                 $0.desktopClient.setWorkspaceUnread = { workspaceID, isUnread in
+                    let workspace = try await database.read { db in
+                        try Workspace.find(workspaceID).fetchOne(db)
+                    }
+                    #expect(workspace?.unread == 1)
                     requests.withValue { $0.append("unread:\(workspaceID):\(isUnread)") }
                     return .hook
                 }
+                $0.date.now = now
             }
 
             await store.send(.workspacePinnedButtonTapped(item))
@@ -462,9 +476,9 @@ struct WorkspacesTests {
                     .fetchOne(db)
             }
             let updatedWorkspace = try #require(fetchedWorkspace)
-            #expect(updatedWorkspace.pinnedAt == nil)
-            #expect(updatedWorkspace.manualStatus == nil)
-            #expect(updatedWorkspace.unread == nil)
+            expectNoDifference(updatedWorkspace.pinnedAt, now.ISO8601Format())
+            expectNoDifference(updatedWorkspace.manualStatus, Workspace.Status.done.rawValue)
+            expectNoDifference(updatedWorkspace.unread, 1)
             expectNoDifference(
                 requests.value,
                 [
@@ -476,16 +490,29 @@ struct WorkspacesTests {
         }
     }
 
-    @Test("Workspace update failures present an alert")
-    func workspaceUpdateFailure() async throws {
+    @Test("A failed pin update restores the previous value")
+    func failedPinUpdateRollsBack() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
+            @Dependency(\.defaultDatabase) var database
+
             let item = workspace(id: "workspace")
+            let now = Date(timeIntervalSince1970: 1_783_555_200)
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
             let store = TestStore(initialState: Workspaces.State()) {
                 Workspaces()
             } withDependencies: {
-                $0.desktopClient.setWorkspacePinned = { _, _ in
+                $0.date.now = now
+                $0.desktopClient.setWorkspacePinned = { workspaceID, _ in
+                    let workspace = try await database.read { db in
+                        try Workspace.find(workspaceID).fetchOne(db)
+                    }
+                    #expect(workspace?.pinnedAt == now.ISO8601Format())
                     throw TestError()
                 }
             }
@@ -497,6 +524,91 @@ struct WorkspacesTests {
                     error: TestError()
                 )
             }
+
+            let workspace = try await database.read { db in
+                try Workspace.find(item.id).fetchOne(db)
+            }
+            #expect(workspace?.pinnedAt == nil)
+        }
+    }
+
+    @Test("A failed status update restores the previous value")
+    func failedStatusUpdateRollsBack() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let item = workspace(id: "workspace", status: .inProgress)
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    let workspace = try await database.read { db in
+                        try Workspace.find(workspaceID).fetchOne(db)
+                    }
+                    #expect(workspace?.manualStatus == status.rawValue)
+                    throw TestError()
+                }
+            }
+
+            await store.send(.workspaceStatusButtonTapped(item, .done))
+
+            await store.receive(\.workspaceMutationFailed) {
+                $0.alert = .failedToUpdateWorkspace(
+                    error: TestError()
+                )
+            }
+
+            let workspace = try await database.read { db in
+                try Workspace.find(item.id).fetchOne(db)
+            }
+            #expect(workspace?.manualStatus == nil)
+        }
+    }
+
+    @Test("A failed unread update restores the previous value")
+    func failedUnreadUpdateRollsBack() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let item = workspace(id: "workspace")
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, _ in
+                    let workspace = try await database.read { db in
+                        try Workspace.find(workspaceID).fetchOne(db)
+                    }
+                    #expect(workspace?.unread == 1)
+                    throw TestError()
+                }
+            }
+
+            await store.send(.workspaceUnreadButtonTapped(item))
+
+            await store.receive(\.workspaceMutationFailed) {
+                $0.alert = .failedToUpdateWorkspace(
+                    error: TestError()
+                )
+            }
+
+            let workspace = try await database.read { db in
+                try Workspace.find(item.id).fetchOne(db)
+            }
+            #expect(workspace?.unread == nil)
         }
     }
 
@@ -505,10 +617,19 @@ struct WorkspacesTests {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
+            @Dependency(\.defaultDatabase) var database
+
             let item = workspace(id: "workspace")
+            let now = Date(timeIntervalSince1970: 1_783_555_200)
+            try await database.write { db in
+                try Workspace
+                    .insert { item.workspace }
+                    .execute(db)
+            }
             let store = TestStore(initialState: Workspaces.State()) {
                 Workspaces()
             } withDependencies: {
+                $0.date.now = now
                 $0.desktopClient.setWorkspacePinned = { _, _ in .sqliteFallback }
             }
 
@@ -516,6 +637,11 @@ struct WorkspacesTests {
             await store.receive(\.workspaceMutationUsedSQLiteFallback) {
                 $0.alert = .workspaceMutationUsedSQLiteFallback
             }
+
+            let workspace = try await database.read { db in
+                try Workspace.find(item.id).fetchOne(db)
+            }
+            #expect(workspace?.pinnedAt == now.ISO8601Format())
         }
     }
 

@@ -189,6 +189,7 @@ public struct Workspaces: Sendable {
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.continuousClock) var clock
+    @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
     public init() {
@@ -263,8 +264,30 @@ public struct Workspaces: Sendable {
 
             case let .workspacePinnedButtonTapped(item):
                 let isPinned = item.workspace.pinnedAt == nil
+                let previousPinnedAt = item.workspace.pinnedAt
+                let pinnedAt = isPinned ? now.ISO8601Format() : nil
 
                 return updateWorkspace {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.pinnedAt = #bind(pinnedAt) }
+                            .execute(db)
+                    }
+                } rollback: {
+                    try await database.write { db in
+                        guard let workspace = try Workspace.find(item.id).fetchOne(db),
+                              workspace.pinnedAt == pinnedAt
+                        else {
+                            return
+                        }
+
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.pinnedAt = #bind(previousPinnedAt) }
+                            .execute(db)
+                    }
+                } operation: {
                     try await desktopClient.setWorkspacePinned(
                         workspaceID: item.id,
                         isPinned: isPinned
@@ -275,8 +298,29 @@ public struct Workspaces: Sendable {
                 guard item.workspace.status != status else {
                     return .none
                 }
+                let previousManualStatus = item.workspace.manualStatus
 
                 return updateWorkspace {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.manualStatus = #bind(status.rawValue) }
+                            .execute(db)
+                    }
+                } rollback: {
+                    try await database.write { db in
+                        guard let workspace = try Workspace.find(item.id).fetchOne(db),
+                              workspace.manualStatus == status.rawValue
+                        else {
+                            return
+                        }
+
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.manualStatus = #bind(previousManualStatus) }
+                            .execute(db)
+                    }
+                } operation: {
                     try await desktopClient.setWorkspaceStatus(
                         workspaceID: item.id,
                         status: status
@@ -285,8 +329,30 @@ public struct Workspaces: Sendable {
 
             case let .workspaceUnreadButtonTapped(item):
                 let isUnread = (item.workspace.unread ?? 0) == 0
+                let previousUnread = item.workspace.unread
+                let unread = isUnread ? 1 : 0
 
                 return updateWorkspace {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.unread = #bind(unread) }
+                            .execute(db)
+                    }
+                } rollback: {
+                    try await database.write { db in
+                        guard let workspace = try Workspace.find(item.id).fetchOne(db),
+                              workspace.unread == unread
+                        else {
+                            return
+                        }
+
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.unread = #bind(previousUnread) }
+                            .execute(db)
+                    }
+                } operation: {
                     try await desktopClient.setWorkspaceUnread(
                         workspaceID: item.id,
                         isUnread: isUnread
@@ -301,17 +367,32 @@ public struct Workspaces: Sendable {
     }
 
     private func updateWorkspace(
-        _ operation: @escaping @Sendable () async throws -> WorkspaceMutationPath
+        _ optimisticUpdate: @escaping @Sendable () async throws -> Void,
+        rollback: @escaping @Sendable () async throws -> Void,
+        operation: @escaping @Sendable () async throws -> WorkspaceMutationPath
     ) -> Effect<Action> {
-        // Leave the cache untouched because the authoritative workspace snapshot owns the UI.
         .run { send in
+            do {
+                try await optimisticUpdate()
+            } catch {
+                Logger.workspace.error("Failed to optimistically update workspace: \(error)")
+                await send(.workspaceMutationFailed(error))
+                return
+            }
+
             do {
                 if try await operation() == .sqliteFallback {
                     await send(.workspaceMutationUsedSQLiteFallback)
                 }
-            } catch {
-                Logger.workspace.error("Failed to update workspace: \(error)")
-                await send(.workspaceMutationFailed(error))
+            } catch let mutationError {
+                do {
+                    try await rollback()
+                } catch {
+                    Logger.workspace.error("Failed to roll back workspace update: \(error)")
+                }
+
+                Logger.workspace.error("Failed to update workspace: \(mutationError)")
+                await send(.workspaceMutationFailed(mutationError))
             }
         }
     }
