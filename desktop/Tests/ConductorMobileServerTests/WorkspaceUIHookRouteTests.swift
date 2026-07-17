@@ -15,7 +15,9 @@ import Testing
 struct WorkspaceUIHookRouteTests {
     @Test("Hook script admits only Conductor or narrow originless script loads")
     func hookAdmission() async throws {
-        let application = Server.makeWorkspaceUIHookApplication(hookSource: "hook();")
+        let hookSource = "hook();"
+        let revision = WorkspaceUIHookRoute.revision(for: hookSource)
+        let application = Server.makeWorkspaceUIHookApplication(hookSource: hookSource)
 
         try await application.test(.router) { client in
             try await client.execute(
@@ -27,6 +29,8 @@ struct WorkspaceUIHookRouteTests {
                 #expect(response.headers[.accessControlAllowOrigin] == WorkspaceUIHookRoute.origin)
                 #expect(response.headers[.cacheControl] == "no-store")
                 #expect(response.headers[.contentType] == "text/javascript; charset=utf-8")
+                #expect(response.headers[.eTag] == revision)
+                #expect(response.headers[.accessControlExposeHeaders] == "ETag")
                 #expect(
                     response.headers[.vary]
                         == "Origin, Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest"
@@ -71,10 +75,12 @@ struct WorkspaceUIHookRouteTests {
     @Test("Events require the exact Conductor origin")
     func eventsAdmission() async throws {
         let uiHook = WorkspaceUIHook.liveValue
+        let hookSource = "hook();"
+        let revision = WorkspaceUIHookRoute.revision(for: hookSource)
         try await withDependencies {
             $0.workspaceUIHook = uiHook
         } operation: {
-            let application = Server.makeWorkspaceUIHookApplication(hookSource: "hook();")
+            let application = Server.makeWorkspaceUIHookApplication(hookSource: hookSource)
             try await application.test(.router) { client in
                 for headers: HTTPFields in [
                     [:],
@@ -92,6 +98,15 @@ struct WorkspaceUIHookRouteTests {
                     }
                 }
 
+                try await client.execute(
+                    uri: "/workspace-ui-hook/events?revision=stale",
+                    method: .get,
+                    headers: [.origin: WorkspaceUIHookRoute.origin]
+                ) { response in
+                    #expect(response.status == .conflict)
+                    #expect(await uiHook.isConnected() == false)
+                }
+
                 let disconnect = Task {
                     while !(await uiHook.isConnected()) {
                         await Task.yield()
@@ -99,7 +114,7 @@ struct WorkspaceUIHookRouteTests {
                     await uiHook.listenerUnavailable()
                 }
                 try await client.execute(
-                    uri: "/workspace-ui-hook/events",
+                    uri: "/workspace-ui-hook/events?revision=\(revision)",
                     method: .get,
                     headers: [.origin: WorkspaceUIHookRoute.origin]
                 ) { response in

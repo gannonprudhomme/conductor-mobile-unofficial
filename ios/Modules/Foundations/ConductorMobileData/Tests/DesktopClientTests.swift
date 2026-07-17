@@ -164,12 +164,59 @@ struct DesktopClientTests {
                 )
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.createSession(workspaceID: "workspace-1")
+            }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
                 try await DesktopClient.liveValue.setWorkspacePinned(
                     workspaceID: "workspace-1",
                     isPinned: true
                 )
             }
         }
+    }
+
+    @Test("Creating a session returns the canonical database row")
+    func createSession() async throws {
+        let session = Session.preview(id: "created", workspaceID: "workspace-1")
+        let recordedRequest = LockIsolated<URLRequest?>(nil)
+        DesktopClientURLProtocol.handler.setValue { request in
+            recordedRequest.setValue(request)
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                try JSONEncoder.conductor.encode(session)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let response = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.createSession(
+                workspaceID: "workspace-1"
+            )
+        }
+
+        expectNoDifference(response, session)
+        let request = try #require(recordedRequest.value)
+        expectNoDifference(request.url?.path, "/workspaces/workspace-1/sessions")
+        let body = try #require(request.bodyData)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: body) as? [String: String]
+        )
+        expectNoDifference(object, [:])
     }
 
     @Test("Sending a message returns the canonical database row")

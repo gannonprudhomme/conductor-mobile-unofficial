@@ -23,6 +23,10 @@ isolatedTest("loader reports the original connection error", async () => {
   const errors = [];
   const connectionError = new Error("Connection refused.");
   defineGlobal("console", { error: (...arguments_) => errors.push(arguments_) });
+  defineGlobal("fetch", async () => new Response("", {
+    headers: { ETag: '"revision-1"' },
+    status: 200,
+  }));
   defineGlobal("__workspaceHookImport", async () => { throw connectionError; });
   const source = await fs.readFile(new URL("./bootstrap-loader.js", import.meta.url), "utf8");
   Function(source
@@ -67,8 +71,29 @@ isolatedTest("discovery follows renderApp and replaces the installed controller"
   assert.equal(environment.eventSources.length, 2);
   assert.equal(
     secondEventSource.url,
-    "http://127.0.0.1:3769/workspace-ui-hook/events",
+    "http://127.0.0.1:3769/workspace-ui-hook/events?revision=%22revision-1%22",
   );
+});
+
+isolatedTest("a stale hook imports and prepares the latest served revision", async () => {
+  const environment = installHookGlobals({ shell: emptyWorkspaceShell() });
+  await prepareHook();
+
+  environment.eventSources[0].onerror();
+  await waitUntil(() => environment.fetches.length === 2);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(environment.importedHookURLs.length, 0);
+
+  environment.hookRevision = '"revision-2"';
+
+  environment.eventSources[0].onerror();
+  await waitUntil(() => environment.importedHookURLs.length === 1);
+
+  assert.equal(
+    environment.importedHookURLs[0],
+    "http://127.0.0.1:3769/workspace-ui-hook/hook.js?revision=%22revision-2%22",
+  );
+  assert.equal(environment.preparedHookUpdates, 1);
 });
 
 isolatedTest("renderApp requires one narrow direct shell import", async () => {
@@ -165,6 +190,9 @@ isolatedTest("commands run in order with real service signatures and continue af
     },
   };
   const sessionService = {
+    async createSession(input) {
+      calls.push(["createSession", input]);
+    },
     async getSessionsForWorkspace(input) {
       calls.push(["sessions", input]);
       return [{ id: "session-1" }];
@@ -196,6 +224,8 @@ isolatedTest("commands run in order with real service signatures and continue af
   replacementSource.onmessage(command({ unread: true }));
   replacementSource.onmessage(command({ unread: false }));
   replacementSource.onmessage(sessionCommand({ model: "gpt-5.6-terra" }));
+  replacementSource.onmessage(command({ createSession: true }));
+  replacementSource.onmessage(command({ futureCommand: true }));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
   replacementSource.onmessage({ data: JSON.stringify({ id: "obsolete", workspaceId: "workspace-1", pinned: true }) });
   replacementSource.onmessage({ data: "not json" });
@@ -203,7 +233,8 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 8);
+  await waitUntil(() => calls.length === 9);
+  await waitUntil(() => environment.errors.length === 5);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
     ["status", { workspaceId: "workspace-1", status: "in-review" }],
@@ -213,21 +244,26 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["unread", "session-1", true],
     ["read", "workspace-1"],
     ["model", "session-1", "gpt-5.6-terra"],
+    ["createSession", { workspaceId: "workspace-1" }],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
-  assert.equal(environment.errors.at(-1)[1].message, "Setter failed.");
+  assert.equal(environment.errors.at(-1)[1].message, "Unsupported workspace command: futureCommand");
   assert.equal(environment.fetches.length, 2);
 });
 
 const browserHookSource = fs.readFile(new URL("./browser-hook.mjs", import.meta.url), "utf8")
   .then((source) => source
     .replace(
-      'const hookBaseURL = new URL("./", moduleURL);',
-      'const hookBaseURL = new URL("http://127.0.0.1:3769/workspace-ui-hook/");',
+      "const moduleURL = new URL(import.meta.url);",
+      'const moduleURL = new URL("http://127.0.0.1:3769/workspace-ui-hook/hook.js?revision=%22revision-1%22");',
     )
     .replace(
       "const shell = await import(shellURL);",
       "const shell = await globalThis.__workspaceHookImportShell(shellURL);",
+    )
+    .replace(
+      "const module = await import(latestHookURL.href);",
+      "const module = await globalThis.__workspaceHookImport(latestHookURL.href);",
     ));
 
 function prepareHook() {
@@ -249,8 +285,11 @@ function installHookGlobals({
     errors: [],
     eventSources: [],
     fetches: [],
+    hookRevision: '"revision-1"',
+    importedHookURLs: [],
     importedShellURLs: [],
     infos: [],
+    preparedHookUpdates: 0,
     shell,
   };
   defineGlobal("window", globalThis);
@@ -283,8 +322,22 @@ function installHookGlobals({
     environment.importedShellURLs.push(String(url));
     return environment.shell;
   });
+  defineGlobal("__workspaceHookImport", async (url) => {
+    environment.importedHookURLs.push(String(url));
+    return {
+      async prepareWorkspaceUIHook() {
+        environment.preparedHookUpdates += 1;
+      },
+    };
+  });
   defineGlobal("fetch", async (url, options = {}) => {
     environment.fetches.push([String(url), options]);
+    if (String(url).startsWith("http://127.0.0.1:3769/workspace-ui-hook/hook.js")) {
+      return new Response("", {
+        headers: { ETag: environment.hookRevision },
+        status: 200,
+      });
+    }
     return new Response(renderAppSource, { status: 200 });
   });
   delete globalThis[controllerKey];
@@ -298,6 +351,7 @@ function emptyWorkspaceShell() {
     async setWorkspaceManualStatus() {},
   };
   const sessionService = {
+    async createSession() {},
     async getSessionsForWorkspace() { return []; },
     async setUnread() {},
     async markWorkspaceAsRead() {},

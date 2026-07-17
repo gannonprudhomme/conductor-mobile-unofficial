@@ -14,6 +14,7 @@ import Sharing
 @DependencyClient
 public struct DesktopClient: Sendable {
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
+    public var createSession: @Sendable (_ workspaceID: String) async throws -> Session
     public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
         throw CancellationError()
     }
@@ -135,6 +136,15 @@ extension DesktopClient: DependencyKey {
     public static var liveValue: Self {
         Self { serverAddress in
             try await ping(serverAddress: serverAddress)
+        } createSession: { workspaceID in
+            guard let session = try await post(
+                [String: String](),
+                to: sessionsURL(workspaceID: workspaceID),
+                decoding: Session.self
+            ) else {
+                throw DesktopClientError.invalidResponse
+            }
+            return session
         } fetchDefaultModel: {
             let settings = try await get(SettingsResponse.self, from: settingsURL())
             return Session.Model(rawValue: settings.defaultModel)
@@ -285,11 +295,14 @@ extension DesktopClient: DependencyKey {
 
     // POST /workspaces/{workspaceID}/sessions/{sessionID}
     private static func sessionURL(workspaceID: String, sessionID: String) throws -> URL {
-        try baseURL()
-            .appending(path: "workspaces")
-            .appending(path: workspaceID)
-            .appending(path: "sessions")
+        try sessionsURL(workspaceID: workspaceID)
             .appending(path: sessionID)
+    }
+
+    // POST /workspaces/{workspaceID}/sessions
+    private static func sessionsURL(workspaceID: String) throws -> URL {
+        try workspaceURL(workspaceID: workspaceID)
+            .appending(path: "sessions")
     }
 
     private static func workspaceURL(workspaceID: String) throws -> URL {

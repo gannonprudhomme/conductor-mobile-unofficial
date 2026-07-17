@@ -31,7 +31,12 @@ public struct WorkspaceChat: Sendable {
         ///
         /// However we want to prevent that from overriding a local switch from the user
         var hasUserSelectedSession = false
+        var isCreatingSession = false
         var isLoadingSessions = true
+        var hasPersistedInitialSessionSnapshot = false
+        /// Cleared once observation identifies a session created after this snapshot.
+        var sessionIDsBeforeCreation: Set<Session.ID>?
+        var sessionIDAwaitingObservation: Session.ID?
 
         @FetchAll public var activeSessions: [Session]
         @FetchAll public var archivedSessions: [Session]
@@ -56,8 +61,7 @@ public struct WorkspaceChat: Sendable {
             let activeSessions = FetchAll(
                 Session
                     .where { $0.workspaceID.eq(workspace.id).and(!$0.isHidden) }
-                    .order(by: \.createdAt),
-                animation: .default
+                    .order(by: \.createdAt)
             )
 
             self._activeSessions = activeSessions
@@ -86,8 +90,11 @@ public struct WorkspaceChat: Sendable {
         case activeSessionIDChanged(Session.ID?)
         case archivedSessionsButtonTapped
         case chat(Chat.Action)
+        case createSessionButtonTapped
+        case createSessionResponse(Result<Session, any Error>)
         case destination(PresentationAction<Destination.Action>)
         case loadSessionsResponse(Result<[Session], any Error>)
+        case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
         case task
     }
@@ -116,12 +123,17 @@ public struct WorkspaceChat: Sendable {
                 )
 
             case let .activeSessionIDChanged(activeSessionID):
-                state.chat = Self.selectedChat(
-                    afterReceiving: state.activeSessions,
-                    currentChat: state.chat,
-                    workspaceActiveSessionID: activeSessionID,
-                    hasUserSelectedSession: state.hasUserSelectedSession
-                )
+                // The workspace and session snapshots are persisted independently. Do not let a
+                // workspace update clear or replace the chat while SQLite is still catching up.
+                guard !state.hasUserSelectedSession,
+                      let activeSessionID,
+                      let activeSession = state.activeSessions.first(where: {
+                          $0.id == activeSessionID
+                      }),
+                      state.chat?.sessionID != activeSessionID else {
+                    return .none
+                }
+                state.chat = Chat.State(session: activeSession)
                 return .none
 
             case .archivedSessionsButtonTapped:
@@ -133,12 +145,71 @@ public struct WorkspaceChat: Sendable {
                 )
                 return .none
 
+            case .createSessionButtonTapped:
+                guard state.activeSessions.count < 5 else {
+                    state.destination = .alert(.maximumTabsReached)
+                    return .none
+                }
+                guard !state.isCreatingSession else {
+                    return .none
+                }
+
+                state.isCreatingSession = true
+                state.sessionIDsBeforeCreation = Set(state.activeSessions.map(\.id))
+                return .run { [workspaceID = state.workspace.id] send in
+                    await send(
+                        .createSessionResponse(
+                            Result {
+                                try await desktopClient.createSession(workspaceID: workspaceID)
+                            }
+                        )
+                    )
+                }
+
+            case let .createSessionResponse(.success(session)):
+                let hasObservedSession = state.sessionIDsBeforeCreation == nil
+                state.hasUserSelectedSession = true
+                state.isCreatingSession = false
+                state.sessionIDAwaitingObservation = hasObservedSession ? nil : session.id
+                state.sessionIDsBeforeCreation = nil
+                if state.chat?.sessionID != session.id {
+                    state.chat = Chat.State(
+                        session: session,
+                        shouldFocusMessageField: true
+                    )
+                }
+                return .none
+
+            case let .createSessionResponse(.failure(error)):
+                Logger.chat.error("Failed to create session: \(error)")
+                state.isCreatingSession = false
+                state.sessionIDsBeforeCreation = nil
+                state.destination = .alert(
+                    .failedToCreateSession(message: error.localizedDescription)
+                )
+                return .none
+
             case let .loadSessionsResponse(.success(sessions)):
+                if let sessionIDsBeforeCreation = state.sessionIDsBeforeCreation,
+                   let createdSession = sessions.last(where: {
+                       !sessionIDsBeforeCreation.contains($0.id) && !$0.isHidden
+                   }) {
+                    state.hasUserSelectedSession = true
+                    state.sessionIDsBeforeCreation = nil
+                    state.chat = Chat.State(
+                        session: createdSession,
+                        shouldFocusMessageField: true
+                    )
+                }
+                if sessions.contains(where: { $0.id == state.sessionIDAwaitingObservation }) {
+                    state.sessionIDAwaitingObservation = nil
+                }
                 state.chat = Self.selectedChat(
                     afterReceiving: sessions,
                     currentChat: state.chat,
                     workspaceActiveSessionID: state.workspace.activeSessionID,
-                    hasUserSelectedSession: state.hasUserSelectedSession
+                    hasUserSelectedSession: state.hasUserSelectedSession,
+                    sessionIDAwaitingObservation: state.sessionIDAwaitingObservation
                 )
                 state.isLoadingSessions = false
                 return .none
@@ -152,6 +223,10 @@ public struct WorkspaceChat: Sendable {
                 state.destination = .alert(
                     .failedToLoadSessions(message: error.localizedDescription)
                 )
+                return .none
+
+            case .sessionSnapshotPersisted:
+                state.hasPersistedInitialSessionSnapshot = true
                 return .none
 
             case let .chat(.loadMessagesFailed(error)):
@@ -194,6 +269,7 @@ public struct WorkspaceChat: Sendable {
             case let .sessionButtonTapped(session):
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
                 state.hasUserSelectedSession = true
+                state.sessionIDAwaitingObservation = nil
                 guard state.chat?.sessionID != session.id else {
                     return .none
                 }
@@ -219,10 +295,14 @@ public struct WorkspaceChat: Sendable {
         afterReceiving sessions: [Session],
         currentChat: Chat.State?,
         workspaceActiveSessionID: Session.ID?,
-        hasUserSelectedSession: Bool
+        hasUserSelectedSession: Bool,
+        sessionIDAwaitingObservation: Session.ID?
     ) -> Chat.State? {
         let activeSessions = sessions.filter { !$0.isHidden } // Archived sessions are displayed separately and cannot remain selected in the chat.
-        if hasUserSelectedSession,
+        if let sessionIDAwaitingObservation,
+           currentChat?.sessionID == sessionIDAwaitingObservation {
+            return currentChat
+        } else if hasUserSelectedSession,
            let currentChat,
             activeSessions.contains(where: { $0.id == currentChat.sessionID }) {
             // Preserve a reconciled or explicit selection instead of resetting it on every snapshot.
@@ -247,6 +327,8 @@ public struct WorkspaceChat: Sendable {
             await WebSocketHelpers.observe {
                 desktopClient.observeSessions(workspaceID: workspaceID)
             } onValue: { sessions in
+                await send(.loadSessionsResponse(.success(sessions)))
+
                 try await database.write { db in
                     try Session
                         .where { $0.workspaceID.eq(workspaceID) }
@@ -256,8 +338,7 @@ public struct WorkspaceChat: Sendable {
                     try Session.upsert { sessions }
                         .execute(db)
                 }
-
-                await send(.loadSessionsResponse(.success(sessions)))
+                await send(.sessionSnapshotPersisted)
             } onFailure: { error in
                 await send(.loadSessionsResponse(.failure(error)))
             }
@@ -268,9 +349,23 @@ public struct WorkspaceChat: Sendable {
 extension WorkspaceChat.Destination.State: Equatable { }
 
 extension AlertState where Action == WorkspaceChat.Destination.Alert {
+    static var maximumTabsReached: Self {
+        AlertState {
+            TextState("Maximum of 5 tabs allowed")
+        }
+    }
+
     static func failedToLoadMessages(message: String) -> Self {
         AlertState {
             TextState("Failed to load messages")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToCreateSession(message: String) -> Self {
+        AlertState {
+            TextState("Failed to create session")
         } message: {
             TextState(message)
         }
@@ -363,9 +458,13 @@ public struct WorkspaceChatView: View {
             SessionPicker(
                 sessions: store.activeSessions,
                 selectedSessionID: store.chat?.sessionID,
+                isCreatingSession: store.isCreatingSession,
+                animatesSessionChanges: store.hasPersistedInitialSessionSnapshot,
                 height: sessionPickerHeight
             ) { session in
                 store.send(.sessionButtonTapped(session))
+            } createSession: {
+                store.send(.createSessionButtonTapped)
             }
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
@@ -402,8 +501,11 @@ public struct WorkspaceChatView: View {
     private struct SessionPicker: View {
         let sessions: [Session]
         let selectedSessionID: Session.ID?
+        let isCreatingSession: Bool
+        let animatesSessionChanges: Bool
         let height: CGFloat
         let action: @MainActor (Session) -> Void
+        let createSession: @MainActor () -> Void
         @State private var scrollPosition = ScrollPosition(idType: Session.ID.self)
 
         var body: some View {
@@ -421,10 +523,20 @@ public struct WorkspaceChatView: View {
                             // applying it directly to the edge buttons keeps them from touching
                             // the screen edge when ScrollPosition scrolls to them.
                             .padding(.leading, session.id == sessions.first?.id ? 16 : 0)
-                            .padding(.trailing, session.id == sessions.last?.id ? 16 : 0)
                         }
+
+                        NewSessionButton(
+                            isCreatingSession: isCreatingSession,
+                            action: createSession
+                        )
+                        .padding(.leading, sessions.isEmpty ? 16 : 0)
+                        .padding(.trailing, 16)
                     }
                     .scrollTargetLayout()
+                    .animation(
+                        animatesSessionChanges ? .default : nil,
+                        value: sessions.map(\.id)
+                    )
                 }
                 .padding(.vertical, 8)
             }
@@ -436,6 +548,9 @@ public struct WorkspaceChatView: View {
             .onChange(of: selectedSessionID, initial: true) { _, sessionID in
                 selectedSessionChanged(sessionID)
             }
+            .onChange(of: sessions.map(\.id)) {
+                selectedSessionChanged(selectedSessionID)
+            }
         }
 
         private func selectedSessionChanged(_ sessionID: Session.ID?) {
@@ -443,9 +558,44 @@ public struct WorkspaceChatView: View {
                 return
             }
 
-            withAnimation {
+            if animatesSessionChanges {
+                withAnimation {
+                    scrollPosition.scrollTo(id: sessionID, anchor: .center)
+                }
+            } else {
                 scrollPosition.scrollTo(id: sessionID, anchor: .center)
             }
+        }
+    }
+
+    private struct NewSessionButton: View {
+        let isCreatingSession: Bool
+        let action: @MainActor () -> Void
+        @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
+        private var iconSize = ThemeFontStyle.small.size
+        @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
+        private var buttonSize = ThemeFontStyle.small.size + 12
+
+        var body: some View {
+            Button(action: action) {
+                Group {
+                    if isCreatingSession {
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.textSecondary))
+                            .controlSize(.mini)
+                    } else {
+                        LucideIcon(Lucide.plus, size: iconSize, relativeTo: .footnote)
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
+                }
+                .frame(width: iconSize, height: iconSize)
+                .frame(width: buttonSize, height: buttonSize)
+            }
+            .glassEffect(.clear.interactive(), in: .circle)
+            .disabled(isCreatingSession)
+            .accessibilityLabel("New session")
+            .accessibilityIdentifier("workspace-chat.new-session")
         }
     }
 
@@ -487,6 +637,7 @@ public struct WorkspaceChatView: View {
                     .interactive()
             )
             .tint(isSelected ? .theme(.highlight) : .clear)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
     }
 }

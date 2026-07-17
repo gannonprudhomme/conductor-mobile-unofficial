@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/14/26.
 //
 
+import CryptoKit
 import Dependencies
 import Foundation
 import Hummingbird
@@ -14,7 +15,21 @@ import HTTPTypes
 enum WorkspaceUIHookRoute {
     static let origin = "tauri://localhost"
 
-    static func getHookFileContents(request: Request, source: String) -> Response {
+    /// Returns a stable fingerprint of the hook source in HTTP ETag syntax.
+    ///
+    /// The loader appends this value to the module URL to bypass Chromium's import cache,
+    /// then the loaded hook sends it back when opening its event stream. A different value
+    /// means the server is serving newer hook code and the running module must reload.
+    static func revision(for source: String) -> String {
+        let digest = SHA256.hash(data: Data(source.utf8))
+        return "\"sha256-\(digest.map { String(format: "%02x", $0) }.joined())\""
+    }
+
+    static func getHookFileContents(
+        request: Request,
+        source: String,
+        revision: String
+    ) -> Response {
         guard let admission = hookAdmission(for: request) else {
             logDenied(route: "hook", request: request)
             return Response(status: .forbidden, headers: hookHeaders(admission: nil))
@@ -22,6 +37,7 @@ enum WorkspaceUIHookRoute {
 
         var headers = hookHeaders(admission: admission)
         headers[.contentType] = "text/javascript; charset=utf-8"
+        headers[.eTag] = revision
         return Response(
             status: .ok,
             headers: headers,
@@ -29,11 +45,16 @@ enum WorkspaceUIHookRoute {
         )
     }
 
-    static func events(request: Request) async -> Response {
+    static func events(request: Request, revision: String) async -> Response {
         // SSE carries mutations, so it always requires Conductor's exact Origin.
         guard request.headers[.origin] == origin else {
             logDenied(route: "events", request: request)
             return Response(status: .forbidden, headers: eventHeaders(isAdmitted: false))
+        }
+        // A stale hook receives 409, causing its EventSource error handler to compare ETags,
+        // import the current module, and replace the old controller.
+        guard request.uri.queryParameters["revision"] == revision[...] else {
+            return Response(status: .conflict, headers: eventHeaders(isAdmitted: true))
         }
 
         @Dependency(\.workspaceUIHook) var uiHook
@@ -92,6 +113,7 @@ enum WorkspaceUIHookRoute {
 
     private static func hookHeaders(admission: HookAdmission?) -> HTTPFields {
         var headers: HTTPFields = [
+            .accessControlExposeHeaders: "ETag",
             .cacheControl: "no-store",
             .vary: "Origin, Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest",
         ]

@@ -173,6 +173,19 @@ public enum Server {
             )
         }
 
+        router.post("/workspaces/{workspaceID}/sessions") { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await CreateSessionRoute.post(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: workspaceMutationTimeout
+            )
+        }
+
         router.post("/workspaces/{workspaceID}/sessions/{sessionID}/stop") { request, context in
             guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
                 throw HTTPError(.forbidden)
@@ -200,11 +213,19 @@ public enum Server {
         port: Int = 3_769
     ) -> Application<RouterResponder<RequestContext>> {
         let router = Router(context: RequestContext.self)
+        let hookRevision = WorkspaceUIHookRoute.revision(for: hookSource)
         router.get("/workspace-ui-hook/hook.js") { request, _ in
-            WorkspaceUIHookRoute.getHookFileContents(request: request, source: hookSource)
+            WorkspaceUIHookRoute.getHookFileContents(
+                request: request,
+                source: hookSource,
+                revision: hookRevision
+            )
         }
         router.get("/workspace-ui-hook/events") { request, _ in
-            await WorkspaceUIHookRoute.events(request: request)
+            await WorkspaceUIHookRoute.events(
+                request: request,
+                revision: hookRevision
+            )
         }
 
         return Application(

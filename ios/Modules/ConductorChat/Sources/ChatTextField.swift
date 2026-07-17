@@ -19,6 +19,7 @@ struct ChatTextField: View {
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
+    let shouldFocusOnAppear: Bool
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
@@ -29,6 +30,7 @@ struct ChatTextField: View {
         isStopInFlight: Bool,
         isWorking: Bool,
         selectedModel: Binding<Session.Model>,
+        shouldFocusOnAppear: Bool = false,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
@@ -38,6 +40,7 @@ struct ChatTextField: View {
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
         self._selectedModel = selectedModel
+        self.shouldFocusOnAppear = shouldFocusOnAppear
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -56,6 +59,13 @@ struct ChatTextField: View {
             in: .rect(cornerRadius: 26)
         )
         .padding(EdgeInsets(vertical: 8, horizontal: 8))
+        .onAppear {
+            guard shouldFocusOnAppear else {
+                return
+            }
+
+            isFocused = true
+        }
     }
 
     private var textField: some View {

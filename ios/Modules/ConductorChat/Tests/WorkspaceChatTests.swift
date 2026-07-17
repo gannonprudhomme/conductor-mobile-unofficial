@@ -109,6 +109,34 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("An active-session update cannot clear a chat before SQLite catches up")
+    func activeSessionUpdatePreservesUnpersistedChat() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.loadSessionsResponse(.success([activeSession]))) {
+                $0.chat = Chat.State(session: activeSession)
+                $0.isLoadingSessions = false
+            }
+            await store.send(.activeSessionIDChanged(activeSession.id))
+            #expect(store.state.chat?.sessionID == activeSession.id)
+        }
+    }
+
     @Test("A user selection before the first load is preserved")
     func userSelectionBeforeFirstLoadIsPreserved() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -278,11 +306,15 @@ struct WorkspaceChatTests {
             await store.receive(\.loadSessionsResponse.success) {
                 $0.isLoadingSessions = false
             }
+            await store.receive(\.sessionSnapshotPersisted) {
+                $0.hasPersistedInitialSessionSnapshot = true
+            }
 
             continuation.yield([replacement])
             await store.receive(\.loadSessionsResponse.success) {
                 $0.chat = Chat.State(session: replacement)
             }
+            await store.receive(\.sessionSnapshotPersisted)
             #expect(connectionCount.value == 1)
 
             let storedSessionIDs = try await database.read { db in
@@ -328,6 +360,203 @@ struct WorkspaceChatTests {
                 $0.chat = Chat.State(session: selectedSession)
             }
             await store.send(.loadSessionsResponse(.success([activeSession, selectedSession])))
+        }
+    }
+
+    @Test("Creating a session selects it once and preserves it until observation catches up")
+    func sessionCreationSelectsSession() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+        let createdSession = try makeSession(id: "created", workspaceID: workspace.id)
+        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.createSession = { workspaceID in
+                    #expect(workspaceID == workspace.id)
+                    requestCount.withValue { $0 += 1 }
+                    for await _ in responses {
+                        return createdSession
+                    }
+                    throw TestError()
+                }
+            }
+
+            await store.send(.createSessionButtonTapped) {
+                $0.isCreatingSession = true
+                $0.sessionIDsBeforeCreation = [activeSession.id]
+            }
+            await store.send(.createSessionButtonTapped)
+            #expect(requestCount.value == 1)
+
+            responseContinuation.yield()
+            await store.receive(\.createSessionResponse.success) {
+                $0.hasUserSelectedSession = true
+                $0.isCreatingSession = false
+                $0.sessionIDsBeforeCreation = nil
+                $0.sessionIDAwaitingObservation = createdSession.id
+                $0.chat = Chat.State(
+                    session: createdSession,
+                    shouldFocusMessageField: true
+                )
+            }
+
+            await store.send(.loadSessionsResponse(.success([activeSession]))) {
+                $0.isLoadingSessions = false
+            }
+            await store.send(
+                .loadSessionsResponse(.success([activeSession, createdSession]))
+            ) {
+                $0.sessionIDAwaitingObservation = nil
+            }
+            #expect(store.state.chat?.sessionID == createdSession.id)
+            responseContinuation.finish()
+        }
+    }
+
+    @Test("Session observation selects a creation before its response arrives")
+    func sessionObservationSelectsCreation() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+        let createdSession = try makeSession(id: "created", workspaceID: workspace.id)
+        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.createSession = { _ in
+                    for await _ in responses {
+                        return createdSession
+                    }
+                    throw TestError()
+                }
+            }
+
+            await store.send(.createSessionButtonTapped) {
+                $0.isCreatingSession = true
+                $0.sessionIDsBeforeCreation = [activeSession.id]
+            }
+            await store.send(
+                .loadSessionsResponse(.success([activeSession, createdSession]))
+            ) {
+                $0.hasUserSelectedSession = true
+                $0.isLoadingSessions = false
+                $0.sessionIDsBeforeCreation = nil
+                $0.chat = Chat.State(
+                    session: createdSession,
+                    shouldFocusMessageField: true
+                )
+            }
+            await store.send(.activeSessionIDChanged(activeSession.id))
+            #expect(store.state.chat?.sessionID == createdSession.id)
+
+            responseContinuation.yield()
+            await store.receive(\.createSessionResponse.success) {
+                $0.isCreatingSession = false
+            }
+            responseContinuation.finish()
+        }
+    }
+
+    @Test("A session creation failure keeps the current chat and presents an alert")
+    func sessionCreationFailure() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.createSession = { _ in
+                    throw TestError()
+                }
+            }
+
+            await store.send(.createSessionButtonTapped) {
+                $0.isCreatingSession = true
+                $0.sessionIDsBeforeCreation = [activeSession.id]
+            }
+            await store.receive(\.createSessionResponse.failure) {
+                $0.isCreatingSession = false
+                $0.sessionIDsBeforeCreation = nil
+                $0.destination = .alert(
+                    .failedToCreateSession(message: TestError().localizedDescription)
+                )
+            }
+            #expect(store.state.chat?.sessionID == activeSession.id)
+        }
+    }
+
+    @Test("Creating a sixth tab presents the local limit without making a request")
+    func sessionCreationLimit() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "session-0")
+        let sessions = try (0..<5).map { index in
+            try makeSession(
+                id: "session-\(index)",
+                workspaceID: workspace.id
+            )
+        }
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { sessions }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.createSessionButtonTapped) {
+                $0.destination = .alert(.maximumTabsReached)
+            }
         }
     }
 
@@ -760,6 +989,9 @@ struct WorkspaceChatTests {
             secondContinuation.yield([activeSession])
             await store.receive(\.loadSessionsResponse.success) {
                 $0.isLoadingSessions = false
+            }
+            await store.receive(\.sessionSnapshotPersisted) {
+                $0.hasPersistedInitialSessionSnapshot = true
             }
             #expect(connectionCount.value == 2)
 

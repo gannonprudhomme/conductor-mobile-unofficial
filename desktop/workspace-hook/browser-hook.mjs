@@ -12,6 +12,10 @@ const directShellImportPattern =
   /(?:^|[;\n\r])\s*import(?=\s|["'{*])(?:\s*["'](\.\/shell-[^/"']+\.js)["']|[^;\n\r]*?\bfrom\s*["'](\.\/shell-[^/"']+\.js)["'])/g;
 export async function prepareWorkspaceUIHook() {
   const moduleURL = new URL(import.meta.url);
+  const hookRevision = moduleURL.searchParams.get("revision");
+  if (!hookRevision) {
+    throw new Error("The Workspace UI Hook revision is missing.");
+  }
 
   // Private service access is allowed only in Conductor's exact top-level document.
   if (globalThis.window !== globalThis.window.top) {
@@ -30,16 +34,26 @@ export async function prepareWorkspaceUIHook() {
   );
   const sessionService = uniqueService(
     shell,
-    ["getSessionsForWorkspace", "setUnread", "markWorkspaceAsRead", "updateSessionModel"],
+    [
+      "createSession",
+      "getSessionsForWorkspace",
+      "setUnread",
+      "markWorkspaceAsRead",
+      "updateSessionModel",
+    ],
     "SessionService",
   );
 
   const hookBaseURL = new URL("./", moduleURL);
+  const eventsURL = new URL("events", hookBaseURL);
+  eventsURL.searchParams.set("revision", hookRevision);
   // Keep one queue across loader runs so a replacement cannot overtake a pending setter.
   const commandQueue = globalThis[commandQueueKey] ?? { tail: Promise.resolve() };
   const controller = createController({
     commandQueue,
-    eventsURL: new URL("events", hookBaseURL),
+    eventsURL,
+    hookRevision,
+    hookURL: new URL("hook.js", hookBaseURL),
     sessionService,
     workspaceService,
   });
@@ -127,9 +141,17 @@ function uniqueService(module, methods, name) {
   return services.values().next().value;
 }
 
-function createController({ commandQueue, eventsURL, sessionService, workspaceService }) {
+function createController({
+  commandQueue,
+  eventsURL,
+  hookRevision,
+  hookURL,
+  sessionService,
+  workspaceService,
+}) {
   let eventSource;
   let isRetired = false;
+  let refreshPromise;
 
   // EventSource reconnects itself; SQLite observation replaces a browser result channel.
   const controller = {
@@ -139,6 +161,17 @@ function createController({ commandQueue, eventsURL, sessionService, workspaceSe
       eventSource = new EventSource(eventsURL);
       eventSource.onopen = () => {
         if (!isRetired) console.info("CONDUCTOR MOBILE: CONNECTED");
+      };
+      eventSource.onerror = () => {
+        if (isRetired || refreshPromise) return;
+
+        refreshPromise = refreshHook({ hookRevision, hookURL })
+          .catch((error) => {
+            console.error("Conductor Mobile could not refresh the Workspace UI Hook.", error);
+          })
+          .finally(() => {
+            refreshPromise = undefined;
+          });
       };
       eventSource.onmessage = (event) => {
         if (isRetired) return;
@@ -174,6 +207,20 @@ function createController({ commandQueue, eventsURL, sessionService, workspaceSe
   return controller;
 }
 
+async function refreshHook({ hookRevision, hookURL }) {
+  const response = await fetch(hookURL, { cache: "no-store" });
+  if (!response.ok) throw new Error("Could not check the Workspace UI Hook revision.");
+
+  const latestRevision = response.headers.get("ETag");
+  if (!latestRevision) throw new Error("The Workspace UI Hook revision is missing.");
+  if (latestRevision === hookRevision) return;
+
+  const latestHookURL = new URL(hookURL);
+  latestHookURL.searchParams.set("revision", latestRevision);
+  const module = await import(latestHookURL.href);
+  await module.prepareWorkspaceUIHook();
+}
+
 // TODO: No clue why this is necessary
 function parseCommand(data) {
   // The server builds these commands; this check keeps each trusted SSE frame to one mutation.
@@ -194,6 +241,9 @@ function parseCommand(data) {
 
 async function executeCommand({ sessionService, workspaceService }, command) {
   switch (command.field) {
+    case "createSession":
+      await sessionService.createSession({ workspaceId: command.workspaceId });
+      return;
     case "model":
       await sessionService.updateSessionModel(command.sessionId, command.value);
       return;
@@ -229,5 +279,7 @@ async function executeCommand({ sessionService, workspaceService }, command) {
         await sessionService.setUnread(activeSession.id, true);
         return;
       }
+    default:
+      throw new Error(`Unsupported workspace command: ${command.field}`);
   }
 }

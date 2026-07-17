@@ -39,6 +39,7 @@ public struct Chat: Sendable {
         var hasObservedSessionModelChange = false
         var hasUserSelectedModel = false
         var scrollToBottomRequest = 0
+        var shouldFocusMessageField = false
 
         /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
         var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
@@ -72,9 +73,14 @@ public struct Chat: Sendable {
             )
         }
 
-        init(session: Session, messages: [Message] = []) {
+        init(
+            session: Session,
+            messages: [Message] = [],
+            shouldFocusMessageField: Bool = false
+        ) {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
+            self.shouldFocusMessageField = shouldFocusMessageField
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -109,6 +115,7 @@ public struct Chat: Sendable {
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
+                && lhs.shouldFocusMessageField == rhs.shouldFocusMessageField
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
                     == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
@@ -482,6 +489,7 @@ struct ChatView: View {
                         isStopInFlight: store.isStopInFlight,
                         isWorking: store.session.status == .working,
                         selectedModel: $store.selectedModel,
+                        shouldFocusOnAppear: store.shouldFocusMessageField,
                         onSendTapped: { store.send(.sendButtonTapped) },
                         onStopTapped: { store.send(.stopButtonTapped) }
                     )

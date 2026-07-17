@@ -19,6 +19,10 @@ public struct WorkspaceUIHook: Sendable {
             id: UUID()
         )
     }
+    var createSession: @Sendable (
+        _ workspaceID: String,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
     var disconnect: @Sendable (_ connectionID: UUID) async -> Void
     var dispatch: @Sendable (
         _ mutation: WorkspaceMutation,
@@ -40,6 +44,7 @@ public struct WorkspaceUIHook: Sendable {
 
     enum DispatchError: Error, Equatable, Sendable {
         case deliveryUnknown
+        case listenerUnavailable
         case mutationInFlight
     }
 
@@ -55,6 +60,12 @@ extension WorkspaceUIHook: DependencyKey {
         return Self(
             isConnected: { await state.isConnected },
             connect: { await state.connect() },
+            createSession: { workspaceID, waitUntilChangeAvailableInDatabase in
+                try await state.createSession(
+                    workspaceID: workspaceID,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
             disconnect: { connectionID in
                 await state.disconnect(connectionID: connectionID)
             },
@@ -135,12 +146,23 @@ private actor WorkspaceUIHookState {
     func dispatch(
         _ mutation: WorkspaceMutation,
         workspaceID: String,
-        fallback: @Sendable () async throws -> Void = {},
+        fallback: @escaping @Sendable () async throws -> Void = {},
         waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
     ) async throws -> WorkspaceUIHook.DispatchPath {
         try await dispatch(
             event: mutation.getEventName(workspaceID: workspaceID),
             fallback: fallback,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    func createSession(
+        workspaceID: String,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        _ = try await dispatch(
+            event: WorkspaceMutation.getCreateSessionEventName(workspaceID: workspaceID),
+            fallback: nil,
             waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
         )
     }
@@ -160,7 +182,7 @@ private actor WorkspaceUIHookState {
 
     private func dispatch(
         event: String,
-        fallback: @Sendable () async throws -> Void,
+        fallback: (@Sendable () async throws -> Void)?,
         waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
     ) async throws -> WorkspaceUIHook.DispatchPath {
         // Serialize mutations so late persistence cannot reorder two commands.
@@ -172,6 +194,9 @@ private actor WorkspaceUIHookState {
 
         // Fall back only when delivery has not happened or yield proves it could not happen.
         guard let connection = activeConnection else {
+            guard let fallback else {
+                throw WorkspaceUIHook.DispatchError.listenerUnavailable
+            }
             try await fallback()
             return .sqliteFallback
         }
@@ -183,6 +208,9 @@ private actor WorkspaceUIHookState {
             return .hook
         case .dropped, .terminated:
             disconnect(connectionID: connection.id)
+            guard let fallback else {
+                throw WorkspaceUIHook.DispatchError.listenerUnavailable
+            }
             try await fallback()
             return .sqliteFallback
         @unknown default:
@@ -223,5 +251,9 @@ private extension WorkspaceMutation {
     // JSONEncoder escapes values even though the surrounding SSE frame is assembled directly.
     static func jsonString(_ value: String) throws -> String {
         String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+    }
+
+    static func getCreateSessionEventName(workspaceID: String) throws -> String {
+        "data: {\"workspaceId\":\(try jsonString(workspaceID)),\"createSession\":true}\n\n"
     }
 }

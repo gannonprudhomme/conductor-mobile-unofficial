@@ -105,6 +105,11 @@ enum MessageRoute {
                         .serviceUnavailable,
                         message: "Could not determine whether the session model was delivered."
                     )
+                case .listenerUnavailable:
+                    throw PlainTextResponseError(
+                        .serviceUnavailable,
+                        message: "Conductor's workspace UI hook is unavailable."
+                    )
                 case .mutationInFlight:
                     throw PlainTextResponseError(
                         .conflict,

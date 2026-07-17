@@ -10,6 +10,31 @@ import Testing
 @testable import ConductorMobileServer
 
 struct WorkspaceUIHookTests {
+    @Test("Session creation requires a listener and emits its workspace command")
+    func createSession() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        await #expect(throws: WorkspaceUIHook.DispatchError.listenerUnavailable) {
+            try await uiHook.createSession(
+                workspaceID: "workspace-1",
+                waitUntilChangeAvailableInDatabase: {}
+            )
+        }
+
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let creation = Task {
+            try await uiHook.createSession(
+                workspaceID: "workspace-\"2",
+                waitUntilChangeAvailableInDatabase: {}
+            )
+        }
+        #expect(
+            await events.next()
+                == "data: {\"workspaceId\":\"workspace-\\\"2\",\"createSession\":true}\n\n"
+        )
+        try await creation.value
+    }
+
     @Test("SSE frames escape mutation values without command IDs")
     func escapedFrame() async throws {
         let uiHook = WorkspaceUIHook.liveValue

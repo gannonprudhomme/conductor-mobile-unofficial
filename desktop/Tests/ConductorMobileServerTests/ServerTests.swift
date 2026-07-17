@@ -312,6 +312,7 @@ struct ServerTests {
             }
 
             for uri in [
+                "/workspaces/workspace-1/sessions",
                 "/workspaces/workspace-1/sessions/session-1/messages",
                 "/workspaces/workspace-1/sessions/session-1/stop",
             ] {
