@@ -369,6 +369,7 @@ public struct ConductorSettingsView: View {
             } icon: {
                 LucideIcon(store.deviceIcon.lucideImage, style: .small)
             }
+            .labelStyle(.iconOnly)
         }
         .buttonStyle(.conductorSecondary)
         .accessibilityLabel("Device icon")
