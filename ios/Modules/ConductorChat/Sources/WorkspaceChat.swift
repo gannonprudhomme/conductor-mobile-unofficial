@@ -327,7 +327,7 @@ public struct WorkspaceChatView: View {
             }
         }
         .themedNavigationTitle(
-            verbatim: store.workspace.displayBranchName,
+            verbatim: store.workspace.displayName,
             alignment: .leading
         ) {
             Label {

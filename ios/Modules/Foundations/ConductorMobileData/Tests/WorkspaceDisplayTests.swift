@@ -40,52 +40,78 @@ struct WorkspaceDisplayTests {
         }
     }
 
-    @Test("Empty chat directory names use the directory, path, then ID")
+    @Test("Empty chat directory names use the workspace, branch, directory, path, then ID")
     func emptyChatDirectoryName() {
         let workspaces = [
             Workspace.preview(
                 id: "workspace-1",
-                directoryName: "preferred-directory",
+                branch: "unused-branch",
+                directoryName: "unused-directory",
+                workspaceName: "preferred workspace  name",
                 workspacePath: "/Users/test/path-directory"
             ),
             Workspace.preview(
                 id: "workspace-2",
+                branch: "preferred-branch",
+                directoryName: "unused-directory",
                 workspacePath: "/Users/test/nil-directory"
             ),
             Workspace.preview(
                 id: "workspace-3",
-                directoryName: "",
+                branch: "",
+                directoryName: "preferred-directory",
                 workspacePath: "/Users/test/empty-directory/"
             ),
             Workspace.preview(
                 id: "workspace-4",
+                branch: "",
                 directoryName: "",
+                workspacePath: "/Users/test/preferred-path/"
+            ),
+            Workspace.preview(
+                id: "workspace-5",
+                workspaceName: "",
                 workspacePath: ""
             ),
         ]
 
         #expect(
             workspaces.map(\.emptyChatDirectoryName)
-                == ["preferred-directory", "nil-directory", "empty-directory", "workspace-4"]
+                == [
+                    "preferred-workspace-name",
+                    "preferred-branch",
+                    "preferred-directory",
+                    "preferred-path",
+                    "workspace-5",
+                ]
         )
     }
 
-    @Test("Workspace display branch names use Conductor sentence case")
-    func displayBranchNameFormatsConductorNames() {
+    @Test("Workspace display names preserve explicit names")
+    func displayNamePreservesWorkspaceName() {
+        let workspace = Workspace.preview(
+            branch: "unused-branch",
+            workspaceName: "renamed workspace name"
+        )
+
+        #expect(workspace.displayName == "renamed workspace name")
+    }
+
+    @Test("Workspace display names use Conductor sentence case for branches")
+    func displayNameFormatsConductorBranches() {
         let workspace = Workspace.preview(branch: "foo-baz_qux")
 
-        #expect(workspace.displayBranchName == "Foo baz qux")
+        #expect(workspace.displayName == "Foo baz qux")
     }
 
-    @Test("Workspace display branch names use the first available name")
-    func displayBranchNameFallsBackThroughAvailableNames() {
+    @Test("Workspace display names use the first available fallback")
+    func displayNameFallsBackThroughAvailableNames() {
         let workspace = Workspace.preview(
             directoryName: "also-unused",
-            placeholderBranchName: "stuttgart-v1",
-            workspaceName: "unused-name"
+            placeholderBranchName: "stuttgart-v1"
         )
 
-        #expect(workspace.displayBranchName == "Stuttgart v1")
+        #expect(workspace.displayName == "Stuttgart v1")
     }
 }
 

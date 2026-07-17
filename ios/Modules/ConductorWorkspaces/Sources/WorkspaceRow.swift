@@ -30,7 +30,7 @@ struct WorkspaceRow: View {
             action(.open)
         } label: {
             Label {
-                Text(item.workspace.displayBranchName)
+                Text(item.workspace.displayName)
                     .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
                     .fontWeight(isUnread ? .semibold : .regular)
                     .lineLimit(1)
