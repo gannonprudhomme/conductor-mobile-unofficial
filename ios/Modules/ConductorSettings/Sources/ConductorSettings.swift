@@ -301,7 +301,7 @@ public struct ConductorSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("Host IP address") // font-sm (14pt)
+                    Text("Host address") // font-sm (14pt)
                         .font(.theme(.small).weight(.medium))
                         .foregroundStyle(.theme(.textPrimary))
 
@@ -312,7 +312,7 @@ public struct ConductorSettingsView: View {
                     }
                 }
 
-                Text("Enter an IP address or Tailscale MagicDNS name. Port 3768 is used by default.")
+                Text("Enter an IP address or Tailscale MagicDNS name. Uses port 3768 by default.")
                     .font(.theme(.small))
                     .foregroundStyle(.theme(.textSecondary))
             }

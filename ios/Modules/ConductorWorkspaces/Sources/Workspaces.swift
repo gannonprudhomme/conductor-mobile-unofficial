@@ -526,6 +526,7 @@ public struct WorkspacesView: View {
                 }
             }
         }
+        .contentMargins(.top, 0)
         .listStyle(.plain)
         .animation(.default, value: store.sections)
         .listSectionSpacing(0)
