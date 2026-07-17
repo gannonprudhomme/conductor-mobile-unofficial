@@ -21,6 +21,7 @@ enum MessageRoute {
         @Dependency(\.continuousClock) var clock
         @Dependency(\.sidecarBridgeClient) var sidecarBridgeClient
         @Dependency(\.uuid) var uuid
+        @Dependency(\.workspaceUIHook) var uiHook
 
         let sendMessageRequest = try await request.decode(
             as: SendMessageRequest.self,
@@ -66,6 +67,52 @@ enum MessageRoute {
                 message: "The workspace is not available locally."
             )
         }
+        // Use the requested model when supplied; otherwise continue with the session model.
+        let model = sendMessageRequest.model ?? messageSendContext.model.rawValue
+        let isKnownModel = Session.Model.models(for: messageSendContext.agentType)
+            .contains { $0.rawValue == model }
+        guard model == messageSendContext.model.rawValue || isKnownModel else {
+            throw PlainTextResponseError(
+                .badRequest,
+                message: "Model is not available for this session's agent."
+            )
+        }
+
+        if model != messageSendContext.model.rawValue {
+            do {
+                _ = try await uiHook.updateSessionModel(
+                    sessionID: sessionID,
+                    model: Session.Model(rawValue: model),
+                    waitUntilChangeAvailableInDatabase: {
+                        let didPersist = try await waitForPersistedSessionModel(
+                            sessionID: sessionID,
+                            model: model,
+                            database: database,
+                            clock: clock
+                        )
+                        guard didPersist else {
+                            throw PlainTextResponseError(
+                                .gatewayTimeout,
+                                message: "Timed out waiting for Conductor to save the session model."
+                            )
+                        }
+                    }
+                )
+            } catch let error as WorkspaceUIHook.DispatchError {
+                switch error {
+                case .deliveryUnknown:
+                    throw PlainTextResponseError(
+                        .serviceUnavailable,
+                        message: "Could not determine whether the session model was delivered."
+                    )
+                case .mutationInFlight:
+                    throw PlainTextResponseError(
+                        .conflict,
+                        message: "Another Conductor UI change is still in progress."
+                    )
+                }
+            }
+        }
 
         let messageID = uuid().uuidString
         do {
@@ -75,7 +122,7 @@ enum MessageRoute {
                     cwd: workspacePath,
                     message: sendMessageRequest.message,
                     messageID: messageID,
-                    model: messageSendContext.model.rawValue,
+                    model: model,
                     sessionID: sessionID,
                     workspaceID: workspaceID
                 )
@@ -154,6 +201,33 @@ enum MessageRoute {
         throw CancellationError()
     }
 
+    private static func waitForPersistedSessionModel<C: Clock>(
+        sessionID: Session.ID,
+        model: String,
+        database: any DatabaseReader,
+        clock: C
+    ) async throws -> Bool where C.Duration == Duration {
+        let timeout = Duration.seconds(2)
+        let start = clock.now
+
+        while !Task.isCancelled {
+            let persistedModel = try await database.read { database in
+                try Session.find(sessionID).fetchOne(database)?.model.rawValue
+            }
+            if persistedModel == model {
+                return true
+            }
+
+            let elapsed = start.duration(to: clock.now)
+            guard elapsed < timeout else {
+                return false
+            }
+            try await clock.sleep(for: min(.milliseconds(25), timeout - elapsed))
+        }
+
+        throw CancellationError()
+    }
+
     @Selection
     fileprivate struct MessageSendContext: Sendable {
         let agentType: Session.AgentType
@@ -163,6 +237,7 @@ enum MessageRoute {
 
     private struct SendMessageRequest: Decodable {
         let message: String
+        let model: String?
     }
 }
 

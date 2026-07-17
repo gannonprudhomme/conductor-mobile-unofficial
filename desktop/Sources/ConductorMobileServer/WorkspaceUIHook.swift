@@ -8,6 +8,7 @@
 import Dependencies
 import DependenciesMacros
 import Foundation
+import SharedConductorData
 
 @DependencyClient
 public struct WorkspaceUIHook: Sendable {
@@ -26,6 +27,11 @@ public struct WorkspaceUIHook: Sendable {
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> DispatchPath
     var listenerUnavailable: @Sendable () async -> Void
+    var updateSessionModel: @Sendable (
+        _ sessionID: Session.ID,
+        _ model: Session.Model,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Bool = { _, _, _ in false }
 
     enum DispatchPath: Equatable, Sendable {
         case hook
@@ -60,7 +66,14 @@ extension WorkspaceUIHook: DependencyKey {
                     waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
                 )
             },
-            listenerUnavailable: { await state.listenerUnavailable() }
+            listenerUnavailable: { await state.listenerUnavailable() },
+            updateSessionModel: { sessionID, model, waitUntilChangeAvailableInDatabase in
+                try await state.updateSessionModel(
+                    sessionID: sessionID,
+                    model: model,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            }
         )
     }
 }
@@ -113,7 +126,7 @@ private actor WorkspaceUIHookState {
         disconnect(connectionID: connectionID)
     }
 
-    /// Serializes workspace mutations while coordinating browser-hook delivery with SQLite.
+    /// Serializes UI mutations while coordinating browser-hook delivery with SQLite.
     ///
     /// If no active listener can accept the event, this performs `fallback`. Once an event is
     /// enqueued, it waits for `waitUntilChangeAvailableInDatabase` and never falls back because
@@ -123,6 +136,31 @@ private actor WorkspaceUIHookState {
         _ mutation: WorkspaceMutation,
         workspaceID: String,
         fallback: @Sendable () async throws -> Void = {},
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws -> WorkspaceUIHook.DispatchPath {
+        try await dispatch(
+            event: mutation.getEventName(workspaceID: workspaceID),
+            fallback: fallback,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    func updateSessionModel(
+        sessionID: Session.ID,
+        model: Session.Model,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws -> Bool {
+        let path = try await dispatch(
+            event: Self.sessionModelEvent(sessionID: sessionID, model: model),
+            fallback: {},
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+        return path == .hook
+    }
+
+    private func dispatch(
+        event: String,
+        fallback: @Sendable () async throws -> Void,
         waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
     ) async throws -> WorkspaceUIHook.DispatchPath {
         // Serialize mutations so late persistence cannot reorder two commands.
@@ -138,7 +176,7 @@ private actor WorkspaceUIHookState {
             return .sqliteFallback
         }
 
-        switch connection.continuation.yield(try mutation.getEventName(workspaceID: workspaceID)) {
+        switch connection.continuation.yield(event) {
         case .enqueued:
             // Never fall back after enqueue because failure cannot prove the browser did not apply it.
             try await waitUntilChangeAvailableInDatabase()
@@ -156,6 +194,15 @@ private actor WorkspaceUIHookState {
     private struct ConnectionState {
         let continuation: AsyncStream<String>.Continuation
         let id: UUID
+    }
+
+    private static func sessionModelEvent(
+        sessionID: Session.ID,
+        model: Session.Model
+    ) throws -> String {
+        let sessionID = try WorkspaceMutation.jsonString(sessionID)
+        let model = try WorkspaceMutation.jsonString(model.rawValue)
+        return "data: {\"sessionId\":\(sessionID),\"model\":\(model)}\n\n"
     }
 }
 

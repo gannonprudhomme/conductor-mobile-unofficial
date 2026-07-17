@@ -5,11 +5,36 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
-import SharedConductorData
 import Foundation
+import SharedConductorData
 import Testing
 
 struct SessionTests {
+    @Test("Session models match the desktop catalog")
+    func modelCatalog() {
+        #expect(
+            Session.Model.claudeModels.map(\.rawValue) == [
+                "fable-5",
+                "opus-4-8-1m",
+                "opus-4-7-1m",
+                "opus-4-6-1m",
+                "sonnet-5-1m",
+                "sonnet-4-6-1m",
+                "sonnet",
+                "haiku",
+            ]
+        )
+        #expect(
+            Session.Model.codexModels.map(\.rawValue) == [
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+            ]
+        )
+    }
+
     @Test("Session decoding preserves unknown schema values")
     func decoding() throws {
         let session = try JSONDecoder().decode(

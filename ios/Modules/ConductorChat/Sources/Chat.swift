@@ -7,11 +7,11 @@
 
 import Combine
 import ComposableArchitecture
-import SharedConductorData
 import ConductorDesign
 import ConductorMobileData
 import Foundation
 import Logging
+import SharedConductorData
 import Sharing
 import SQLiteData
 import SwiftUI
@@ -36,11 +36,14 @@ public struct Chat: Sendable {
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
         var isStopInFlight = false
+        var hasObservedSessionModelChange = false
+        var hasUserSelectedModel = false
         var scrollToBottomRequest = 0
 
         /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
         var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
+        var selectedModel: Session.Model
 
         /// The turns + parsed rows (e.g. `Message.content` -> `AgentEvent`)
         ///
@@ -89,6 +92,7 @@ public struct Chat: Sendable {
                         )
                     }
             )
+            self.selectedModel = session.model
         }
 
         /// `turns` and `rows` are derived presentation caches, while `session` captures
@@ -102,18 +106,23 @@ public struct Chat: Sendable {
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
+                && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
+                && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
                     == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
+                && lhs.selectedModel == rhs.selectedModel
         }
 
         /// Read by ``WorkspaceChat`` to track the selected session.
         var sessionID: Session.ID { session.id }
     }
 
-    public enum Action {
+    public enum Action: BindableAction {
+        case binding(BindingAction<State>)
         case task
+        case defaultModelFetched(Session.Model)
         case initialMessagesResponse([Message])
         case loadMessagesFailed(any Error)
         case messagesUpdated([Message])
@@ -128,6 +137,7 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             result: Result<String, any Error>
         )
+        case sessionModelChanged(Session.Model)
         case sessionStatusChanged(Session.Status)
         case stopButtonTapped
         case stopSessionResponse(
@@ -143,10 +153,18 @@ public struct Chat: Sendable {
     init() { }
 
     public var body: some ReducerOf<Self> {
+        BindingReducer()
+
         Reduce { state, action in
             switch action {
             case .task:
                 return .merge(
+                    .run { send in
+                        guard let model = try? await desktopClient.fetchDefaultModel() else {
+                            return
+                        }
+                        await send(.defaultModelFetched(model))
+                    },
                     observeMessages(state),
                     .publisher {
                         state.$messages
@@ -155,6 +173,20 @@ public struct Chat: Sendable {
                             .map(Action.messagesUpdated)
                     }
                 )
+
+            case let .defaultModelFetched(model):
+                guard !state.hasObservedSessionModelChange,
+                      !state.hasUserSelectedModel,
+                      Session.Model.models(for: state.session.agentType).contains(model)
+                else {
+                    return .none
+                }
+                state.selectedModel = model
+                return .none
+
+            case .binding(\.selectedModel):
+                state.hasUserSelectedModel = true
+                return .none
 
             case .messagesUpdated(let messages):
                 state.isMessageSnapshotEmpty = messages.isEmpty
@@ -195,6 +227,14 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: status)
                 return .none
 
+            case let .sessionModelChanged(model):
+                guard !state.hasUserSelectedModel else {
+                    return .none
+                }
+                state.hasObservedSessionModelChange = true
+                state.selectedModel = model
+                return .none
+
             case .turnSummaryTapped(let summaryID):
                 if state.expandedSummaryIDs.remove(summaryID) == nil {
                     state.expandedSummaryIDs.insert(summaryID)
@@ -210,12 +250,18 @@ public struct Chat: Sendable {
 
                 state.isMessageSendInFlight = true
                 state.scrollToBottomRequest &+= 1
-                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                return .run {
+                    [
+                        model = state.selectedModel,
+                        sessionID = state.session.id,
+                        workspaceID = state.session.workspaceID,
+                    ] send in
                     let result = await Result {
                         if let canonicalMessage = try await desktopClient.sendMessage(
                             workspaceID: workspaceID,
                             sessionID: sessionID,
-                            message: message
+                            message: message,
+                            model: model
                         ) {
                             await send(
                                 .messageConfirmed(
@@ -299,6 +345,9 @@ public struct Chat: Sendable {
                 return .none
 
             case .loadMessagesFailed:
+                return .none
+
+            case .binding:
                 return .none
             }
         }
@@ -387,7 +436,7 @@ private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.D
 }
 
 struct ChatView: View {
-    let store: StoreOf<Chat>
+    @Bindable var store: StoreOf<Chat>
     let directoryName: String
 
     var body: some View {
@@ -432,7 +481,7 @@ struct ChatView: View {
                         isSendInFlight: store.isMessageSendInFlight,
                         isStopInFlight: store.isStopInFlight,
                         isWorking: store.session.status == .working,
-                        model: store.session.model,
+                        selectedModel: $store.selectedModel,
                         onSendTapped: { store.send(.sendButtonTapped) },
                         onStopTapped: { store.send(.stopButtonTapped) }
                     )
@@ -442,6 +491,9 @@ struct ChatView: View {
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
             .onChange(of: store.session.status) { _, status in
                 store.send(.sessionStatusChanged(status))
+            }
+            .onChange(of: store.session.model) { _, model in
+                store.send(.sessionModelChanged(model))
             }
             .task(id: store.session.id) {
                 await store.send(.task).finish()

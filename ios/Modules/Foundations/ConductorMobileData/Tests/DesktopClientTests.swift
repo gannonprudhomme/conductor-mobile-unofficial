@@ -115,6 +115,41 @@ struct DesktopClientTests {
         }
     }
 
+    @Test("Default model is fetched from the desktop settings endpoint")
+    func defaultModel() async throws {
+        let requestedPath = LockIsolated<String?>(nil)
+        DesktopClientURLProtocol.handler.setValue { request in
+            requestedPath.setValue(request.url?.path)
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(#"{"defaultModel":"gpt-5.6-sol"}"#.utf8)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let model = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.fetchDefaultModel()
+        }
+
+        expectNoDifference(model, .gpt_5_6_sol)
+        expectNoDifference(requestedPath.value, "/settings")
+    }
+
     @Test("Commands reject a missing desktop server address")
     func commandsWithoutServerAddress() async {
         await withDependencies {
@@ -124,7 +159,8 @@ struct DesktopClientTests {
                 try await DesktopClient.liveValue.sendMessage(
                     workspaceID: "workspace-1",
                     sessionID: "session-1",
-                    message: "Run the tests."
+                    message: "Run the tests.",
+                    model: .gpt_5_6_terra
                 )
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
@@ -175,7 +211,8 @@ struct DesktopClientTests {
             return try await DesktopClient.liveValue.sendMessage(
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
-                message: "Run the tests."
+                message: "Run the tests.",
+                model: .gpt_5_6_terra
             )
         }
 
@@ -191,7 +228,10 @@ struct DesktopClientTests {
         )
         expectNoDifference(
             object,
-            ["message": "Run the tests."]
+            [
+                "message": "Run the tests.",
+                "model": "gpt-5.6-terra",
+            ]
         )
     }
 
@@ -224,7 +264,8 @@ struct DesktopClientTests {
             return try await DesktopClient.liveValue.sendMessage(
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
-                message: "Run the tests."
+                message: "Run the tests.",
+                model: .gpt_5_6_terra
             )
         }
 

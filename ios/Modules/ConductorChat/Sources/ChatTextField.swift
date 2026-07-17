@@ -5,21 +5,20 @@
 //  Created by Gannon Prudomme on 7/10/26.
 //
 
-import SharedConductorData
 import ConductorDesign
-import ConductorMobileData
 import LucideIcons
+import SharedConductorData
 import SwiftUI
 
 struct ChatTextField: View {
     @FocusState var isFocused: Bool
 
     @Binding var text: String
+    @Binding var selectedModel: Session.Model
     let agentType: Session.AgentType
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
-    let model: Session.Model
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
@@ -29,7 +28,7 @@ struct ChatTextField: View {
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
-        model: Session.Model,
+        selectedModel: Binding<Session.Model>,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
@@ -38,7 +37,7 @@ struct ChatTextField: View {
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
-        self.model = model
+        self._selectedModel = selectedModel
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -77,8 +76,13 @@ struct ChatTextField: View {
 
     private var bottomRowButtons: some View {
         HStack(spacing: 8) {
-            modelLabel
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ChatModelPicker(
+                agentType: agentType,
+                selectedModel: selectedModel,
+                onSelect: { selectedModel = $0 }
+            )
+            .equatable()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
                 if isWorking || isStopInFlight {
@@ -109,21 +113,6 @@ struct ChatTextField: View {
 
     private var isAnyActionInFlight: Bool {
         isSendInFlight || isStopInFlight
-    }
-
-    private var modelLabel: some View {
-        Label {
-            Text(verbatim: model.displayName)
-        } icon: {
-            AgentIcon(
-                agentType: agentType,
-                size: ThemeFontStyle.small.size,
-                relativeTo: ThemeFontStyle.small.textStyle
-            )
-        }
-        .labelStyle(.conductorExtraSmall)
-        .foregroundStyle(.theme(.textPrimary))
-        .font(.theme(.small))
     }
 
     private struct SendButton: View {
@@ -212,6 +201,7 @@ struct ChatTextField: View {
 
 #Preview {
     @Previewable @State var text = ""
+    @Previewable @State var selectedModel = Session.Model.gpt_5_6_sol
 
     ScrollView {
         LazyVStack(spacing: 4) {
@@ -225,11 +215,11 @@ struct ChatTextField: View {
     .safeAreaBar(edge: .bottom) {
         ChatTextField(
             text: $text,
-            agentType: .claude,
+            agentType: .codex,
             isSendInFlight: false,
             isStopInFlight: false,
             isWorking: true,
-            model: .sonnet4_6,
+            selectedModel: $selectedModel,
             onSendTapped: { },
             onStopTapped: { }
         )

@@ -27,6 +27,17 @@ struct WorkspaceUIHookTests {
                 == "data: {\"workspaceId\":\"workspace-\\\"2\",\"status\":\"in-\\nprogress\"}\n\n"
         )
         #expect(path == .hook)
+
+        let didDispatchModel = try await uiHook.updateSessionModel(
+            sessionID: "session-\"3",
+            model: .gpt_5_6_terra,
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        #expect(
+            await events.next()
+                == "data: {\"sessionId\":\"session-\\\"3\",\"model\":\"gpt-5.6-terra\"}\n\n"
+        )
+        #expect(didDispatchModel)
     }
 
     @Test("Fallback holds the global slot without waiting for persistence")

@@ -19,7 +19,7 @@ extension Session {
         updatedAt: String = "2026-06-25T09:30:00.000Z",
         lastUserMessageAt: String? = nil,
         status: Status = .idle,
-        model: Model = .gpt5_6Sol,
+        model: Model = .gpt_5_6_sol,
         unreadCount: Int = 0,
         freshlyCompacted: Int = 0,
         contextTokenCount: Int = 0

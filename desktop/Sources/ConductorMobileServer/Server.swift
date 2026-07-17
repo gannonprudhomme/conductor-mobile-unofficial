@@ -47,6 +47,10 @@ public enum Server {
         database: DatabaseQueue,
         // Five seconds tolerates a slow Conductor UI write without holding the request indefinitely.
         workspaceMutationTimeout: Duration = .seconds(5),
+        userSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".conductor/settings.toml"),
+        managedSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".conductor/settings.managed.toml"),
         port: Int = 3_768,
         allowedOrigin: String? = nil
     ) -> Application<RouterResponder<RequestContext>> {
@@ -56,6 +60,21 @@ public enum Server {
 
         router.get("/ping") { _, _ in
             HTTPResponse.Status.noContent
+        }
+
+        router.get("/settings") { request, context in
+            let defaultModel = try defaultModel(
+                userSettingsURL: userSettingsURL,
+                managedSettingsURL: managedSettingsURL
+            )
+            guard let defaultModel else {
+                throw HTTPError(.notFound)
+            }
+            return try JSONEncoder.conductor.encode(
+                SettingsResponse(defaultModel: defaultModel),
+                from: request,
+                context: context
+            )
         }
 
         let shouldUpgradeToWebSocket: @Sendable (Request, RequestContext) async throws -> RouterShouldUpgrade = { request, _ in
@@ -326,6 +345,46 @@ public enum Server {
         allowedOrigin: String?
     ) -> Bool {
         request.headers[.origin] == allowedOrigin
+    }
+
+    private static func defaultModel(
+        userSettingsURL: URL,
+        managedSettingsURL: URL
+    ) throws -> String? {
+        try defaultModel(from: managedSettingsURL)
+            ?? defaultModel(from: userSettingsURL)
+    }
+
+    private static func defaultModel(from settingsURL: URL) throws -> String? {
+        guard FileManager.default.fileExists(atPath: settingsURL.path) else {
+            return nil
+        }
+
+        let settings = try String(contentsOf: settingsURL, encoding: .utf8)
+        var isModelsSection = false
+
+        for line in settings.components(separatedBy: .newlines) {
+            let line = line.trimmingCharacters(in: .whitespaces)
+            if line == "[models]" {
+                isModelsSection = true
+                continue
+            }
+            if line.hasPrefix("[") {
+                isModelsSection = false
+                continue
+            }
+            guard isModelsSection,
+                  let match = line.firstMatch(of: /^default\s*=\s*"([^"]+)"/)
+            else {
+                continue
+            }
+            return match.1.split(separator: ":", maxSplits: 1).last.map(String.init)
+        }
+        return nil
+    }
+
+    private struct SettingsResponse: Encodable {
+        let defaultModel: String
     }
 
     struct RequestContext: Hummingbird.RequestContext, WebSocketRequestContext {

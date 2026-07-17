@@ -178,6 +178,9 @@ isolatedTest("commands run in order with real service signatures and continue af
     async markWorkspaceAsRead(workspaceID) {
       calls.push(["read", workspaceID]);
     },
+    async updateSessionModel(sessionID, model) {
+      calls.push(["model", sessionID, model]);
+    },
   };
   const environment = installHookGlobals({ shell: { workspaceService, sessionService } });
   await prepareHook();
@@ -192,6 +195,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   replacementSource.onmessage(command({ status: "in-review" }));
   replacementSource.onmessage(command({ unread: true }));
   replacementSource.onmessage(command({ unread: false }));
+  replacementSource.onmessage(sessionCommand({ model: "gpt-5.6-terra" }));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
   replacementSource.onmessage({ data: JSON.stringify({ id: "obsolete", workspaceId: "workspace-1", pinned: true }) });
   replacementSource.onmessage({ data: "not json" });
@@ -199,7 +203,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 7);
+  await waitUntil(() => calls.length === 8);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
     ["status", { workspaceId: "workspace-1", status: "in-review" }],
@@ -208,6 +212,7 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["unread", "session-1", true],
     ["unread", "session-1", true],
     ["read", "workspace-1"],
+    ["model", "session-1", "gpt-5.6-terra"],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
   assert.equal(environment.errors.at(-1)[1].message, "Setter failed.");
@@ -296,12 +301,17 @@ function emptyWorkspaceShell() {
     async getSessionsForWorkspace() { return []; },
     async setUnread() {},
     async markWorkspaceAsRead() {},
+    async updateSessionModel() {},
   };
   return { workspaceService, sessionService };
 }
 
 function command(mutation) {
   return { data: JSON.stringify({ workspaceId: "workspace-1", ...mutation }) };
+}
+
+function sessionCommand(mutation) {
+  return { data: JSON.stringify({ sessionId: "session-1", ...mutation }) };
 }
 
 function isolatedTest(name, operation) {

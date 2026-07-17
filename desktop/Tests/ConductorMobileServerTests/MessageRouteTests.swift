@@ -16,7 +16,7 @@ import Testing
 @testable import ConductorMobileServer
 
 struct MessageRouteTests {
-    @Test("POST message waits for Conductor to persist the canonical row")
+    @Test("POST message forwards a compatible model and waits for the canonical row")
     func post() async throws {
         let database = try await messageRouteDatabase()
         let messageID = UUID(0).uuidString
@@ -34,7 +34,22 @@ struct MessageRouteTests {
         try await withDependencies {
             $0.continuousClock = clock
             $0.uuid = .incrementing
+            $0.workspaceUIHook.updateSessionModel = { sessionID, model, waitUntilChangeAvailableInDatabase in
+                await recorder.recordModelUpdate(sessionID: sessionID, model: model)
+                try await database.write { database in
+                    try Session
+                        .find(sessionID)
+                        .update { $0.model = #bind(model) }
+                        .execute(database)
+                }
+                try await waitUntilChangeAvailableInDatabase()
+                return true
+            }
             $0.sidecarBridgeClient.sendMessage = { request in
+                let persistedModel = try? await database.read { database in
+                    try Session.find(request.sessionID).fetchOne(database)?.model
+                }
+                #expect(persistedModel == .gpt_5_6_terra)
                 await recorder.record(request)
             }
         } operation: {
@@ -46,7 +61,7 @@ struct MessageRouteTests {
                         method: .post,
                         headers: [.contentType: "application/json"],
                         body: ByteBuffer(
-                            string: #"{"message":"  Run the tests.  "}"#
+                            string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra"}"#
                         )
                     ) { response in
                         #expect(response.status == .ok)
@@ -73,11 +88,44 @@ struct MessageRouteTests {
                 cwd: "/tmp/workspace-1",
                 message: "  Run the tests.  ",
                 messageID: messageID,
-                model: "gpt-5.5",
+                model: "gpt-5.6-terra",
                 sessionID: "session-1",
                 workspaceID: "workspace-1"
             )
         )
+        #expect(await recorder.updatedSessionID == "session-1")
+        #expect(await recorder.updatedModel == .gpt_5_6_terra)
+    }
+
+    @Test("POST message rejects a model from another agent")
+    func incompatibleModel() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.sidecarBridgeClient.sendMessage = { request in
+                await recorder.record(request)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Switch providers.","model":"fable-5"}"#
+                    )
+                ) { response in
+                    #expect(response.status == .badRequest)
+                    #expect(
+                        String(buffer: response.body)
+                            == "Model is not available for this session's agent."
+                    )
+                }
+            }
+        }
+
+        #expect(await recorder.message == nil)
     }
 
     @Test("POST message returns bad gateway when the message never appears")
@@ -167,8 +215,15 @@ private func messageRouteDatabase() async throws -> DatabaseQueue {
 
 private actor MessageRouteRecorder {
     private(set) var message: SidecarBridgeClient.RuntimeMessageRequest?
+    private(set) var updatedModel: Session.Model?
+    private(set) var updatedSessionID: Session.ID?
 
     func record(_ message: SidecarBridgeClient.RuntimeMessageRequest) {
         self.message = message
+    }
+
+    func recordModelUpdate(sessionID: Session.ID, model: Session.Model) {
+        updatedModel = model
+        updatedSessionID = sessionID
     }
 }

@@ -6,10 +6,10 @@
 //
 
 import ComposableArchitecture
-import SharedConductorData
 import ConductorMobileData
 import CustomDump
 import Foundation
+import SharedConductorData
 import Sharing
 import SQLiteData
 @testable import ConductorChat
@@ -451,7 +451,75 @@ struct ChatTests {
         }
     }
 
-    @Test("Sending persists the canonical message before completing")
+    @Test("Fetched default model applies only before a compatible user selection")
+    func defaultModel() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(model: .gpt5_5)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(.defaultModelFetched(.gpt_5_6_sol)) {
+                $0.selectedModel = .gpt_5_6_sol
+            }
+            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+                $0.selectedModel = .gpt_5_6_terra
+                $0.hasUserSelectedModel = true
+            }
+            await store.send(.defaultModelFetched(.gpt5_4))
+            await store.send(.defaultModelFetched(.fable5))
+        }
+    }
+
+    @Test("An explicit selection wins after returning to the initial model")
+    func explicitModelSelection() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(session: .preview(model: .gpt5_5))
+            ) {
+                Chat()
+            }
+
+            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+                $0.selectedModel = .gpt_5_6_terra
+                $0.hasUserSelectedModel = true
+            }
+            await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
+                $0.selectedModel = .gpt5_5
+            }
+            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+        }
+    }
+
+    @Test("Observed session models apply until the user selects a model")
+    func sessionModel() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(session: .preview(model: .gpt5_5))
+            ) {
+                Chat()
+            }
+
+            await store.send(.sessionModelChanged(.gpt_5_6_sol)) {
+                $0.hasObservedSessionModelChange = true
+                $0.selectedModel = .gpt_5_6_sol
+            }
+            await store.send(.defaultModelFetched(.gpt5_4))
+            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+                $0.selectedModel = .gpt_5_6_terra
+                $0.hasUserSelectedModel = true
+            }
+            await store.send(.sessionModelChanged(.gpt5_4))
+        }
+    }
+
+    @Test("Steering a working session forwards the selected model and clears the accepted draft")
     func messageSendSucceeds() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
@@ -471,14 +539,19 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
+                    #expect(model == .gpt_5_6_terra)
                     return sentMessage
                 }
             }
 
+            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+                $0.selectedModel = .gpt_5_6_terra
+                $0.hasUserSelectedModel = true
+            }
             store.state.$messageDraft.withLock { $0 = "  Please run the tests.  " }
             await store.send(.sendButtonTapped) {
                 $0.isMessageSendInFlight = true
@@ -510,7 +583,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in nil }
+                $0.desktopClient.sendMessage = { _, _, _, _ in nil }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -536,7 +609,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _ in
                     for await response in responses {
                         return response
                     }
@@ -591,7 +664,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -633,7 +706,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -666,7 +739,7 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _ in
                     throw TestError()
                 }
             }
@@ -919,7 +992,7 @@ private func makeSession(status: String = "idle") throws -> Session {
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
               "status": "\(status)",
-              "model": "gpt-5",
+              "model": "gpt-5.5",
               "unread_count": 0,
               "freshly_compacted": 0,
               "context_token_count": 0

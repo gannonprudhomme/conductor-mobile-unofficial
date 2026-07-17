@@ -30,7 +30,7 @@ export async function prepareWorkspaceUIHook() {
   );
   const sessionService = uniqueService(
     shell,
-    ["getSessionsForWorkspace", "setUnread", "markWorkspaceAsRead"],
+    ["getSessionsForWorkspace", "setUnread", "markWorkspaceAsRead", "updateSessionModel"],
     "SessionService",
   );
 
@@ -176,16 +176,17 @@ function createController({ commandQueue, eventsURL, sessionService, workspaceSe
 
 // TODO: No clue why this is necessary
 function parseCommand(data) {
-  // The server validates PATCH input; this check keeps each trusted SSE frame to one mutation.
+  // The server builds these commands; this check keeps each trusted SSE frame to one mutation.
   const value = JSON.parse(data);
   const [field, ...extraFields] = Object.keys(value)
-    .filter((candidate) => candidate !== "workspaceId");
+    .filter((candidate) => candidate !== "sessionId" && candidate !== "workspaceId");
   if (!field || extraFields.length > 0) {
     throw new Error("The command is invalid.");
   }
 
   return {
     field,
+    sessionId: value.sessionId,
     value: value[field],
     workspaceId: value.workspaceId,
   };
@@ -193,6 +194,9 @@ function parseCommand(data) {
 
 async function executeCommand({ sessionService, workspaceService }, command) {
   switch (command.field) {
+    case "model":
+      await sessionService.updateSessionModel(command.sessionId, command.value);
+      return;
     case "pinned":
       await workspaceService.setWorkspacePinned({
         workspaceId: command.workspaceId,

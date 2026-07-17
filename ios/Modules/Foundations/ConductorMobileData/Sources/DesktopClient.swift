@@ -5,15 +5,18 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
-import SharedConductorData
 import Dependencies
 import DependenciesMacros
 import Foundation
+import SharedConductorData
 import Sharing
 
 @DependencyClient
 public struct DesktopClient: Sendable {
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
+    public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
+        throw CancellationError()
+    }
     public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
         AsyncThrowingStream { $0.finish() }
     }
@@ -24,7 +27,12 @@ public struct DesktopClient: Sendable {
         AsyncThrowingStream { $0.finish() }
     }
     public var ping: @Sendable () async throws -> Void = { }
-    public var sendMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ message: String) async throws -> Message?
+    public var sendMessage: @Sendable (
+        _ workspaceID: String,
+        _ sessionID: String,
+        _ message: String,
+        _ model: Session.Model
+    ) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> WorkspaceMutationPath
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> WorkspaceMutationPath
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> WorkspaceMutationPath
@@ -127,6 +135,9 @@ extension DesktopClient: DependencyKey {
     public static var liveValue: Self {
         Self { serverAddress in
             try await ping(serverAddress: serverAddress)
+        } fetchDefaultModel: {
+            let settings = try await get(SettingsResponse.self, from: settingsURL())
+            return Session.Model(rawValue: settings.defaultModel)
         } observeMessages: { workspaceID, sessionID in
             // Messages are the only unbounded observation: frames after the initial snapshot
             // contain incremental changes, so dropping one could permanently miss an update.
@@ -152,9 +163,12 @@ extension DesktopClient: DependencyKey {
             }
         } ping: {
             try await ping()
-        } sendMessage: { workspaceID, sessionID, message in
+        } sendMessage: { workspaceID, sessionID, message, model in
             try await post(
-                ["message": message],
+                SendMessageRequest(
+                    message: message,
+                    model: model.rawValue
+                ),
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
                 decoding: Message.self
             )
@@ -250,6 +264,19 @@ extension DesktopClient: DependencyKey {
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 
+    private struct SendMessageRequest: Encodable {
+        let message: String
+        let model: String
+    }
+
+    private struct SettingsResponse: Decodable {
+        let defaultModel: String
+    }
+
+    private static func settingsURL() throws -> URL {
+        try baseURL().appending(path: "settings")
+    }
+
     // POST /workspaces/{workspaceID}/sessions/{sessionID}/messages
     private static func messagesURL(workspaceID: String, sessionID: String) throws -> URL {
         try sessionURL(workspaceID: workspaceID, sessionID: sessionID)
@@ -282,6 +309,15 @@ extension DesktopClient: DependencyKey {
         guard statusCode != 204 else {
             return nil
         }
+        return try JSONDecoder.conductor.decode(responseType, from: data)
+    }
+
+    private static func get<Response: Decodable>(
+        _ responseType: Response.Type,
+        from url: URL
+    ) async throws -> Response {
+        let (data, response) = try await data(for: URLRequest(url: url))
+        try validateSuccessfulHTTPResponse(response, data: data)
         return try JSONDecoder.conductor.decode(responseType, from: data)
     }
 

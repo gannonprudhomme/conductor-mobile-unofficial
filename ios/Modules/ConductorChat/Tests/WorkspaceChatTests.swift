@@ -6,9 +6,9 @@
 //
 
 import ComposableArchitecture
-import SharedConductorData
 import ConductorMobileData
 import Foundation
+import SharedConductorData
 import SQLiteData
 @testable import ConductorChat
 import Testing
@@ -354,10 +354,11 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model in
                     #expect(workspaceID == workspace.id)
                     #expect(sessionID == activeSession.id)
                     #expect(message == "Run the tests.")
+                    #expect(model == activeSession.model)
                     for await _ in responses {
                         throw TestError()
                     }

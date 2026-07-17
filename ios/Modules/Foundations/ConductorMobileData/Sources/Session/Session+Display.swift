@@ -5,8 +5,8 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
-import SharedConductorData
 import Foundation
+import SharedConductorData
 
 extension Session {
     public var displayTitle: String {
@@ -54,17 +54,17 @@ extension Session.Model {
             "Opus 4.6 1M"
         case .sonnet5_1M:
             "Sonnet 5 1M"
-        case .sonnet4_6_1M:
+        case .sonnet_4_6_1M:
             "Sonnet 4.6 1M"
-        case .sonnet4_6:
+        case .sonnet_4_6:
             "Sonnet 4.6"
         case .haiku4_5:
             "Haiku 4.5"
-        case .gpt5_6Sol:
+        case .gpt_5_6_sol:
             "GPT-5.6 Sol"
-        case .gpt5_6Terra:
+        case .gpt_5_6_terra:
             "GPT-5.6 Terra"
-        case .gpt5_6Luna:
+        case .gpt_5_6_luna:
             "GPT-5.6 Luna"
         case .gpt5_5:
             "GPT-5.5"

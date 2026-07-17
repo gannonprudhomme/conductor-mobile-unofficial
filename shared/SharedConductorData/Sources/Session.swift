@@ -76,12 +76,14 @@ extension Session {
 
     }
 
-    public struct Model: Codable, Hashable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {
+    public struct Model: Codable, Hashable, Identifiable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {
         public var rawValue: String
 
         public init(rawValue: String) {
             self.rawValue = rawValue
         }
+
+        public var id: String { rawValue }
 
         public static let fable5 = Self(rawValue: "fable-5")
         public static let opus = Self(rawValue: "opus")
@@ -90,15 +92,45 @@ extension Session {
         public static let opus4_7_1M = Self(rawValue: "opus-4-7-1m")
         public static let opus4_6_1M = Self(rawValue: "opus-4-6-1m")
         public static let sonnet5_1M = Self(rawValue: "sonnet-5-1m")
-        public static let sonnet4_6_1M = Self(rawValue: "sonnet-4-6-1m")
-        public static let sonnet4_6 = Self(rawValue: "sonnet")
+        public static let sonnet_4_6_1M = Self(rawValue: "sonnet-4-6-1m")
+        public static let sonnet_4_6 = Self(rawValue: "sonnet")
         public static let haiku4_5 = Self(rawValue: "haiku")
-        public static let gpt5_6Sol = Self(rawValue: "gpt-5.6-sol")
-        public static let gpt5_6Terra = Self(rawValue: "gpt-5.6-terra")
-        public static let gpt5_6Luna = Self(rawValue: "gpt-5.6-luna")
+        public static let gpt_5_6_sol = Self(rawValue: "gpt-5.6-sol")
+        public static let gpt_5_6_terra = Self(rawValue: "gpt-5.6-terra")
+        public static let gpt_5_6_luna = Self(rawValue: "gpt-5.6-luna")
         public static let gpt5_5 = Self(rawValue: "gpt-5.5")
         public static let gpt5_4 = Self(rawValue: "gpt-5.4")
         public static let gpt5_3Codex = Self(rawValue: "gpt-5.3-codex")
+
+        public static let claudeModels: [Self] = [
+            .fable5,
+            .opus4_8_1M,
+            .opus4_7_1M,
+            .opus4_6_1M,
+            .sonnet5_1M,
+            .sonnet_4_6_1M,
+            .sonnet_4_6,
+            .haiku4_5,
+        ]
+
+        public static let codexModels: [Self] = [
+            .gpt_5_6_sol,
+            .gpt_5_6_terra,
+            .gpt_5_6_luna,
+            .gpt5_5,
+            .gpt5_4,
+        ]
+
+        public static func models(for agentType: AgentType) -> [Self] {
+            switch agentType {
+            case .claude:
+                claudeModels
+            case .codex:
+                codexModels
+            default:
+                []
+            }
+        }
     }
 
     public struct Status: Codable, Hashable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {

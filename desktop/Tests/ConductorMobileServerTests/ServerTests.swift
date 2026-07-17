@@ -30,6 +30,18 @@ struct ServerTests {
         )!
         try iconData.write(to: rootURL.appending(path: "favicon.png"))
 
+        let userSettingsURL = rootURL.appending(path: "settings.toml")
+        try """
+            [models]
+            default = "codex:gpt-5.6-sol"
+            default_fast_mode = false
+            default_plan_mode = false
+
+            [models.codex]
+            default_thinking_level = "high"
+            """
+            .write(to: userSettingsURL, atomically: true, encoding: .utf8)
+
         let databaseURL = rootURL.appending(path: "conductor.db")
         let writer = try testConductorDatabase(at: databaseURL)
         try await writer.write { db in
@@ -68,6 +80,8 @@ struct ServerTests {
         } operation: {
             let application = Server.makeApplication(
                 database: database,
+                userSettingsURL: userSettingsURL,
+                managedSettingsURL: rootURL.appending(path: "missing-managed-settings.toml"),
                 port: 0,
                 allowedOrigin: "ws://localhost"
             )
@@ -75,6 +89,18 @@ struct ServerTests {
             try await application.test(.live) { client in
                 try await client.execute(uri: "/ping", method: .get) { response in
                     #expect(response.status == .noContent)
+                }
+
+                try await client.execute(
+                    uri: "/settings",
+                    method: .get
+                ) { response in
+                    #expect(response.status == .ok)
+                    let settings = try? JSONDecoder.conductor.decode(
+                        [String: String].self,
+                        from: Data(response.body.readableBytesView)
+                    )
+                    #expect(settings == ["defaultModel": "gpt-5.6-sol"])
                 }
 
                 for uri in [
@@ -225,6 +251,46 @@ struct ServerTests {
                     #expect(response.status == .ok)
                 }
                 #endif
+            }
+        }
+    }
+
+    @Test("Managed settings override the user default model")
+    func managedSettingsOverrideUserDefaultModel() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let userSettingsURL = rootURL.appending(path: "settings.toml")
+        try """
+            [models]
+            default = "codex:gpt-5.4"
+            """
+            .write(to: userSettingsURL, atomically: true, encoding: .utf8)
+
+        let managedSettingsURL = rootURL.appending(path: "settings.managed.toml")
+        try """
+            [models]
+            default = "codex:gpt-5.6-luna"
+            """
+            .write(to: managedSettingsURL, atomically: true, encoding: .utf8)
+
+        let application = Server.makeApplication(
+            database: try testConductorDatabase(),
+            userSettingsURL: userSettingsURL,
+            managedSettingsURL: managedSettingsURL,
+            port: 0
+        )
+
+        try await application.test(.live) { client in
+            try await client.execute(uri: "/settings", method: .get) { response in
+                #expect(response.status == .ok)
+                let settings = try JSONDecoder.conductor.decode(
+                    [String: String].self,
+                    from: Data(response.body.readableBytesView)
+                )
+                #expect(settings == ["defaultModel": "gpt-5.6-luna"])
             }
         }
     }
