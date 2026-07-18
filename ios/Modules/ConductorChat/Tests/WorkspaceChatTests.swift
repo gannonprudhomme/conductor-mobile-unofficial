@@ -15,6 +15,118 @@ import Testing
 
 @MainActor
 struct WorkspaceChatTests {
+    @Test("Loading unread sessions marks their workspace as read")
+    func loadingUnreadSessionsMarksWorkspaceAsRead() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active", unread: 1)
+        let activeSession = try makeSession(
+            id: "active",
+            workspaceID: workspace.id,
+            unreadCount: 3
+        )
+        let unreadSession = try makeSession(
+            id: "unread",
+            workspaceID: workspace.id,
+            unreadCount: 2
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.upsert { workspace }.execute(db)
+                try Session.upsert { [activeSession, unreadSession] }.execute(db)
+            }
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let requests = LockIsolated<[String]>([])
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, isUnread in
+                    requests.withValue { $0.append("\(workspaceID):\(isUnread)") }
+                    return .hook
+                }
+            }
+
+            await store.send(.loadSessionsResponse(.success([activeSession, unreadSession]))) {
+                $0.isLoadingSessions = false
+            }
+            await store.finish()
+            #expect(requests.value.isEmpty)
+
+            await store.send(
+                .chat(
+                    .initialMessagesResponse(
+                        sessionID: activeSession.id,
+                        messages: []
+                    )
+                )
+            ) {
+                $0.chat?.isLoadingMessages = false
+                $0.chat?.isMessageSnapshotEmpty = true
+            }
+            await store.finish()
+            #expect(requests.value == ["\(workspace.id):false"])
+
+            try await database.write { db in
+                try Session
+                    .find(unreadSession.id)
+                    .update { $0.unreadCount = 2 }
+                    .execute(db)
+            }
+            await store.send(.sessionButtonTapped(unreadSession)) {
+                $0.chat = Chat.State(session: unreadSession)
+                $0.hasUserSelectedSession = true
+            }
+            await store.finish()
+            #expect(requests.value == ["\(workspace.id):false"])
+
+            await store.send(
+                .chat(
+                    .initialMessagesResponse(
+                        sessionID: activeSession.id,
+                        messages: []
+                    )
+                )
+            )
+            #expect(requests.value == ["\(workspace.id):false"])
+
+            await store.send(
+                .chat(
+                    .initialMessagesResponse(
+                        sessionID: unreadSession.id,
+                        messages: []
+                    )
+                )
+            ) {
+                $0.chat?.isLoadingMessages = false
+                $0.chat?.isMessageSnapshotEmpty = true
+            }
+            await store.finish()
+
+            let cachedUnreadState = try await database.read { db in
+                (
+                    try Workspace.find(workspace.id).fetchOne(db)?.unread,
+                    try Session
+                        .where { $0.workspaceID.eq(workspace.id) }
+                        .order(by: \.id)
+                        .fetchAll(db)
+                        .map(\.unreadCount)
+                )
+            }
+            #expect(cachedUnreadState.0 == 0)
+            #expect(cachedUnreadState.1 == [0, 0])
+            #expect(requests.value == ["\(workspace.id):false", "\(workspace.id):false"])
+        }
+    }
+
     @Test("Active sessions match Conductor's creation order")
     func activeSessionsMatchConductorOrder() throws {
         let olderSession = try makeSession(
@@ -1007,6 +1119,7 @@ private func makeSession(
     isHidden: Bool = false,
     createdAt: String = "2026-07-09 00:00:00",
     status: String = "idle",
+    unreadCount: Int = 0,
     updatedAt: String = "2026-07-09 01:00:00"
 ) throws -> Session {
     try JSONDecoder().decode(
@@ -1023,7 +1136,7 @@ private func makeSession(
               "updated_at": "\(updatedAt)",
               "status": "\(status)",
               "model": "sonnet",
-              "unread_count": 0,
+              "unread_count": \(unreadCount),
               "freshly_compacted": 0,
               "context_token_count": 0
             }
@@ -1032,7 +1145,10 @@ private func makeSession(
     )
 }
 
-private func makeWorkspace(activeSessionID: String? = nil) throws -> Workspace {
+private func makeWorkspace(
+    activeSessionID: String? = nil,
+    unread: Int = 0
+) throws -> Workspace {
     let activeSession = activeSessionID.map { "\"\($0)\"" } ?? "null"
     return try JSONDecoder.conductor.decode(
         Workspace.self,
@@ -1043,7 +1159,8 @@ private func makeWorkspace(activeSessionID: String? = nil) throws -> Workspace {
               "active_session_id": \(activeSession),
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
-              "is_working": false
+              "is_working": false,
+              "unread": \(unread)
             }
             """.utf8
         )

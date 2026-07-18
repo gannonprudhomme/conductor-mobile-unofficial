@@ -46,7 +46,8 @@ public struct WorkspaceChat: Sendable {
             let workspace = workspaceWithRepository.workspace
             self._workspaceWithRepository = FetchOne(
                 wrappedValue: workspaceWithRepository,
-                WorkspaceWithRepository.all(workspaceID: workspace.id)
+                WorkspaceWithRepository.all(workspaceID: workspace.id),
+                animation: .default
             )
 
             self.chat = nil
@@ -61,7 +62,8 @@ public struct WorkspaceChat: Sendable {
             let activeSessions = FetchAll(
                 Session
                     .where { $0.workspaceID.eq(workspace.id).and(!$0.isHidden) }
-                    .order(by: \.createdAt)
+                    .order(by: \.createdAt),
+                animation: .default
             )
 
             self._activeSessions = activeSessions
@@ -229,6 +231,15 @@ public struct WorkspaceChat: Sendable {
                 state.hasPersistedInitialSessionSnapshot = true
                 return .none
 
+            case let .chat(.initialMessagesResponse(sessionID, _)):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+                return markWorkspaceReadIfNeeded(
+                    state,
+                    selectedSession: state.chat?.session
+                )
+
             case let .chat(.loadMessagesFailed(error)):
                 guard !DesktopClientError.isConnectionFailure(error) else {
                     return .none
@@ -341,6 +352,47 @@ public struct WorkspaceChat: Sendable {
                 await send(.sessionSnapshotPersisted)
             } onFailure: { error in
                 await send(.loadSessionsResponse(.failure(error)))
+            }
+        }
+    }
+
+    private func markWorkspaceReadIfNeeded(
+        _ state: State,
+        selectedSession: Session?
+    ) -> Effect<Action> {
+        guard (state.workspace.unread ?? 0) > 0
+              || (selectedSession?.unreadCount ?? 0) > 0 else {
+            return .none
+        }
+
+        return .run { [workspaceID = state.workspace.id] _ in
+            do {
+                _ = try await desktopClient.setWorkspaceUnread(
+                    workspaceID: workspaceID,
+                    isUnread: false
+                )
+            } catch {
+                Logger.chat.error("Failed to mark workspace as read: \(error)")
+                return
+            }
+
+            do {
+                try await database.write { db in
+                    try Workspace
+                        .find(workspaceID)
+                        .update { $0.unread = #bind(0) }
+                        .execute(db)
+                    try Session
+                        .where {
+                            $0.workspaceID.eq(workspaceID)
+                                && !$0.isHidden
+                                && $0.unreadCount.gt(0)
+                        }
+                        .update { $0.unreadCount = 0 }
+                        .execute(db)
+                }
+            } catch {
+                Logger.chat.error("Failed to update cached unread state: \(error)")
             }
         }
     }

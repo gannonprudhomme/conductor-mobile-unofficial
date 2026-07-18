@@ -130,7 +130,10 @@ public struct Chat: Sendable {
         case binding(BindingAction<State>)
         case task
         case defaultModelFetched(Session.Model)
-        case initialMessagesResponse([Message])
+        case initialMessagesResponse(
+            sessionID: Session.ID,
+            messages: [Message]
+        )
         case loadMessagesFailed(any Error)
         case messagesUpdated([Message])
         /// Sent after POST returns its persisted row, before writing it locally. The message
@@ -204,7 +207,10 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
 
-            case let .initialMessagesResponse(messages):
+            case let .initialMessagesResponse(sessionID, messages):
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
                 // A completed send can race with an older first WebSocket snapshot. Prefer the
                 // snapshot's copy when IDs overlap, and append only confirmed rows it omitted.
                 let responseMessageIDs = Set(messages.map(\.id))
@@ -376,7 +382,12 @@ public struct Chat: Sendable {
             } onValue: { messages in
                 if isAwaitingInitialResponse {
                     isAwaitingInitialResponse = false
-                    await send(.initialMessagesResponse(messages))
+                    await send(
+                        .initialMessagesResponse(
+                            sessionID: sessionID,
+                            messages: messages
+                        )
+                    )
                 }
                 try await storeMessages(messages)
             } onFailure: { error in
