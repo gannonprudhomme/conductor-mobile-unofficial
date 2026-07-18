@@ -12,6 +12,11 @@ import UIKit
 
 @MainActor
 struct ChatCollectionViewTests {
+    @Test("Content shorter than the viewport aligns to the top")
+    func shortContentAlignment() {
+        #expect(ChatCollectionView.contentAlignmentPoint == CGPoint(x: 0, y: 0))
+    }
+
     @Test("Initial content opens at the bottom and later updates follow only while pinned")
     func scrollPolicy() {
         var policy = ChatCollectionView.ScrollPolicy()

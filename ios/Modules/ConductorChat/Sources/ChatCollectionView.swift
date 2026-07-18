@@ -13,6 +13,9 @@ import UIKit
 /// self-sizing layout, diffable updates, and transient scroll interaction.
 @MainActor
 struct ChatCollectionView: UIViewRepresentable {
+    /// Top-aligns content that is shorter than the collection view's viewport.
+    static let contentAlignmentPoint = CGPoint(x: 0, y: 0)
+
     /// The complete ordered presentation model for the collection view's single section.
     let rows: [DisplayedChatRowWithPadding]
 
@@ -38,7 +41,7 @@ struct ChatCollectionView: UIViewRepresentable {
         )
         collectionView.alwaysBounceVertical = true
         collectionView.backgroundColor = .clear
-        collectionView.contentAlignmentPoint = CGPoint(x: 0, y: 1)
+        collectionView.contentAlignmentPoint = Self.contentAlignmentPoint
         collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.keyboardDismissMode = .interactive
         collectionView.topEdgeEffect.style = .soft
