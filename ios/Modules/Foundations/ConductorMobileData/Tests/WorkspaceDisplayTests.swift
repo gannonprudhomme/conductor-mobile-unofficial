@@ -87,6 +87,17 @@ struct WorkspaceDisplayTests {
         )
     }
 
+    @Test("Workspace display names prefer pull request titles")
+    func displayNamePrefersPullRequestTitle() {
+        let workspace = Workspace.preview(
+            branch: "unused-branch",
+            prTitle: "Preferred pull request title",
+            workspaceName: "unused workspace name"
+        )
+
+        #expect(workspace.displayName == "Preferred pull request title")
+    }
+
     @Test("Workspace display names preserve explicit names")
     func displayNamePreservesWorkspaceName() {
         let workspace = Workspace.preview(

@@ -52,6 +52,10 @@ extension Workspace {
     }
 
     public var displayName: String {
+        if let prTitle = prTitle?.nilIfEmpty {
+            return prTitle
+        }
+
         if let workspaceName = workspaceName?.nilIfEmpty {
             return workspaceName
         }
