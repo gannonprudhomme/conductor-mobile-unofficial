@@ -171,7 +171,12 @@ public func appDatabase() throws -> any DatabaseWriter {
             """
             CREATE TABLE "mobile_workspace_state" (
               "id" TEXT PRIMARY KEY REFERENCES "workspaces" ("id") ON DELETE CASCADE,
-              "is_working" INTEGER NOT NULL DEFAULT 0
+              "is_working" INTEGER NOT NULL DEFAULT 0,
+              "pull_request_url" TEXT,
+              "pull_request_is_draft" INTEGER NOT NULL DEFAULT 0,
+              "pull_request_is_merged" INTEGER NOT NULL DEFAULT 0,
+              "pull_request_merge_state_status" TEXT,
+              "pull_request_checks_status" TEXT
             );
             """
         )

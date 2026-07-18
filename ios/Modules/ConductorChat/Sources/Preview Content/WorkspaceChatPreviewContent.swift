@@ -11,12 +11,17 @@ import ConductorMobileData
 
 struct WorkspaceChatPreviewContent: Sendable {
     let messages: [Message]
+    let mobileState: MobileWorkspaceState
     let repository: Repository
     let sessions: [Session]
     let workspace: Workspace
 
     var workspaceWithRepository: WorkspaceWithRepository {
-        WorkspaceWithRepository(workspace: workspace, repository: repository)
+        WorkspaceWithRepository(
+            workspace: workspace,
+            repository: repository,
+            mobileState: mobileState
+        )
     }
 
     init() throws {
@@ -62,6 +67,17 @@ struct WorkspaceChatPreviewContent: Sendable {
         )
 
         self.messages = chat.messages + workingMessages + unreadMessages
+        self.mobileState = MobileWorkspaceState(
+            workspaceID: chat.session.workspaceID,
+            isWorking: false,
+            pullRequest: PullRequestSnapshot(
+                url: "https://github.com/conductor-preview/mock-repository/pull/201",
+                isDraft: false,
+                isMerged: false,
+                mergeStateStatus: .clean,
+                checksStatus: .passing
+            )
+        )
         self.repository = repository
         self.sessions = [
             chat.session,

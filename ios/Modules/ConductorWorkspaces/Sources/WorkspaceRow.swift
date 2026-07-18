@@ -45,6 +45,12 @@ struct WorkspaceRow: View {
                         .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
                         .tint(.theme(.textSecondary))
                         .frame(width: iconSize, height: iconSize)
+                } else if let pullRequestStatus = item.pullRequestStatus {
+                    PullRequestStatusIcon(
+                        status: pullRequestStatus,
+                        size: 20,
+                        relativeTo: .body
+                    )
                 } else {
                     LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
                         .foregroundStyle(.theme(.textSecondary))

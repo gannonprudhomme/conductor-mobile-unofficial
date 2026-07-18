@@ -436,7 +436,8 @@ public struct Workspaces: Sendable {
                         snapshot.workspaces.map {
                             MobileWorkspaceState(
                                 workspaceID: $0.workspace.id,
-                                isWorking: $0.isWorking
+                                isWorking: $0.isWorking,
+                                pullRequest: snapshot.pullRequests[$0.workspace.id]
                             )
                         }
                     }
@@ -1112,7 +1113,62 @@ private struct WorkspacesPreview: View {
                 try Workspace.upsert { workspaces }
                     .execute(db)
                 try MobileWorkspaceState.upsert {
-                    MobileWorkspaceState(workspaceID: "working", isWorking: true)
+                    [
+                        MobileWorkspaceState(
+                            workspaceID: "pinned-chat",
+                            isWorking: false,
+                            pullRequest: PullRequestSnapshot(
+                                url: "https://github.com/conductor-preview/mock-repository/pull/101",
+                                isDraft: true,
+                                isMerged: false
+                            )
+                        ),
+                        MobileWorkspaceState(
+                            workspaceID: "working",
+                            isWorking: true
+                        ),
+                        MobileWorkspaceState(
+                            workspaceID: "in-review-unread",
+                            isWorking: false,
+                            pullRequest: PullRequestSnapshot(
+                                url: "https://github.com/conductor-preview/mock-repository/pull/102",
+                                isDraft: false,
+                                isMerged: false,
+                                mergeStateStatus: .blocked,
+                                checksStatus: .failing
+                            )
+                        ),
+                        MobileWorkspaceState(
+                            workspaceID: "in-review-desktop",
+                            isWorking: false,
+                            pullRequest: PullRequestSnapshot(
+                                url: "https://github.com/conductor-preview/mock-repository/pull/103",
+                                isDraft: false,
+                                isMerged: false,
+                                mergeStateStatus: .clean,
+                                checksStatus: .passing
+                            )
+                        ),
+                        MobileWorkspaceState(
+                            workspaceID: "backlog",
+                            isWorking: false,
+                            pullRequest: PullRequestSnapshot(
+                                url: "https://github.com/conductor-preview/mock-repository/pull/104",
+                                isDraft: false,
+                                isMerged: false,
+                                mergeStateStatus: .dirty
+                            )
+                        ),
+                        MobileWorkspaceState(
+                            workspaceID: "done",
+                            isWorking: false,
+                            pullRequest: PullRequestSnapshot(
+                                url: "https://github.com/conductor-preview/mock-repository/pull/105",
+                                isDraft: false,
+                                isMerged: true
+                            )
+                        ),
+                    ]
                 }
                 .execute(db)
             }

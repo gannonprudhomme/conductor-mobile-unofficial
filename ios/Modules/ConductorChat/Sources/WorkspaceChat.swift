@@ -449,6 +449,7 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
 }
 
 public struct WorkspaceChatView: View {
+    @Environment(\.openURL) private var openURL
     @Bindable var store: StoreOf<WorkspaceChat>
     @ScaledMetric(relativeTo: .body) private var sessionPickerHeight = 52
 
@@ -491,20 +492,7 @@ public struct WorkspaceChatView: View {
             .labelStyle(.conductorExtraSmall)
         }
         .toolbar {
-            if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        store.send(.archivedSessionsButtonTapped)
-                    } label: {
-                        Label {
-                            Text("Archived sessions")
-                        } icon: {
-                            LucideIcon(Lucide.history, size: 20, relativeTo: .title)
-                        }
-                        .foregroundStyle(.theme(.textPrimary))
-                    }
-                }
-            }
+            toolbarMenu
         }
         .safeAreaBar(edge: .top) {
             SessionPicker(
@@ -547,7 +535,38 @@ public struct WorkspaceChatView: View {
         .task {
             await store.send(.task).finish()
         }
+    }
 
+    private var toolbarMenu: some View {
+        Menu {
+            if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
+                Button {
+                    store.send(.archivedSessionsButtonTapped)
+                } label: {
+                    Label {
+                        Text("Archived sessions")
+                    } icon: {
+                        ColoredMenuImage(Lucide.history, color: .theme(.textPrimary))
+                    }
+                }
+            }
+
+            if let pullRequestURL = store.workspaceWithRepository.pullRequestURL {
+                Button {
+                    openURL(pullRequestURL)
+                } label: {
+                    Label {
+                        Text("Open PR in GitHub")
+                    } icon: {
+                        ScaledImage.gitHub(size: 16, relativeTo: .body)
+                    }
+                }
+                .accessibilityLabel("Pull request")
+            }
+        } label: {
+            LucideIcon(Lucide.ellipsis, style: .inlineToolbarTitle)
+                .foregroundStyle(.theme(.textPrimary))
+        }
     }
 
     private struct SessionPicker: View {
@@ -702,6 +721,7 @@ public struct WorkspaceChatView: View {
         try $0.defaultDatabase.write { db in
             try Workspace.upsert { content.workspace }.execute(db)
             try Repository.upsert { content.repository }.execute(db)
+            try MobileWorkspaceState.upsert { content.mobileState }.execute(db)
             try Session.upsert { content.sessions }.execute(db)
             try Message.upsert { content.messages }.execute(db)
         }
@@ -729,6 +749,17 @@ public struct WorkspaceChatView: View {
                 WorkspaceChat()
             }
         )
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                // mimic a back button
+                Button {
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .imageScale(.medium)
+                        .foregroundStyle(.theme(.textPrimary))
+                }
+            }
+        }
     }
     .preferredColorScheme(.dark)
 }

@@ -294,13 +294,21 @@ struct WorkspacesTests {
             )
             var updatedWorkspace = workspace
             updatedWorkspace.derivedStatus = Workspace.Status.done.rawValue
+            let pullRequest = PullRequestSnapshot(
+                url: "https://github.com/example/repository/pull/42",
+                isDraft: false,
+                isMerged: false,
+                mergeStateStatus: .clean,
+                checksStatus: .passing
+            )
             let firstSnapshot = WorkspaceListSnapshot(
                 repositories: [repository],
                 workspaces: [WorkspaceSnapshot(workspace: workspace, isWorking: false)]
             )
             let secondSnapshot = WorkspaceListSnapshot(
                 repositories: [repository],
-                workspaces: [WorkspaceSnapshot(workspace: updatedWorkspace, isWorking: true)]
+                workspaces: [WorkspaceSnapshot(workspace: updatedWorkspace, isWorking: true)],
+                pullRequests: [workspace.id: pullRequest]
             )
             let firstExpectedWorkspace = WorkspaceWithRepository(
                 workspace: workspace,
@@ -310,7 +318,11 @@ struct WorkspacesTests {
             let secondExpectedWorkspace = WorkspaceWithRepository(
                 workspace: updatedWorkspace,
                 repository: repository,
-                mobileState: MobileWorkspaceState(workspaceID: workspace.id, isWorking: true)
+                mobileState: MobileWorkspaceState(
+                    workspaceID: workspace.id,
+                    isWorking: true,
+                    pullRequest: pullRequest
+                )
             )
             let (firstStream, firstContinuation) = AsyncThrowingStream<
                 WorkspaceListSnapshot,
