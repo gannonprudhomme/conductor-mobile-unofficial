@@ -134,7 +134,10 @@ public struct WorkspaceChat: Sendable {
                     return .none
                 }
                 state.chat = Chat.State(session: activeSession)
-                return .none
+                return markWorkspaceReadIfNeeded(
+                    state,
+                    selectedSession: activeSession
+                )
 
             case .archivedSessionsButtonTapped:
                 state.destination = .archivedSessions(
@@ -212,7 +215,11 @@ public struct WorkspaceChat: Sendable {
                     sessionIDAwaitingObservation: state.sessionIDAwaitingObservation
                 )
                 state.isLoadingSessions = false
-                return .none
+                let selectedSession = sessions.first { $0.id == state.chat?.sessionID }
+                return markWorkspaceReadIfNeeded(
+                    state,
+                    selectedSession: selectedSession
+                )
 
             case let .loadSessionsResponse(.failure(error)):
                 Logger.chat.error("Failed to load sessions: \(error)")
@@ -270,11 +277,15 @@ public struct WorkspaceChat: Sendable {
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
                 state.hasUserSelectedSession = true
                 state.sessionIDAwaitingObservation = nil
+                let markWorkspaceRead = markWorkspaceReadIfNeeded(
+                    state,
+                    selectedSession: session
+                )
                 guard state.chat?.sessionID != session.id else {
-                    return .none
+                    return markWorkspaceRead
                 }
                 state.chat = Chat.State(session: session)
-                return .none
+                return markWorkspaceRead
 
             case .chat, .destination:
                 return .none
@@ -341,6 +352,47 @@ public struct WorkspaceChat: Sendable {
                 await send(.sessionSnapshotPersisted)
             } onFailure: { error in
                 await send(.loadSessionsResponse(.failure(error)))
+            }
+        }
+    }
+
+    private func markWorkspaceReadIfNeeded(
+        _ state: State,
+        selectedSession: Session?
+    ) -> Effect<Action> {
+        guard (state.workspace.unread ?? 0) > 0
+              || (selectedSession?.unreadCount ?? 0) > 0 else {
+            return .none
+        }
+
+        return .run { [workspaceID = state.workspace.id] _ in
+            do {
+                _ = try await desktopClient.setWorkspaceUnread(
+                    workspaceID: workspaceID,
+                    isUnread: false
+                )
+            } catch {
+                Logger.chat.error("Failed to mark workspace as read: \(error)")
+                return
+            }
+
+            do {
+                try await database.write { db in
+                    try Workspace
+                        .find(workspaceID)
+                        .update { $0.unread = #bind(0) }
+                        .execute(db)
+                    try Session
+                        .where {
+                            $0.workspaceID.eq(workspaceID)
+                                && !$0.isHidden
+                                && $0.unreadCount.gt(0)
+                        }
+                        .update { $0.unreadCount = 0 }
+                        .execute(db)
+                }
+            } catch {
+                Logger.chat.error("Failed to update cached unread state: \(error)")
             }
         }
     }
