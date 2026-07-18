@@ -150,7 +150,10 @@ extension ChatCollectionView {
         }
 
         /// Records an incoming row set and returns the placement policy to use after its snapshot.
-        mutating func rowsWillChange(hasRows: Bool) -> UpdateIntent {
+        mutating func rowsWillChange(
+            hasRows: Bool,
+            shouldPreserveViewport: Bool = false
+        ) -> UpdateIntent {
             // Empty content has no anchor. Resetting here makes the next nonempty update initial
             // content again rather than an append to content that is no longer displayed.
             guard hasRows else {
@@ -161,8 +164,14 @@ extension ChatCollectionView {
 
             // Initial content always opens at the bottom. Later content follows only while the
             // user remains pinned; otherwise the coordinator restores the visible viewport.
+            // Disclosure changes also preserve the viewport so expanding a summary does not move
+            // its header just because the feed was previously bottom-pinned.
             let isInitial = !hasDisplayedContent
             hasDisplayedContent = true
+            if !isInitial, shouldPreserveViewport {
+                isFollowingBottom = false
+                return .preserveViewport
+            }
             return isInitial || isFollowingBottom
                 ? .bottom(isInitial: isInitial)
                 : .preserveViewport
@@ -260,6 +269,28 @@ extension ChatCollectionView {
         }
     }
 
+    /// Reports whether an existing turn summary changed its disclosure state.
+    static func hasTurnSummaryDisclosureChange(
+        from previousRows: [DisplayedChatRowWithPadding],
+        to rows: [DisplayedChatRowWithPadding]
+    ) -> Bool {
+        let previousSummaries: [DisplayedChatRow.TurnSummary.ID: Bool] = Dictionary(
+            uniqueKeysWithValues: previousRows.compactMap { row in
+                guard case .turnSummary(let summary) = row.content else {
+                    return nil
+                }
+                return (summary.id, summary.isExpanded)
+            }
+        )
+        return rows.contains { row in
+            guard case .turnSummary(let summary) = row.content,
+                  let wasExpanded = previousSummaries[summary.id] else {
+                return false
+            }
+            return wasExpanded != summary.isExpanded
+        }
+    }
+
     /// Decides whether the next bottom correction should use UIKit's native scroll animation.
     /// Diffable row animation is a separate decision; for example, summary rows may insert with a
     /// diffable animation while their bottom-offset correction remains immediate.
@@ -282,24 +313,8 @@ extension ChatCollectionView {
             return false
         }
 
-        // Summary expansion can change several row heights and identities at once. Comparing the
-        // disclosure bit on matching summary IDs distinguishes it from an ordinary append.
-        let previousSummaries: [DisplayedChatRow.TurnSummary.ID: Bool] = Dictionary(
-            uniqueKeysWithValues: previousRows.compactMap { row in
-                guard case .turnSummary(let summary) = row.content else {
-                    return nil
-                }
-                return (summary.id, summary.isExpanded)
-            }
-        )
-        let hasDisclosureChange = rows.contains { row in
-            guard case .turnSummary(let summary) = row.content,
-                  let wasExpanded = previousSummaries[summary.id] else {
-                return false
-            }
-            return wasExpanded != summary.isExpanded
-        }
-        guard !hasDisclosureChange else {
+        // Summary expansion can change several row heights and identities at once.
+        guard !hasTurnSummaryDisclosureChange(from: previousRows, to: rows) else {
             return false
         }
 
@@ -581,7 +596,14 @@ extension ChatCollectionView {
 
             // Classify offset animation before mutating retained rows. Diffable structural animation
             // is calculated later and intentionally remains independent from this choice.
-            let intent = scrollPolicy.rowsWillChange(hasRows: !rows.isEmpty)
+            let hasDisclosureChange = ChatCollectionView.hasTurnSummaryDisclosureChange(
+                from: previousRows,
+                to: rows
+            )
+            let intent = scrollPolicy.rowsWillChange(
+                hasRows: !rows.isEmpty,
+                shouldPreserveViewport: hasDisclosureChange && !needsScrollToBottom
+            )
             let isInitialContent = intent == .bottom(isInitial: true)
             let isInteractionActive = isInteracting(with: collectionView)
             let shouldAnimateBottom = !shouldScrollToBottom
