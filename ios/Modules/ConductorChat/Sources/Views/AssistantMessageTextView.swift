@@ -46,6 +46,7 @@ struct AssistantMessageTextView: View {
                     existingSpacing: ChatRowLayout.interRowSpacing
                 )
             )
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

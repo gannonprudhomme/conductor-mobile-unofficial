@@ -771,7 +771,7 @@ extension Turn {
             turnID: turnID,
             humanMessageID: humanMessage.id,
             expandedSummaryIDs: expandedSummaryIDs,
-            summarizedRows: summarizedRows
+            assistantRows: assistantRows
         )
         segmentRows.append(.turnSummary(summary))
 
@@ -795,7 +795,7 @@ extension Turn {
         turnID: Turn.ID,
         humanMessageID: Row.HumanMessageRow.ID,
         expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID>,
-        summarizedRows: [(index: Int, row: Row)]
+        assistantRows: [(index: Int, row: Row)]
     ) -> DisplayedChatRow.TurnSummary {
         // Including the human-message ID keeps summaries independently addressable when one
         // stored turn contains multiple steered human messages.
@@ -805,11 +805,16 @@ extension Turn {
         var toolIcons: [DisplayedChatRow.TurnSummary.ToolIcon] = []
         var seenToolIcons: Set<DisplayedChatRow.TurnSummary.ToolIcon> = []
 
-        // Counts describe exactly what expansion reveals. Tool icons represent distinct
-        // categories and retain first-use order so their arrangement is stable and meaningful.
-        for (_, row) in summarizedRows {
+        // Counts describe the complete segment, including the final response that remains visible
+        // outside the disclosure. Tool icons represent distinct categories and retain first-use
+        // order so their arrangement is stable and meaningful.
+        for (_, row) in assistantRows {
             switch row {
-            case .assistantMessage(.text), .assistantMessage(.error):
+            case let .assistantMessage(.text(_, content, _)):
+                if !content.chunks.isEmpty {
+                    messageCount += 1
+                }
+            case .assistantMessage(.error):
                 messageCount += 1
             case .assistantMessage(.toolCall(_, let toolCall)):
                 toolCallCount += 1

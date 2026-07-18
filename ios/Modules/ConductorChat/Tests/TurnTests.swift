@@ -581,7 +581,7 @@ struct TurnTests {
             id: "turn-1:human-2",
             isExpanded: false,
             toolCallCount: 1,
-            messageCount: 1,
+            messageCount: 2,
             toolIcons: [.search]
         )
         let expandedSummary1 = DisplayedChatRow.TurnSummary(
@@ -681,14 +681,14 @@ struct TurnTests {
             id: summaryID,
             isExpanded: false,
             toolCallCount: 1,
-            messageCount: 0,
+            messageCount: 1,
             toolIcons: [.fileText]
         )
         let expandedSummary = DisplayedChatRow.TurnSummary(
             id: summaryID,
             isExpanded: true,
             toolCallCount: 1,
-            messageCount: 0,
+            messageCount: 1,
             toolIcons: [.fileText]
         )
 
@@ -870,7 +870,7 @@ struct TurnTests {
             id: "error-ended:human",
             isExpanded: false,
             toolCallCount: 1,
-            messageCount: 1,
+            messageCount: 2,
             toolIcons: [.fileText]
         )
 
@@ -945,14 +945,14 @@ struct TurnTests {
             id: summaryID,
             isExpanded: false,
             toolCallCount: 1,
-            messageCount: 1,
+            messageCount: 2,
             toolIcons: [.terminal]
         )
         let expandedSummary = DisplayedChatRow.TurnSummary(
             id: summaryID,
             isExpanded: true,
             toolCallCount: 1,
-            messageCount: 1,
+            messageCount: 2,
             toolIcons: [.terminal]
         )
 
@@ -1033,7 +1033,7 @@ struct TurnTests {
             ["human:human", "summary:turn:human", "assistant:final:chunk:0"]
         )
         #expect(summary.toolCallCount == 3)
-        #expect(summary.messageCount == 1)
+        #expect(summary.messageCount == 2)
         expectNoDifference(summary.toolIcons, [.fileText, .filePen])
     }
 
