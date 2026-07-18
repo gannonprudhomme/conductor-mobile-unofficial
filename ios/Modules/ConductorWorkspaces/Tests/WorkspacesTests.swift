@@ -279,6 +279,122 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Create button presents a sheet with the available repositories")
+    func createButtonPresentsSheet() async throws {
+        let repository = Repository.preview()
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Repository.insert { repository }.execute(db)
+            }
+        } operation: {
+            let state = Workspaces.State()
+            state.$selectedRepositoryID.withLock { $0 = repository.id }
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(.createButtonTapped) {
+                $0.destination = .createWorkspace(
+                    CreateWorkspace.State(
+                        repositories: [repository],
+                        selectedRepositoryIDFilter: repository.id
+                    )
+                )
+            }
+        }
+    }
+
+    @Test("Create button does nothing without repositories")
+    func createButtonWithoutRepositories() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            }
+
+            await store.send(.createButtonTapped)
+        }
+    }
+
+    @Test("Creating a workspace waits after the sheet dismisses")
+    func workspaceCreationWaitsForSheetDismissal() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let clock = TestClock()
+            let repository = Repository.preview()
+            let workspace = Workspace.preview(
+                derivedStatus: Workspace.Status.inProgress.rawValue,
+                repositoryID: repository.id
+            )
+            let item = WorkspaceWithRepository(
+                workspace: workspace,
+                repository: repository
+            )
+            let creation = WorkspaceCreationResult(
+                selectedModel: .gpt_5_6_terra,
+                workspace: item
+            )
+            var state = Workspaces.State()
+            state.destination = .createWorkspace(
+                CreateWorkspace.State(repositories: [repository])
+            )
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            } withDependencies: {
+                $0.continuousClock = clock
+            }
+
+            await store.send(
+                .destination(
+                    .presented(.createWorkspace(.delegate(.workspaceCreated(creation))))
+                )
+            ) {
+                $0.destination = nil
+                $0.pendingWorkspaceCreation = creation
+            }
+            await store.send(.workspacesChanged([item])) {
+                $0.deferredWorkspaces = [item]
+            }
+            #expect(store.state.hasVisibleWorkspaces == false)
+            await store.send(.createWorkspaceSheetDismissed) {
+                $0.sections = Workspaces.State.sections(
+                    groupedBy: $0.grouping,
+                    workspaces: [item]
+                )
+                $0.deferredWorkspaces = nil
+                $0.pendingWorkspaceCreation = nil
+            }
+            #expect(store.state.hasVisibleWorkspaces)
+            await clock.advance(by: .milliseconds(249))
+            await clock.advance(by: .milliseconds(1))
+            await store.receive(\.workspaceCreated, creation)
+        }
+    }
+
+    @Test("Observation failures preserve the create sheet")
+    func observationFailurePreservesCreateSheet() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let repository = Repository.preview()
+            let createWorkspace = CreateWorkspace.State(repositories: [repository])
+            var state = Workspaces.State()
+            state.destination = .createWorkspace(createWorkspace)
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(.loadWorkspacesFailed(TestError()))
+        }
+    }
+
     @Test("Workspace snapshots reconnect after failures and cancel")
     func workspaceSnapshotsStreamReconnectAndCancel() async throws {
         try await withDependencies {
@@ -539,8 +655,8 @@ struct WorkspacesTests {
             await store.send(.workspacePinnedButtonTapped(item))
 
             await store.receive(\.workspaceMutationFailed) {
-                $0.alert = .failedToUpdateWorkspace(
-                    error: TestError()
+                $0.destination = .alert(
+                    .failedToUpdateWorkspace(error: TestError())
                 )
             }
 
@@ -579,8 +695,8 @@ struct WorkspacesTests {
             await store.send(.workspaceStatusButtonTapped(item, .done))
 
             await store.receive(\.workspaceMutationFailed) {
-                $0.alert = .failedToUpdateWorkspace(
-                    error: TestError()
+                $0.destination = .alert(
+                    .failedToUpdateWorkspace(error: TestError())
                 )
             }
 
@@ -619,8 +735,8 @@ struct WorkspacesTests {
             await store.send(.workspaceUnreadButtonTapped(item))
 
             await store.receive(\.workspaceMutationFailed) {
-                $0.alert = .failedToUpdateWorkspace(
-                    error: TestError()
+                $0.destination = .alert(
+                    .failedToUpdateWorkspace(error: TestError())
                 )
             }
 
@@ -654,7 +770,7 @@ struct WorkspacesTests {
 
             await store.send(.workspacePinnedButtonTapped(item))
             await store.receive(\.workspaceMutationUsedSQLiteFallback) {
-                $0.alert = .workspaceMutationUsedSQLiteFallback
+                $0.destination = .alert(.workspaceMutationUsedSQLiteFallback)
             }
 
             let workspace = try await database.read { db in
@@ -689,8 +805,8 @@ struct WorkspacesTests {
             await store.send(.workspacePinnedButtonTapped(item))
 
             await store.receive(\.workspaceMutationFailed) {
-                $0.alert = .failedToUpdateWorkspace(
-                    error: URLError(.networkConnectionLost)
+                $0.destination = .alert(
+                    .failedToUpdateWorkspace(error: URLError(.networkConnectionLost))
                 )
             }
         }

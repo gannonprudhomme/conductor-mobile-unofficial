@@ -54,6 +54,8 @@ public enum Server {
         database: DatabaseQueue,
         // Five seconds tolerates a slow Conductor UI write without holding the request indefinitely.
         uiMutationTimeout: Duration = .seconds(5),
+        // Workspace creation can run setup and worktree scripts, so it gets a separate timeout.
+        workspaceCreationTimeout: Duration = .seconds(300),
         userSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".conductor/settings.toml"),
         managedSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -105,6 +107,20 @@ public enum Server {
             )
         }
         #endif
+
+        router.post("/workspaces") { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await WorkspaceRoute.post(
+                request: request,
+                context: context,
+                database: database,
+                creationTimeout: workspaceCreationTimeout,
+                uiMutationTimeout: uiMutationTimeout
+            )
+        }
 
         router.patch("/workspaces/{workspaceID}") { request, context in
             guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {

@@ -176,6 +176,15 @@ struct DesktopClientTests {
                     isPinned: true
                 )
             }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
+                _ = try await DesktopClient.liveValue.createWorkspace(
+                    workspaceID: "00000000-0000-0000-0000-000000000000",
+                    repositoryID: "repository-1",
+                    agentType: .codex,
+                    model: .gpt_5_6_sol,
+                    isFastModeEnabled: false
+                )
+            }
         }
     }
 
@@ -408,6 +417,110 @@ struct DesktopClientTests {
         #expect(response == nil)
     }
 
+    @Test("Creating a workspace matches the desktop API contract")
+    func createWorkspace() async throws {
+        let createdWorkspace = CreatedWorkspace(
+            workspace: .preview(activeSessionID: "session-1"),
+            session: .preview(id: "session-1")
+        )
+        let recordedRequest = LockIsolated<URLRequest?>(nil)
+        DesktopClientURLProtocol.handler.setValue { request in
+            recordedRequest.setValue(request)
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                try JSONEncoder.conductor.encode(createdWorkspace)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            let response = try await DesktopClient.liveValue.createWorkspace(
+                workspaceID: "00000000-0000-0000-0000-000000000000",
+                repositoryID: "repository-1",
+                agentType: .codex,
+                model: .gpt_5_6_terra,
+                isFastModeEnabled: true
+            )
+            expectNoDifference(response, createdWorkspace)
+        }
+
+        let request = try #require(recordedRequest.value)
+        expectNoDifference(request.url?.path, "/workspaces")
+        expectNoDifference(request.httpMethod, "POST")
+        expectNoDifference(
+            request.value(forHTTPHeaderField: "Content-Type"),
+            "application/json"
+        )
+        let body = try #require(request.bodyData)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        #expect(object["agent_type"] as? String == "codex")
+        #expect(object["fast_mode"] as? Bool == true)
+        #expect(object["model"] as? String == "gpt-5.6-terra")
+        #expect(object["repository_id"] as? String == "repository-1")
+        #expect(
+            object["workspace_id"] as? String
+                == "00000000-0000-0000-0000-000000000000"
+        )
+        #expect(object.count == 5)
+    }
+
+    @Test("Creating a workspace requires a canonical response")
+    func createWorkspaceRequiresResponse() async throws {
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 204,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        await #expect(
+            throws: DesktopClientError.invalidResponse
+        ) {
+            try await withDependencies {
+                $0.defaultFileStorage = .inMemory
+                $0.urlSession = urlSession
+            } operation: {
+                @Shared(.desktopServerAddress) var desktopServerAddress
+                $desktopServerAddress.withLock { $0 = "my-mac" }
+                _ = try await DesktopClient.liveValue.createWorkspace(
+                    workspaceID: "00000000-0000-0000-0000-000000000000",
+                    repositoryID: "repository-1",
+                    agentType: .codex,
+                    model: .gpt_5_6_sol,
+                    isFastModeEnabled: false
+                )
+            }
+        }
+    }
+
     @Test("Desktop client errors include response details")
     func errorDescriptions() {
         #expect(
@@ -448,6 +561,19 @@ struct DesktopClientTests {
                 )
             )
         }
+    }
+
+    @Test("Desktop client extracts Hummingbird error messages")
+    func errorResponseMessage() {
+        #expect(
+            DesktopClient.errorMessage(
+                from: Data(#"{"error":{"message":"Repository not found"}}"#.utf8)
+            ) == "Repository not found"
+        )
+        #expect(
+            DesktopClient.errorMessage(from: Data("Plain text error".utf8))
+                == "Plain text error"
+        )
     }
 
     @Test("Conductor decoder accepts SQLite and ISO 8601 dates")

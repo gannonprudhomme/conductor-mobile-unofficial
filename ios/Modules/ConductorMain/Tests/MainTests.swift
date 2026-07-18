@@ -109,6 +109,123 @@ struct MainTests {
         }
     }
 
+    @Test("Workspace creation pushes its chat")
+    func workspaceCreationPushesChat() async throws {
+        let workspace = Workspace.preview(activeSessionID: "active")
+        let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
+        let creation = WorkspaceCreationResult(
+            selectedModel: .gpt_5_6_terra,
+            workspace: item
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+
+            await store.send(.workspaces(.workspaceCreated(creation))) {
+                $0.path.append(
+                    .workspaceChat(
+                        WorkspaceChat.State(
+                            workspaceWithRepository: item,
+                            selectedModel: .gpt_5_6_terra,
+                            shouldFocusMessageField: true
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    @Test("A newly created workspace's message field accepts text")
+    func newlyCreatedWorkspaceMessageFieldAcceptsText() async throws {
+        let repository = Repository.preview()
+        let workspace = Workspace.preview(
+            activeSessionID: "active",
+            derivedStatus: Workspace.Status.inProgress.rawValue,
+            repositoryID: repository.id
+        )
+        let session = Session.preview(id: "active", workspaceID: workspace.id)
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: repository
+        )
+        let creation = WorkspaceCreationResult(
+            selectedModel: session.model,
+            workspace: item
+        )
+        let database = try appDatabase()
+
+        try await database.write { db in
+            try Repository.upsert { repository }.execute(db)
+            try Workspace.upsert { workspace }.execute(db)
+            try Session.upsert { session }.execute(db)
+        }
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+            $0.defaultFileStorage = .inMemory
+            $0.defaultInMemoryStorage = InMemoryStorage()
+            $0.desktopClient.observeMessages = { _, _ in
+                AsyncThrowingStream { $0.finish() }
+            }
+            $0.desktopClient.observeSessions = { _ in
+                AsyncThrowingStream { $0.finish() }
+            }
+            $0.desktopClient.observeWorkspaces = {
+                AsyncThrowingStream { $0.finish() }
+            }
+            $0.desktopClient.ping = { }
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+
+            let store = Store(initialState: Main.State()) {
+                Main()
+            }
+            let hostingController = UIHostingController(
+                rootView: MainView(store: store)
+            )
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+            window.rootViewController = hostingController
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(5))
+            store.send(.workspaces(.workspaceCreated(creation)))
+
+            while firstTextInputResponder(in: hostingController.view) == nil,
+                  clock.now < deadline {
+                await Task.yield()
+            }
+
+            let responder = try #require(firstTextInputResponder(in: hostingController.view))
+            let center = responder.convert(
+                CGPoint(x: responder.bounds.midX, y: responder.bounds.midY),
+                to: hostingController.view
+            )
+            let hitView = hostingController.view.hitTest(center, with: nil)
+            #expect(
+                hitView === responder
+                    || hitView?.isDescendant(of: responder) == true
+            )
+
+            responder.insertText("Test message")
+
+            while messageDraft(in: store.state) != "Test message",
+                  clock.now < deadline {
+                await Task.yield()
+            }
+            #expect(messageDraft(in: store.state) == "Test message")
+        }
+    }
+
     @Test("Workspace stream remains active while chat is pushed")
     func workspaceStreamRemainsActiveWhileChatIsPushed() async throws {
         let cachedSession = Session.preview(id: "cached")
@@ -259,6 +376,29 @@ private func firstValue<Value: Sendable>(
         group.cancelAll()
         return value
     }
+}
+
+@MainActor
+private func firstTextInputResponder(in view: UIView) -> (UIView & UIKeyInput)? {
+    if view.isFirstResponder, let textInput = view as? UIView & UIKeyInput {
+        return textInput
+    }
+    for subview in view.subviews {
+        if let responder = firstTextInputResponder(in: subview) {
+            return responder
+        }
+    }
+    return nil
+}
+
+@MainActor
+private func messageDraft(in state: Main.State) -> String? {
+    guard let pathID = state.path.ids.first,
+          case let .workspaceChat(workspaceChat) = state.path[id: pathID]
+    else {
+        return nil
+    }
+    return workspaceChat.chat?.messageDraft
 }
 
 private struct TestTimeoutError: Error, CustomStringConvertible {

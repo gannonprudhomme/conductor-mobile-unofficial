@@ -24,12 +24,22 @@ public struct WorkspaceUIHook: Sendable {
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> Void
     var disconnect: @Sendable (_ connectionID: UUID) async -> Void
+    var createWorkspace: @Sendable (
+        _ command: CreateWorkspaceCommand,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Bool = { _, _ in false }
     var dispatch: @Sendable (
         _ command: UIHookCommand,
         _ fallback: @escaping @Sendable () async throws -> Void,
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> DispatchPath
     var listenerUnavailable: @Sendable () async -> Void
+    var updateSessionAgentAndModel: @Sendable (
+        _ sessionID: Session.ID,
+        _ agentType: Session.AgentType,
+        _ model: Session.Model,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Bool = { _, _, _, _ in false }
     var updateSessionModel: @Sendable (
         _ sessionID: Session.ID,
         _ model: Session.Model,
@@ -68,6 +78,12 @@ extension WorkspaceUIHook: DependencyKey {
             disconnect: { connectionID in
                 await state.disconnect(connectionID: connectionID)
             },
+            createWorkspace: { command, waitUntilChangeAvailableInDatabase in
+                try await state.createWorkspace(
+                    command: command,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
             dispatch: { command, fallback, waitUntilChangeAvailableInDatabase in
                 try await state.dispatch(
                     command,
@@ -76,6 +92,18 @@ extension WorkspaceUIHook: DependencyKey {
                 )
             },
             listenerUnavailable: { await state.listenerUnavailable() },
+            updateSessionAgentAndModel: {
+                sessionID,
+                agentType,
+                model,
+                waitUntilChangeAvailableInDatabase in
+                try await state.updateSessionAgentAndModel(
+                    sessionID: sessionID,
+                    agentType: agentType,
+                    model: model,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
             updateSessionModel: { sessionID, model, waitUntilChangeAvailableInDatabase in
                 try await state.updateSessionModel(
                     sessionID: sessionID,
@@ -96,6 +124,7 @@ extension DependencyValues {
 
 private actor WorkspaceUIHookState {
     private var activeConnection: ConnectionState?
+    private var dispatchedCreationIDs: Set<Workspace.ID> = []
     private var isMutationInFlight = false
 
     var isConnected: Bool {
@@ -133,6 +162,24 @@ private actor WorkspaceUIHookState {
             return
         }
         disconnect(connectionID: connectionID)
+    }
+
+    func createWorkspace(
+        command: CreateWorkspaceCommand,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws -> Bool {
+        if dispatchedCreationIDs.contains(command.workspaceID) {
+            try await waitUntilChangeAvailableInDatabase()
+            return true
+        }
+
+        let path = try await dispatch(
+            event: Self.createWorkspaceEvent(command),
+            fallback: {},
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase,
+            enqueuedCreationID: command.workspaceID
+        )
+        return path == .hook
     }
 
     /// Serializes UI mutations while coordinating browser-hook delivery with SQLite.
@@ -177,10 +224,29 @@ private actor WorkspaceUIHookState {
         return path == .hook
     }
 
+    func updateSessionAgentAndModel(
+        sessionID: Session.ID,
+        agentType: Session.AgentType,
+        model: Session.Model,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws -> Bool {
+        let path = try await dispatch(
+            event: Self.sessionAgentAndModelEvent(
+                sessionID: sessionID,
+                agentType: agentType,
+                model: model
+            ),
+            fallback: {},
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+        return path == .hook
+    }
+
     private func dispatch(
         event: String,
         fallback: (@Sendable () async throws -> Void)?,
-        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void,
+        enqueuedCreationID: Workspace.ID? = nil
     ) async throws -> WorkspaceUIHook.DispatchPath {
         // Serialize mutations so late persistence cannot reorder two commands.
         guard !isMutationInFlight else {
@@ -200,6 +266,9 @@ private actor WorkspaceUIHookState {
 
         switch connection.continuation.yield(event) {
         case .enqueued:
+            if let enqueuedCreationID {
+                dispatchedCreationIDs.insert(enqueuedCreationID)
+            }
             // Never fall back after enqueue because failure cannot prove the browser did not apply it.
             try await waitUntilChangeAvailableInDatabase()
             return .hook
@@ -228,6 +297,40 @@ private actor WorkspaceUIHookState {
         let sessionID = try UIHookCommand.jsonString(sessionID)
         let model = try UIHookCommand.jsonString(model.rawValue)
         return "data: {\"sessionId\":\(sessionID),\"model\":\(model)}\n\n"
+    }
+
+    private static func sessionAgentAndModelEvent(
+        sessionID: Session.ID,
+        agentType: Session.AgentType,
+        model: Session.Model
+    ) throws -> String {
+        let sessionID = try UIHookCommand.jsonString(sessionID)
+        let agentType = try UIHookCommand.jsonString(agentType.rawValue)
+        let model = try UIHookCommand.jsonString(model.rawValue)
+        return "data: {\"sessionId\":\(sessionID),\"agentAndModel\":{\"agentType\":\(agentType),\"model\":\(model)}}\n\n"
+    }
+
+    private static func createWorkspaceEvent(_ command: CreateWorkspaceCommand) throws -> String {
+        let data = try JSONEncoder().encode(CreateWorkspaceEvent(createWorkspace: command))
+        return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+    }
+
+    private struct CreateWorkspaceEvent: Encodable {
+        let createWorkspace: CreateWorkspaceCommand
+    }
+}
+
+struct CreateWorkspaceCommand: Codable, Equatable, Sendable {
+    let repositoryID: Repository.ID
+    let workspaceID: Workspace.ID
+    let agentType: String
+    let model: String
+
+    private enum CodingKeys: String, CodingKey {
+        case repositoryID = "repositoryId"
+        case workspaceID = "workspaceId"
+        case agentType
+        case model
     }
 }
 

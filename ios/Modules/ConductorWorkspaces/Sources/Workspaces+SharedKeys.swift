@@ -52,6 +52,18 @@ extension SharedKey where Self == FileStorageKey<Set<String>>.Default {
     }
 }
 
+extension SharedKey where Self == FileStorageKey<String>.Default {
+    static var createWorkspacePrompt: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "create-workspace-prompt.json")
+            ),
+            default: "",
+        ]
+    }
+}
+
 extension SharedKey where Self == FileStorageKey<String?>.Default {
     static var selectedRepositoryID: Self {
         Self[

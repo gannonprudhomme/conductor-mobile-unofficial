@@ -16,6 +16,7 @@ struct ChatTextField: View {
     @Binding var text: String
     @Binding var selectedModel: Session.Model
     let agentType: Session.AgentType
+    let allowsAgentSwitching: Bool
     let isFastModeEnabled: Bool
     let isSendInFlight: Bool
     let isStopInFlight: Bool
@@ -28,6 +29,7 @@ struct ChatTextField: View {
     init(
         text: Binding<String>,
         agentType: Session.AgentType,
+        allowsAgentSwitching: Bool,
         isFastModeEnabled: Bool,
         isSendInFlight: Bool,
         isStopInFlight: Bool,
@@ -40,6 +42,7 @@ struct ChatTextField: View {
     ) {
         self._text = text
         self.agentType = agentType
+        self.allowsAgentSwitching = allowsAgentSwitching
         self.isFastModeEnabled = isFastModeEnabled
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
@@ -65,11 +68,10 @@ struct ChatTextField: View {
             in: .rect(cornerRadius: 26)
         )
         .padding(EdgeInsets(vertical: 8, horizontal: 8))
-        .onAppear {
+        .task {
             guard shouldFocusOnAppear else {
                 return
             }
-
             isFocused = true
         }
     }
@@ -92,22 +94,15 @@ struct ChatTextField: View {
 
     private var bottomRowButtons: some View {
         HStack(spacing: 8) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 4) {
-                    ChatModelPicker(
-                        agentType: agentType,
-                        selectedModel: selectedModel,
-                        onSelect: { selectedModel = $0 }
-                    )
-                    .equatable()
-
-                    fastModeButton
-                }
-                .frame(maxHeight: .infinity)
-            }
-            .scrollIndicators(.hidden)
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            .defaultScrollAnchor(.leading)
+            ModelAndFastModeControls(
+                agentType: agentType,
+                allowsAgentSwitching: allowsAgentSwitching,
+                isFastModeEnabled: isFastModeEnabled,
+                isFastModeButtonDisabled: isAnyActionInFlight,
+                selectedModel: selectedModel,
+                onFastModeTapped: onFastModeTapped,
+                onSelectModel: { selectedModel = $0 }
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
@@ -140,32 +135,6 @@ struct ChatTextField: View {
 
     private var isAnyActionInFlight: Bool {
         isSendInFlight || isStopInFlight
-    }
-
-    private var fastModeButton: some View {
-        Button(action: onFastModeTapped) {
-            Label {
-                Text("Fast mode")
-            } icon: {
-                LucideIcon(Lucide.zap, style: .small)
-            }
-            .labelStyle(.iconOnly)
-            .foregroundStyle(
-                .theme(isFastModeEnabled ? .accent : .textSecondary)
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                Color.theme(.highlight)
-                    .opacity(isFastModeEnabled ? 1 : 0),
-                in: .circle
-            )
-            .animation(.interactiveSpring, value: isFastModeEnabled)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .buttonStyle(.spring)
-        .disabled(isAnyActionInFlight)
-        .accessibilityLabel("Fast mode")
-        .accessibilityValue(isFastModeEnabled ? "On" : "Off")
     }
 
     private struct SendButton: View {
@@ -270,6 +239,7 @@ struct ChatTextField: View {
         ChatTextField(
             text: $text,
             agentType: .codex,
+            allowsAgentSwitching: true,
             isFastModeEnabled: isFastModeEnabled,
             isSendInFlight: false,
             isStopInFlight: false,

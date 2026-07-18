@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/14/26.
 //
 
+import Foundation
 import Testing
 
 @testable import ConductorMobileServer
@@ -33,6 +34,82 @@ struct WorkspaceUIHookTests {
                 == "data: {\"workspaceId\":\"workspace-\\\"2\",\"createSession\":true}\n\n"
         )
         try await creation.value
+    }
+
+    @Test("Workspace creation frames preserve the Conductor service argument names")
+    func createWorkspaceFrame() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let command = CreateWorkspaceCommand(
+            repositoryID: "repository-1",
+            workspaceID: "workspace-1",
+            agentType: "codex",
+            model: "gpt-5.6-sol"
+        )
+
+        let didDispatch = try await uiHook.createWorkspace(
+            command: command,
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        let frame = try #require(await events.next())
+        let data = try #require(
+            frame
+                .replacingOccurrences(of: "data: ", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .data(using: .utf8)
+        )
+        let payload = try JSONDecoder().decode(
+            [String: CreateWorkspaceCommand].self,
+            from: data
+        )
+
+        #expect(didDispatch)
+        #expect(payload == ["createWorkspace": command])
+    }
+
+    @Test("Workspace creation retries observe persistence without enqueueing twice")
+    func createWorkspaceRetry() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let command = CreateWorkspaceCommand(
+            repositoryID: "repository-1",
+            workspaceID: "workspace-1",
+            agentType: "codex",
+            model: "gpt-5.6-sol"
+        )
+
+        await #expect(throws: PersistenceError.expectedFailure) {
+            try await uiHook.createWorkspace(
+                command: command,
+                waitUntilChangeAvailableInDatabase: {
+                    throw PersistenceError.expectedFailure
+                }
+            )
+        }
+        _ = try #require(await events.next())
+
+        #expect(
+            try await uiHook.createWorkspace(
+                command: command,
+                waitUntilChangeAvailableInDatabase: {}
+            )
+        )
+        #expect(
+            try await uiHook.dispatch(
+                command: .workspace(
+                    id: "workspace-2",
+                    mutation: .pinned(isPinned: true)
+                ),
+                fallback: {},
+                waitUntilChangeAvailableInDatabase: {}
+            ) == .hook
+        )
+        #expect(
+            await events.next()
+                == "data: {\"workspaceId\":\"workspace-2\",\"pinned\":true}\n\n"
+        )
     }
 
     @Test("SSE frames escape mutation values without command IDs")
@@ -79,6 +156,18 @@ struct WorkspaceUIHookTests {
                 == "data: {\"sessionId\":\"session-\\\"3\",\"model\":\"gpt-5.6-terra\"}\n\n"
         )
         #expect(didDispatchModel)
+
+        let didDispatchAgentAndModel = try await uiHook.updateSessionAgentAndModel(
+            sessionID: "session-\"4",
+            agentType: .claude,
+            model: .fable5,
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        #expect(
+            await events.next()
+                == "data: {\"sessionId\":\"session-\\\"4\",\"agentAndModel\":{\"agentType\":\"claude\",\"model\":\"fable-5\"}}\n\n"
+        )
+        #expect(didDispatchAgentAndModel)
     }
 
     @Test("Fallback holds the global slot without waiting for persistence")
@@ -201,5 +290,6 @@ struct WorkspaceUIHookTests {
 }
 
 private enum PersistenceError: Error, Equatable {
+    case expectedFailure
     case unexpectedWait
 }

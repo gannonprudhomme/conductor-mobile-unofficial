@@ -135,6 +135,16 @@ extension Session {
                 []
             }
         }
+
+        public var agentType: AgentType? {
+            if Self.claudeModels.contains(self) {
+                .claude
+            } else if Self.codexModels.contains(self) {
+                .codex
+            } else {
+                nil
+            }
+        }
     }
 
     public struct Status: Codable, Hashable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {

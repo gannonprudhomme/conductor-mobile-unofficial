@@ -16,6 +16,13 @@ public struct DesktopClient: Sendable {
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
     public var createSession: @Sendable (_ workspaceID: String) async throws -> Session
+    public var createWorkspace: @Sendable (
+        _ workspaceID: Workspace.ID,
+        _ repositoryID: Repository.ID,
+        _ agentType: Session.AgentType,
+        _ model: Session.Model,
+        _ isFastModeEnabled: Bool
+    ) async throws -> CreatedWorkspace
     public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
         throw CancellationError()
     }
@@ -160,6 +167,28 @@ extension DesktopClient: DependencyKey {
                 throw DesktopClientError.invalidResponse
             }
             return session
+        } createWorkspace: {
+            workspaceID,
+            repositoryID,
+            agentType,
+            model,
+            isFastModeEnabled in
+            guard let createdWorkspace = try await post(
+                CreateWorkspaceBody(
+                    workspaceID: workspaceID,
+                    repositoryID: repositoryID,
+                    agentType: agentType.rawValue,
+                    model: model.rawValue,
+                    isFastModeEnabled: isFastModeEnabled
+                ),
+                to: baseURL().appending(path: "workspaces"),
+                decoding: CreatedWorkspace.self,
+                // Leave transport headroom beyond the server's five-minute creation window.
+                timeoutInterval: 330
+            ) else {
+                throw DesktopClientError.invalidResponse
+            }
+            return createdWorkspace
         } fetchDefaultModel: {
             let settings = try await get(SettingsResponse.self, from: settingsURL())
             return Session.Model(rawValue: settings.defaultModel)
@@ -337,9 +366,13 @@ extension DesktopClient: DependencyKey {
     private static func post<Body: Encodable, Response: Decodable>(
         _ body: Body,
         to url: URL,
-        decoding responseType: Response.Type
+        decoding responseType: Response.Type,
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> Response? {
-        let request = try jsonRequest(method: "POST", body: body, url: url)
+        var request = try jsonRequest(method: "POST", body: body, url: url)
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
+        }
         let (data, response) = try await data(for: request)
         let statusCode = try validateSuccessfulHTTPResponse(response, data: data)
         guard statusCode != 204 else {
@@ -370,10 +403,23 @@ extension DesktopClient: DependencyKey {
         guard (200..<300).contains(response.statusCode) else {
             throw DesktopClientError.requestFailed(
                 statusCode: response.statusCode,
-                message: String(decoding: data, as: UTF8.self)
+                message: errorMessage(from: data)
             )
         }
         return response.statusCode
+    }
+
+    static func errorMessage(from data: Data) -> String {
+        (try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message)
+            ?? String(decoding: data, as: UTF8.self)
+    }
+
+    private struct ErrorResponse: Decodable {
+        let error: Details
+
+        struct Details: Decodable {
+            let message: String
+        }
     }
 
     private static func patch<Body: Encodable & Sendable>(
@@ -437,6 +483,22 @@ extension DesktopClient: DependencyKey {
             }
             throw error
         }
+    }
+}
+
+private struct CreateWorkspaceBody: Encodable, Sendable {
+    let workspaceID: Workspace.ID
+    let repositoryID: Repository.ID
+    let agentType: String
+    let model: String
+    let isFastModeEnabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspace_id"
+        case repositoryID = "repository_id"
+        case agentType = "agent_type"
+        case model
+        case isFastModeEnabled = "fast_mode"
     }
 }
 

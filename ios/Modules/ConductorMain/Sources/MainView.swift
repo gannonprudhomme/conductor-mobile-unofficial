@@ -53,6 +53,18 @@ public struct Main: Sendable {
                     state.settings = ConductorSettings.State()
                     return .none
 
+                case let .workspaces(.workspaceCreated(creation)):
+                    state.path.append(
+                        .workspaceChat(
+                            WorkspaceChat.State(
+                                workspaceWithRepository: creation.workspace,
+                                selectedModel: creation.selectedModel,
+                                shouldFocusMessageField: true
+                            )
+                        )
+                    )
+                    return .none
+
                 case let .workspaces(.workspaceTapped(item)):
                     state.path.append(
                         .workspaceChat(

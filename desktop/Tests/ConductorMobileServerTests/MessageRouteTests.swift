@@ -152,7 +152,7 @@ struct MessageRouteTests {
         let isPersistedFastModeEnabled = try await database.read { database in
             try Session.find("session-1").fetchOne(database)?.isFastModeEnabled
         }
-        #expect(isPersistedFastModeEnabled == false)
+        #expect(isPersistedFastModeEnabled == true)
     }
 
     @Test("POST message skips Fast Mode synchronization when unchanged")
@@ -223,9 +223,110 @@ struct MessageRouteTests {
         #expect(await recorder.message == nil)
     }
 
-    @Test("POST message rejects a model from another agent")
-    func incompatibleModel() async throws {
+    @Test("POST first message can switch the session agent and model")
+    func firstMessageSwitchesAgent() async throws {
         let database = try await messageRouteDatabase()
+        let messageID = UUID(0).uuidString
+        let persistedMessage = Message(
+            id: messageID,
+            sessionID: "session-1",
+            role: .user,
+            content: "Switch providers.",
+            createdAt: Date(timeIntervalSince1970: 1_783_555_202),
+            turnID: "turn-1"
+        )
+
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.updateSessionAgentAndModel = {
+                sessionID,
+                agentType,
+                model,
+                waitUntilChangeAvailableInDatabase in
+                try await database.write { database in
+                    try Session
+                        .find(sessionID)
+                        .update {
+                            $0.agentType = #bind(agentType)
+                            $0.model = #bind(model)
+                        }
+                        .execute(database)
+                }
+                try await waitUntilChangeAvailableInDatabase()
+                return true
+            }
+            $0.sidecarBridgeClient.sendMessage = { request in
+                #expect(request.agentType == "claude")
+                #expect(request.model == "fable-5")
+                try await database.write { database in
+                    try Message.insert { persistedMessage }.execute(database)
+                }
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Switch providers.","model":"fable-5"}"#
+                    )
+                ) { response in
+                    #expect(response.status == .ok)
+                }
+            }
+        }
+
+        let session = try await database.read { database in
+            try Session.find("session-1").fetchOne(database)
+        }
+        #expect(session?.agentType == .claude)
+        #expect(session?.model == .fable5)
+    }
+
+    @Test("POST message requires the UI hook to change the session model")
+    func modelChangeRequiresUIHook() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.workspaceUIHook.updateSessionModel = { _, _, _ in false }
+            $0.sidecarBridgeClient.sendMessage = { request in
+                await recorder.record(request)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Use Terra.","model":"gpt-5.6-terra"}"#
+                    )
+                ) { response in
+                    #expect(response.status == .serviceUnavailable)
+                    #expect(
+                        String(buffer: response.body)
+                            == "Conductor is not connected to change the session model."
+                    )
+                }
+            }
+        }
+
+        #expect(await recorder.message == nil)
+    }
+
+    @Test("POST message rejects a model from another agent after a message was sent")
+    func incompatibleModelAfterMessage() async throws {
+        let database = try await messageRouteDatabase()
+        try await database.write { database in
+            try Session
+                .find("session-1")
+                .update { $0.lastUserMessageAt = #bind("2026-07-09T00:01:00Z") }
+                .execute(database)
+        }
         let recorder = MessageRouteRecorder()
         try await withDependencies {
             $0.sidecarBridgeClient.sendMessage = { request in

@@ -12,11 +12,54 @@ import Foundation
 import SharedConductorData
 import Sharing
 import SQLiteData
+import SwiftUI
 @testable import ConductorChat
 import Testing
+import UIKit
 
 @MainActor
 struct ChatTests {
+    @Test("The rendered message field edits the chat draft")
+    func messageFieldEditsDraft() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = Store(
+                initialState: Chat.State(
+                    session: .preview(),
+                    shouldFocusMessageField: true
+                )
+            ) {
+                Chat()
+            }
+            let hostingController = UIHostingController(
+                rootView: ChatView(store: store, directoryName: "repo")
+            )
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+            window.rootViewController = hostingController
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while firstTextInputResponder(in: hostingController.view) == nil,
+                  clock.now < deadline {
+                await Task.yield()
+            }
+
+            let responder = try #require(firstTextInputResponder(in: hostingController.view))
+            responder.insertText("Test message")
+
+            while store.state.messageDraft != "Test message", clock.now < deadline {
+                await Task.yield()
+            }
+            #expect(store.state.messageDraft == "Test message")
+        }
+    }
+
     @Test("Connection status follows the shared desktop status")
     func connectionStatus() throws {
         try withDependencies {
@@ -57,6 +100,11 @@ struct ChatTests {
             var emptySnapshot = original
             emptySnapshot.isMessageSnapshotEmpty = true
             #expect(original != emptySnapshot)
+
+            emptySnapshot.isLoadingMessages = false
+            #expect(emptySnapshot.allowsAgentSwitching)
+            emptySnapshot.isMessageSendInFlight = true
+            #expect(!emptySnapshot.allowsAgentSwitching)
         }
     }
 
@@ -485,6 +533,27 @@ struct ChatTests {
             }
             await store.send(.defaultModelFetched(.gpt5_4))
             await store.send(.defaultModelFetched(.fable5))
+        }
+    }
+
+    @Test("The model selected during creation is not replaced by the desktop default")
+    func creationModel() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(model: .gpt_5_6_terra)
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    selectedModel: .gpt_5_6_terra
+                )
+            ) {
+                Chat()
+            }
+
+            #expect(store.state.hasUserSelectedModel)
+            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+            #expect(store.state.selectedModel == .gpt_5_6_terra)
         }
     }
 
@@ -1028,6 +1097,19 @@ struct ChatTests {
             )
         }
     }
+}
+
+@MainActor
+private func firstTextInputResponder(in view: UIView) -> (UIView & UIKeyInput)? {
+    if view.isFirstResponder, let textInput = view as? UIView & UIKeyInput {
+        return textInput
+    }
+    for subview in view.subviews {
+        if let responder = firstTextInputResponder(in: subview) {
+            return responder
+        }
+    }
+    return nil
 }
 
 private func makeMessage(

@@ -33,6 +33,9 @@ struct SessionTests {
                 "gpt-5.4",
             ]
         )
+        #expect(Session.Model.fable5.agentType == .claude)
+        #expect(Session.Model.gpt_5_6_sol.agentType == .codex)
+        #expect(Session.Model(rawValue: "future-model").agentType == nil)
     }
 
     @Test("Session decoding preserves unknown schema values")

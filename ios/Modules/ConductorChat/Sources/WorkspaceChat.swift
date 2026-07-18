@@ -42,7 +42,11 @@ public struct WorkspaceChat: Sendable {
         @FetchAll public var archivedSessions: [Session]
         @FetchOne public var workspaceWithRepository: WorkspaceWithRepository
 
-        public init(workspaceWithRepository: WorkspaceWithRepository) {
+        public init(
+            workspaceWithRepository: WorkspaceWithRepository,
+            selectedModel: Session.Model? = nil,
+            shouldFocusMessageField: Bool = false
+        ) {
             let workspace = workspaceWithRepository.workspace
             self._workspaceWithRepository = FetchOne(
                 wrappedValue: workspaceWithRepository,
@@ -72,7 +76,13 @@ public struct WorkspaceChat: Sendable {
                 $0.id == workspace.activeSessionID
             } ?? self.activeSessions.first
 
-            self.chat = session.map { Chat.State(session: $0) }
+            self.chat = session.map {
+                Chat.State(
+                    session: $0,
+                    selectedModel: selectedModel,
+                    shouldFocusMessageField: shouldFocusMessageField
+                )
+            }
         }
 
         public var workspace: Workspace {

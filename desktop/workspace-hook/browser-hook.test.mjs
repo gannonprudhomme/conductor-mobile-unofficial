@@ -179,6 +179,9 @@ isolatedTest("commands run in order with real service signatures and continue af
     async archiveWorkspace(input) {
       calls.push(["archive", input]);
     },
+    async createWorkspaceWithSetup(input) {
+      input.onCreation();
+    },
     async getWorkspaces() {
       calls.push("workspaces");
       return [{ id: "workspace-1", activeSessionId: "session-1" }];
@@ -212,6 +215,9 @@ isolatedTest("commands run in order with real service signatures and continue af
     async updateSessionFastMode(input) {
       calls.push(["fastMode", input]);
     },
+    async setSessionAgentAndModel(sessionID, agentType, model) {
+      calls.push(["agentAndModel", sessionID, agentType, model]);
+    },
     async updateSessionModel(sessionID, model) {
       calls.push(["model", sessionID, model]);
     },
@@ -232,6 +238,9 @@ isolatedTest("commands run in order with real service signatures and continue af
   replacementSource.onmessage(sessionCommand({ model: "gpt-5.6-terra" }));
   replacementSource.onmessage(command({ createSession: true }));
   replacementSource.onmessage(command({ archive: true }));
+  replacementSource.onmessage(sessionCommand({
+    agentAndModel: { agentType: "claude", model: "fable-5" },
+  }));
   replacementSource.onmessage(command({ futureCommand: true }));
   replacementSource.onmessage(sessionCommand({ fastMode: true }));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
@@ -241,7 +250,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 11);
+  await waitUntil(() => calls.length === 12);
   await waitUntil(() => environment.errors.length === 5);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
@@ -254,11 +263,51 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["model", "session-1", "gpt-5.6-terra"],
     ["createSession", { workspaceId: "workspace-1" }],
     ["archive", { workspaceId: "workspace-1" }],
+    ["agentAndModel", "session-1", "claude", "fable-5"],
     ["fastMode", { sessionId: "session-1", fastMode: true }],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
   assert.equal(environment.errors.at(-1)[1].message, "Unsupported workspace command: futureCommand");
   assert.equal(environment.fetches.length, 2);
+});
+
+isolatedTest("workspace creation resolves when Conductor publishes the workspace", async () => {
+  const shell = emptyWorkspaceShell();
+  const creation = deferred();
+  shell.workspaceService.createWorkspaceWithSetup = async (input) => {
+    creation.resolve(input);
+    input.onCreation({ id: input.workspaceId });
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage({
+    data: JSON.stringify({
+      createWorkspace: {
+        agentType: "codex",
+        model: "gpt-5.6-sol",
+        repositoryId: "repository-1",
+        workspaceId: "workspace-1",
+      },
+    }),
+  });
+
+  const input = await creation.promise;
+  assert.equal(typeof input.onCreation, "function");
+  assert.deepEqual(
+    {
+      agentType: input.agentType,
+      model: input.model,
+      repositoryId: input.repositoryId,
+      workspaceId: input.workspaceId,
+    },
+    {
+      agentType: "codex",
+      model: "gpt-5.6-sol",
+      repositoryId: "repository-1",
+      workspaceId: "workspace-1",
+    },
+  );
 });
 
 const browserHookSource = fs.readFile(new URL("./browser-hook.mjs", import.meta.url), "utf8")
@@ -354,16 +403,18 @@ function installHookGlobals({
   return environment;
 }
 
-function emptyWorkspaceShell() {
-  const workspaceService = {
-    async archiveWorkspace() {},
-    async getWorkspaces() { return []; },
+  function emptyWorkspaceShell() {
+    const workspaceService = {
+      async archiveWorkspace() {},
+      async createWorkspaceWithSetup(input) { input.onCreation(); },
+      async getWorkspaces() { return []; },
     async setWorkspacePinned() {},
     async setWorkspaceManualStatus() {},
   };
   const sessionService = {
     async createSession() {},
     async getSessionsForWorkspace() { return []; },
+    async setSessionAgentAndModel() {},
     async setUnread() {},
     async markWorkspaceAsRead() {},
     async updateSessionFastMode() {},

@@ -16,7 +16,7 @@ enum MessageRoute {
     static func post(
         request: Request,
         context: Server.RequestContext,
-        database: any DatabaseReader
+        database: any DatabaseWriter
     ) async throws -> Response {
         @Dependency(\.continuousClock) var clock
         @Dependency(\.sidecarBridgeClient) var sidecarBridgeClient
@@ -47,6 +47,7 @@ enum MessageRoute {
                 return MessageSendContext(
                     agentType: row.agentType,
                     isFastModeEnabled: row.isFastModeEnabled,
+                    lastUserMessageAt: row.lastUserMessageAt,
                     model: row.model,
                     workspacePath: row.workspacePath
                 )
@@ -70,9 +71,15 @@ enum MessageRoute {
         }
         // Use the requested model when supplied; otherwise continue with the session model.
         let model = sendMessageRequest.model ?? messageSendContext.model.rawValue
-        let isKnownModel = Session.Model.models(for: messageSendContext.agentType)
-            .contains { $0.rawValue == model }
-        guard model == messageSendContext.model.rawValue || isKnownModel else {
+        let requestedModel = Session.Model(rawValue: model)
+        let requestedAgentType: Session.AgentType
+        if model == messageSendContext.model.rawValue
+            || Session.Model.models(for: messageSendContext.agentType).contains(requestedModel) {
+            requestedAgentType = messageSendContext.agentType
+        } else if messageSendContext.lastUserMessageAt == nil,
+                  let agentType = requestedModel.agentType {
+            requestedAgentType = agentType
+        } else {
             throw PlainTextResponseError(
                 .badRequest,
                 message: "Model is not available for this session's agent."
@@ -82,18 +89,45 @@ enum MessageRoute {
             ?? messageSendContext.isFastModeEnabled
             ?? false
 
-        if model != messageSendContext.model.rawValue {
-            do {
-                _ = try await uiHook.updateSessionModel(
+        do {
+            if requestedAgentType != messageSendContext.agentType {
+                let didUpdate = try await uiHook.updateSessionAgentAndModel(
                     sessionID: sessionID,
-                    model: Session.Model(rawValue: model)
+                    agentType: requestedAgentType,
+                    model: requestedModel
                 ) {
                     let didPersist = try await waitForPersistedSessionChange(
                         sessionID: sessionID,
                         database: database,
                         clock: clock
                     ) { session in
-                        session.model.rawValue == model
+                        session.agentType == requestedAgentType
+                            && session.model == requestedModel
+                    }
+                    guard didPersist else {
+                        throw PlainTextResponseError(
+                            .gatewayTimeout,
+                            message: "Timed out waiting for Conductor to save the session agent and model."
+                        )
+                    }
+                }
+                guard didUpdate else {
+                    throw PlainTextResponseError(
+                        .serviceUnavailable,
+                        message: "Conductor is not connected to change the session agent."
+                    )
+                }
+            } else if model != messageSendContext.model.rawValue {
+                let didUpdate = try await uiHook.updateSessionModel(
+                    sessionID: sessionID,
+                    model: requestedModel
+                ) {
+                    let didPersist = try await waitForPersistedSessionChange(
+                        sessionID: sessionID,
+                        database: database,
+                        clock: clock
+                    ) { session in
+                        session.model == requestedModel
                     }
                     guard didPersist else {
                         throw PlainTextResponseError(
@@ -102,12 +136,18 @@ enum MessageRoute {
                         )
                     }
                 }
-            } catch let error as WorkspaceUIHook.DispatchError {
-                throw responseError(
-                    for: error,
-                    deliveryUnknownMessage: "Could not determine whether the session model was delivered."
-                )
+                guard didUpdate else {
+                    throw PlainTextResponseError(
+                        .serviceUnavailable,
+                        message: "Conductor is not connected to change the session model."
+                    )
+                }
             }
+        } catch let error as WorkspaceUIHook.DispatchError {
+            throw responseError(
+                for: error,
+                deliveryUnknownMessage: "Could not determine whether the session model was delivered."
+            )
         }
 
         if isFastModeEnabled != (messageSendContext.isFastModeEnabled ?? false) {
@@ -118,6 +158,12 @@ enum MessageRoute {
                         isEnabled: isFastModeEnabled
                     )
                 ) {
+                    try await database.write { database in
+                        try Session
+                            .find(sessionID)
+                            .update { $0.isFastModeEnabled = #bind(isFastModeEnabled) }
+                            .execute(database)
+                    }
                 } waitUntilChangeAvailableInDatabase: {
                     let didPersist = try await waitForPersistedSessionChange(
                         sessionID: sessionID,
@@ -145,7 +191,7 @@ enum MessageRoute {
         do {
             try await sidecarBridgeClient.sendMessage(
                 SidecarBridgeClient.RuntimeMessageRequest(
-                    agentType: messageSendContext.agentType.rawValue,
+                    agentType: requestedAgentType.rawValue,
                     cwd: workspacePath,
                     isFastModeEnabled: isFastModeEnabled,
                     message: sendMessageRequest.message,
@@ -283,6 +329,7 @@ enum MessageRoute {
     fileprivate struct MessageSendContext: Sendable {
         let agentType: Session.AgentType
         let isFastModeEnabled: Bool?
+        let lastUserMessageAt: String?
         let model: Session.Model
         let workspacePath: String?
     }
@@ -317,6 +364,7 @@ private extension Session {
                 MessageRoute.MessageSendContext.Columns(
                     agentType: session.agentType,
                     isFastModeEnabled: session.isFastModeEnabled,
+                    lastUserMessageAt: session.lastUserMessageAt,
                     model: session.model,
                     workspacePath: workspace.workspacePath
                 )

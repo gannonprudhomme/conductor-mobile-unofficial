@@ -29,7 +29,13 @@ export async function prepareWorkspaceUIHook() {
   const shell = await import(shellURL);
   const workspaceService = uniqueService(
     shell,
-    ["archiveWorkspace", "getWorkspaces", "setWorkspacePinned", "setWorkspaceManualStatus"],
+    [
+      "archiveWorkspace",
+      "createWorkspaceWithSetup",
+      "getWorkspaces",
+      "setWorkspacePinned",
+      "setWorkspaceManualStatus",
+    ],
     "WorkspaceService",
   );
   const sessionService = uniqueService(
@@ -37,6 +43,7 @@ export async function prepareWorkspaceUIHook() {
     [
       "createSession",
       "getSessionsForWorkspace",
+      "setSessionAgentAndModel",
       "markWorkspaceAsRead",
       "setUnread",
       "updateSessionFastMode",
@@ -256,8 +263,23 @@ async function executeCommand({ sessionService, workspaceService }, command) {
         fastMode: command.value,
       });
       return;
+    case "createWorkspace":
+      await new Promise((resolve, reject) => {
+        workspaceService.createWorkspaceWithSetup({
+          ...command.value,
+          onCreation: resolve,
+        }).catch(reject);
+      });
+      return;
     case "model":
       await sessionService.updateSessionModel(command.sessionId, command.value);
+      return;
+    case "agentAndModel":
+      await sessionService.setSessionAgentAndModel(
+        command.sessionId,
+        command.value.agentType,
+        command.value.model,
+      );
       return;
     case "pinned":
       await workspaceService.setWorkspacePinned({

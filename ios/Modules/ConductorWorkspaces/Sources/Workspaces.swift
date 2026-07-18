@@ -21,7 +21,7 @@ import SwiftUI
 public struct Workspaces: Sendable {
     @ObservableState
     public struct State: Equatable {
-        @Presents public var alert: AlertState<Action.Alert>?
+        @Presents public var destination: Destination.State?
 
         @Shared(.desktopConnectionStatus)
         public var connectionStatus
@@ -48,6 +48,9 @@ public struct Workspaces: Sendable {
         @Shared(.workspaceSort)
         public var sort
 
+        var deferredWorkspaces: [WorkspaceWithRepository]?
+        var pendingWorkspaceCreation: WorkspaceCreationResult?
+
         @FetchAll(
             WorkspaceWithRepository.all(),
             animation: .default
@@ -56,6 +59,10 @@ public struct Workspaces: Sendable {
 
         var isLoadingWorkspaces = true
         var sections: [WorkspaceSection] = []
+
+        var hasVisibleWorkspaces: Bool {
+            sections.contains { !$0.items.isEmpty }
+        }
 
         public init() {
             _workspaces = FetchAll(
@@ -165,8 +172,18 @@ public struct Workspaces: Sendable {
         }
     }
 
+    @Reducer
+    public enum Destination {
+        case alert(AlertState<Alert>)
+        case createWorkspace(CreateWorkspace)
+
+        public enum Alert: Equatable {}
+    }
+
     public enum Action {
-        case alert(PresentationAction<Alert>)
+        case createButtonTapped
+        case createWorkspaceSheetDismissed
+        case destination(PresentationAction<Destination.Action>)
         case groupingChanged(WorkspaceWithRepository.Grouping)
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
@@ -178,15 +195,13 @@ public struct Workspaces: Sendable {
         case workspacesChanged([WorkspaceWithRepository])
         case workspaceArchiveButtonTapped(WorkspaceWithRepository)
         case workspaceArchiveFailed(any Error)
+        case workspaceCreated(WorkspaceCreationResult)
         case workspaceMutationFailed(any Error)
         case workspaceMutationUsedSQLiteFallback
         case workspacePinnedButtonTapped(WorkspaceWithRepository)
         case workspaceStatusButtonTapped(WorkspaceWithRepository, Workspace.Status)
         case workspaceTapped(WorkspaceWithRepository)
         case workspaceUnreadButtonTapped(WorkspaceWithRepository)
-
-        public enum Alert: Equatable {
-        }
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -229,6 +244,41 @@ public struct Workspaces: Sendable {
                 )
                 return reloadWorkspaces(state)
 
+            case .createButtonTapped:
+                guard !state.repositories.isEmpty else {
+                    return .none
+                }
+
+                state.destination = .createWorkspace(
+                    CreateWorkspace.State(
+                        repositories: state.repositories,
+                        selectedRepositoryIDFilter: state.selectedRepositoryID
+                    )
+                )
+                return .none
+
+            case .createWorkspaceSheetDismissed:
+                state.sections = State.sections(
+                    groupedBy: state.grouping,
+                    workspaces: state.deferredWorkspaces ?? state.workspaces
+                )
+                state.deferredWorkspaces = nil
+                guard let creation = state.pendingWorkspaceCreation else {
+                    return .none
+                }
+                state.pendingWorkspaceCreation = nil
+                return .run { [creation] send in
+                    try await clock.sleep(for: .milliseconds(250))
+                    await send(.workspaceCreated(creation))
+                }
+
+            case let .destination(
+                .presented(.createWorkspace(.delegate(.workspaceCreated(creation))))
+            ):
+                state.destination = nil
+                state.pendingWorkspaceCreation = creation
+                return .none
+
             case .initialWorkspacesResponse:
                 state.isLoadingWorkspaces = false
                 return .none
@@ -238,7 +288,11 @@ public struct Workspaces: Sendable {
                     return .none
                 }
 
-                state.alert = .failedToLoadWorkspaces(error: error)
+                guard state.destination?.createWorkspace == nil else {
+                    return .none
+                }
+
+                state.destination = .alert(.failedToLoadWorkspaces(error: error))
                 return .none
 
             case let .repositoryFilterButtonTapped(repositoryID):
@@ -250,6 +304,11 @@ public struct Workspaces: Sendable {
                 return reloadWorkspaces(state)
 
             case let .workspacesChanged(workspaces):
+                guard state.destination?.createWorkspace == nil,
+                      state.pendingWorkspaceCreation == nil else {
+                    state.deferredWorkspaces = workspaces
+                    return .none
+                }
                 state.sections = State.sections(
                     groupedBy: state.grouping,
                     workspaces: workspaces
@@ -267,15 +326,15 @@ public struct Workspaces: Sendable {
                 }
 
             case let .workspaceArchiveFailed(error):
-                state.alert = .failedToArchiveWorkspace(error: error)
+                state.destination = .alert(.failedToArchiveWorkspace(error: error))
                 return .none
 
             case let .workspaceMutationFailed(error):
-                state.alert = .failedToUpdateWorkspace(error: error)
+                state.destination = .alert(.failedToUpdateWorkspace(error: error))
                 return .none
 
             case .workspaceMutationUsedSQLiteFallback:
-                state.alert = .workspaceMutationUsedSQLiteFallback
+                state.destination = .alert(.workspaceMutationUsedSQLiteFallback)
                 return .none
 
             case let .workspacePinnedButtonTapped(item):
@@ -375,11 +434,11 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .alert, .settingsButtonTapped, .workspaceTapped:
+            case .destination, .settingsButtonTapped, .workspaceCreated, .workspaceTapped:
                 return .none
             }
         }
-        .ifLet(\.$alert, action: \.alert)
+        .ifLet(\.$destination, action: \.destination)
     }
 
     private func updateWorkspace(
@@ -481,7 +540,9 @@ public struct Workspaces: Sendable {
     }
 }
 
-extension AlertState where Action == Workspaces.Action.Alert {
+extension Workspaces.Destination.State: Equatable {}
+
+extension AlertState where Action == Workspaces.Destination.Alert {
     static func failedToLoadWorkspaces(error: any Error) -> Self {
         AlertState {
             TextState("Failed to load workspaces")
@@ -525,13 +586,15 @@ public struct WorkspacesView: View {
     @Shared(.collapsedWorkspaceSectionIDs)
     private var collapsedSectionIDs
 
+    @Namespace private var namespace
+
     public init(store: StoreOf<Workspaces>) {
         self.store = store
     }
 
     public var body: some View {
         List {
-            if !store.workspaces.isEmpty {
+            if store.hasVisibleWorkspaces {
                 ForEach(store.sections) { section in
                     if section.isPinned {
                         PinnedSectionView(section: section) { item, action in
@@ -567,7 +630,7 @@ public struct WorkspacesView: View {
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .background(.theme(.background))
-            } else if store.workspaces.isEmpty {
+            } else if !store.hasVisibleWorkspaces {
                 ContentUnavailableView(
                     "No Workspaces",
                     systemImage: "rectangle.stack",
@@ -602,9 +665,42 @@ public struct WorkspacesView: View {
             }
 
             ToolbarSpacer(.flexible, placement: .bottomBar)
+
+            ToolbarItem(placement: .bottomBar) {
+                Button {
+                    store.send(.createButtonTapped)
+                } label: {
+                    HStack(spacing: 6) {
+                        LucideIcon(Lucide.plus, style: .body)
+
+                        Text("Create")
+                    }
+                    .fixedSize()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.theme(.foreground))
+                .foregroundStyle(.theme(.background))
+                .disabled(store.repositories.isEmpty)
+                .accessibilityHint("Creates a new Conductor workspace")
+                .sheet(
+                    item: $store.scope(
+                        state: \.destination?.createWorkspace,
+                        action: \.destination.createWorkspace
+                    ),
+                    onDismiss: {
+                        store.send(.createWorkspaceSheetDismissed)
+                    }
+                ) { createWorkspaceStore in
+                    CreateWorkspaceView(store: createWorkspaceStore)
+                        .presentationDetents([.medium, .large])
+                        .presentationBackground(.theme(.background))
+                        .navigationTransition(.zoom(sourceID: "new-workspace", in: namespace))
+                }
+            }
+            .matchedTransitionSource(id: "new-workspace", in: namespace)
         }
         .background(.theme(.background))
-        .alert($store.scope(state: \.alert, action: \.alert))
+        .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .preferredColorScheme(.dark)
     }
 
@@ -871,31 +967,13 @@ public struct WorkspacesView: View {
 
             Menu {
                 Menu {
-                    Picker(
-                        "Repository",
+                    RepositoryPicker(
+                        store.repositories,
                         selection: Binding(
                             get: { store.selectedRepositoryID },
                             set: { store.send(.repositoryFilterButtonTapped($0), animation: .default) }
                         )
-                    ) {
-                        Text("All Repositories")
-                            .tag(String?.none)
-
-                        ForEach(store.repositories) { repository in
-                            Label {
-                                Text(verbatim: repository.displayName)
-                            } icon: {
-                                RepositoryIcon(
-                                    repository: repository,
-                                    size: 16,
-                                    relativeTo: .body
-                                )
-                            }
-                            .tag(Optional(repository.id))
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.inline)
+                    )
                 } label: {
                     Text("Repository")
                     if let repositoryName {

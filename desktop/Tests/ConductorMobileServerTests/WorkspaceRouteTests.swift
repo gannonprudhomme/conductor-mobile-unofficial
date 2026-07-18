@@ -7,6 +7,7 @@
 
 import Dependencies
 import Foundation
+import Hummingbird
 import HummingbirdTesting
 import NIOCore
 import SharedConductorData
@@ -252,6 +253,161 @@ struct WorkspaceRouteTests {
             try Workspace.find(workspace.id).fetchOne(database)
         }
         #expect(persistedWorkspace?.pinnedAt == nil)
+    }
+
+    @Test("Creating a workspace finds its initial session and persists Fast Mode")
+    func createWorkspace() async throws {
+        let database = try testConductorDatabase()
+        try await insertRepository(id: "repository-1", into: database)
+        let workspaceID = UUID(0).uuidString.lowercased()
+        let session = Session(
+            id: "session-1",
+            workspaceID: workspaceID,
+            title: "Untitled",
+            agentType: .codex,
+            isHidden: false,
+            createdAt: "2026-07-17T00:00:00Z",
+            updatedAt: "2026-07-17T00:00:00Z",
+            lastUserMessageAt: nil,
+            status: .idle,
+            model: .gpt_5_6_terra,
+            unreadCount: 0,
+            freshlyCompacted: 0,
+            contextTokenCount: 0,
+            isFastModeEnabled: false
+        )
+        let workspace = Workspace(
+            id: workspaceID,
+            createdAt: Date(timeIntervalSince1970: 1_783_555_200),
+            repositoryID: "repository-1",
+            updatedAt: Date(timeIntervalSince1970: 1_783_555_200)
+        )
+
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            var uiHook = WorkspaceUIHook.liveValue
+            uiHook.createWorkspace = {
+                command,
+                waitUntilChangeAvailableInDatabase in
+                #expect(
+                    command == CreateWorkspaceCommand(
+                        repositoryID: "repository-1",
+                        workspaceID: workspaceID,
+                        agentType: "codex",
+                        model: "gpt-5.6-terra"
+                    )
+                )
+                try await database.write { database in
+                    try Workspace.insert { workspace }.execute(database)
+                    try Session.insert { session }.execute(database)
+                }
+                try await waitUntilChangeAvailableInDatabase()
+                return true
+            }
+            $0.workspaceUIHook = uiHook
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                let body = ByteBuffer(
+                    string: #"{"workspace_id":"00000000-0000-0000-0000-000000000000","repository_id":"repository-1","agent_type":"codex","model":"gpt-5.6-terra","fast_mode":true}"#
+                )
+                for _ in 0..<2 {
+                    try await client.execute(
+                        uri: "/workspaces",
+                        method: .post,
+                        body: body
+                    ) { response in
+                        #expect(response.status == .ok)
+                        let createdWorkspace = try JSONDecoder.conductor.decode(
+                            CreatedWorkspace.self,
+                            from: Data(response.body.readableBytesView)
+                        )
+                        #expect(createdWorkspace.session.isFastModeEnabled == true)
+                        #expect(createdWorkspace.workspace == workspace)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("Creating a workspace validates its repository, agent, and model")
+    func invalidWorkspaceCreation() async throws {
+        let database = try testConductorDatabase()
+        try await insertRepository(id: "repository-1", into: database)
+        let application = Server.makeApplication(database: database)
+        let workspaceID = "00000000-0000-0000-0000-000000000000"
+
+        try await application.test(.router) { client in
+            let cases: [(body: String, status: HTTPResponse.Status)] = [
+                (
+                    #"{"workspace_id":"invalid","repository_id":"repository-1","agent_type":"codex","model":"gpt-5.6-sol","fast_mode":false}"#,
+                    .badRequest
+                ),
+                (
+                    #"{"workspace_id":"\#(workspaceID)","repository_id":"  ","agent_type":"codex","model":"gpt-5.6-sol","fast_mode":false}"#,
+                    .badRequest
+                ),
+                (
+                    #"{"workspace_id":"\#(workspaceID)","repository_id":"missing","agent_type":"codex","model":"gpt-5.6-sol","fast_mode":false}"#,
+                    .notFound
+                ),
+                (
+                    #"{"workspace_id":"\#(workspaceID)","repository_id":"repository-1","agent_type":"claude","model":"gpt-5.6-sol","fast_mode":false}"#,
+                    .badRequest
+                ),
+                (
+                    #"{"workspace_id":"\#(workspaceID)","repository_id":"repository-1","agent_type":"codex","model":"unknown","fast_mode":false}"#,
+                    .badRequest
+                ),
+            ]
+            for item in cases {
+                try await client.execute(
+                    uri: "/workspaces",
+                    method: .post,
+                    body: ByteBuffer(string: item.body)
+                ) { response in
+                    #expect(response.status == item.status)
+                }
+            }
+        }
+    }
+
+    @Test("Creating a workspace requires the Conductor UI hook")
+    func createWorkspaceRequiresHook() async throws {
+        let database = try testConductorDatabase()
+        try await insertRepository(id: "repository-1", into: database)
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.workspaceUIHook = .liveValue
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                let body = ByteBuffer(
+                    string: #"{"workspace_id":"00000000-0000-0000-0000-000000000000","repository_id":"repository-1","agent_type":"codex","model":"gpt-5.6-sol","fast_mode":false}"#
+                )
+                try await client.execute(uri: "/workspaces", method: .post, body: body) { response in
+                    #expect(response.status == .serviceUnavailable)
+                }
+            }
+        }
+    }
+}
+
+private func insertRepository(
+    id: String,
+    into database: any DatabaseWriter
+) async throws {
+    let date = Date(timeIntervalSince1970: 1_783_555_200)
+    try await database.write { database in
+        try Repository
+            .insert {
+                Repository(
+                    id: id,
+                    createdAt: date,
+                    updatedAt: date
+                )
+            }
+            .execute(database)
     }
 }
 

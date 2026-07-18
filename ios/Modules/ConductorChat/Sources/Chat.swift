@@ -61,6 +61,10 @@ public struct Chat: Sendable {
             !isLoadingMessages && isMessageSnapshotEmpty
         }
 
+        var allowsAgentSwitching: Bool {
+            shouldShowEmptyChat && !isMessageSendInFlight
+        }
+
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
                 rows = nil
@@ -76,11 +80,11 @@ public struct Chat: Sendable {
         init(
             session: Session,
             messages: [Message] = [],
+            selectedModel: Session.Model? = nil,
             shouldFocusMessageField: Bool = false
         ) {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
-            self.shouldFocusMessageField = shouldFocusMessageField
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
             self._session = FetchOne(
                 wrappedValue: session,
@@ -99,7 +103,9 @@ public struct Chat: Sendable {
                         )
                     }
             )
-            self.selectedModel = session.model
+            self.hasUserSelectedModel = selectedModel != nil
+            self.selectedModel = selectedModel ?? session.model
+            self.shouldFocusMessageField = shouldFocusMessageField
         }
 
         /// `turns` and `rows` are derived presentation caches, while `session` captures
@@ -510,6 +516,7 @@ struct ChatView: View {
                     ChatTextField(
                         text: Binding(store.$messageDraft),
                         agentType: store.session.agentType,
+                        allowsAgentSwitching: store.allowsAgentSwitching,
                         isFastModeEnabled: store.isFastModeEnabled,
                         isSendInFlight: store.isMessageSendInFlight,
                         isStopInFlight: store.isStopInFlight,
