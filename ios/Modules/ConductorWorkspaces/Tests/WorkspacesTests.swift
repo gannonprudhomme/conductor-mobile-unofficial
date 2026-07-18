@@ -444,6 +444,9 @@ struct WorkspacesTests {
             let store = TestStore(initialState: Workspaces.State()) {
                 Workspaces()
             } withDependencies: {
+                $0.desktopClient.archiveWorkspace = { workspaceID in
+                    requests.withValue { $0.append("archive:\(workspaceID)") }
+                }
                 $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
                     let workspace = try await database.read { db in
                         try Workspace.find(workspaceID).fetchOne(db)
@@ -482,6 +485,9 @@ struct WorkspacesTests {
             await store.send(.workspaceUnreadButtonTapped(item))
             await store.finish()
 
+            await store.send(.workspaceArchiveButtonTapped(item))
+            await store.finish()
+
             let fetchedWorkspace = try await database.read { db in
                 try Workspace
                     .find(item.id)
@@ -497,6 +503,7 @@ struct WorkspacesTests {
                     "pinned:workspace:true",
                     "status:workspace:done",
                     "unread:workspace:true",
+                    "archive:workspace",
                 ]
             )
         }

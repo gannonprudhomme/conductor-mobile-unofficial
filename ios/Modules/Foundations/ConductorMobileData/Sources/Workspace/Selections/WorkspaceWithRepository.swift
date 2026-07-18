@@ -64,7 +64,10 @@ extension WorkspaceWithRepository {
         (MobileWorkspaceState?, Repository?)
     > {
         var query = Workspace
-            .where { $0.state.neq(Workspace.State.archived) }
+            .where {
+                $0.state.neq(Workspace.State.archiving)
+                    && $0.state.neq(Workspace.State.archived)
+            }
 
         if let repositoryID {
             query = query.where { $0.repositoryID.eq(repositoryID) }

@@ -128,6 +128,9 @@ enum WorkspaceRoute {
             }
 
             switch mutation {
+            case .archive:
+                // Archiving runs Conductor's cleanup flow and cannot safely fall back to SQLite.
+                throw WorkspaceUIHook.DispatchError.listenerUnavailable
             case .pinned(let isPinned):
                 let pinnedAt = isPinned ? Date.now.ISO8601Format() : nil
                 try Workspace
@@ -162,6 +165,8 @@ enum WorkspaceRoute {
                     return false
                 }
                 switch mutation {
+                case .archive:
+                    return workspace.state == .archiving || workspace.state == .archived
                 case .pinned(let isPinned):
                     return (workspace.pinnedAt != nil) == isPinned
                 case .status(let status):
@@ -244,6 +249,12 @@ extension WorkspaceMutation: Decodable {
         }
 
         self = switch key.stringValue {
+        case "archive":
+            if try container.decode(Bool.self, forKey: key) {
+                .archive
+            } else {
+                throw RequestDecodingError.invalidBody
+            }
         case "pinned":
             .pinned(isPinned: try container.decode(Bool.self, forKey: key))
         case "status":

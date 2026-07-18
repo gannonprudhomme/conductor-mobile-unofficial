@@ -176,6 +176,9 @@ isolatedTest("commands run in order with real service signatures and continue af
   const calls = [];
   const persistedUnreadSessionIDs = [];
   const workspaceService = {
+    async archiveWorkspace(input) {
+      calls.push(["archive", input]);
+    },
     async getWorkspaces() {
       calls.push("workspaces");
       return [{ id: "workspace-1", activeSessionId: "session-1" }];
@@ -228,6 +231,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   replacementSource.onmessage(command({ unread: false }));
   replacementSource.onmessage(sessionCommand({ model: "gpt-5.6-terra" }));
   replacementSource.onmessage(command({ createSession: true }));
+  replacementSource.onmessage(command({ archive: true }));
   replacementSource.onmessage(command({ futureCommand: true }));
   replacementSource.onmessage(sessionCommand({ fastMode: true }));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
@@ -237,7 +241,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 10);
+  await waitUntil(() => calls.length === 11);
   await waitUntil(() => environment.errors.length === 5);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
@@ -249,6 +253,7 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["read", "workspace-1"],
     ["model", "session-1", "gpt-5.6-terra"],
     ["createSession", { workspaceId: "workspace-1" }],
+    ["archive", { workspaceId: "workspace-1" }],
     ["fastMode", { sessionId: "session-1", fastMode: true }],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
@@ -351,6 +356,7 @@ function installHookGlobals({
 
 function emptyWorkspaceShell() {
   const workspaceService = {
+    async archiveWorkspace() {},
     async getWorkspaces() { return []; },
     async setWorkspacePinned() {},
     async setWorkspaceManualStatus() {},

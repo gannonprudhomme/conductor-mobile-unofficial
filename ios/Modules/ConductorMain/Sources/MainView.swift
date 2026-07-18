@@ -61,6 +61,15 @@ public struct Main: Sendable {
                     )
                     return .none
 
+                case let .path(
+                    .element(
+                        id: id,
+                        action: .workspaceChat(.delegate(.workspaceArchived))
+                    )
+                ):
+                    state.path.pop(from: id)
+                    return .none
+
                 case .path, .settings, .workspaces:
                     return .none
                 }

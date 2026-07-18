@@ -13,6 +13,7 @@ import Sharing
 
 @DependencyClient
 public struct DesktopClient: Sendable {
+    public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
     public var createSession: @Sendable (_ workspaceID: String) async throws -> Session
     public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
@@ -143,7 +144,12 @@ extension DesktopClient: DependencyKey {
     static let defaultServerPort = 3_768
 
     public static var liveValue: Self {
-        Self { serverAddress in
+        Self { workspaceID in
+            _ = try await patch(
+                WorkspacePatchBody(shouldArchive: true),
+                at: workspaceURL(workspaceID: workspaceID)
+            )
+        } checkConnection: { serverAddress in
             try await ping(serverAddress: serverAddress)
         } createSession: { workspaceID in
             guard let session = try await post(
@@ -435,11 +441,13 @@ extension DesktopClient: DependencyKey {
 }
 
 struct WorkspacePatchBody: Encodable, Sendable {
+    var shouldArchive: Bool? = nil
     var isPinned: Bool? = nil
     var status: String? = nil
     var isUnread: Bool? = nil
 
     private enum CodingKeys: String, CodingKey {
+        case shouldArchive = "archive"
         case isPinned = "pinned"
         case isUnread = "unread"
         case status

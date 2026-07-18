@@ -819,6 +819,36 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Archiving a workspace calls the desktop")
+    func archiveWorkspace() async throws {
+        let workspace = try makeWorkspace()
+        let archivedWorkspaceID = LockIsolated<String?>(nil)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.archiveWorkspace = { workspaceID in
+                    archivedWorkspaceID.setValue(workspaceID)
+                }
+            }
+            store.exhaustivity = .off
+
+            await store.send(.archiveWorkspaceButtonTapped)
+            await store.finish()
+            #expect(archivedWorkspaceID.value == workspace.id)
+        }
+    }
+
     @Test("When chat fails to load messages, an alert is presented and dismissed")
     func chatFailsToLoadMessages() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")

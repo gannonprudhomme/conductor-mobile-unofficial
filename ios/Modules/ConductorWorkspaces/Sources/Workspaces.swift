@@ -176,6 +176,8 @@ public struct Workspaces: Sendable {
         case settingsButtonTapped
         case task
         case workspacesChanged([WorkspaceWithRepository])
+        case workspaceArchiveButtonTapped(WorkspaceWithRepository)
+        case workspaceArchiveFailed(any Error)
         case workspaceMutationFailed(any Error)
         case workspaceMutationUsedSQLiteFallback
         case workspacePinnedButtonTapped(WorkspaceWithRepository)
@@ -252,6 +254,20 @@ public struct Workspaces: Sendable {
                     groupedBy: state.grouping,
                     workspaces: workspaces
                 )
+                return .none
+
+            case let .workspaceArchiveButtonTapped(item):
+                return .run { send in
+                    do {
+                        try await desktopClient.archiveWorkspace(workspaceID: item.id)
+                    } catch {
+                        Logger.workspace.error("Failed to archive workspace: \(error)")
+                        await send(.workspaceArchiveFailed(error))
+                    }
+                }
+
+            case let .workspaceArchiveFailed(error):
+                state.alert = .failedToArchiveWorkspace(error: error)
                 return .none
 
             case let .workspaceMutationFailed(error):
@@ -482,6 +498,14 @@ extension AlertState where Action == Workspaces.Action.Alert {
         }
     }
 
+    static func failedToArchiveWorkspace(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to archive workspace")
+        } message: {
+            TextState(error.localizedDescription)
+        }
+    }
+
     static var workspaceMutationUsedSQLiteFallback: Self {
         AlertState {
             TextState("Workspace change saved")
@@ -658,6 +682,9 @@ public struct WorkspacesView: View {
         item: WorkspaceWithRepository
     ) {
         switch action {
+        case .archive:
+            store.send(.workspaceArchiveButtonTapped(item))
+
         case .open:
             store.send(.workspaceTapped(item))
 

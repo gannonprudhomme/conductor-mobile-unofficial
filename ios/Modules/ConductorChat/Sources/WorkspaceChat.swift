@@ -90,6 +90,8 @@ public struct WorkspaceChat: Sendable {
 
     public enum Action {
         case activeSessionIDChanged(Session.ID?)
+        case archiveWorkspaceButtonTapped
+        case archiveWorkspaceResponse(Result<Void, any Error>)
         case archivedSessionsButtonTapped
         case chat(Chat.Action)
         case createSessionButtonTapped
@@ -99,6 +101,13 @@ public struct WorkspaceChat: Sendable {
         case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
         case task
+
+        case delegate(Delegate)
+
+        @CasePathable
+        public enum Delegate: Equatable {
+            case workspaceArchived
+        }
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -136,6 +145,27 @@ public struct WorkspaceChat: Sendable {
                     return .none
                 }
                 state.chat = Chat.State(session: activeSession)
+                return .none
+
+            case .archiveWorkspaceButtonTapped:
+                return .run { [workspaceID = state.workspace.id] send in
+                    await send(
+                        .archiveWorkspaceResponse(
+                            Result {
+                                try await desktopClient.archiveWorkspace(workspaceID: workspaceID)
+                            }
+                        )
+                    )
+                }
+
+            case .archiveWorkspaceResponse(.success):
+                return .send(.delegate(.workspaceArchived))
+
+            case let .archiveWorkspaceResponse(.failure(error)):
+                Logger.chat.error("Failed to archive workspace: \(error)")
+                state.destination = .alert(
+                    .failedToArchiveWorkspace(message: error.localizedDescription)
+                )
                 return .none
 
             case .archivedSessionsButtonTapped:
@@ -287,7 +317,7 @@ public struct WorkspaceChat: Sendable {
                 state.chat = Chat.State(session: session)
                 return .none
 
-            case .chat, .destination:
+            case .chat, .delegate, .destination:
                 return .none
 
             }
@@ -410,6 +440,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     static func failedToLoadMessages(message: String) -> Self {
         AlertState {
             TextState("Failed to load messages")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToArchiveWorkspace(message: String) -> Self {
+        AlertState {
+            TextState("Failed to archive workspace")
         } message: {
             TextState(message)
         }
@@ -562,6 +600,21 @@ public struct WorkspaceChatView: View {
                     }
                 }
                 .accessibilityLabel("Pull request")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    store.send(.archiveWorkspaceButtonTapped)
+                } label: {
+                    Label {
+                        Text("Archive")
+                    } icon: {
+                        ColoredMenuImage(
+                            Lucide.archive,
+                            color: .theme(.destructive)
+                        )
+                    }
+                }
             }
         } label: {
             LucideIcon(Lucide.ellipsis, style: .inlineToolbarTitle)

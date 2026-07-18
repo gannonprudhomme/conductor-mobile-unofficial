@@ -49,6 +49,14 @@ struct WorkspaceRouteTests {
                     .update { $0.unreadCount = 1 }
                     .execute(database)
             }
+
+            _ = try #require(await events.next())
+            try await database.write { database in
+                try Workspace
+                    .find(workspace.id)
+                    .update { $0.state = #bind(Workspace.State.archiving) }
+                    .execute(database)
+            }
         }
         try await withDependencies {
             $0.workspaceUIHook = uiHook
@@ -59,6 +67,7 @@ struct WorkspaceRouteTests {
                     #"{"pinned":true}"#,
                     #"{"status":"in-review"}"#,
                     #"{"unread":true}"#,
+                    #"{"archive":true}"#,
                 ] {
                     try await client.execute(
                         uri: "/workspaces/\(workspace.id)",
@@ -82,6 +91,7 @@ struct WorkspaceRouteTests {
         #expect(state.session?.unreadCount == 1)
         #expect(state.workspace?.pinnedAt == "2026-07-15T00:00:00Z")
         #expect(state.workspace?.manualStatus == Workspace.Status.inReview.rawValue)
+        #expect(state.workspace?.state == .archiving)
     }
 
     @Test("A definite disconnection commits each mutation through SQLite")
@@ -138,6 +148,7 @@ struct WorkspaceRouteTests {
                 #"{"pinned":true,"extra":false}"#,
                 #"{"extra":true}"#,
                 #"{"pinned":"true"}"#,
+                #"{"archive":false}"#,
                 #"{"status":"unknown"}"#,
             ] {
                 try await client.execute(
@@ -157,6 +168,31 @@ struct WorkspaceRouteTests {
                 #expect(response.status == .notFound)
             }
         }
+    }
+
+    @Test("Archive requires the UI hook")
+    func archiveRequiresUIHook() async throws {
+        let (database, workspace, _, _, _) = try await workspaceRouteDatabase()
+        let application = Server.makeApplication(database: database)
+
+        try await withDependencies {
+            $0.workspaceUIHook = .liveValue
+        } operation: {
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: #"{"archive":true}"#)
+                ) { response in
+                    #expect(response.status == .serviceUnavailable)
+                }
+            }
+        }
+
+        let persistedWorkspace = try await database.read { database in
+            try Workspace.find(workspace.id).fetchOne(database)
+        }
+        #expect(persistedWorkspace?.state != .archived)
     }
 
     @Test("Fallback reports conflict when unread has no active visible session")

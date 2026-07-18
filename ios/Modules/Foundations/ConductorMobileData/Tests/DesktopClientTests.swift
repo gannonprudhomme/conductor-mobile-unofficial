@@ -168,6 +168,9 @@ struct DesktopClientTests {
                 try await DesktopClient.liveValue.createSession(workspaceID: "workspace-1")
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.archiveWorkspace(workspaceID: "workspace-1")
+            }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
                 try await DesktopClient.liveValue.setWorkspacePinned(
                     workspaceID: "workspace-1",
                     isPinned: true
@@ -531,6 +534,7 @@ struct DesktopClientTests {
     func workspaceMutationBodies() throws {
         let status = Workspace.Status.inReview.rawValue
         for (body, expectedJSON) in [
+            (WorkspacePatchBody(shouldArchive: true), #"{"archive":true}"#),
             (WorkspacePatchBody(isPinned: true), #"{"pinned":true}"#),
             (WorkspacePatchBody(status: status), #"{"status":"in-review"}"#),
             (WorkspacePatchBody(isUnread: false), #"{"unread":false}"#),

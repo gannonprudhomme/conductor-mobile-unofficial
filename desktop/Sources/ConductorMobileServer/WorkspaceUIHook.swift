@@ -258,6 +258,8 @@ private extension WorkspaceMutation {
     var field: String {
         get throws {
             switch self {
+            case .archive:
+                "\"archive\":true"
             case .pinned(let isPinned):
                 "\"pinned\":\(isPinned)"
             case .status(let value):

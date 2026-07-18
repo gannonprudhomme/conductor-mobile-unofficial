@@ -12,6 +12,7 @@ import SharedConductorData
 import SwiftUI
 
 enum WorkspaceRowAction {
+    case archive
     case open
     case setStatus(Workspace.Status)
     case togglePinned
@@ -116,6 +117,18 @@ struct WorkspaceRow: View {
                 }
             }
             .pickerStyle(.inline)
+        }
+
+        Section {
+            Button(role: .destructive) {
+                action(.archive)
+            } label: {
+                Label {
+                    Text("Archive")
+                } icon: {
+                    ColoredMenuImage(Lucide.archive, color: .theme(.destructive))
+                }
+            }
         }
     }
 

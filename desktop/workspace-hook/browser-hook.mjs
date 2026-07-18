@@ -29,7 +29,7 @@ export async function prepareWorkspaceUIHook() {
   const shell = await import(shellURL);
   const workspaceService = uniqueService(
     shell,
-    ["getWorkspaces", "setWorkspacePinned", "setWorkspaceManualStatus"],
+    ["archiveWorkspace", "getWorkspaces", "setWorkspacePinned", "setWorkspaceManualStatus"],
     "WorkspaceService",
   );
   const sessionService = uniqueService(
@@ -241,6 +241,12 @@ function parseCommand(data) {
 
 async function executeCommand({ sessionService, workspaceService }, command) {
   switch (command.field) {
+    case "archive":
+      if (command.value !== true) {
+        throw new Error("The archive command is invalid.");
+      }
+      await workspaceService.archiveWorkspace({ workspaceId: command.workspaceId });
+      return;
     case "createSession":
       await sessionService.createSession({ workspaceId: command.workspaceId });
       return;

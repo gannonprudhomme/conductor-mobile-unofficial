@@ -77,6 +77,38 @@ struct MainTests {
         }
     }
 
+    @Test("Archived workspace delegate pops its chat")
+    func archivedWorkspacePopsChat() async throws {
+        let item = WorkspaceWithRepository(
+            workspace: .preview(id: "workspace"),
+            repository: nil
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var initialState = Main.State()
+            initialState.path.append(
+                .workspaceChat(WorkspaceChat.State(workspaceWithRepository: item))
+            )
+            let pathID = try #require(initialState.path.ids.first)
+            let store = TestStore(initialState: initialState) {
+                Main()
+            }
+
+            await store.send(
+                .path(
+                    .element(
+                        id: pathID,
+                        action: .workspaceChat(.delegate(.workspaceArchived))
+                    )
+                )
+            ) {
+                $0.path.pop(from: pathID)
+            }
+        }
+    }
+
     @Test("Workspace stream remains active while chat is pushed")
     func workspaceStreamRemainsActiveWhileChatIsPushed() async throws {
         let cachedSession = Session.preview(id: "cached")

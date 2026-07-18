@@ -55,6 +55,20 @@ struct WorkspaceUIHookTests {
         )
         #expect(path == .hook)
 
+        let archivePath = try await uiHook.dispatch(
+            command: .workspace(
+                id: "workspace-\"2",
+                mutation: .archive
+            ),
+            fallback: {},
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        #expect(
+            await events.next()
+                == "data: {\"workspaceId\":\"workspace-\\\"2\",\"archive\":true}\n\n"
+        )
+        #expect(archivePath == .hook)
+
         let didDispatchModel = try await uiHook.updateSessionModel(
             sessionID: "session-\"3",
             model: .gpt_5_6_terra,

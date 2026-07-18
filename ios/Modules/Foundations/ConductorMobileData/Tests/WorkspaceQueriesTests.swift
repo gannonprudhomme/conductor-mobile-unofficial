@@ -33,7 +33,7 @@ struct WorkspaceQueriesTests {
         expectNoDifference(missingRepository.repositoryDisplayName, "Unknown repository")
     }
 
-    @Test("Workspace query filters, joins repositories, excludes archived rows, and sorts")
+    @Test("Workspace query filters, joins repositories, excludes archiving and archived rows, and sorts")
     func query() throws {
         let database = try appDatabase()
         let first = Date(timeIntervalSince1970: 1)
@@ -78,6 +78,16 @@ struct WorkspaceQueriesTests {
                         createdAt: fourth,
                         repositoryID: "repo-1",
                         state: .archived,
+                        updatedAt: fourth
+                    ),
+                    false
+                ),
+                (
+                    Workspace.preview(
+                        id: "w5",
+                        createdAt: fourth,
+                        repositoryID: "repo-1",
+                        state: .archiving,
                         updatedAt: fourth
                     ),
                     false
