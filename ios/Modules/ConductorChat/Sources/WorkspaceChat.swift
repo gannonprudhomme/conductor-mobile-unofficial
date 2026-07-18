@@ -46,7 +46,8 @@ public struct WorkspaceChat: Sendable {
             let workspace = workspaceWithRepository.workspace
             self._workspaceWithRepository = FetchOne(
                 wrappedValue: workspaceWithRepository,
-                WorkspaceWithRepository.all(workspaceID: workspace.id)
+                WorkspaceWithRepository.all(workspaceID: workspace.id),
+                animation: .default
             )
 
             self.chat = nil
@@ -61,7 +62,8 @@ public struct WorkspaceChat: Sendable {
             let activeSessions = FetchAll(
                 Session
                     .where { $0.workspaceID.eq(workspace.id).and(!$0.isHidden) }
-                    .order(by: \.createdAt)
+                    .order(by: \.createdAt),
+                animation: .default
             )
 
             self._activeSessions = activeSessions
@@ -134,10 +136,7 @@ public struct WorkspaceChat: Sendable {
                     return .none
                 }
                 state.chat = Chat.State(session: activeSession)
-                return markWorkspaceReadIfNeeded(
-                    state,
-                    selectedSession: activeSession
-                )
+                return .none
 
             case .archivedSessionsButtonTapped:
                 state.destination = .archivedSessions(
@@ -215,11 +214,7 @@ public struct WorkspaceChat: Sendable {
                     sessionIDAwaitingObservation: state.sessionIDAwaitingObservation
                 )
                 state.isLoadingSessions = false
-                let selectedSession = sessions.first { $0.id == state.chat?.sessionID }
-                return markWorkspaceReadIfNeeded(
-                    state,
-                    selectedSession: selectedSession
-                )
+                return .none
 
             case let .loadSessionsResponse(.failure(error)):
                 Logger.chat.error("Failed to load sessions: \(error)")
@@ -235,6 +230,15 @@ public struct WorkspaceChat: Sendable {
             case .sessionSnapshotPersisted:
                 state.hasPersistedInitialSessionSnapshot = true
                 return .none
+
+            case let .chat(.initialMessagesResponse(sessionID, _)):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+                return markWorkspaceReadIfNeeded(
+                    state,
+                    selectedSession: state.chat?.session
+                )
 
             case let .chat(.loadMessagesFailed(error)):
                 guard !DesktopClientError.isConnectionFailure(error) else {
@@ -278,16 +282,10 @@ public struct WorkspaceChat: Sendable {
                 state.hasUserSelectedSession = true
                 state.sessionIDAwaitingObservation = nil
                 guard state.chat?.sessionID != session.id else {
-                    return markWorkspaceReadIfNeeded(
-                        state,
-                        selectedSession: session
-                    )
+                    return .none
                 }
                 state.chat = Chat.State(session: session)
-                return markWorkspaceReadIfNeeded(
-                    state,
-                    selectedSession: session
-                )
+                return .none
 
             case .chat, .destination:
                 return .none

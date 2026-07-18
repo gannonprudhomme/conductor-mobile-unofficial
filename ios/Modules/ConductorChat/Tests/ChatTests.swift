@@ -370,7 +370,12 @@ struct ChatTests {
             #expect(store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
 
-            await store.send(.initialMessagesResponse([])) {
+            await store.send(
+                .initialMessagesResponse(
+                    sessionID: session.id,
+                    messages: []
+                )
+            ) {
                 $0.isLoadingMessages = false
                 $0.isMessageSnapshotEmpty = true
             }
@@ -400,7 +405,12 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.initialMessagesResponse([message])) {
+            await store.send(
+                .initialMessagesResponse(
+                    sessionID: session.id,
+                    messages: [message]
+                )
+            ) {
                 $0.isLoadingMessages = false
             }
 
@@ -437,7 +447,12 @@ struct ChatTests {
             ) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = [message]
             }
-            await store.send(.initialMessagesResponse([])) {
+            await store.send(
+                .initialMessagesResponse(
+                    sessionID: session.id,
+                    messages: []
+                )
+            ) {
                 $0.confirmedMessagesAwaitingInitialSnapshot = []
                 $0.isLoadingMessages = false
             }

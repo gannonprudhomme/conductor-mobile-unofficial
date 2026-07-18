@@ -15,8 +15,8 @@ import Testing
 
 @MainActor
 struct WorkspaceChatTests {
-    @Test("Viewing unread sessions marks their workspace as read")
-    func viewingUnreadSessionsMarksWorkspaceAsRead() async throws {
+    @Test("Loading unread sessions marks their workspace as read")
+    func loadingUnreadSessionsMarksWorkspaceAsRead() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active", unread: 1)
         let activeSession = try makeSession(
             id: "active",
@@ -59,6 +59,20 @@ struct WorkspaceChatTests {
                 $0.isLoadingSessions = false
             }
             await store.finish()
+            #expect(requests.value.isEmpty)
+
+            await store.send(
+                .chat(
+                    .initialMessagesResponse(
+                        sessionID: activeSession.id,
+                        messages: []
+                    )
+                )
+            ) {
+                $0.chat?.isLoadingMessages = false
+                $0.chat?.isMessageSnapshotEmpty = true
+            }
+            await store.finish()
             #expect(requests.value == ["\(workspace.id):false"])
 
             try await database.write { db in
@@ -70,6 +84,30 @@ struct WorkspaceChatTests {
             await store.send(.sessionButtonTapped(unreadSession)) {
                 $0.chat = Chat.State(session: unreadSession)
                 $0.hasUserSelectedSession = true
+            }
+            await store.finish()
+            #expect(requests.value == ["\(workspace.id):false"])
+
+            await store.send(
+                .chat(
+                    .initialMessagesResponse(
+                        sessionID: activeSession.id,
+                        messages: []
+                    )
+                )
+            )
+            #expect(requests.value == ["\(workspace.id):false"])
+
+            await store.send(
+                .chat(
+                    .initialMessagesResponse(
+                        sessionID: unreadSession.id,
+                        messages: []
+                    )
+                )
+            ) {
+                $0.chat?.isLoadingMessages = false
+                $0.chat?.isMessageSnapshotEmpty = true
             }
             await store.finish()
 
