@@ -277,15 +277,17 @@ public struct WorkspaceChat: Sendable {
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
                 state.hasUserSelectedSession = true
                 state.sessionIDAwaitingObservation = nil
-                let markWorkspaceRead = markWorkspaceReadIfNeeded(
+                guard state.chat?.sessionID != session.id else {
+                    return markWorkspaceReadIfNeeded(
+                        state,
+                        selectedSession: session
+                    )
+                }
+                state.chat = Chat.State(session: session)
+                return markWorkspaceReadIfNeeded(
                     state,
                     selectedSession: session
                 )
-                guard state.chat?.sessionID != session.id else {
-                    return markWorkspaceRead
-                }
-                state.chat = Chat.State(session: session)
-                return markWorkspaceRead
 
             case .chat, .destination:
                 return .none
