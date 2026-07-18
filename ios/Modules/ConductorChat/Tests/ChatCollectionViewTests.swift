@@ -53,6 +53,34 @@ struct ChatCollectionViewTests {
         )
     }
 
+    @Test("Summary disclosure preserves the viewport even while bottom-pinned")
+    func summaryDisclosureScrollPolicy() {
+        var policy = ChatCollectionView.ScrollPolicy()
+
+        expectNoDifference(
+            policy.rowsWillChange(hasRows: true),
+            .bottom(isInitial: true)
+        )
+        expectNoDifference(
+            policy.rowsWillChange(
+                hasRows: true,
+                shouldPreserveViewport: true
+            ),
+            .preserveViewport
+        )
+        #expect(!policy.isFollowingBottom)
+        expectNoDifference(
+            policy.rowsWillChange(hasRows: true),
+            .preserveViewport
+        )
+
+        policy.scrollToBottomRequested()
+        expectNoDifference(
+            policy.rowsWillChange(hasRows: true),
+            .bottom(isInitial: false)
+        )
+    }
+
     @Test("Bottom geometry includes adjusted insets and handles short content")
     func bottomGeometry() {
         let insets = UIEdgeInsets(top: 20, left: 0, bottom: 30, right: 0)
