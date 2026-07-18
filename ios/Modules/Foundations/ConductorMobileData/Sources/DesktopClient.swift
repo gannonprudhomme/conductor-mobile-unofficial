@@ -32,11 +32,12 @@ public struct DesktopClient: Sendable {
         _ workspaceID: String,
         _ sessionID: String,
         _ message: String,
-        _ model: Session.Model
+        _ model: Session.Model,
+        _ isFastModeEnabled: Bool
     ) async throws -> Message?
-    public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> WorkspaceMutationPath
-    public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> WorkspaceMutationPath
-    public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> WorkspaceMutationPath
+    public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> UIHookMutationPath
+    public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> UIHookMutationPath
+    public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> UIHookMutationPath
     public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Session?
 
     public enum ConnectionStatus: Equatable, Sendable {
@@ -71,9 +72,17 @@ public extension SharedKey where Self == InMemoryKey<DesktopClient.ConnectionSta
     }
 }
 
-// A 204 persisted through the hook; a 202 used SQLite and may leave Conductor's window stale.
-public enum WorkspaceMutationPath: Equatable, Sendable {
+// Specifies how the change was persisted on a successful POST/PATCH call
+public enum UIHookMutationPath: Equatable, Sendable {
+    /// Change was propagated through the UI hook
+    ///
+    /// 204
     case hook
+
+    /// Used sqlite so the Conductor window is likely stale.
+    /// We generally show an alert when this happens
+    ///
+    /// Code 202
     case sqliteFallback
 }
 
@@ -173,11 +182,12 @@ extension DesktopClient: DependencyKey {
             }
         } ping: {
             try await ping()
-        } sendMessage: { workspaceID, sessionID, message, model in
+        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled in
             try await post(
                 SendMessageRequest(
                     message: message,
-                    model: model.rawValue
+                    model: model.rawValue,
+                    isFastModeEnabled: isFastModeEnabled
                 ),
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
                 decoding: Message.self
@@ -277,6 +287,13 @@ extension DesktopClient: DependencyKey {
     private struct SendMessageRequest: Encodable {
         let message: String
         let model: String
+        let isFastModeEnabled: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case model
+            case isFastModeEnabled = "fast_mode"
+        }
     }
 
     private struct SettingsResponse: Decodable {
@@ -293,7 +310,7 @@ extension DesktopClient: DependencyKey {
             .appending(path: "messages")
     }
 
-    // POST /workspaces/{workspaceID}/sessions/{sessionID}
+    // /workspaces/{workspaceID}/sessions/{sessionID}
     private static func sessionURL(workspaceID: String, sessionID: String) throws -> URL {
         try sessionsURL(workspaceID: workspaceID)
             .appending(path: sessionID)
@@ -356,14 +373,14 @@ extension DesktopClient: DependencyKey {
     private static func patch<Body: Encodable & Sendable>(
         _ body: Body,
         at url: URL
-    ) async throws -> WorkspaceMutationPath {
+    ) async throws -> UIHookMutationPath {
         let request = try jsonRequest(method: "PATCH", body: body, url: url)
         let (data, response) = try await data(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw DesktopClientError.invalidResponse
         }
 
-        return try getWorkspaceMutationPathFromStatusCode(
+        return try getUIHookMutationPathFromStatusCode(
             statusCode: response.statusCode,
             data: data
         )
@@ -381,10 +398,10 @@ extension DesktopClient: DependencyKey {
         return request
     }
 
-    static func getWorkspaceMutationPathFromStatusCode(
+    static func getUIHookMutationPathFromStatusCode(
         statusCode: Int,
         data: Data = Data()
-    ) throws -> WorkspaceMutationPath {
+    ) throws -> UIHookMutationPath {
         switch statusCode {
         case 204:
             return .hook

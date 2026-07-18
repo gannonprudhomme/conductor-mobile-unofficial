@@ -48,8 +48,7 @@ enum WorkspaceRoute {
         // The UI hook holds one global slot through either live persistence or the fallback write.
         do {
             path = try await uiHook.dispatch(
-                mutation: mutation,
-                workspaceID: workspaceID,
+                command: .workspace(id: workspaceID, mutation: mutation),
                 fallback: {
                     try await applyUIHookSQLiteFallback(
                         mutation,

@@ -369,7 +369,7 @@ public struct Workspaces: Sendable {
     private func updateWorkspace(
         _ optimisticUpdate: @escaping @Sendable () async throws -> Void,
         rollback: @escaping @Sendable () async throws -> Void,
-        operation: @escaping @Sendable () async throws -> WorkspaceMutationPath
+        operation: @escaping @Sendable () async throws -> UIHookMutationPath
     ) -> Effect<Action> {
         .run { send in
             do {

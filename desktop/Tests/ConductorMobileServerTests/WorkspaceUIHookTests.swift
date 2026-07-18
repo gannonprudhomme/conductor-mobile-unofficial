@@ -42,8 +42,10 @@ struct WorkspaceUIHookTests {
         var events = connection.events.makeAsyncIterator()
 
         let path = try await uiHook.dispatch(
-            mutation: .status("in-\nprogress"),
-            workspaceID: "workspace-\"2",
+            command: .workspace(
+                id: "workspace-\"2",
+                mutation: .status("in-\nprogress")
+            ),
             fallback: {},
             waitUntilChangeAvailableInDatabase: {}
         )
@@ -74,8 +76,10 @@ struct WorkspaceUIHookTests {
 
         let fallback = Task {
             try await uiHook.dispatch(
-                mutation: .pinned(isPinned: true),
-                workspaceID: "workspace-1",
+                command: .workspace(
+                    id: "workspace-1",
+                    mutation: .pinned(isPinned: true)
+                ),
                 fallback: {
                     fallbackStartedContinuation.yield(())
                     for await _ in fallbackGate {}
@@ -89,8 +93,10 @@ struct WorkspaceUIHookTests {
 
         await #expect(throws: WorkspaceUIHook.DispatchError.mutationInFlight) {
             try await uiHook.dispatch(
-                mutation: .unread(isUnread: true),
-                workspaceID: "workspace-2",
+                command: .workspace(
+                    id: "workspace-2",
+                    mutation: .unread(isUnread: true)
+                ),
                 fallback: {},
                 waitUntilChangeAvailableInDatabase: {}
             )
@@ -109,8 +115,10 @@ struct WorkspaceUIHookTests {
 
         let first = Task {
             try await uiHook.dispatch(
-                mutation: .pinned(isPinned: true),
-                workspaceID: "workspace-1",
+                command: .workspace(
+                    id: "workspace-1",
+                    mutation: .pinned(isPinned: true)
+                ),
                 fallback: {},
                 waitUntilChangeAvailableInDatabase: {
                     for await _ in persistence {
@@ -123,8 +131,10 @@ struct WorkspaceUIHookTests {
 
         await #expect(throws: WorkspaceUIHook.DispatchError.mutationInFlight) {
             try await uiHook.dispatch(
-                mutation: .unread(isUnread: true),
-                workspaceID: "workspace-2",
+                command: .workspace(
+                    id: "workspace-2",
+                    mutation: .unread(isUnread: true)
+                ),
                 fallback: {},
                 waitUntilChangeAvailableInDatabase: {}
             )
@@ -135,8 +145,10 @@ struct WorkspaceUIHookTests {
 
         #expect(
             try await uiHook.dispatch(
-                mutation: .unread(isUnread: true),
-                workspaceID: "workspace-2",
+                command: .workspace(
+                    id: "workspace-2",
+                    mutation: .unread(isUnread: true)
+                ),
                 fallback: {},
                 waitUntilChangeAvailableInDatabase: {}
             ) == .hook
@@ -154,13 +166,18 @@ struct WorkspaceUIHookTests {
 
         #expect(
             try await uiHook.dispatch(
-                mutation: .unread(isUnread: true),
-                workspaceID: "workspace-1",
+                command: .sessionFastMode(
+                    sessionID: "session-1",
+                    isEnabled: true
+                ),
                 fallback: {},
                 waitUntilChangeAvailableInDatabase: {}
             ) == .hook
         )
-        #expect(await secondEvents.next() != nil)
+        #expect(
+            await secondEvents.next()
+                == "data: {\"sessionId\":\"session-1\",\"fastMode\":true}\n\n"
+        )
 
         await uiHook.disconnect(connectionID: firstConnection.id)
         #expect(await uiHook.isConnected())

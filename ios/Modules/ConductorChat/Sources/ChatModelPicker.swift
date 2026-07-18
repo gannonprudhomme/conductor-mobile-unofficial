@@ -37,6 +37,7 @@ struct ChatModelPicker: Equatable, View {
             )
         } label: {
             modelLabel(selectedModel, agentType: agentType)
+                .frame(maxHeight: .infinity)
         }
         .menuOrder(.fixed)
         .accessibilityLabel("Model")

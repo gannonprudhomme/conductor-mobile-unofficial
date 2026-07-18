@@ -22,7 +22,8 @@ extension Session {
         model: Model = .gpt_5_6_sol,
         unreadCount: Int = 0,
         freshlyCompacted: Int = 0,
-        contextTokenCount: Int = 0
+        contextTokenCount: Int = 0,
+        isFastModeEnabled: Bool? = false
     ) -> Self {
         Self(
             id: id,
@@ -37,7 +38,8 @@ extension Session {
             model: model,
             unreadCount: unreadCount,
             freshlyCompacted: freshlyCompacted,
-            contextTokenCount: contextTokenCount
+            contextTokenCount: contextTokenCount,
+            isFastModeEnabled: isFastModeEnabled
         )
     }
 }

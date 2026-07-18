@@ -45,11 +45,29 @@ struct MessageRouteTests {
                 try await waitUntilChangeAvailableInDatabase()
                 return true
             }
-            $0.sidecarBridgeClient.sendMessage = { request in
-                let persistedModel = try? await database.read { database in
-                    try Session.find(request.sessionID).fetchOne(database)?.model
+            $0.workspaceUIHook.dispatch = { command, _, waitUntilChangeAvailableInDatabase in
+                #expect(
+                    command == .sessionFastMode(
+                        sessionID: "session-1",
+                        isEnabled: true
+                    )
+                )
+                await recorder.recordFastModeUpdate(isEnabled: true)
+                try await database.write { database in
+                    try Session
+                        .find("session-1")
+                        .update { $0.isFastModeEnabled = #bind(true) }
+                        .execute(database)
                 }
-                #expect(persistedModel == .gpt_5_6_terra)
+                try await waitUntilChangeAvailableInDatabase()
+                return .hook
+            }
+            $0.sidecarBridgeClient.sendMessage = { request in
+                let persistedSession = try? await database.read { database in
+                    try Session.find(request.sessionID).fetchOne(database)
+                }
+                #expect(persistedSession?.model == .gpt_5_6_terra)
+                #expect(persistedSession?.isFastModeEnabled == true)
                 await recorder.record(request)
             }
         } operation: {
@@ -61,7 +79,7 @@ struct MessageRouteTests {
                         method: .post,
                         headers: [.contentType: "application/json"],
                         body: ByteBuffer(
-                            string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra"}"#
+                            string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra","fast_mode":true}"#
                         )
                     ) { response in
                         #expect(response.status == .ok)
@@ -86,6 +104,7 @@ struct MessageRouteTests {
             await recorder.message == SidecarBridgeClient.RuntimeMessageRequest(
                 agentType: "codex",
                 cwd: "/tmp/workspace-1",
+                isFastModeEnabled: true,
                 message: "  Run the tests.  ",
                 messageID: messageID,
                 model: "gpt-5.6-terra",
@@ -95,6 +114,113 @@ struct MessageRouteTests {
         )
         #expect(await recorder.updatedSessionID == "session-1")
         #expect(await recorder.updatedModel == .gpt_5_6_terra)
+        #expect(await recorder.isUpdatedFastModeEnabled == true)
+    }
+
+    @Test("POST message sends requested Fast Mode when the UI hook is unavailable")
+    func unavailableUIHook() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.dispatch = { _, fallback, _ in
+                try await fallback()
+                return .sqliteFallback
+            }
+            $0.sidecarBridgeClient.sendMessage = { request in
+                await recorder.record(request)
+                try await persistMessage(for: request, database: database)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Run fast.","model":"gpt-5.5","fast_mode":true}"#
+                    )
+                ) { response in
+                    #expect(response.status == .ok)
+                }
+            }
+        }
+
+        #expect(await recorder.message?.isFastModeEnabled == true)
+        let isPersistedFastModeEnabled = try await database.read { database in
+            try Session.find("session-1").fetchOne(database)?.isFastModeEnabled
+        }
+        #expect(isPersistedFastModeEnabled == false)
+    }
+
+    @Test("POST message skips Fast Mode synchronization when unchanged")
+    func unchangedFastMode() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.dispatch = { _, _, _ in
+                Issue.record("Fast Mode should not be synchronized when unchanged.")
+                return .hook
+            }
+            $0.sidecarBridgeClient.sendMessage = { request in
+                await recorder.record(request)
+                try await persistMessage(for: request, database: database)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Run normally.","model":"gpt-5.5","fast_mode":false}"#
+                    )
+                ) { response in
+                    #expect(response.status == .ok)
+                }
+            }
+        }
+
+        #expect(await recorder.message?.isFastModeEnabled == false)
+    }
+
+    @Test("POST message does not reach the sidecar when Fast Mode delivery fails")
+    func fastModeDeliveryFails() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.workspaceUIHook.dispatch = { _, _, _ in
+                throw WorkspaceUIHook.DispatchError.deliveryUnknown
+            }
+            $0.sidecarBridgeClient.sendMessage = { request in
+                await recorder.record(request)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Run fast.","model":"gpt-5.5","fast_mode":true}"#
+                    )
+                ) { response in
+                    #expect(response.status == .serviceUnavailable)
+                    #expect(
+                        String(buffer: response.body)
+                            == "Could not determine whether Fast Mode was delivered."
+                    )
+                }
+            }
+        }
+
+        #expect(await recorder.message == nil)
     }
 
     @Test("POST message rejects a model from another agent")
@@ -204,7 +330,8 @@ private func messageRouteDatabase() async throws -> DatabaseQueue {
         model: .gpt5_5,
         unreadCount: 0,
         freshlyCompacted: 0,
-        contextTokenCount: 0
+        contextTokenCount: 0,
+        isFastModeEnabled: false
     )
     try await database.write { database in
         try Workspace.insert { workspace }.execute(database)
@@ -215,6 +342,7 @@ private func messageRouteDatabase() async throws -> DatabaseQueue {
 
 private actor MessageRouteRecorder {
     private(set) var message: SidecarBridgeClient.RuntimeMessageRequest?
+    private(set) var isUpdatedFastModeEnabled: Bool?
     private(set) var updatedModel: Session.Model?
     private(set) var updatedSessionID: Session.ID?
 
@@ -225,5 +353,28 @@ private actor MessageRouteRecorder {
     func recordModelUpdate(sessionID: Session.ID, model: Session.Model) {
         updatedModel = model
         updatedSessionID = sessionID
+    }
+
+    func recordFastModeUpdate(isEnabled: Bool) {
+        isUpdatedFastModeEnabled = isEnabled
+    }
+}
+
+private func persistMessage(
+    for request: SidecarBridgeClient.RuntimeMessageRequest,
+    database: any DatabaseWriter
+) async throws {
+    try await database.write { database in
+        try Message.insert {
+            Message(
+                id: request.messageID,
+                sessionID: request.sessionID,
+                role: .user,
+                content: request.message,
+                createdAt: Date(timeIntervalSince1970: 1_783_555_202),
+                turnID: "turn-1"
+            )
+        }
+        .execute(database)
     }
 }

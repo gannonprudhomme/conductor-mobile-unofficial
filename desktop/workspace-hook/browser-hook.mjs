@@ -37,8 +37,9 @@ export async function prepareWorkspaceUIHook() {
     [
       "createSession",
       "getSessionsForWorkspace",
-      "setUnread",
       "markWorkspaceAsRead",
+      "setUnread",
+      "updateSessionFastMode",
       "updateSessionModel",
     ],
     "SessionService",
@@ -181,7 +182,7 @@ function createController({
           command = parseCommand(event.data);
         } catch (error) {
           console.error(
-            "Conductor Mobile received an invalid workspace command.",
+            "Conductor Mobile received an invalid UI command.",
             error,
           );
           return;
@@ -191,7 +192,7 @@ function createController({
           .then(() => executeCommand({ sessionService, workspaceService }, command))
           .catch((error) => {
             console.error(
-              "Conductor Mobile workspace mutation failed.",
+              "Conductor Mobile UI mutation failed.",
               error,
             );
           });
@@ -221,7 +222,6 @@ async function refreshHook({ hookRevision, hookURL }) {
   await module.prepareWorkspaceUIHook();
 }
 
-// TODO: No clue why this is necessary
 function parseCommand(data) {
   // The server builds these commands; this check keeps each trusted SSE frame to one mutation.
   const value = JSON.parse(data);
@@ -243,6 +243,12 @@ async function executeCommand({ sessionService, workspaceService }, command) {
   switch (command.field) {
     case "createSession":
       await sessionService.createSession({ workspaceId: command.workspaceId });
+      return;
+    case "fastMode":
+      await sessionService.updateSessionFastMode({
+        sessionId: command.sessionId,
+        fastMode: command.value,
+      });
       return;
     case "model":
       await sessionService.updateSessionModel(command.sessionId, command.value);

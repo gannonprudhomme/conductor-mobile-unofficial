@@ -160,7 +160,8 @@ struct DesktopClientTests {
                     workspaceID: "workspace-1",
                     sessionID: "session-1",
                     message: "Run the tests.",
-                    model: .gpt_5_6_terra
+                    model: .gpt_5_6_terra,
+                    isFastModeEnabled: false
                 )
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
@@ -259,7 +260,8 @@ struct DesktopClientTests {
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
                 message: "Run the tests.",
-                model: .gpt_5_6_terra
+                model: .gpt_5_6_terra,
+                isFastModeEnabled: true
             )
         }
 
@@ -271,15 +273,12 @@ struct DesktopClientTests {
         )
         let body = try #require(request.bodyData)
         let object = try #require(
-            JSONSerialization.jsonObject(with: body) as? [String: String]
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
         )
-        expectNoDifference(
-            object,
-            [
-                "message": "Run the tests.",
-                "model": "gpt-5.6-terra",
-            ]
-        )
+        #expect(object["message"] as? String == "Run the tests.")
+        #expect(object["model"] as? String == "gpt-5.6-terra")
+        #expect(object["fast_mode"] as? Bool == true)
+        #expect(object.count == 3)
     }
 
     @Test("Sending supports a legacy no-content response")
@@ -312,7 +311,8 @@ struct DesktopClientTests {
                 workspaceID: "workspace-1",
                 sessionID: "session-1",
                 message: "Run the tests.",
-                model: .gpt_5_6_terra
+                model: .gpt_5_6_terra,
+                isFastModeEnabled: false
             )
         }
 
@@ -501,14 +501,14 @@ struct DesktopClientTests {
         }
     }
 
-    @Test("Workspace mutations map only exact 204 and 202 responses")
-    func workspaceMutationResponses() throws {
+    @Test("UI-hook mutations map only exact 204 and 202 responses")
+    func uiHookMutationResponses() throws {
         for (statusCode, expectedPath) in [
-            (204, WorkspaceMutationPath.hook),
+            (204, UIHookMutationPath.hook),
             (202, .sqliteFallback),
         ] {
             #expect(
-                try DesktopClient.getWorkspaceMutationPathFromStatusCode(statusCode: statusCode)
+                try DesktopClient.getUIHookMutationPathFromStatusCode(statusCode: statusCode)
                     == expectedPath
             )
         }
@@ -519,7 +519,7 @@ struct DesktopClientTests {
                     message: "error"
                 )
             ) {
-                try DesktopClient.getWorkspaceMutationPathFromStatusCode(
+                try DesktopClient.getUIHookMutationPathFromStatusCode(
                     statusCode: statusCode,
                     data: Data("error".utf8)
                 )

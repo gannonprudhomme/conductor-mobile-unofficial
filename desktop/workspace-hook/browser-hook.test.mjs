@@ -206,6 +206,9 @@ isolatedTest("commands run in order with real service signatures and continue af
     async markWorkspaceAsRead(workspaceID) {
       calls.push(["read", workspaceID]);
     },
+    async updateSessionFastMode(input) {
+      calls.push(["fastMode", input]);
+    },
     async updateSessionModel(sessionID, model) {
       calls.push(["model", sessionID, model]);
     },
@@ -226,6 +229,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   replacementSource.onmessage(sessionCommand({ model: "gpt-5.6-terra" }));
   replacementSource.onmessage(command({ createSession: true }));
   replacementSource.onmessage(command({ futureCommand: true }));
+  replacementSource.onmessage(sessionCommand({ fastMode: true }));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
   replacementSource.onmessage({ data: JSON.stringify({ id: "obsolete", workspaceId: "workspace-1", pinned: true }) });
   replacementSource.onmessage({ data: "not json" });
@@ -233,7 +237,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 9);
+  await waitUntil(() => calls.length === 10);
   await waitUntil(() => environment.errors.length === 5);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
@@ -245,6 +249,7 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["read", "workspace-1"],
     ["model", "session-1", "gpt-5.6-terra"],
     ["createSession", { workspaceId: "workspace-1" }],
+    ["fastMode", { sessionId: "session-1", fastMode: true }],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
   assert.equal(environment.errors.at(-1)[1].message, "Unsupported workspace command: futureCommand");
@@ -355,6 +360,7 @@ function emptyWorkspaceShell() {
     async getSessionsForWorkspace() { return []; },
     async setUnread() {},
     async markWorkspaceAsRead() {},
+    async updateSessionFastMode() {},
     async updateSessionModel() {},
   };
   return { workspaceService, sessionService };

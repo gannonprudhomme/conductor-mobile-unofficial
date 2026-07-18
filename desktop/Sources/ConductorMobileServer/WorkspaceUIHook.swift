@@ -25,8 +25,7 @@ public struct WorkspaceUIHook: Sendable {
     ) async throws -> Void
     var disconnect: @Sendable (_ connectionID: UUID) async -> Void
     var dispatch: @Sendable (
-        _ mutation: WorkspaceMutation,
-        _ workspaceID: String,
+        _ command: UIHookCommand,
         _ fallback: @escaping @Sendable () async throws -> Void,
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> DispatchPath
@@ -69,10 +68,9 @@ extension WorkspaceUIHook: DependencyKey {
             disconnect: { connectionID in
                 await state.disconnect(connectionID: connectionID)
             },
-            dispatch: { mutation, workspaceID, fallback, waitUntilChangeAvailableInDatabase in
+            dispatch: { command, fallback, waitUntilChangeAvailableInDatabase in
                 try await state.dispatch(
-                    mutation,
-                    workspaceID: workspaceID,
+                    command,
                     fallback: fallback,
                     waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
                 )
@@ -144,13 +142,12 @@ private actor WorkspaceUIHookState {
     /// Conductor may already have applied the mutation. Injecting both operations keeps this actor
     /// independent of persistence details.
     func dispatch(
-        _ mutation: WorkspaceMutation,
-        workspaceID: String,
+        _ command: UIHookCommand,
         fallback: @escaping @Sendable () async throws -> Void = {},
         waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
     ) async throws -> WorkspaceUIHook.DispatchPath {
         try await dispatch(
-            event: mutation.getEventName(workspaceID: workspaceID),
+            event: try command.event,
             fallback: fallback,
             waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
         )
@@ -161,7 +158,7 @@ private actor WorkspaceUIHookState {
         waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
     ) async throws {
         _ = try await dispatch(
-            event: WorkspaceMutation.getCreateSessionEventName(workspaceID: workspaceID),
+            event: UIHookCommand.getCreateSessionEventName(workspaceID: workspaceID),
             fallback: nil,
             waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
         )
@@ -228,24 +225,23 @@ private actor WorkspaceUIHookState {
         sessionID: Session.ID,
         model: Session.Model
     ) throws -> String {
-        let sessionID = try WorkspaceMutation.jsonString(sessionID)
-        let model = try WorkspaceMutation.jsonString(model.rawValue)
+        let sessionID = try UIHookCommand.jsonString(sessionID)
+        let model = try UIHookCommand.jsonString(model.rawValue)
         return "data: {\"sessionId\":\(sessionID),\"model\":\(model)}\n\n"
     }
 }
 
-private extension WorkspaceMutation {
-    func getEventName(workspaceID: String) throws -> String {
-        let workspaceID = try Self.jsonString(workspaceID)
-        let field: String = switch self {
-        case .pinned(let isPinned):
-            "\"pinned\":\(isPinned)"
-        case .status(let value):
-            "\"status\":\(try Self.jsonString(value))"
-        case .unread(let isUnread):
-            "\"unread\":\(isUnread)"
+private extension UIHookCommand {
+    var event: String {
+        get throws {
+            let payload: String = switch self {
+            case let .workspace(workspaceID, mutation):
+                "\"workspaceId\":\(try Self.jsonString(workspaceID)),\(try mutation.field)"
+            case let .sessionFastMode(sessionID, isEnabled):
+                "\"sessionId\":\(try Self.jsonString(sessionID)),\"fastMode\":\(isEnabled)"
+            }
+            return "data: {\(payload)}\n\n"
         }
-        return "data: {\"workspaceId\":\(workspaceID),\(field)}\n\n"
     }
 
     // JSONEncoder escapes values even though the surrounding SSE frame is assembled directly.
@@ -255,5 +251,20 @@ private extension WorkspaceMutation {
 
     static func getCreateSessionEventName(workspaceID: String) throws -> String {
         "data: {\"workspaceId\":\(try jsonString(workspaceID)),\"createSession\":true}\n\n"
+    }
+}
+
+private extension WorkspaceMutation {
+    var field: String {
+        get throws {
+            switch self {
+            case .pinned(let isPinned):
+                "\"pinned\":\(isPinned)"
+            case .status(let value):
+                "\"status\":\(try UIHookCommand.jsonString(value))"
+            case .unread(let isUnread):
+                "\"unread\":\(isUnread)"
+            }
+        }
     }
 }

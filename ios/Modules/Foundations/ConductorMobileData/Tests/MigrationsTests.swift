@@ -41,6 +41,12 @@ struct MigrationsTests {
                 sql: "SELECT name FROM pragma_table_info('mobile_workspace_state')"
             )
         }
+        let sessionColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('sessions')"
+            )
+        }
 
         #expect(workspaces == 0)
         #expect(mobileWorkspaceStates == 0)
@@ -53,5 +59,6 @@ struct MigrationsTests {
         #expect(mobileWorkspaceStateColumns.contains("pull_request_is_merged"))
         #expect(mobileWorkspaceStateColumns.contains("pull_request_merge_state_status"))
         #expect(mobileWorkspaceStateColumns.contains("pull_request_checks_status"))
+        #expect(sessionColumns.contains("fast_mode"))
     }
 }

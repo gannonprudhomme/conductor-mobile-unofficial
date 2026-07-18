@@ -46,6 +46,7 @@ enum MessageRoute {
 
                 return MessageSendContext(
                     agentType: row.agentType,
+                    isFastModeEnabled: row.isFastModeEnabled,
                     model: row.model,
                     workspacePath: row.workspacePath
                 )
@@ -77,45 +78,66 @@ enum MessageRoute {
                 message: "Model is not available for this session's agent."
             )
         }
+        let isFastModeEnabled = sendMessageRequest.isFastModeEnabled
+            ?? messageSendContext.isFastModeEnabled
+            ?? false
 
         if model != messageSendContext.model.rawValue {
             do {
                 _ = try await uiHook.updateSessionModel(
                     sessionID: sessionID,
-                    model: Session.Model(rawValue: model),
-                    waitUntilChangeAvailableInDatabase: {
-                        let didPersist = try await waitForPersistedSessionModel(
-                            sessionID: sessionID,
-                            model: model,
-                            database: database,
-                            clock: clock
-                        )
-                        guard didPersist else {
-                            throw PlainTextResponseError(
-                                .gatewayTimeout,
-                                message: "Timed out waiting for Conductor to save the session model."
-                            )
-                        }
+                    model: Session.Model(rawValue: model)
+                ) {
+                    let didPersist = try await waitForPersistedSessionChange(
+                        sessionID: sessionID,
+                        database: database,
+                        clock: clock
+                    ) { session in
+                        session.model.rawValue == model
                     }
-                )
-            } catch let error as WorkspaceUIHook.DispatchError {
-                switch error {
-                case .deliveryUnknown:
-                    throw PlainTextResponseError(
-                        .serviceUnavailable,
-                        message: "Could not determine whether the session model was delivered."
-                    )
-                case .listenerUnavailable:
-                    throw PlainTextResponseError(
-                        .serviceUnavailable,
-                        message: "Conductor's workspace UI hook is unavailable."
-                    )
-                case .mutationInFlight:
-                    throw PlainTextResponseError(
-                        .conflict,
-                        message: "Another Conductor UI change is still in progress."
-                    )
+                    guard didPersist else {
+                        throw PlainTextResponseError(
+                            .gatewayTimeout,
+                            message: "Timed out waiting for Conductor to save the session model."
+                        )
+                    }
                 }
+            } catch let error as WorkspaceUIHook.DispatchError {
+                throw responseError(
+                    for: error,
+                    deliveryUnknownMessage: "Could not determine whether the session model was delivered."
+                )
+            }
+        }
+
+        if isFastModeEnabled != (messageSendContext.isFastModeEnabled ?? false) {
+            do {
+                _ = try await uiHook.dispatch(
+                    command: .sessionFastMode(
+                        sessionID: sessionID,
+                        isEnabled: isFastModeEnabled
+                    )
+                ) {
+                } waitUntilChangeAvailableInDatabase: {
+                    let didPersist = try await waitForPersistedSessionChange(
+                        sessionID: sessionID,
+                        database: database,
+                        clock: clock
+                    ) { session in
+                        session.isFastModeEnabled == isFastModeEnabled
+                    }
+                    guard didPersist else {
+                        throw PlainTextResponseError(
+                            .gatewayTimeout,
+                            message: "Timed out waiting for Conductor to save Fast Mode."
+                        )
+                    }
+                }
+            } catch let error as WorkspaceUIHook.DispatchError {
+                throw responseError(
+                    for: error,
+                    deliveryUnknownMessage: "Could not determine whether Fast Mode was delivered."
+                )
             }
         }
 
@@ -125,6 +147,7 @@ enum MessageRoute {
                 SidecarBridgeClient.RuntimeMessageRequest(
                     agentType: messageSendContext.agentType.rawValue,
                     cwd: workspacePath,
+                    isFastModeEnabled: isFastModeEnabled,
                     message: sendMessageRequest.message,
                     messageID: messageID,
                     model: model,
@@ -206,20 +229,20 @@ enum MessageRoute {
         throw CancellationError()
     }
 
-    private static func waitForPersistedSessionModel<C: Clock>(
+    private static func waitForPersistedSessionChange<C: Clock>(
         sessionID: Session.ID,
-        model: String,
         database: any DatabaseReader,
-        clock: C
+        clock: C,
+        matches: @Sendable (Session) -> Bool
     ) async throws -> Bool where C.Duration == Duration {
         let timeout = Duration.seconds(2)
         let start = clock.now
 
         while !Task.isCancelled {
-            let persistedModel = try await database.read { database in
-                try Session.find(sessionID).fetchOne(database)?.model.rawValue
+            let isPersisted = try await database.read { database in
+                try Session.find(sessionID).fetchOne(database).map(matches) ?? false
             }
-            if persistedModel == model {
+            if isPersisted {
                 return true
             }
 
@@ -233,9 +256,33 @@ enum MessageRoute {
         throw CancellationError()
     }
 
+    private static func responseError(
+        for error: WorkspaceUIHook.DispatchError,
+        deliveryUnknownMessage: String
+    ) -> PlainTextResponseError {
+        switch error {
+        case .deliveryUnknown:
+            PlainTextResponseError(
+                .serviceUnavailable,
+                message: deliveryUnknownMessage
+            )
+        case .listenerUnavailable:
+            PlainTextResponseError(
+                .serviceUnavailable,
+                message: "Conductor's workspace UI hook is unavailable."
+            )
+        case .mutationInFlight:
+            PlainTextResponseError(
+                .conflict,
+                message: "Another Conductor UI change is still in progress."
+            )
+        }
+    }
+
     @Selection
     fileprivate struct MessageSendContext: Sendable {
         let agentType: Session.AgentType
+        let isFastModeEnabled: Bool?
         let model: Session.Model
         let workspacePath: String?
     }
@@ -243,6 +290,13 @@ enum MessageRoute {
     private struct SendMessageRequest: Decodable {
         let message: String
         let model: String?
+        let isFastModeEnabled: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case model
+            case isFastModeEnabled = "fast_mode"
+        }
     }
 }
 
@@ -262,6 +316,7 @@ private extension Session {
             .select { session, workspace in
                 MessageRoute.MessageSendContext.Columns(
                     agentType: session.agentType,
+                    isFastModeEnabled: session.isFastModeEnabled,
                     model: session.model,
                     workspacePath: workspace.workspacePath
                 )

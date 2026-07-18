@@ -10,3 +10,8 @@ enum WorkspaceMutation: Equatable, Sendable {
     case status(String)
     case unread(isUnread: Bool)
 }
+
+enum UIHookCommand: Equatable, Sendable {
+    case workspace(id: String, mutation: WorkspaceMutation)
+    case sessionFastMode(sessionID: String, isEnabled: Bool)
+}

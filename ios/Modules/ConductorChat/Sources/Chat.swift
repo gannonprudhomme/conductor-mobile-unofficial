@@ -31,7 +31,7 @@ public struct Chat: Sendable {
 
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
-
+        var isFastModeEnabled: Bool
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
@@ -81,6 +81,7 @@ public struct Chat: Sendable {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
             self.shouldFocusMessageField = shouldFocusMessageField
+            self.isFastModeEnabled = session.isFastModeEnabled ?? false
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -107,6 +108,7 @@ public struct Chat: Sendable {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
+                && lhs.isFastModeEnabled == rhs.isFastModeEnabled
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -130,6 +132,7 @@ public struct Chat: Sendable {
         case binding(BindingAction<State>)
         case task
         case defaultModelFetched(Session.Model)
+        case fastModeButtonTapped
         case initialMessagesResponse(
             sessionID: Session.ID,
             messages: [Message]
@@ -148,6 +151,7 @@ public struct Chat: Sendable {
             result: Result<String, any Error>
         )
         case sessionModelChanged(Session.Model)
+        case sessionFastModeChanged(Bool)
         case sessionStatusChanged(Session.Status)
         case stopButtonTapped
         case stopSessionResponse(
@@ -248,6 +252,14 @@ public struct Chat: Sendable {
                 state.selectedModel = model
                 return .none
 
+            case let .sessionFastModeChanged(isFastModeEnabled):
+                state.isFastModeEnabled = isFastModeEnabled
+                return .none
+
+            case .fastModeButtonTapped:
+                state.isFastModeEnabled.toggle()
+                return .none
+
             case .turnSummaryTapped(let summaryID):
                 if state.expandedSummaryIDs.remove(summaryID) == nil {
                     state.expandedSummaryIDs.insert(summaryID)
@@ -266,6 +278,7 @@ public struct Chat: Sendable {
                 return .run {
                     [
                         model = state.selectedModel,
+                        isFastModeEnabled = state.isFastModeEnabled,
                         sessionID = state.session.id,
                         workspaceID = state.session.workspaceID,
                     ] send in
@@ -274,7 +287,8 @@ public struct Chat: Sendable {
                             workspaceID: workspaceID,
                             sessionID: sessionID,
                             message: message,
-                            model: model
+                            model: model,
+                            isFastModeEnabled: isFastModeEnabled
                         ) {
                             await send(
                                 .messageConfirmed(
@@ -496,11 +510,13 @@ struct ChatView: View {
                     ChatTextField(
                         text: Binding(store.$messageDraft),
                         agentType: store.session.agentType,
+                        isFastModeEnabled: store.isFastModeEnabled,
                         isSendInFlight: store.isMessageSendInFlight,
                         isStopInFlight: store.isStopInFlight,
                         isWorking: store.session.status == .working,
                         selectedModel: $store.selectedModel,
                         shouldFocusOnAppear: store.shouldFocusMessageField,
+                        onFastModeTapped: { store.send(.fastModeButtonTapped) },
                         onSendTapped: { store.send(.sendButtonTapped) },
                         onStopTapped: { store.send(.stopButtonTapped) }
                     )
@@ -513,6 +529,9 @@ struct ChatView: View {
             }
             .onChange(of: store.session.model) { _, model in
                 store.send(.sessionModelChanged(model))
+            }
+            .onChange(of: store.session.isFastModeEnabled) { _, isFastModeEnabled in
+                store.send(.sessionFastModeChanged(isFastModeEnabled ?? false))
             }
             .task(id: store.session.id) {
                 await store.send(.task).finish()

@@ -53,7 +53,7 @@ public enum Server {
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
         // Five seconds tolerates a slow Conductor UI write without holding the request indefinitely.
-        workspaceMutationTimeout: Duration = .seconds(5),
+        uiMutationTimeout: Duration = .seconds(5),
         userSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".conductor/settings.toml"),
         managedSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -115,7 +115,7 @@ public enum Server {
                 request: request,
                 context: context,
                 database: database,
-                persistenceTimeout: workspaceMutationTimeout
+                persistenceTimeout: uiMutationTimeout
             )
         }
 
@@ -214,7 +214,7 @@ public enum Server {
                 request: request,
                 context: context,
                 database: database,
-                persistenceTimeout: workspaceMutationTimeout
+                persistenceTimeout: uiMutationTimeout
             )
         }
 

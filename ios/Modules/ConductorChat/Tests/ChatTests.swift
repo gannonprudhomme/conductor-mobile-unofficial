@@ -534,7 +534,7 @@ struct ChatTests {
         }
     }
 
-    @Test("Steering a working session forwards the selected model and clears the accepted draft")
+    @Test("Steering forwards the selected model and fast mode, then clears the draft")
     func messageSendSucceeds() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
@@ -542,7 +542,7 @@ struct ChatTests {
         } operation: {
             @Dependency(\.defaultDatabase) var database
 
-            let session = Session.preview(status: .working)
+            let session = Session.preview(status: .working, isFastModeEnabled: true)
             let sentMessage = Message(
                 id: "message-1",
                 sessionID: session.id,
@@ -554,11 +554,12 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
                     #expect(model == .gpt_5_6_terra)
+                    #expect(isFastModeEnabled)
                     return sentMessage
                 }
             }
@@ -598,7 +599,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _ in nil }
+                $0.desktopClient.sendMessage = { _, _, _, _, _ in nil }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -624,7 +625,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _ in
                     for await response in responses {
                         return response
                     }
@@ -679,7 +680,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -721,7 +722,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -754,7 +755,7 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _ in
                     throw TestError()
                 }
             }
@@ -765,6 +766,63 @@ struct ChatTests {
             }
             await store.receive(\.sendMessageResponse) {
                 $0.isMessageSendInFlight = false
+            }
+        }
+    }
+
+    @Test("Fast mode changes locally and is sent with the next message")
+    func fastModeChangesLocally() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let isRecordedFastModeEnabled = LockIsolated<Bool?>(nil)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    #expect(message == "Use the next setting.")
+                    #expect(model == session.model)
+                    isRecordedFastModeEnabled.withValue { $0 = isFastModeEnabled }
+                    return nil
+                }
+            }
+
+            await store.send(.fastModeButtonTapped) {
+                $0.isFastModeEnabled = false
+            }
+            #expect(isRecordedFastModeEnabled.value == nil)
+
+            store.state.$messageDraft.withLock { $0 = "Use the next setting." }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.$messageDraft.withLock { $0 = "" }
+                $0.isMessageSendInFlight = false
+            }
+            expectNoDifference(isRecordedFastModeEnabled.value, false)
+        }
+    }
+
+    @Test("Fast mode follows the observed session setting")
+    func fastModeFollowsObservedSession() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(.sessionFastModeChanged(false)) {
+                $0.isFastModeEnabled = false
+            }
+            await store.send(.sessionFastModeChanged(true)) {
+                $0.isFastModeEnabled = true
             }
         }
     }
@@ -1008,6 +1066,7 @@ private func makeSession(status: String = "idle") throws -> Session {
               "updated_at": "2026-07-09 00:00:00",
               "status": "\(status)",
               "model": "gpt-5.5",
+              "fast_mode": true,
               "unread_count": 0,
               "freshly_compacted": 0,
               "context_token_count": 0

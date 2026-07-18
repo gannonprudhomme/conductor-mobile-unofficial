@@ -52,6 +52,7 @@ struct SessionTests {
                   "last_user_message_at": null,
                   "status": "waiting_on_tool",
                   "model": "gpt-5.3-codex",
+                  "fast_mode": true,
                   "unread_count": 0,
                   "freshly_compacted": 0,
                   "context_token_count": 1234
@@ -63,5 +64,6 @@ struct SessionTests {
         #expect(session.status.rawValue == "waiting_on_tool")
         #expect(session.agentType == .codex)
         #expect(session.isHidden)
+        #expect(session.isFastModeEnabled == true)
     }
 }
