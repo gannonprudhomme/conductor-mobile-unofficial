@@ -15,6 +15,7 @@ public struct CachedAsyncImage<Content: View>: View {
     private let url: URL?
     private let scale: CGFloat
     private let revalidatesCachedResponse: Bool
+    private let retryDelays: [Duration]
     private let transaction: Transaction
     private let prepareImage: (UIImage) async -> UIImage?
     private let content: (AsyncImagePhase) -> Content
@@ -23,6 +24,7 @@ public struct CachedAsyncImage<Content: View>: View {
         url: URL?,
         scale: CGFloat = 1,
         revalidatesCachedResponse: Bool = false,
+        retryDelays: [Duration] = [],
         transaction: Transaction = Transaction(),
         prepareImage: @escaping (UIImage) async -> UIImage? = { $0 },
         @ViewBuilder content: @escaping (AsyncImagePhase) -> Content
@@ -30,6 +32,7 @@ public struct CachedAsyncImage<Content: View>: View {
         self.url = url
         self.scale = scale
         self.revalidatesCachedResponse = revalidatesCachedResponse
+        self.retryDelays = retryDelays
         self.transaction = transaction
         self.prepareImage = prepareImage
         self.content = content
@@ -49,13 +52,32 @@ public struct CachedAsyncImage<Content: View>: View {
         }
 
         do {
-            let loadedImage = try await Loader().image(
+            let replacementImage = try await Loader().image(
                 for: URLRequest(url: url),
                 scale: scale,
-                revalidatesCachedResponse: revalidatesCachedResponse
-            )
+                revalidatesCachedResponse: revalidatesCachedResponse,
+                retryDelays: retryDelays
+            ) { cachedImage in
+                guard let image = await prepareImage(cachedImage), !Task.isCancelled else {
+                    return false
+                }
+                withTransaction(transaction) {
+                    phase = .success(Image(uiImage: image))
+                }
+                return true
+            } onRetry: {
+                guard !Task.isCancelled else {
+                    return
+                }
+                withTransaction(transaction) {
+                    phase = .failure(LoadingError.retrying)
+                }
+            }
+            guard let replacementImage else {
+                return
+            }
             try Task.checkCancellation()
-            guard let image = await prepareImage(loadedImage) else {
+            guard let image = await prepareImage(replacementImage) else {
                 throw LoadingError.invalidImageData
             }
             try Task.checkCancellation()
@@ -68,6 +90,9 @@ public struct CachedAsyncImage<Content: View>: View {
         } catch where Task.isCancelled {
             return
         } catch {
+            guard phase.image == nil else {
+                return
+            }
             withTransaction(transaction) {
                 phase = .failure(error)
             }
@@ -81,8 +106,11 @@ public struct CachedAsyncImage<Content: View>: View {
         func image(
             for request: URLRequest,
             scale: CGFloat,
-            revalidatesCachedResponse: Bool
-        ) async throws -> UIImage {
+            revalidatesCachedResponse: Bool,
+            retryDelays: [Duration] = [],
+            onCachedImage: @MainActor (UIImage) async -> Bool = { _ in false },
+            onRetry: @MainActor () -> Void = { }
+        ) async throws -> UIImage? {
             let cachedResponse = urlCacheClient.cachedResponse(request)
             let cachedImage = cachedResponse.flatMap {
                 UIImage(data: $0.data, scale: scale)
@@ -90,6 +118,12 @@ public struct CachedAsyncImage<Content: View>: View {
             if let cachedImage, !revalidatesCachedResponse {
                 return cachedImage
             }
+            let hasPublishedCachedImage = if let cachedImage {
+                await onCachedImage(cachedImage)
+            } else {
+                false
+            }
+            try Task.checkCancellation()
 
             var networkRequest = request
             if cachedResponse != nil {
@@ -101,12 +135,54 @@ public struct CachedAsyncImage<Content: View>: View {
                 networkRequest.setValue(eTag, forHTTPHeaderField: "If-None-Match")
             }
 
-            let (data, response) = try await urlSession.data(for: networkRequest)
+            var retryDelayIterator = retryDelays.makeIterator()
+            while !Task.isCancelled {
+                do {
+                    let replacementImage = try await loadImage(
+                        for: networkRequest,
+                        cacheRequest: request,
+                        hasCachedImage: cachedImage != nil,
+                        scale: scale
+                    )
+                    if let replacementImage {
+                        return replacementImage
+                    }
+                    if hasPublishedCachedImage {
+                        return nil
+                    }
+                    return cachedImage
+                } catch {
+                    try Task.checkCancellation()
+                    guard let retryDelay = retryDelayIterator.next() else {
+                        if let cachedImage {
+                            if hasPublishedCachedImage {
+                                return nil
+                            }
+                            return cachedImage
+                        }
+                        throw error
+                    }
+                    if cachedImage == nil {
+                        await onRetry()
+                    }
+                    try await Task.sleep(for: retryDelay)
+                }
+            }
+            throw CancellationError()
+        }
+
+        private func loadImage(
+            for request: URLRequest,
+            cacheRequest: URLRequest,
+            hasCachedImage: Bool,
+            scale: CGFloat
+        ) async throws -> UIImage? {
+            let (data, response) = try await urlSession.data(for: request)
             guard let response = response as? HTTPURLResponse else {
                 throw LoadingError.invalidResponse
             }
-            if response.statusCode == 304, let cachedImage {
-                return cachedImage
+            if response.statusCode == 304, hasCachedImage {
+                return nil
             }
             guard 200..<300 ~= response.statusCode else {
                 throw LoadingError.invalidHTTPStatus(response.statusCode)
@@ -117,13 +193,14 @@ public struct CachedAsyncImage<Content: View>: View {
 
             urlCacheClient.storeCachedResponse(
                 CachedURLResponse(response: response, data: data, storagePolicy: .allowed),
-                request
+                cacheRequest
             )
             return image
         }
     }
 
     private enum LoadingError: Error {
+        case retrying
         case invalidResponse
         case invalidHTTPStatus(Int)
         case invalidImageData

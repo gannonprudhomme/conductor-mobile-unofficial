@@ -8,6 +8,7 @@
 import Dependencies
 import CustomDump
 import Foundation
+import Synchronization
 import SwiftUI
 @testable import ConductorDesign
 import Testing
@@ -60,11 +61,12 @@ struct CachedAsyncImageTests {
     }
 
     @MainActor
-    @Test("Revalidation returns a valid cached image when the server reports no change")
+    @Test("A cached image remains displayed when revalidation reports no change")
     func revalidation() async throws {
         let url = URL(string: "https://example.com/favicon.png")!
         let request = URLRequest(url: url)
         let imageData = try testImageData()
+        let displayedImageSizes = Mutex<[CGSize]>([])
         let cachedResponse = CachedURLResponse(
             response: HTTPURLResponse(
                 url: url,
@@ -77,6 +79,7 @@ struct CachedAsyncImageTests {
         let session = testURLSession()
         ImageURLProtocol.handler = { request in
             #expect(request.value(forHTTPHeaderField: "If-None-Match") == "\"favicon-1\"")
+            #expect(displayedImageSizes.withLock { $0 } == [CGSize(width: 1, height: 1)])
             return (
                 HTTPURLResponse(
                     url: url,
@@ -89,7 +92,7 @@ struct CachedAsyncImageTests {
         }
         defer { ImageURLProtocol.handler = nil }
 
-        let image = try await withDependencies {
+        let replacementImage = try await withDependencies {
             $0.urlCacheClient = URLCacheClient(
                 cachedResponse: { _ in cachedResponse },
                 storeCachedResponse: { _, _ in
@@ -102,10 +105,180 @@ struct CachedAsyncImageTests {
                 for: request,
                 scale: 1,
                 revalidatesCachedResponse: true
-            )
+            ) { cachedImage in
+                displayedImageSizes.withLock { $0.append(cachedImage.size) }
+                return true
+            } onRetry: {
+                Issue.record("Cached image revalidation should not expose a retrying phase")
+            }
         }
 
+        #expect(displayedImageSizes.withLock { $0 } == [CGSize(width: 1, height: 1)])
+        #expect(replacementImage == nil)
+    }
+
+    @MainActor
+    @Test("An unpublished cached image is returned when revalidation reports no change")
+    func failedCachedImagePreparation() async throws {
+        let url = URL(string: "https://example.com/favicon.png")!
+        let request = URLRequest(url: url)
+        let imageData = try testImageData()
+        let cachedResponse = CachedURLResponse(
+            response: HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["ETag": "\"favicon-1\""]
+            )!,
+            data: imageData
+        )
+        ImageURLProtocol.handler = { _ in
+            (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 304,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { ImageURLProtocol.handler = nil }
+
+        let replacementImage = try await withDependencies {
+            $0.urlCacheClient = URLCacheClient(
+                cachedResponse: { _ in cachedResponse },
+                storeCachedResponse: { _, _ in
+                    Issue.record("A 304 response should keep the existing cached response")
+                }
+            )
+            $0.urlSession = testURLSession()
+        } operation: {
+            try await CachedAsyncImage<EmptyView>.Loader().image(
+                for: request,
+                scale: 1,
+                revalidatesCachedResponse: true
+            ) { _ in
+                false
+            }
+        }
+
+        let image = try #require(replacementImage)
         #expect(image.size == CGSize(width: 1, height: 1))
+    }
+
+    @MainActor
+    @Test("A successful revalidation replaces the displayed cached image")
+    func successfulRefresh() async throws {
+        let url = URL(string: "https://example.com/favicon.png")!
+        let request = URLRequest(url: url)
+        let cachedImageData = try testImageData()
+        let refreshedImageData = try testImageData(size: CGSize(width: 2, height: 2))
+        let displayedImageSizes = Mutex<[CGSize]>([])
+        let cachedResponse = CachedURLResponse(
+            response: HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["ETag": "\"favicon-1\""]
+            )!,
+            data: cachedImageData
+        )
+        ImageURLProtocol.handler = { request in
+            #expect(request.value(forHTTPHeaderField: "If-None-Match") == "\"favicon-1\"")
+            #expect(displayedImageSizes.withLock { $0 } == [CGSize(width: 1, height: 1)])
+            return (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["ETag": "\"favicon-2\""]
+                )!,
+                refreshedImageData
+            )
+        }
+        defer { ImageURLProtocol.handler = nil }
+
+        let loadedImage = try await withDependencies {
+            $0.urlCacheClient = URLCacheClient(
+                cachedResponse: { _ in cachedResponse },
+                storeCachedResponse: { response, _ in
+                    #expect(response.data == refreshedImageData)
+                }
+            )
+            $0.urlSession = testURLSession()
+        } operation: {
+            try await CachedAsyncImage<EmptyView>.Loader().image(
+                for: request,
+                scale: 1,
+                revalidatesCachedResponse: true
+            ) { cachedImage in
+                displayedImageSizes.withLock { $0.append(cachedImage.size) }
+                return true
+            }
+        }
+
+        let image = try #require(loadedImage)
+        #expect(displayedImageSizes.withLock { $0 } == [CGSize(width: 1, height: 1)])
+        #expect(image.size == CGSize(width: 2, height: 2))
+    }
+
+    @MainActor
+    @Test("A cached image remains displayed when revalidation fails")
+    func failedRefresh() async throws {
+        let url = URL(string: "https://example.com/favicon.png")!
+        let request = URLRequest(url: url)
+        let imageData = try testImageData()
+        let displayedImageSizes = Mutex<[CGSize]>([])
+        let requestCount = Mutex(0)
+        let cachedResponse = CachedURLResponse(
+            response: HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["ETag": "\"favicon-1\""]
+            )!,
+            data: imageData
+        )
+        ImageURLProtocol.handler = { _ in
+            requestCount.withLock { $0 += 1 }
+            return (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 500,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { ImageURLProtocol.handler = nil }
+
+        let replacementImage = try await withDependencies {
+            $0.urlCacheClient = URLCacheClient(
+                cachedResponse: { _ in cachedResponse },
+                storeCachedResponse: { _, _ in
+                    Issue.record("A failed refresh should not replace the cached response")
+                }
+            )
+            $0.urlSession = testURLSession()
+        } operation: {
+            try await CachedAsyncImage<EmptyView>.Loader().image(
+                for: request,
+                scale: 1,
+                revalidatesCachedResponse: true,
+                retryDelays: [.milliseconds(1)]
+            ) { cachedImage in
+                displayedImageSizes.withLock { $0.append(cachedImage.size) }
+                return true
+            } onRetry: {
+                Issue.record("A cached image should remain displayed while refresh retries")
+            }
+        }
+
+        #expect(requestCount.withLock { $0 } == 2)
+        #expect(displayedImageSizes.withLock { $0 } == [CGSize(width: 1, height: 1)])
+        #expect(replacementImage == nil)
     }
 
     @MainActor
@@ -132,7 +305,7 @@ struct CachedAsyncImageTests {
         }
         defer { ImageURLProtocol.handler = nil }
 
-        let image = try await withDependencies {
+        let loadedImage = try await withDependencies {
             $0.urlCacheClient = URLCacheClient(
                 cachedResponse: { _ in cachedResponse },
                 storeCachedResponse: { _, _ in }
@@ -146,7 +319,107 @@ struct CachedAsyncImageTests {
             )
         }
 
+        let image = try #require(loadedImage)
         #expect(image.size == CGSize(width: 1, height: 1))
+    }
+
+    @MainActor
+    @Test("A transient image failure is retried")
+    func retry() async throws {
+        let url = URL(string: "https://example.com/favicon.png")!
+        let request = URLRequest(url: url)
+        let imageData = try testImageData()
+        let requestCount = Mutex(0)
+        let retryCount = Mutex(0)
+        ImageURLProtocol.handler = { _ in
+            let attempt = requestCount.withLock {
+                $0 += 1
+                return $0
+            }
+            return (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: attempt == 1 ? 404 : 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                attempt == 1 ? Data() : imageData
+            )
+        }
+        defer { ImageURLProtocol.handler = nil }
+
+        let loadedImage = try await withDependencies {
+            $0.urlCacheClient = URLCacheClient(
+                cachedResponse: { _ in nil },
+                storeCachedResponse: { _, _ in }
+            )
+            $0.urlSession = testURLSession()
+        } operation: {
+            try await CachedAsyncImage<EmptyView>.Loader().image(
+                for: request,
+                scale: 1,
+                revalidatesCachedResponse: false,
+                retryDelays: [.milliseconds(1)]
+            ) { _ in
+                Issue.record("An uncached request should not display a cached image")
+                return false
+            } onRetry: {
+                retryCount.withLock { $0 += 1 }
+            }
+        }
+
+        let image = try #require(loadedImage)
+        #expect(requestCount.withLock { $0 } == 2)
+        #expect(retryCount.withLock { $0 } == 1)
+        #expect(image.size == CGSize(width: 1, height: 1))
+    }
+
+    @MainActor
+    @Test("Canceling a load does not publish a retry")
+    func cancellation() async {
+        let url = URL(string: "https://example.com/favicon.png")!
+        let request = URLRequest(url: url)
+        let hasRequestStarted = Mutex(false)
+        let retryCount = Mutex(0)
+        func hasNetworkRequestStarted() -> Bool {
+            hasRequestStarted.withLock { $0 }
+        }
+        ImageURLProtocol.handler = { _ in
+            hasRequestStarted.withLock { $0 = true }
+            return nil
+        }
+        defer { ImageURLProtocol.handler = nil }
+
+        let loadTask = Task {
+            try await withDependencies {
+                $0.urlCacheClient = URLCacheClient(
+                    cachedResponse: { _ in nil },
+                    storeCachedResponse: { _, _ in }
+                )
+                $0.urlSession = testURLSession()
+            } operation: {
+                try await CachedAsyncImage<EmptyView>.Loader().image(
+                    for: request,
+                    scale: 1,
+                    revalidatesCachedResponse: false,
+                    retryDelays: [.milliseconds(1)]
+                ) { _ in
+                    Issue.record("An uncached request should not display a cached image")
+                    return false
+                } onRetry: {
+                    retryCount.withLock { $0 += 1 }
+                }
+            }
+        }
+        while !hasNetworkRequestStarted() {
+            await Task.yield()
+        }
+        loadTask.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await loadTask.value
+        }
+        #expect(retryCount.withLock { $0 } == 0)
     }
 
     @MainActor
@@ -173,7 +446,7 @@ struct CachedAsyncImageTests {
         }
         defer { ImageURLProtocol.handler = nil }
 
-        let image = try await withDependencies {
+        let loadedImage = try await withDependencies {
             $0.urlCacheClient = URLCacheClient(
                 cachedResponse: { _ in invalidResponse },
                 storeCachedResponse: { response, _ in
@@ -189,17 +462,20 @@ struct CachedAsyncImageTests {
             )
         }
 
+        let image = try #require(loadedImage)
         #expect(image.size == CGSize(width: 1, height: 1))
     }
 }
 
 @MainActor
-private func testImageData() throws -> Data {
+private func testImageData(
+    size: CGSize = CGSize(width: 1, height: 1)
+) throws -> Data {
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
     return try #require(
         UIGraphicsImageRenderer(
-            size: CGSize(width: 1, height: 1),
+            size: size,
             format: format
         )
             .image { _ in }
@@ -215,7 +491,9 @@ private func testURLSession() -> URLSession {
 }
 
 private final class ImageURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var handler: ((URLRequest) -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var handler: (
+        @Sendable (URLRequest) -> (HTTPURLResponse, Data)?
+    )?
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -230,7 +508,9 @@ private final class ImageURLProtocol: URLProtocol {
             Issue.record("Image URL protocol started without a handler")
             return
         }
-        let (response, data) = handler(request)
+        guard let (response, data) = handler(request) else {
+            return
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)

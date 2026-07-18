@@ -81,6 +81,7 @@ public struct RepositoryIcon: View {
         CachedAsyncImage(
             url: url,
             revalidatesCachedResponse: true,
+            retryDelays: [.seconds(1), .seconds(2), .seconds(4)],
             prepareImage: prepareRemoteImage
         ) { phase in
             if let image = phase.image {
