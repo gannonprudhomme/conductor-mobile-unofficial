@@ -957,6 +957,137 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Workspace menu actions call the desktop service")
+    func workspaceMenuActionsCallDesktopService() async throws {
+        let workspace = try makeWorkspace(status: .inProgress)
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: nil
+        )
+        let now = Date(timeIntervalSince1970: 1_783_555_200)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.insert { workspace }.execute(db)
+            }
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let requests = LockIsolated<[String]>([])
+            let store = TestStore(
+                initialState: WorkspaceChat.State(workspaceWithRepository: item)
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.date.now = now
+                $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
+                    requests.withValue { $0.append("pinned:\(workspaceID):\(isPinned)") }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    requests.withValue {
+                        $0.append("status:\(workspaceID):\(status.rawValue)")
+                    }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, isUnread in
+                    requests.withValue { $0.append("unread:\(workspaceID):\(isUnread)") }
+                    return .hook
+                }
+            }
+            store.exhaustivity = .off
+
+            await store.send(.workspacePinnedButtonTapped)
+            await store.finish()
+
+            await store.send(.workspaceStatusButtonTapped(.inReview))
+            await store.finish()
+
+            await store.send(.workspaceUnreadButtonTapped)
+            await store.finish()
+
+            let updatedWorkspace = try await database.read { db in
+                try Workspace.find(workspace.id).fetchOne(db)
+            }
+            #expect(updatedWorkspace?.pinnedAt == now.ISO8601Format())
+            #expect(updatedWorkspace?.manualStatus == Workspace.Status.inReview.rawValue)
+            #expect(updatedWorkspace?.unread == 1)
+            #expect(
+                requests.value == [
+                    "pinned:\(workspace.id):true",
+                    "status:\(workspace.id):in-review",
+                    "unread:\(workspace.id):true",
+                ]
+            )
+        }
+    }
+
+    @Test("A failed workspace menu update restores the previous value")
+    func failedWorkspaceMenuUpdateRollsBack() async throws {
+        let workspace = try makeWorkspace()
+        let item = WorkspaceWithRepository(workspace: workspace, repository: nil)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.insert { workspace }.execute(db)
+            }
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+
+            let store = TestStore(
+                initialState: WorkspaceChat.State(workspaceWithRepository: item)
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_555_200)
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    throw TestError()
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped)
+            await store.receive(\.workspaceMutationFailed) {
+                $0.destination = .alert(
+                    .failedToUpdateWorkspace(message: TestError().localizedDescription)
+                )
+            }
+
+            let updatedWorkspace = try await database.read { db in
+                try Workspace.find(workspace.id).fetchOne(db)
+            }
+            #expect(updatedWorkspace?.pinnedAt == nil)
+        }
+    }
+
+    @Test("A workspace menu SQLite fallback presents a warning")
+    func workspaceMenuFallbackPresentsWarning() async throws {
+        let workspace = try makeWorkspace()
+        let item = WorkspaceWithRepository(workspace: workspace, repository: nil)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.insert { workspace }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(workspaceWithRepository: item)
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_555_200)
+                $0.desktopClient.setWorkspacePinned = { _, _ in .sqliteFallback }
+            }
+
+            await store.send(.workspacePinnedButtonTapped)
+            await store.receive(\.workspaceMutationUsedSQLiteFallback) {
+                $0.destination = .alert(.workspaceMutationUsedSQLiteFallback)
+            }
+        }
+    }
+
     @Test("When chat fails to load messages, an alert is presented and dismissed")
     func chatFailsToLoadMessages() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -1286,10 +1417,12 @@ private func makeSession(
 private func makeWorkspace(
     activeSessionID: String? = nil,
     branch: String? = nil,
-    unread: Int = 0
+    unread: Int = 0,
+    status: Workspace.Status? = nil
 ) throws -> Workspace {
     let activeSession = activeSessionID.map { "\"\($0)\"" } ?? "null"
     let branch = branch.map { "\"\($0)\"" } ?? "null"
+    let derivedStatus = status.map { "\"\($0.rawValue)\"" } ?? "null"
     return try JSONDecoder.conductor.decode(
         Workspace.self,
         from: Data(
@@ -1298,6 +1431,7 @@ private func makeWorkspace(
               "id": "workspace-1",
               "active_session_id": \(activeSession),
               "branch": \(branch),
+              "derived_status": \(derivedStatus),
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
               "is_working": false,

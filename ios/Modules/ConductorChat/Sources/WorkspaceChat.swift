@@ -123,6 +123,11 @@ public struct WorkspaceChat: Sendable {
         case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
         case task
+        case workspaceMutationFailed(any Error)
+        case workspaceMutationUsedSQLiteFallback
+        case workspacePinnedButtonTapped
+        case workspaceStatusButtonTapped(Workspace.Status)
+        case workspaceUnreadButtonTapped
 
         case delegate(Delegate)
 
@@ -133,6 +138,7 @@ public struct WorkspaceChat: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
     public init() { }
@@ -381,6 +387,116 @@ public struct WorkspaceChat: Sendable {
                 state.chat = Chat.State(session: session)
                 return .none
 
+            case let .workspaceMutationFailed(error):
+                state.destination = .alert(
+                    .failedToUpdateWorkspace(message: error.localizedDescription)
+                )
+                return .none
+
+            case .workspaceMutationUsedSQLiteFallback:
+                state.destination = .alert(.workspaceMutationUsedSQLiteFallback)
+                return .none
+
+            case .workspacePinnedButtonTapped:
+                let item = state.workspaceWithRepository
+                let isPinned = item.workspace.pinnedAt == nil
+                let previousPinnedAt = item.workspace.pinnedAt
+                let pinnedAt = isPinned ? now.ISO8601Format() : nil
+
+                return updateWorkspace {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.pinnedAt = #bind(pinnedAt) }
+                            .execute(db)
+                    }
+                } rollback: {
+                    try await database.write { db in
+                        guard let workspace = try Workspace.find(item.id).fetchOne(db),
+                              workspace.pinnedAt == pinnedAt
+                        else {
+                            return
+                        }
+
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.pinnedAt = #bind(previousPinnedAt) }
+                            .execute(db)
+                    }
+                } operation: {
+                    try await desktopClient.setWorkspacePinned(
+                        workspaceID: item.id,
+                        isPinned: isPinned
+                    )
+                }
+
+            case let .workspaceStatusButtonTapped(status):
+                let item = state.workspaceWithRepository
+                guard item.workspace.status != status else {
+                    return .none
+                }
+                let previousManualStatus = item.workspace.manualStatus
+
+                return updateWorkspace {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.manualStatus = #bind(status.rawValue) }
+                            .execute(db)
+                    }
+                } rollback: {
+                    try await database.write { db in
+                        guard let workspace = try Workspace.find(item.id).fetchOne(db),
+                              workspace.manualStatus == status.rawValue
+                        else {
+                            return
+                        }
+
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.manualStatus = #bind(previousManualStatus) }
+                            .execute(db)
+                    }
+                } operation: {
+                    try await desktopClient.setWorkspaceStatus(
+                        workspaceID: item.id,
+                        status: status
+                    )
+                }
+
+            case .workspaceUnreadButtonTapped:
+                let item = state.workspaceWithRepository
+                let isUnread = (item.workspace.unread ?? 0) == 0
+                let previousUnread = item.workspace.unread
+                let unread = isUnread ? 1 : 0
+
+                return updateWorkspace {
+                    try await database.write { db in
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.unread = #bind(unread) }
+                            .execute(db)
+                    }
+                } rollback: {
+                    try await database.write { db in
+                        guard let workspace = try Workspace.find(item.id).fetchOne(db),
+                              workspace.unread == unread
+                        else {
+                            return
+                        }
+
+                        try Workspace
+                            .find(item.id)
+                            .update { $0.unread = #bind(previousUnread) }
+                            .execute(db)
+                    }
+                } operation: {
+                    try await desktopClient.setWorkspaceUnread(
+                        workspaceID: item.id,
+                        isUnread: isUnread
+                    )
+                }
+
             case .binding, .chat, .delegate, .destination:
                 return .none
 
@@ -390,6 +506,37 @@ public struct WorkspaceChat: Sendable {
             Chat()
         }
         .ifLet(\.$destination, action: \.destination)
+    }
+
+    private func updateWorkspace(
+        _ optimisticUpdate: @escaping @Sendable () async throws -> Void,
+        rollback: @escaping @Sendable () async throws -> Void,
+        operation: @escaping @Sendable () async throws -> UIHookMutationPath
+    ) -> Effect<Action> {
+        .run { send in
+            do {
+                try await optimisticUpdate()
+            } catch {
+                Logger.chat.error("Failed to optimistically update workspace: \(error)")
+                await send(.workspaceMutationFailed(error))
+                return
+            }
+
+            do {
+                if try await operation() == .sqliteFallback {
+                    await send(.workspaceMutationUsedSQLiteFallback)
+                }
+            } catch let mutationError {
+                do {
+                    try await rollback()
+                } catch {
+                    Logger.chat.error("Failed to roll back workspace update: \(error)")
+                }
+
+                Logger.chat.error("Failed to update workspace: \(mutationError)")
+                await send(.workspaceMutationFailed(mutationError))
+            }
+        }
     }
 
     /// Reconciles the selected chat after session or workspace updates.
@@ -517,6 +664,26 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
         }
     }
 
+    static func failedToUpdateWorkspace(message: String) -> Self {
+        AlertState {
+            TextState("Failed to update workspace")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static var workspaceMutationUsedSQLiteFallback: Self {
+        AlertState {
+            TextState("Workspace change saved")
+        } message: {
+            TextState(
+                "The change was saved to Conductor's database, but the open Conductor window "
+                    + "may remain stale until Conductor reloads. Reconnect the Workspace UI hook "
+                    + "for live updates."
+            )
+        }
+    }
+
     static func failedToCreateSession(message: String) -> Self {
         AlertState {
             TextState("Failed to create session")
@@ -561,6 +728,7 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
 public struct WorkspaceChatView: View {
     @Environment(\.openURL) private var openURL
     @Bindable var store: StoreOf<WorkspaceChat>
+    @ScaledMetric(relativeTo: .body) private var menuIconSize = 20
     @ScaledMetric(relativeTo: .body) private var sessionPickerHeight = 52
 
     public init(store: StoreOf<WorkspaceChat>) {
@@ -673,44 +841,105 @@ public struct WorkspaceChatView: View {
 
     private var toolbarMenu: some View {
         Menu {
-            Button {
-                store.send(.renameBranchButtonTapped)
-            } label: {
-                Label {
-                    Text("Rename branch")
-                } icon: {
-                    ColoredMenuImage(Lucide.pencil, color: .theme(.textPrimary))
-                }
-
-                if let branch = store.workspace.branch {
-                    Text(verbatim: branch)
-                }
-            }
-            .disabled(store.isRenamingBranch)
-
-            if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
+            Section {
                 Button {
-                    store.send(.archivedSessionsButtonTapped)
+                    store.send(.workspaceUnreadButtonTapped)
                 } label: {
                     Label {
-                        Text("Archived sessions")
+                        Text(isUnread ? "Mark as read" : "Mark as unread")
                     } icon: {
-                        ColoredMenuImage(Lucide.history, color: .theme(.textPrimary))
+                        ColoredMenuImage(isUnread ? Lucide.mailOpen : Lucide.mail)
                     }
+                }
+
+                Button {
+                    store.send(.workspacePinnedButtonTapped)
+                } label: {
+                    Label {
+                        Text(isPinned ? "Unpin" : "Pin")
+                    } icon: {
+                        ColoredMenuImage(isPinned ? Lucide.pinOff : Lucide.pin)
+                    }
+                }
+
+                Menu {
+                    Picker(
+                        "Status",
+                        selection: Binding(
+                            get: { store.workspace.status },
+                            set: { store.send(.workspaceStatusButtonTapped($0)) }
+                        )
+                    ) {
+                        ForEach(statuses) { status in
+                            Label {
+                                Text(status.title)
+                            } icon: {
+                                LinearStatusIcon(
+                                    status: status,
+                                    size: menuIconSize,
+                                    preservesColor: true
+                                )
+                            }
+                            .tag(status)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.inline)
+                } label: {
+                    Label {
+                        Text("Set status")
+                    } icon: {
+                        LinearStatusIcon(
+                            status: store.workspace.status,
+                            size: menuIconSize,
+                            preservesColor: true
+                        )
+                    }
+
+                    Text(store.workspace.status.title)
                 }
             }
 
-            if let pullRequestURL = store.workspaceWithRepository.pullRequestURL {
+            Section {
                 Button {
-                    openURL(pullRequestURL)
+                    store.send(.renameBranchButtonTapped)
                 } label: {
                     Label {
-                        Text("Open PR in GitHub")
+                        Text("Rename branch")
                     } icon: {
-                        ScaledImage.gitHub(size: 16, relativeTo: .body)
+                        ColoredMenuImage(Lucide.pencil, color: .theme(.textPrimary))
+                    }
+
+                    if let branch = store.workspace.branch {
+                        Text(verbatim: branch)
                     }
                 }
-                .accessibilityLabel("Pull request")
+                .disabled(store.isRenamingBranch)
+
+                if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
+                    Button {
+                        store.send(.archivedSessionsButtonTapped)
+                    } label: {
+                        Label {
+                            Text("Chat history")
+                        } icon: {
+                            ColoredMenuImage(Lucide.history, color: .theme(.textPrimary))
+                        }
+                    }
+                }
+
+                if let pullRequestURL = store.workspaceWithRepository.pullRequestURL {
+                    Button {
+                        openURL(pullRequestURL)
+                    } label: {
+                        Label {
+                            Text("Open PR in GitHub")
+                        } icon: {
+                            ScaledImage.gitHub(size: 16, relativeTo: .body)
+                        }
+                    }
+                    .accessibilityLabel("Pull request")
+                }
             }
 
             Section {
@@ -736,6 +965,19 @@ public struct WorkspaceChatView: View {
             }
             .labelStyle(.iconOnly)
         }
+        .accessibilityLabel("Workspace actions")
+    }
+
+    private var statuses: [Workspace.Status] {
+        [.backlog, .inProgress, .inReview, .done, .canceled]
+    }
+
+    private var isPinned: Bool {
+        store.workspace.pinnedAt != nil
+    }
+
+    private var isUnread: Bool {
+        (store.workspace.unread ?? 0) > 0
     }
 
     private struct SessionPicker: View {
