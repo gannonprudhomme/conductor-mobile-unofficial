@@ -28,9 +28,11 @@ struct ChatTextFieldTests {
                 isSendInFlight: false,
                 isStopInFlight: false,
                 isWorking: false,
+                voiceInputPhase: .idle,
                 selectedModel: .constant(.gpt_5_6_sol),
                 shouldFocusOnAppear: true,
                 onFastModeTapped: {},
+                onMicrophoneTapped: {},
                 onSendTapped: {},
                 onStopTapped: {}
             )

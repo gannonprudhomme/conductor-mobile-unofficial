@@ -1205,6 +1205,46 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("When voice transcription fails, an alert is presented and dismissed")
+    func voiceTranscriptionFails() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .speechTranscriptionResponse(
+                        sessionID: activeSession.id,
+                        result: .failure(TestError())
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToTranscribeSpeech(message: TestError().localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
     @Test("A stop failure is ignored after the stopped session was observed")
     func observedStopSuppressesFailure() async throws {
         let workspace = Workspace.preview(activeSessionID: "active")

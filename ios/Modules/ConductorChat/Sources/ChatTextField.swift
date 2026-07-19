@@ -21,8 +21,10 @@ struct ChatTextField: View {
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
+    let voiceInputPhase: Chat.VoiceInputPhase
     let shouldFocusOnAppear: Bool
     let onFastModeTapped: @MainActor () -> Void
+    let onMicrophoneTapped: @MainActor () -> Void
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
@@ -34,9 +36,11 @@ struct ChatTextField: View {
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
+        voiceInputPhase: Chat.VoiceInputPhase,
         selectedModel: Binding<Session.Model>,
         shouldFocusOnAppear: Bool = false,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onMicrophoneTapped: @escaping @MainActor () -> Void,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
@@ -47,9 +51,11 @@ struct ChatTextField: View {
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
+        self.voiceInputPhase = voiceInputPhase
         self._selectedModel = selectedModel
         self.shouldFocusOnAppear = shouldFocusOnAppear
         self.onFastModeTapped = onFastModeTapped
+        self.onMicrophoneTapped = onMicrophoneTapped
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -106,9 +112,15 @@ struct ChatTextField: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
+                VoiceInputButton(
+                    phase: voiceInputPhase,
+                    isEnabled: isVoiceInputButtonEnabled,
+                    action: onMicrophoneTapped
+                )
+
                 if isWorking || isStopInFlight {
                     StopButton(
-                        isEnabled: !isAnyActionInFlight,
+                        isEnabled: !isMessageActionInFlight,
                         isInFlight: isStopInFlight,
                         action: onStopTapped
                     )
@@ -116,7 +128,9 @@ struct ChatTextField: View {
 
                 if (!isWorking && !isStopInFlight) || hasSendableText || isSendInFlight {
                     SendButton(
-                        isEnabled: hasSendableText && !isAnyActionInFlight,
+                        isEnabled: hasSendableText
+                            && !isMessageActionInFlight
+                            && voiceInputPhase == .idle,
                         isInFlight: isSendInFlight,
                         action: onSendTapped
                     )
@@ -127,6 +141,7 @@ struct ChatTextField: View {
         .fixedSize(horizontal: false, vertical: true)
         .animation(.default, value: hasSendableText)
         .animation(.default, value: isWorking)
+        .animation(.default, value: voiceInputPhase)
     }
 
     private var hasSendableText: Bool {
@@ -134,7 +149,110 @@ struct ChatTextField: View {
     }
 
     private var isAnyActionInFlight: Bool {
+        isMessageActionInFlight || voiceInputPhase == .startingRecording
+            || voiceInputPhase == .transcribing
+    }
+
+    private var isMessageActionInFlight: Bool {
         isSendInFlight || isStopInFlight
+    }
+
+    private var isVoiceInputButtonEnabled: Bool {
+        switch voiceInputPhase {
+        case .idle:
+            !isMessageActionInFlight
+
+        case .recording:
+            true
+
+        case .startingRecording, .transcribing:
+            false
+        }
+    }
+
+    private struct VoiceInputButton: View {
+        @ScaledMetric(relativeTo: ThemeFontStyle.body.textStyle)
+        private var iconSize = ThemeFontStyle.body.size
+
+        let phase: Chat.VoiceInputPhase
+        let isEnabled: Bool
+        let action: @MainActor () -> Void
+
+        var body: some View {
+            Button(action: action) {
+                Label {
+                    Text(accessibilityLabel)
+                } icon: {
+                    switch phase {
+                    case .idle:
+                        LucideIcon(Lucide.mic, style: .body)
+
+                    case .recording:
+                        let rectSize = iconSize / 1.5
+                        Rectangle()
+                            .fill(Color.theme(.destructive))
+                            .frame(width: rectSize, height: rectSize)
+                            .frame(width: iconSize, height: iconSize)
+                            .contentTransition(.opacity)
+
+                    case .startingRecording, .transcribing:
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(foregroundColor)
+                    }
+                }
+                .labelStyle(.iconOnly)
+                .font(.theme(.body))
+                .foregroundStyle(foregroundColor)
+                .tint(foregroundColor)
+                .padding(8)
+            }
+            .disabled(!isEnabled)
+            .accessibilityIdentifier("chat.voiceInput")
+            .glassEffect(
+                .regular
+                    .tint(backgroundColor)
+                    .interactive(isEnabled)
+            )
+            .animation(.default, value: phase)
+            .sensoryFeedback(.selection, trigger: phase)
+        }
+
+        private var accessibilityLabel: String {
+            switch phase {
+            case .idle:
+                "Record message"
+
+            case .startingRecording:
+                "Starting recording"
+
+            case .recording:
+                "Stop recording"
+
+            case .transcribing:
+                "Transcribing recording"
+            }
+        }
+
+        private var backgroundColor: Color {
+            switch phase {
+            case .recording:
+                .theme(.destructiveBackground)
+
+            case .idle, .startingRecording, .transcribing:
+                Color.theme(.foreground).opacity(0.05)
+            }
+        }
+
+        private var foregroundColor: Color {
+            switch phase {
+            case .recording:
+                .theme(.destructive)
+
+            case .idle, .startingRecording, .transcribing:
+                .theme(.textPrimary)
+            }
+        }
     }
 
     private struct SendButton: View {
@@ -244,8 +362,10 @@ struct ChatTextField: View {
             isSendInFlight: false,
             isStopInFlight: false,
             isWorking: true,
+            voiceInputPhase: .idle,
             selectedModel: $selectedModel,
             onFastModeTapped: { isFastModeEnabled.toggle() },
+            onMicrophoneTapped: { },
             onSendTapped: { },
             onStopTapped: { }
         )

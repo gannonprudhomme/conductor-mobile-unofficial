@@ -361,6 +361,18 @@ public struct WorkspaceChat: Sendable {
                 )
                 return .none
 
+            case let .chat(.speechRecordingStarted(sessionID, .failure(error))),
+                 let .chat(.speechTranscriptionResponse(sessionID, .failure(error))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to transcribe speech: \(error)")
+                state.destination = .alert(
+                    .failedToTranscribeSpeech(message: error.localizedDescription)
+                )
+                return .none
+
             case let .chat(.stopSessionResponse(sessionID, .failure(error))):
                 guard state.chat?.sessionID == sessionID else {
                     return .none
@@ -719,6 +731,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     static func failedToStopSession(message: String) -> Self {
         AlertState {
             TextState("Failed to stop agent")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToTranscribeSpeech(message: String) -> Self {
+        AlertState {
+            TextState("Failed to transcribe speech")
         } message: {
             TextState(message)
         }

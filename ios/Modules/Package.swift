@@ -53,6 +53,7 @@ let package = Package(
             name: "ConductorChat",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "DependenciesMacros", package: "swift-dependencies"),
                 .product(name: "SharedConductorData", package: "ConductorShared"),
                 .product(name: "LucideIcons", package: "lucide-icons-swift"),
                 .product(name: "Logging", package: "swift-log"),

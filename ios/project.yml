@@ -46,6 +46,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.productivity
         LSRequiresIPhoneOS: true
+        NSMicrophoneUsageDescription: Record speech to add a transcription to your message.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
