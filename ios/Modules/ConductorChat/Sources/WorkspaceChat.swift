@@ -627,8 +627,13 @@ public struct WorkspaceChatView: View {
                 }
             }
         } label: {
-            LucideIcon(Lucide.ellipsis, style: .inlineToolbarTitle)
-                .foregroundStyle(.theme(.textPrimary))
+            Label {
+                Text("More")
+            } icon: {
+                LucideIcon(Lucide.ellipsis, size: 20, relativeTo: .body)
+                    .foregroundStyle(.theme(.textPrimary))
+            }
+            .labelStyle(.iconOnly)
         }
     }
 
