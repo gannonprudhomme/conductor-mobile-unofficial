@@ -14,15 +14,35 @@ import Speech
 @DependencyClient
 struct SpeechTranscriptionClient: Sendable {
     var cancelRecording: @Sendable () async -> Void
+    var recordingLevels: @Sendable () -> AsyncStream<Float> = {
+        AsyncStream { $0.finish() }
+    }
     var startRecording: @Sendable () async throws -> Void
     var stopRecordingAndTranscribe: @Sendable () async throws -> String
 }
 
 extension SpeechTranscriptionClient: DependencyKey {
+    static var testValue: Self {
+        var client = Self()
+        client.recordingLevels = { AsyncStream { $0.finish() } }
+        return client
+    }
+
     static var liveValue: Self {
         let transcriber = LiveSpeechTranscriber()
         return Self(
             cancelRecording: { await transcriber.cancelRecording() },
+            recordingLevels: {
+                AsyncStream { continuation in
+                    let task = Task {
+                        while !Task.isCancelled {
+                            continuation.yield(await transcriber.recordingLevel())
+                            try? await Task.sleep(for: .milliseconds(50))
+                        }
+                    }
+                    continuation.onTermination = { _ in task.cancel() }
+                }
+            },
             startRecording: { try await transcriber.startRecording() },
             stopRecordingAndTranscribe: {
                 try await transcriber.stopRecordingAndTranscribe()
@@ -74,6 +94,7 @@ private actor LiveSpeechTranscriber {
                     AVSampleRateKey: 44_100,
                 ]
             )
+            recorder.isMeteringEnabled = true
             guard recorder.prepareToRecord(), recorder.record() else {
                 throw SpeechTranscriptionError.failedToStartRecording
             }
@@ -87,6 +108,14 @@ private actor LiveSpeechTranscriber {
             try? FileManager.default.removeItem(at: url)
             throw error
         }
+    }
+
+    func recordingLevel() -> Float {
+        guard let recorder else {
+            return 0
+        }
+        recorder.updateMeters()
+        return min(max((recorder.averagePower(forChannel: 0) + 50) / 50, 0), 1)
     }
 
     func stopRecordingAndTranscribe() async throws -> String {

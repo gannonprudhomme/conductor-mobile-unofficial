@@ -101,6 +101,10 @@ struct ChatTests {
             recording.voiceInputPhase = .recording
             #expect(original != recording)
 
+            var metering = original
+            metering.voiceInputLevels = [0.5]
+            #expect(original != metering)
+
             var emptySnapshot = original
             emptySnapshot.isMessageSnapshotEmpty = true
             #expect(original != emptySnapshot)
@@ -236,6 +240,46 @@ struct ChatTests {
 
             #expect(wasCancelled.value)
             #expect(store.state.messageDraft == "Keep this draft.")
+        }
+    }
+
+    @Test("Voice input levels update the waveform and reset after cancellation")
+    func voiceInputLevels() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let (levels, levelContinuation) = AsyncStream<Float>.makeStream()
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.cancelRecording = { }
+                $0.speechTranscriptionClient.recordingLevels = { levels }
+                $0.speechTranscriptionClient.startRecording = { }
+            }
+
+            await store.send(.microphoneButtonTapped) {
+                $0.voiceInputPhase = .startingRecording
+            }
+            await store.receive(\.speechRecordingStarted) {
+                $0.voiceInputPhase = .recording
+            }
+
+            levelContinuation.yield(0.25)
+            await store.receive(\.speechRecordingLevelUpdated, 0.25) {
+                $0.voiceInputLevels = [0.25]
+            }
+            levelContinuation.yield(2)
+            await store.receive(\.speechRecordingLevelUpdated, 2) {
+                $0.voiceInputLevels = [0.25, 1]
+            }
+
+            await store.send(.speechRecordingCancelled) {
+                $0.voiceInputPhase = .idle
+                $0.voiceInputLevels = []
+            }
+            levelContinuation.finish()
+            await store.finish()
         }
     }
 

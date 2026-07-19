@@ -22,6 +22,7 @@ struct ChatTextField: View {
     let isStopInFlight: Bool
     let isWorking: Bool
     let voiceInputPhase: Chat.VoiceInputPhase
+    let voiceInputLevels: [Float]
     let shouldFocusOnAppear: Bool
     let onFastModeTapped: @MainActor () -> Void
     let onMicrophoneTapped: @MainActor () -> Void
@@ -37,6 +38,7 @@ struct ChatTextField: View {
         isStopInFlight: Bool,
         isWorking: Bool,
         voiceInputPhase: Chat.VoiceInputPhase,
+        voiceInputLevels: [Float],
         selectedModel: Binding<Session.Model>,
         shouldFocusOnAppear: Bool = false,
         onFastModeTapped: @escaping @MainActor () -> Void,
@@ -52,6 +54,7 @@ struct ChatTextField: View {
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
         self.voiceInputPhase = voiceInputPhase
+        self.voiceInputLevels = voiceInputLevels
         self._selectedModel = selectedModel
         self.shouldFocusOnAppear = shouldFocusOnAppear
         self.onFastModeTapped = onFastModeTapped
@@ -62,11 +65,17 @@ struct ChatTextField: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            textField
+            if voiceInputPhase == .idle {
+                textField
 
-            bottomRowButtons
+                bottomRowButtons
+            } else {
+                voiceInputTakeover
+            }
         }
+        .frame(minHeight: 64)
         .animation(.default, value: isFocused)
+        .animation(.default, value: voiceInputPhase)
         .padding(EdgeInsets(vertical: 12, horizontal: 16))
         .glassEffect(
             .clear
@@ -79,6 +88,32 @@ struct ChatTextField: View {
                 return
             }
             isFocused = true
+        }
+    }
+
+    @ViewBuilder
+    private var voiceInputTakeover: some View {
+        switch voiceInputPhase {
+        case .recording:
+            HStack(spacing: 12) {
+                RecordingWaveform(levels: voiceInputLevels)
+                    .frame(maxWidth: .infinity)
+
+                VoiceInputButton(
+                    phase: voiceInputPhase,
+                    isEnabled: true,
+                    action: onMicrophoneTapped
+                )
+            }
+
+        case .startingRecording:
+            VoiceInputStatus(title: "Starting recording…")
+
+        case .transcribing:
+            VoiceInputStatus(title: "Transcribing…")
+
+        case .idle:
+            EmptyView()
         }
     }
 
@@ -255,6 +290,59 @@ struct ChatTextField: View {
         }
     }
 
+    private struct RecordingWaveform: View {
+        let levels: [Float]
+
+        var body: some View {
+            Canvas { context, size in
+                let barWidth = 3.0
+                let spacing = 3.0
+                let barCount = max(Int((size.width + spacing) / (barWidth + spacing)), 1)
+                let visibleLevels = Array(levels.suffix(barCount))
+                let leadingEmptyBarCount = barCount - visibleLevels.count
+
+                for index in 0..<barCount {
+                    let levelIndex = index - leadingEmptyBarCount
+                    let level = levelIndex >= 0
+                        ? CGFloat(visibleLevels[levelIndex])
+                        : 0
+                    let barHeight = max(barWidth, level * size.height)
+                    let rect = CGRect(
+                        x: CGFloat(index) * (barWidth + spacing),
+                        y: (size.height - barHeight) / 2,
+                        width: barWidth,
+                        height: barHeight
+                    )
+                    context.fill(
+                        Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                        with: .color(Color.theme(.accent))
+                    )
+                }
+            }
+            .frame(height: 40)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Microphone audio level")
+        }
+    }
+
+    private struct VoiceInputStatus: View {
+        let title: String
+
+        var body: some View {
+            Label {
+                Text(title)
+            } icon: {
+                ProgressView()
+                    .progressViewStyle(.network)
+                    .tint(.theme(.textSecondary))
+            }
+            .labelStyle(.conductorSmall)
+            .font(.theme(.small))
+            .foregroundStyle(.theme(.textSecondary))
+            .frame(maxWidth: .infinity, minHeight: 40, alignment: .center)
+        }
+    }
+
     private struct SendButton: View {
         let isEnabled: Bool
         let isInFlight: Bool
@@ -363,6 +451,7 @@ struct ChatTextField: View {
             isStopInFlight: false,
             isWorking: true,
             voiceInputPhase: .idle,
+            voiceInputLevels: [],
             selectedModel: $selectedModel,
             onFastModeTapped: { isFastModeEnabled.toggle() },
             onMicrophoneTapped: { },

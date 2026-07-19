@@ -44,6 +44,7 @@ public struct Chat: Sendable {
         var isMessageSendInFlight = false
         var isStopInFlight = false
         var voiceInputPhase = VoiceInputPhase.idle
+        var voiceInputLevels: [Float] = []
         var hasObservedSessionModelChange = false
         var hasUserSelectedModel = false
         var scrollToBottomRequest = 0
@@ -129,6 +130,7 @@ public struct Chat: Sendable {
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.voiceInputPhase == rhs.voiceInputPhase
+                && lhs.voiceInputLevels == rhs.voiceInputLevels
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
@@ -167,6 +169,7 @@ public struct Chat: Sendable {
             result: Result<String, any Error>
         )
         case speechRecordingCancelled
+        case speechRecordingLevelUpdated(Float)
         case speechRecordingStarted(
             sessionID: Session.ID,
             result: Result<Void, any Error>
@@ -241,6 +244,7 @@ public struct Chat: Sendable {
                 switch state.voiceInputPhase {
                 case .idle:
                     state.voiceInputPhase = .startingRecording
+                    state.voiceInputLevels.removeAll()
                     return .run { [sessionID = state.session.id] send in
                         do {
                             try await speechTranscriptionClient.startRecording()
@@ -265,28 +269,32 @@ public struct Chat: Sendable {
 
                 case .recording:
                     state.voiceInputPhase = .transcribing
-                    return .run { [sessionID = state.session.id] send in
-                        do {
-                            let transcript = try await speechTranscriptionClient
-                                .stopRecordingAndTranscribe()
-                            await send(
-                                .speechTranscriptionResponse(
-                                    sessionID: sessionID,
-                                    result: .success(transcript)
+                    state.voiceInputLevels.removeAll()
+                    return .merge(
+                        .cancel(id: CancelID.speechRecordingLevels),
+                        .run { [sessionID = state.session.id] send in
+                            do {
+                                let transcript = try await speechTranscriptionClient
+                                    .stopRecordingAndTranscribe()
+                                await send(
+                                    .speechTranscriptionResponse(
+                                        sessionID: sessionID,
+                                        result: .success(transcript)
+                                    )
                                 )
-                            )
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            await send(
-                                .speechTranscriptionResponse(
-                                    sessionID: sessionID,
-                                    result: .failure(error)
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                await send(
+                                    .speechTranscriptionResponse(
+                                        sessionID: sessionID,
+                                        result: .failure(error)
+                                    )
                                 )
-                            )
+                            }
                         }
-                    }
-                    .cancellable(id: CancelID.speechRecording, cancelInFlight: true)
+                        .cancellable(id: CancelID.speechRecording, cancelInFlight: true)
+                    )
 
                 case .startingRecording, .transcribing:
                     return .none
@@ -297,31 +305,51 @@ public struct Chat: Sendable {
                     return .none
                 }
                 state.voiceInputPhase = .idle
+                state.voiceInputLevels.removeAll()
                 return .merge(
                     .cancel(id: CancelID.speechRecording),
+                    .cancel(id: CancelID.speechRecordingLevels),
                     .run { _ in
                         await speechTranscriptionClient.cancelRecording()
                     }
                 )
 
+            case let .speechRecordingLevelUpdated(level):
+                guard state.voiceInputPhase == .recording else {
+                    return .none
+                }
+                state.voiceInputLevels.append(min(max(level, 0), 1))
+                if state.voiceInputLevels.count > 48 {
+                    state.voiceInputLevels.removeFirst(state.voiceInputLevels.count - 48)
+                }
+                return .none
+
             case let .speechRecordingStarted(sessionID, result):
                 guard sessionID == state.sessionID else {
                     return .none
                 }
-                state.voiceInputPhase = switch result {
+                switch result {
                 case .success:
-                    .recording
+                    state.voiceInputPhase = .recording
+                    return .run { send in
+                        for await level in speechTranscriptionClient.recordingLevels() {
+                            await send(.speechRecordingLevelUpdated(level))
+                        }
+                    }
+                    .cancellable(id: CancelID.speechRecordingLevels, cancelInFlight: true)
 
                 case .failure:
-                    .idle
+                    state.voiceInputPhase = .idle
+                    state.voiceInputLevels.removeAll()
+                    return .none
                 }
-                return .none
 
             case let .speechTranscriptionResponse(sessionID, result):
                 guard sessionID == state.sessionID else {
                     return .none
                 }
                 state.voiceInputPhase = .idle
+                state.voiceInputLevels.removeAll()
                 guard case let .success(transcript) = result else {
                     return .none
                 }
@@ -508,6 +536,7 @@ public struct Chat: Sendable {
 
     private enum CancelID: Hashable {
         case speechRecording
+        case speechRecordingLevels
     }
 
     private func observeMessages(_ state: State) -> Effect<Action> {
@@ -646,6 +675,7 @@ struct ChatView: View {
                         isStopInFlight: store.isStopInFlight,
                         isWorking: store.session.status == .working,
                         voiceInputPhase: store.voiceInputPhase,
+                        voiceInputLevels: store.voiceInputLevels,
                         selectedModel: $store.selectedModel,
                         shouldFocusOnAppear: store.shouldFocusMessageField,
                         onFastModeTapped: { store.send(.fastModeButtonTapped) },

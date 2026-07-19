@@ -29,6 +29,7 @@ struct ChatTextFieldTests {
                 isStopInFlight: false,
                 isWorking: false,
                 voiceInputPhase: .idle,
+                voiceInputLevels: [],
                 selectedModel: .constant(.gpt_5_6_sol),
                 shouldFocusOnAppear: true,
                 onFastModeTapped: {},
