@@ -1,34 +1,35 @@
 //
 //  SpeechTranscriptionClient.swift
-//  ConductorChat
+//  ConductorMobileData
 //
 //  Created by Gannon Prudomme on 7/19/26.
 //
 
 import AVFAudio
-import ComposableArchitecture
+import Dependencies
 import DependenciesMacros
 import Foundation
 import Speech
 
 @DependencyClient
-struct SpeechTranscriptionClient: Sendable {
-    var cancelRecording: @Sendable () async -> Void
-    var recordingLevels: @Sendable () -> AsyncStream<Float> = {
+public struct SpeechTranscriptionClient: Sendable {
+    public var cancelRecording: @Sendable () async -> Void = { }
+    public var recordingLevels: @Sendable () -> AsyncStream<Float> = {
         AsyncStream { $0.finish() }
     }
-    var startRecording: @Sendable () async throws -> Void
-    var stopRecordingAndTranscribe: @Sendable () async throws -> String
+    public var startRecording: @Sendable () async throws -> Void
+    public var stopRecordingAndTranscribe: @Sendable () async throws -> String
 }
 
 extension SpeechTranscriptionClient: DependencyKey {
-    static var testValue: Self {
+    public static var testValue: Self {
         var client = Self()
+        client.cancelRecording = { }
         client.recordingLevels = { AsyncStream { $0.finish() } }
         return client
     }
 
-    static var liveValue: Self {
+    public static var liveValue: Self {
         let transcriber = LiveSpeechTranscriber()
         return Self(
             cancelRecording: { await transcriber.cancelRecording() },
@@ -51,7 +52,7 @@ extension SpeechTranscriptionClient: DependencyKey {
     }
 }
 
-extension DependencyValues {
+public extension DependencyValues {
     var speechTranscriptionClient: SpeechTranscriptionClient {
         get { self[SpeechTranscriptionClient.self] }
         set { self[SpeechTranscriptionClient.self] = newValue }
@@ -134,13 +135,8 @@ private actor LiveSpeechTranscriber {
             try? FileManager.default.removeItem(at: recordingURL)
         }
 
-        do {
-            return try await transcribeAudio(at: recordingURL)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch let error where error.localizedDescription
-            == "No speech was transcribed in recording" {
-            return ""
-        }
+        return try await transcribeAudio(at: recordingURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func cancelRecording() {
@@ -172,16 +168,31 @@ private actor LiveSpeechTranscriber {
         }
 
         let audioFile = try AVAudioFile(forReading: url)
-        async let transcript = transcriber.results.reduce(into: "") {
-            $0 += String($1.text.characters)
-        }
+        async let transcript = collectTranscript(from: transcriber)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
             try await analyzer.finalizeAndFinish(through: lastSample)
         } else {
             await analyzer.cancelAndFinishNow()
         }
-        return try await transcript
+        return try await transcript.get()
+    }
+
+    private func collectTranscript(
+        from transcriber: SpeechTranscriber
+    ) async -> Result<String, any Error> {
+        var transcript = ""
+        do {
+            for try await result in transcriber.results {
+                transcript += String(result.text.characters)
+            }
+        } catch {
+            guard !transcript.isEmpty else {
+                return .success("")
+            }
+            return .failure(error)
+        }
+        return .success(transcript)
     }
 }
 

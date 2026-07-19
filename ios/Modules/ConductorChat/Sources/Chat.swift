@@ -22,13 +22,6 @@ import SwiftUI
 public struct Chat: Sendable {
     public typealias TurnSummaryID = String
 
-    enum VoiceInputPhase: Equatable, Sendable {
-        case idle
-        case startingRecording
-        case recording
-        case transcribing
-    }
-
     @ObservableState
     public struct State: Equatable {
         @Shared(.desktopConnectionStatus)
@@ -301,9 +294,6 @@ public struct Chat: Sendable {
                 }
 
             case .speechRecordingCancelled:
-                guard state.voiceInputPhase != .idle else {
-                    return .none
-                }
                 state.voiceInputPhase = .idle
                 state.voiceInputLevels.removeAll()
                 return .merge(

@@ -272,6 +272,28 @@ struct ChatTests {
         }
     }
 
+    @Test("Leaving an idle chat still cancels the shared recorder")
+    func idleVoiceInputCancellation() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let wasCancelled = LockIsolated(false)
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.cancelRecording = {
+                    wasCancelled.setValue(true)
+                }
+            }
+
+            await store.send(.speechRecordingCancelled)
+            await store.finish()
+
+            #expect(wasCancelled.value)
+        }
+    }
+
     @Test("Voice input levels update the waveform and reset after cancellation")
     func voiceInputLevels() async throws {
         try await withDependencies {
