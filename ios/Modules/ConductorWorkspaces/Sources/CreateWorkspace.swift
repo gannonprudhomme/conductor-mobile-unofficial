@@ -13,6 +13,7 @@ import SharedConductorData
 import Sharing
 import SQLiteData
 import SwiftUI
+import UIKit
 
 @Reducer
 public struct CreateWorkspace: Sendable {
@@ -214,7 +215,6 @@ extension AlertState where Action == CreateWorkspace.Action.Alert {
 
 public struct CreateWorkspaceView: View {
     @Bindable var store: StoreOf<CreateWorkspace>
-    @FocusState private var isPromptFocused: Bool
 
     public init(store: StoreOf<CreateWorkspace>) {
         self.store = store
@@ -293,12 +293,13 @@ public struct CreateWorkspaceView: View {
     }
 
     private var promptEditor: some View {
-        TextEditor(text: Binding(store.$prompt))
-            .scrollContentBackground(.hidden)
+        PromptTextView(
+            text: Binding(store.$prompt),
+            isEditable: !store.isCreateAPIInFlight
+        )
             .font(.theme(.body))
             .foregroundStyle(.theme(.textPrimary))
             .tint(.theme(.accent))
-            .focused($isPromptFocused)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .overlay(alignment: .topLeading) {
                 if store.prompt.isEmpty {
@@ -312,10 +313,6 @@ public struct CreateWorkspaceView: View {
             }
             .disabled(store.isCreateAPIInFlight)
             .accessibilityLabel("Workspace prompt")
-            .task {
-                await Task.yield()
-                isPromptFocused = true
-            }
     }
 
     private var bottomRow: some View {
@@ -371,6 +368,56 @@ public struct CreateWorkspaceView: View {
     private var selectedRepository: Repository? {
         store.repositories
             .first(where: { $0.id == store.selectedRepositoryID })
+    }
+}
+
+@MainActor
+private struct PromptTextView: UIViewRepresentable {
+    @Binding var text: String
+    let isEditable: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        let bodyFont = UIFont(
+            name: ThemeFontStyle.body.fontName,
+            size: ThemeFontStyle.body.size
+        ) ?? UIFont.systemFont(ofSize: ThemeFontStyle.body.size)
+        textView.adjustsFontForContentSizeCategory = true
+        textView.backgroundColor = .clear
+        textView.delegate = context.coordinator
+        textView.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: bodyFont)
+        textView.isEditable = isEditable
+        textView.text = text
+        textView.textColor = UIColor(Color.theme(.textPrimary))
+        textView.tintColor = UIColor(Color.theme(.accent))
+        if isEditable {
+            textView.becomeFirstResponder()
+        }
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        context.coordinator.text = $text
+        if textView.text != text {
+            textView.text = text
+        }
+        textView.isEditable = isEditable
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            text.wrappedValue = textView.text
+        }
     }
 }
 

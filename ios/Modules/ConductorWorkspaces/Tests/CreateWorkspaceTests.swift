@@ -249,9 +249,6 @@ struct CreateWorkspaceTests {
             }
 
             let textView = try #require(firstTextView(in: hostingController.view))
-            while !textView.isFirstResponder, clock.now < deadline {
-                await Task.yield()
-            }
             #expect(textView.isFirstResponder)
 
             textView.insertText("Build the feature")
