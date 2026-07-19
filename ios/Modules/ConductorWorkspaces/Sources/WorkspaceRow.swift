@@ -67,6 +67,24 @@ struct WorkspaceRow: View {
         .contextMenu {
             contextMenu
         }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            Button {
+                action(.toggleUnread)
+            } label: {
+                Label(
+                    isUnread ? "Mark as read" : "Mark as unread",
+                    systemImage: isUnread ? "envelope.open" : "envelope"
+                )
+            }
+            .tint(.theme(.planBorder))
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                action(.archive)
+            } label: {
+                Label("Archive", systemImage: "archivebox")
+            }
+        }
     }
 
     @ViewBuilder private var contextMenu: some View {

@@ -24,6 +24,7 @@ public enum ThemeColorStyle {
     case highlightForeground
     case input
     case muted
+    case planBorder
     case pullRequestConflict
     case pullRequestMerged
     case sidebarMutedForeground
@@ -89,6 +90,9 @@ public extension ShapeStyle where Self == Color {
 
         case .muted:
             Color(red: 33.0 / 255.0, green: 30.0 / 255.0, blue: 28.0 / 255.0)
+
+        case .planBorder:
+            Color(red: 131.0 / 255.0, green: 105.0 / 255.0, blue: 103.0 / 255.0)
 
         case .pullRequestConflict:
             // Matches Conductor's `--color-orange-400` CSS variable.
