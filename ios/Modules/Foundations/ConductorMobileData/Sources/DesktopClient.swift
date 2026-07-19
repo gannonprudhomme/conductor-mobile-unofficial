@@ -121,7 +121,8 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
         // iOS can abort a WebSocket while the app is suspended. Treat that like other transient
         // transport loss so observations reconnect instead of presenting an alert.
         if nsError.domain == NSPOSIXErrorDomain,
-           nsError.code == Int(POSIXErrorCode.ECONNABORTED.rawValue)
+           nsError.code == Int(POSIXErrorCode.ECANCELED.rawValue)
+                || nsError.code == Int(POSIXErrorCode.ECONNABORTED.rawValue)
                 || nsError.code == Int(POSIXErrorCode.ENOTCONN.rawValue) {
             return true
         }

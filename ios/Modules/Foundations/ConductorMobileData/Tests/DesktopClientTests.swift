@@ -32,6 +32,15 @@ struct DesktopClientTests {
             DesktopClientError.isConnectionFailure(
                 NSError(
                     domain: NSPOSIXErrorDomain,
+                    code: Int(POSIXErrorCode.ECANCELED.rawValue)
+                )
+            ),
+            true
+        )
+        expectNoDifference(
+            DesktopClientError.isConnectionFailure(
+                NSError(
+                    domain: NSPOSIXErrorDomain,
                     code: Int(POSIXErrorCode.ENOTCONN.rawValue)
                 )
             ),
