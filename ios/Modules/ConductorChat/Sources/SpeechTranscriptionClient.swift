@@ -134,12 +134,13 @@ private actor LiveSpeechTranscriber {
             try? FileManager.default.removeItem(at: recordingURL)
         }
 
-        let transcript = try await transcribeAudio(at: recordingURL)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !transcript.isEmpty else {
-            throw SpeechTranscriptionError.noSpeechDetected
+        do {
+            return try await transcribeAudio(at: recordingURL)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch let error where error.localizedDescription
+            == "No speech was transcribed in recording" {
+            return ""
         }
-        return transcript
     }
 
     func cancelRecording() {
@@ -189,7 +190,6 @@ private enum SpeechTranscriptionError: LocalizedError {
     case localeNotSupported
     case microphonePermissionDenied
     case noActiveRecording
-    case noSpeechDetected
 
     var errorDescription: String? {
         switch self {
@@ -204,9 +204,6 @@ private enum SpeechTranscriptionError: LocalizedError {
 
         case .noActiveRecording:
             "There isn't an active recording to transcribe."
-
-        case .noSpeechDetected:
-            "No speech was detected in the recording."
         }
     }
 }

@@ -210,6 +210,35 @@ struct ChatTests {
         }
     }
 
+    @Test("Voice input with no transcript preserves the draft")
+    func voiceInputWithoutTranscript() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = { "" }
+            }
+
+            store.state.$messageDraft.withLock { $0 = "Keep this draft." }
+            await store.send(.microphoneButtonTapped) {
+                $0.voiceInputPhase = .startingRecording
+            }
+            await store.receive(\.speechRecordingStarted) {
+                $0.voiceInputPhase = .recording
+            }
+            await store.send(.microphoneButtonTapped) {
+                $0.voiceInputPhase = .transcribing
+            }
+            await store.receive(\.speechTranscriptionResponse) {
+                $0.voiceInputPhase = .idle
+            }
+        }
+    }
+
     @Test("Cancelling voice input stops recording and preserves the draft")
     func voiceInputCancellation() async throws {
         try await withDependencies {

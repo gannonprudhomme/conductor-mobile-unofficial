@@ -350,7 +350,8 @@ public struct Chat: Sendable {
                 }
                 state.voiceInputPhase = .idle
                 state.voiceInputLevels.removeAll()
-                guard case let .success(transcript) = result else {
+                guard case let .success(transcript) = result,
+                      !transcript.isEmpty else {
                     return .none
                 }
                 state.$messageDraft.withLock { draft in
