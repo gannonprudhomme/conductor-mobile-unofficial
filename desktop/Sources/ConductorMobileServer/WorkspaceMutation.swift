@@ -7,6 +7,7 @@
 
 enum WorkspaceMutation: Equatable, Sendable {
     case archive
+    case branch(String)
     case pinned(isPinned: Bool)
     case status(String)
     case unread(isUnread: Bool)

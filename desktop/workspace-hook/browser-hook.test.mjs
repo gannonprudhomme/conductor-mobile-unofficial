@@ -172,12 +172,26 @@ isolatedTest("failed candidates preserve the installed controller", async () => 
   assert.equal(environment.eventSources[0].closeCount, 0);
 });
 
-isolatedTest("missing or duplicate session and message controllers preserve the installed hook", async () => {
+isolatedTest("missing or duplicate Git, session, and message controllers preserve the installed hook", async () => {
   const environment = installHookGlobals({ shell: emptyWorkspaceShell() });
   const installedController = await prepareHook();
   const shell = emptyWorkspaceShell();
 
   environment.shell = {
+    messageProcessingController: shell.messageProcessingController,
+    sessionService: shell.sessionService,
+    workspaceService: shell.workspaceService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous GitService/);
+
+  environment.shell = {
+    ...shell,
+    gitAlias: emptyWorkspaceShell().gitService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous GitService/);
+
+  environment.shell = {
+    gitService: shell.gitService,
     messageProcessingController: shell.messageProcessingController,
     workspaceService: shell.workspaceService,
   };
@@ -190,6 +204,7 @@ isolatedTest("missing or duplicate session and message controllers preserve the 
   await assert.rejects(prepareHook(), /unambiguous SessionService/);
 
   environment.shell = {
+    gitService: shell.gitService,
     sessionService: shell.sessionService,
     workspaceService: shell.workspaceService,
   };
@@ -210,6 +225,13 @@ isolatedTest("commands run in order with real service signatures and continue af
   const pinGate = deferred();
   const calls = [];
   const persistedUnreadSessionIDs = [];
+  const gitService = {
+    async refreshLocalBranch() {},
+    async refreshWorkspaceChanges() {},
+    async renameBranch(input) {
+      calls.push(["branch", input]);
+    },
+  };
   const workspaceService = {
     async archiveWorkspace(input) {
       calls.push(["archive", input]);
@@ -220,6 +242,9 @@ isolatedTest("commands run in order with real service signatures and continue af
     async getWorkspaces() {
       calls.push("workspaces");
       return [{ id: "workspace-1", activeSessionId: "session-1" }];
+    },
+    async markUserSetBranchName(workspaceID) {
+      calls.push(["userSetBranch", workspaceID]);
     },
     async setWorkspacePinned(input) {
       calls.push(["pin", input]);
@@ -259,7 +284,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   };
   const { messageProcessingController } = emptyWorkspaceShell();
   const environment = installHookGlobals({
-    shell: { messageProcessingController, workspaceService, sessionService },
+    shell: { gitService, messageProcessingController, workspaceService, sessionService },
   });
   await prepareHook();
   const source = environment.eventSources[0];
@@ -276,6 +301,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   replacementSource.onmessage(sessionCommand({ model: "gpt-5.6-terra" }));
   replacementSource.onmessage(command({ createSession: true }));
   replacementSource.onmessage(command({ archive: true }));
+  replacementSource.onmessage(command({ branch: "renamed-branch" }));
   replacementSource.onmessage(sessionCommand({
     agentAndModel: { agentType: "claude", model: "fable-5" },
   }));
@@ -288,7 +314,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 12);
+  await waitUntil(() => calls.length === 14);
   await waitUntil(() => environment.errors.length === 5);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
@@ -301,6 +327,12 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["model", "session-1", "gpt-5.6-terra"],
     ["createSession", { workspaceId: "workspace-1" }],
     ["archive", { workspaceId: "workspace-1" }],
+    ["branch", {
+      workspaceId: "workspace-1",
+      branchName: "renamed-branch",
+      autoRenameWorkspace: false,
+    }],
+    ["userSetBranch", "workspace-1"],
     ["agentAndModel", "session-1", "claude", "fable-5"],
     ["fastMode", { sessionId: "session-1", fastMode: true }],
   ]);
@@ -601,10 +633,16 @@ function installHookGlobals({
 }
 
 function emptyWorkspaceShell() {
+  const gitService = {
+    async refreshLocalBranch() {},
+    async refreshWorkspaceChanges() {},
+    async renameBranch() {},
+  };
   const workspaceService = {
     async archiveWorkspace() {},
     async createWorkspaceWithSetup(input) { input.onCreation(); },
     async getWorkspaces() { return []; },
+    async markUserSetBranchName() {},
     async setWorkspacePinned() {},
     async setWorkspaceManualStatus() {},
   };
@@ -622,7 +660,7 @@ function emptyWorkspaceShell() {
     async enqueueMessage() {},
     async sendMessageImmediately() {},
   };
-  return { messageProcessingController, workspaceService, sessionService };
+  return { gitService, messageProcessingController, workspaceService, sessionService };
 }
 
 function command(mutation) {

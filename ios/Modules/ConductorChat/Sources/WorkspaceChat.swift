@@ -32,7 +32,9 @@ public struct WorkspaceChat: Sendable {
         /// However we want to prevent that from overriding a local switch from the user
         var hasUserSelectedSession = false
         var isCreatingSession = false
+        var isRenamingBranch = false
         var isLoadingSessions = true
+        var branchNameDraft = ""
         var hasPersistedInitialSessionSnapshot = false
         /// Cleared once observation identifies a session created after this snapshot.
         var sessionIDsBeforeCreation: Set<Session.ID>?
@@ -88,26 +90,36 @@ public struct WorkspaceChat: Sendable {
         public var workspace: Workspace {
             workspaceWithRepository.workspace
         }
+
+        var canRenameBranch: Bool {
+            let branch = branchNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !isRenamingBranch && !branch.isEmpty && branch != workspace.branch
+        }
     }
 
     @Reducer
     public enum Destination {
         case alert(AlertState<Alert>)
         case archivedSessions(ArchivedSessions)
+        case renameBranch
 
         public enum Alert: Equatable { }
     }
 
-    public enum Action {
+    public enum Action: BindableAction {
         case activeSessionIDChanged(Session.ID?)
         case archiveWorkspaceButtonTapped
         case archiveWorkspaceResponse(Result<Void, any Error>)
         case archivedSessionsButtonTapped
+        case binding(BindingAction<State>)
         case chat(Chat.Action)
         case createSessionButtonTapped
         case createSessionResponse(Result<Session, any Error>)
         case destination(PresentationAction<Destination.Action>)
         case loadSessionsResponse(Result<[Session], any Error>)
+        case renameBranchButtonTapped
+        case renameBranchResponse(Result<Void, any Error>)
+        case renameBranchSubmitted
         case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
         case task
@@ -126,6 +138,7 @@ public struct WorkspaceChat: Sendable {
     public init() { }
 
     public var body: some ReducerOf<Self> {
+        BindingReducer()
         Reduce { state, action in
             switch action {
             case .task:
@@ -184,6 +197,47 @@ public struct WorkspaceChat: Sendable {
                         workspaceID: state.workspace.id,
                         sessions: state.archivedSessions
                     )
+                )
+                return .none
+
+            case .renameBranchButtonTapped:
+                state.branchNameDraft = state.workspace.branch ?? ""
+                state.destination = .renameBranch
+                return .none
+
+            case .renameBranchSubmitted:
+                guard state.canRenameBranch else {
+                    return .none
+                }
+
+                let branch = state.branchNameDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                state.branchNameDraft = branch
+                state.destination = nil
+                state.isRenamingBranch = true
+                return .run { [workspaceID = state.workspace.id, branch] send in
+                    await send(
+                        .renameBranchResponse(
+                            Result {
+                                try await desktopClient.renameWorkspaceBranch(
+                                    workspaceID: workspaceID,
+                                    branch: branch
+                                )
+                            }
+                        )
+                    )
+                }
+
+            case .renameBranchResponse(.success):
+                state.isRenamingBranch = false
+                return .none
+
+            case let .renameBranchResponse(.failure(error)):
+                Logger.chat.error("Failed to rename branch: \(error)")
+                state.isRenamingBranch = false
+                state.destination = .alert(
+                    .failedToRenameBranch(message: error.localizedDescription)
                 )
                 return .none
 
@@ -327,7 +381,7 @@ public struct WorkspaceChat: Sendable {
                 state.chat = Chat.State(session: session)
                 return .none
 
-            case .chat, .delegate, .destination:
+            case .binding, .chat, .delegate, .destination:
                 return .none
 
             }
@@ -479,6 +533,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
         }
     }
 
+    static func failedToRenameBranch(message: String) -> Self {
+        AlertState {
+            TextState("Failed to rename branch")
+        } message: {
+            TextState(message)
+        }
+    }
+
     static func failedToSendMessage(message: String) -> Self {
         AlertState {
             TextState("Failed to send message")
@@ -567,6 +629,30 @@ public struct WorkspaceChatView: View {
             }
         }
         .background(.theme(.background))
+        .alert(
+            "Rename branch",
+            isPresented: Binding(
+                get: { store.destination == .renameBranch },
+                set: { isPresented in
+                    if !isPresented {
+                        store.send(.destination(.dismiss))
+                    }
+                }
+            )
+        ) {
+            TextField("Branch name", text: $store.branchNameDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .tint(.theme(.accent))
+
+            Button("Rename", role: .confirm) {
+                store.send(.renameBranchSubmitted)
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(!store.canRenameBranch)
+
+            Button("Cancel", role: .cancel) { }
+        }
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .sensoryFeedback(.error, trigger: store.destination) { _, destination in
             destination?.alert != nil
@@ -587,6 +673,21 @@ public struct WorkspaceChatView: View {
 
     private var toolbarMenu: some View {
         Menu {
+            Button {
+                store.send(.renameBranchButtonTapped)
+            } label: {
+                Label {
+                    Text("Rename branch")
+                } icon: {
+                    ColoredMenuImage(Lucide.pencil, color: .theme(.textPrimary))
+                }
+
+                if let branch = store.workspace.branch {
+                    Text(verbatim: branch)
+                }
+            }
+            .disabled(store.isRenamingBranch)
+
             if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
                 Button {
                     store.send(.archivedSessionsButtonTapped)

@@ -639,6 +639,8 @@ private extension WorkspaceMutation {
             switch self {
             case .archive:
                 "\"archive\":true"
+            case .branch(let branch):
+                "\"branch\":\(try UIHookCommand.jsonString(branch))"
             case .pinned(let isPinned):
                 "\"pinned\":\(isPinned)"
             case .status(let value):

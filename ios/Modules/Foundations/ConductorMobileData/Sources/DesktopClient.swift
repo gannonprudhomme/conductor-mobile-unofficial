@@ -36,6 +36,10 @@ public struct DesktopClient: Sendable {
         AsyncThrowingStream { $0.finish() }
     }
     public var ping: @Sendable () async throws -> Void = { }
+    public var renameWorkspaceBranch: @Sendable (
+        _ workspaceID: String,
+        _ branch: String
+    ) async throws -> Void
     public var sendMessage: @Sendable (
         _ workspaceID: String,
         _ sessionID: String,
@@ -218,6 +222,11 @@ extension DesktopClient: DependencyKey {
             }
         } ping: {
             try await ping()
+        } renameWorkspaceBranch: { workspaceID, branch in
+            _ = try await patch(
+                WorkspacePatchBody(branch: branch),
+                at: workspaceURL(workspaceID: workspaceID)
+            )
         } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled in
             try await post(
                 SendMessageRequest(
@@ -505,12 +514,14 @@ private struct CreateWorkspaceBody: Encodable, Sendable {
 
 struct WorkspacePatchBody: Encodable, Sendable {
     var shouldArchive: Bool? = nil
+    var branch: String? = nil
     var isPinned: Bool? = nil
     var status: String? = nil
     var isUnread: Bool? = nil
 
     private enum CodingKeys: String, CodingKey {
         case shouldArchive = "archive"
+        case branch
         case isPinned = "pinned"
         case isUnread = "unread"
         case status

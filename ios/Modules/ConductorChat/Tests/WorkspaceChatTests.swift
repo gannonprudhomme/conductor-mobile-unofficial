@@ -639,6 +639,114 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Branch rename is prefilled, trimmed, and submitted")
+    func branchRename() async throws {
+        let workspace = try makeWorkspace(branch: "old-branch")
+        let requests = LockIsolated<[String]>([])
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.renameWorkspaceBranch = { workspaceID, branch in
+                    requests.withValue { $0.append("\(workspaceID):\(branch)") }
+                }
+            }
+            store.exhaustivity = .off
+
+            await store.send(.renameBranchButtonTapped) {
+                $0.branchNameDraft = "old-branch"
+                $0.destination = .renameBranch
+            }
+            await store.send(.binding(.set(\.branchNameDraft, "  renamed-branch  "))) {
+                $0.branchNameDraft = "  renamed-branch  "
+            }
+            await store.send(.renameBranchSubmitted) {
+                $0.branchNameDraft = "renamed-branch"
+                $0.destination = nil
+                $0.isRenamingBranch = true
+            }
+            await store.finish()
+
+            #expect(requests.value == ["workspace-1:renamed-branch"])
+        }
+    }
+
+    @Test("Empty and unchanged branch names are not submitted")
+    func invalidBranchRenames() async throws {
+        let workspace = try makeWorkspace(branch: "old-branch")
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.renameWorkspaceBranch = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                }
+            }
+
+            await store.send(.renameBranchButtonTapped) {
+                $0.branchNameDraft = "old-branch"
+                $0.destination = .renameBranch
+            }
+            await store.send(.renameBranchSubmitted)
+            await store.send(.binding(.set(\.branchNameDraft, "   "))) {
+                $0.branchNameDraft = "   "
+            }
+            await store.send(.renameBranchSubmitted)
+
+            #expect(requestCount.value == 0)
+        }
+    }
+
+    @Test("Branch rename failures present an alert")
+    func branchRenameFailure() async throws {
+        let workspace = try makeWorkspace(branch: "old-branch")
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            state.isRenamingBranch = true
+            let store = TestStore(
+                initialState: state
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.renameBranchResponse(.failure(TestError()))) {
+                $0.isRenamingBranch = false
+                $0.destination = .alert(
+                    .failedToRenameBranch(message: TestError().localizedDescription)
+                )
+            }
+        }
+    }
+
     @Test("Creating a sixth tab presents the local limit without making a request")
     func sessionCreationLimit() async throws {
         let workspace = try makeWorkspace(activeSessionID: "session-0")
@@ -1177,9 +1285,11 @@ private func makeSession(
 
 private func makeWorkspace(
     activeSessionID: String? = nil,
+    branch: String? = nil,
     unread: Int = 0
 ) throws -> Workspace {
     let activeSession = activeSessionID.map { "\"\($0)\"" } ?? "null"
+    let branch = branch.map { "\"\($0)\"" } ?? "null"
     return try JSONDecoder.conductor.decode(
         Workspace.self,
         from: Data(
@@ -1187,6 +1297,7 @@ private func makeWorkspace(
             {
               "id": "workspace-1",
               "active_session_id": \(activeSession),
+              "branch": \(branch),
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
               "is_working": false,

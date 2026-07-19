@@ -41,7 +41,7 @@ Steps:
 
 In order to be able to actually control Conductor **remotely**, you need to install the desktop "companion". You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
 
-#### UI Hook (for sending messages, stopping agents, and changing Conductor state)
+#### UI Hook (for sending messages, stopping agents, renaming branches, and changing Conductor state)
 
 1. Press `Copy Loader`
 2. In Conductor, press Cmd+Opt+I to display the Web Inspector (TODO: Replace this with the icons)
@@ -83,7 +83,7 @@ For the most part all of the data we get is from Conductor's SQLite database. As
 
 #### UI hook
 
-> Note: This hook is required for sending messages, stopping agents, and for seeing Status, Unread, Pinned, etc. changes propagate to Conductor without restarting it.
+> Note: This hook is required for sending messages, stopping agents, branch renames, and for seeing Status, Unread, Pinned, etc. changes propagate to Conductor without restarting it.
 
 While Conductor does use SQLite to persist pretty much all of it's data, just writing to the database does not mean you will see the changes propagated in Conductor - at least not when it's open. (if you write to the SQLite database then restart, you will see them)
 

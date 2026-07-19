@@ -186,6 +186,11 @@ enum WorkspaceRoute {
                 )
             }
         }
+        if case .branch(let branch) = mutation {
+            guard !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PlainTextResponseError(.badRequest, message: "Branch name cannot be empty.")
+            }
+        }
 
         let workspaceExists = try await database.read { database in
             try Workspace.find(workspaceID).fetchOne(database) != nil
@@ -281,6 +286,9 @@ enum WorkspaceRoute {
             case .archive:
                 // Archiving runs Conductor's cleanup flow and cannot safely fall back to SQLite.
                 throw WorkspaceUIHook.DispatchError.listenerUnavailable
+            case .branch:
+                // Conductor must keep Git and its workspace metadata in sync during a rename.
+                throw WorkspaceUIHook.DispatchError.listenerUnavailable
             case .pinned(let isPinned):
                 let pinnedAt = isPinned ? Date.now.ISO8601Format() : nil
                 try Workspace
@@ -317,6 +325,8 @@ enum WorkspaceRoute {
                 switch mutation {
                 case .archive:
                     return workspace.state == .archiving || workspace.state == .archived
+                case .branch(let branch):
+                    return workspace.branch == branch && workspace.userSetBranchName == 1
                 case .pinned(let isPinned):
                     return (workspace.pinnedAt != nil) == isPinned
                 case .status(let status):
@@ -601,6 +611,8 @@ extension WorkspaceMutation: Decodable {
             } else {
                 throw RequestDecodingError.invalidBody
             }
+        case "branch":
+            .branch(try container.decode(String.self, forKey: key))
         case "pinned":
             .pinned(isPinned: try container.decode(Bool.self, forKey: key))
         case "status":

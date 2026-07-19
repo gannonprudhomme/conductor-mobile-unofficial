@@ -35,6 +35,17 @@ struct WorkspaceRouteTests {
             }
 
             _ = try #require(await events.next())
+            try await database.write { database in
+                try Workspace
+                    .find(workspace.id)
+                    .update {
+                        $0.branch = #bind("renamed-branch")
+                        $0.userSetBranchName = #bind(1)
+                    }
+                    .execute(database)
+            }
+
+            _ = try #require(await events.next())
             let status = Workspace.Status.inReview.rawValue
             try await database.write { database in
                 try Workspace
@@ -66,6 +77,7 @@ struct WorkspaceRouteTests {
             try await application.test(.router) { client in
                 for body in [
                     #"{"pinned":true}"#,
+                    #"{"branch":"renamed-branch"}"#,
                     #"{"status":"in-review"}"#,
                     #"{"unread":true}"#,
                     #"{"archive":true}"#,
@@ -91,6 +103,8 @@ struct WorkspaceRouteTests {
         }
         #expect(state.session?.unreadCount == 1)
         #expect(state.workspace?.pinnedAt == "2026-07-15T00:00:00Z")
+        #expect(state.workspace?.branch == "renamed-branch")
+        #expect(state.workspace?.userSetBranchName == 1)
         #expect(state.workspace?.manualStatus == Workspace.Status.inReview.rawValue)
         #expect(state.workspace?.state == .archiving)
     }
@@ -150,6 +164,9 @@ struct WorkspaceRouteTests {
                 #"{"extra":true}"#,
                 #"{"pinned":"true"}"#,
                 #"{"archive":false}"#,
+                #"{"branch":""}"#,
+                #"{"branch":"   "}"#,
+                #"{"branch":true}"#,
                 #"{"status":"unknown"}"#,
             ] {
                 try await client.execute(
@@ -194,6 +211,32 @@ struct WorkspaceRouteTests {
             try Workspace.find(workspace.id).fetchOne(database)
         }
         #expect(persistedWorkspace?.state != .archived)
+    }
+
+    @Test("Branch rename requires the UI hook")
+    func branchRenameRequiresUIHook() async throws {
+        let (database, workspace, _, _, _) = try await workspaceRouteDatabase()
+        let application = Server.makeApplication(database: database)
+
+        try await withDependencies {
+            $0.workspaceUIHook = .liveValue
+        } operation: {
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/\(workspace.id)",
+                    method: .patch,
+                    body: ByteBuffer(string: #"{"branch":"renamed-branch"}"#)
+                ) { response in
+                    #expect(response.status == .serviceUnavailable)
+                }
+            }
+        }
+
+        let persistedWorkspace = try await database.read { database in
+            try Workspace.find(workspace.id).fetchOne(database)
+        }
+        #expect(persistedWorkspace?.branch == workspace.branch)
+        #expect(persistedWorkspace?.userSetBranchName == workspace.userSetBranchName)
     }
 
     @Test("Fallback reports conflict when unread has no active visible session")
@@ -423,6 +466,7 @@ private func workspaceRouteDatabase() async throws -> (
     let workspace = Workspace(
         id: "workspace",
         activeSessionID: "active",
+        branch: "old-branch",
         createdAt: date,
         updatedAt: date
     )

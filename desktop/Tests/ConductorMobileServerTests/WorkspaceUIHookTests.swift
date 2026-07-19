@@ -408,6 +408,20 @@ struct WorkspaceUIHookTests {
         )
         #expect(path == .hook)
 
+        let branchPath = try await uiHook.dispatch(
+            command: .workspace(
+                id: "workspace-\"2",
+                mutation: .branch("new-\nbranch")
+            ),
+            fallback: {},
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        #expect(
+            await events.next()
+                == "data: {\"workspaceId\":\"workspace-\\\"2\",\"branch\":\"new-\\nbranch\"}\n\n"
+        )
+        #expect(branchPath == .hook)
+
         let archivePath = try await uiHook.dispatch(
             command: .workspace(
                 id: "workspace-\"2",

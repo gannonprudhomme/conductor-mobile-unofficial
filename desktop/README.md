@@ -9,7 +9,7 @@ The source boundaries are:
 - `Sources/ConductorMobileServer/`: the HTTP and WebSocket server plus
   Conductor database access used by the phone.
 - `workspace-hook/`: the saved-snippet loader and browser module that call
-  Conductor's loaded frontend services.
+  Conductor's loaded frontend services, including Git operations.
 
 ## Development
 

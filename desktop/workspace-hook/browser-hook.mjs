@@ -34,10 +34,20 @@ export async function prepareWorkspaceUIHook() {
       "archiveWorkspace",
       "createWorkspaceWithSetup",
       "getWorkspaces",
+      "markUserSetBranchName",
       "setWorkspacePinned",
       "setWorkspaceManualStatus",
     ],
     "WorkspaceService",
+  );
+  const gitService = uniqueService(
+    shell,
+    [
+      "refreshLocalBranch",
+      "refreshWorkspaceChanges",
+      "renameBranch",
+    ],
+    "GitService",
   );
   const sessionService = uniqueService(
     shell,
@@ -67,6 +77,7 @@ export async function prepareWorkspaceUIHook() {
   const controller = createController({
     commandQueue,
     eventsURL,
+    gitService,
     hookRevision,
     hookURL: new URL("hook.js", hookBaseURL),
     commandResultURL,
@@ -162,6 +173,7 @@ function createController({
   commandQueue,
   commandResultURL,
   eventsURL,
+  gitService,
   hookRevision,
   hookURL,
   messageProcessingController,
@@ -208,6 +220,7 @@ function createController({
 
         const execute = () => executeAndReportCommand({
           commandResultURL,
+          gitService,
           messageProcessingController,
           sessionService,
           workspaceService,
@@ -307,7 +320,7 @@ function delay(milliseconds) {
 }
 
 async function executeCommand(
-  { messageProcessingController, sessionService, workspaceService },
+  { gitService, messageProcessingController, sessionService, workspaceService },
   command,
 ) {
   switch (command.field) {
@@ -316,6 +329,17 @@ async function executeCommand(
         throw new Error("The archive command is invalid.");
       }
       await workspaceService.archiveWorkspace({ workspaceId: command.workspaceId });
+      return;
+    case "branch":
+      if (typeof command.value !== "string" || command.value.trim().length === 0) {
+        throw new Error("The branch command is invalid.");
+      }
+      await gitService.renameBranch({
+        workspaceId: command.workspaceId,
+        branchName: command.value,
+        autoRenameWorkspace: false,
+      });
+      await workspaceService.markUserSetBranchName(command.workspaceId);
       return;
     case "createSession":
       await sessionService.createSession({ workspaceId: command.workspaceId });

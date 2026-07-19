@@ -180,6 +180,12 @@ struct DesktopClientTests {
                 try await DesktopClient.liveValue.archiveWorkspace(workspaceID: "workspace-1")
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.renameWorkspaceBranch(
+                    workspaceID: "workspace-1",
+                    branch: "renamed-branch"
+                )
+            }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
                 try await DesktopClient.liveValue.setWorkspacePinned(
                     workspaceID: "workspace-1",
                     isPinned: true
@@ -670,6 +676,7 @@ struct DesktopClientTests {
         let status = Workspace.Status.inReview.rawValue
         for (body, expectedJSON) in [
             (WorkspacePatchBody(shouldArchive: true), #"{"archive":true}"#),
+            (WorkspacePatchBody(branch: "renamed-branch"), #"{"branch":"renamed-branch"}"#),
             (WorkspacePatchBody(isPinned: true), #"{"pinned":true}"#),
             (WorkspacePatchBody(status: status), #"{"status":"in-review"}"#),
             (WorkspacePatchBody(isUnread: false), #"{"unread":false}"#),
