@@ -28,6 +28,9 @@ struct ChatCollectionView: UIViewRepresentable {
     /// Sends summary disclosure taps back to the SwiftUI/TCA feature that owns expansion state.
     let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
 
+    /// Sends optimistic-message retries back to the feature that owns the durable outbox.
+    let retryMessage: @MainActor (UUID) -> Void
+
     /// Creates the long-lived UIKit delegate and diffable-data-source owner.
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -78,6 +81,7 @@ struct ChatCollectionView: UIViewRepresentable {
             scrollToBottomRequest: scrollToBottomRequest,
             animation: context.transaction.animation,
             turnSummaryTapped: turnSummaryTapped,
+            retryMessage: retryMessage,
             in: collectionView
         )
     }
@@ -449,6 +453,9 @@ extension ChatCollectionView {
         /// Latest action closure from SwiftUI, replaced even when the row values are unchanged.
         private var turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void = { _ in }
 
+        /// Latest retry action from SwiftUI, replaced so reused cells never retain stale state.
+        private var retryMessage: @MainActor (UUID) -> Void = { _ in }
+
         /// Captured visible geometry used only while the user is not following the bottom.
         private var viewportAnchor: ViewportAnchor?
 
@@ -485,6 +492,9 @@ extension ChatCollectionView {
                 cell.contentConfiguration = UIHostingConfiguration {
                     ChatRowView(
                         row: row.content,
+                        retryMessage: { [weak self] bubbleID in
+                            self?.retryMessage(bubbleID)
+                        },
                         turnSummaryTapped: { [weak self] summaryID in
                             self?.turnSummaryTapped(summaryID)
                         }
@@ -560,6 +570,7 @@ extension ChatCollectionView {
             scrollToBottomRequest: Int = 0,
             animation: Animation?,
             turnSummaryTapped: @escaping @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void,
+            retryMessage: @escaping @MainActor (UUID) -> Void,
             in collectionView: UICollectionView
         ) {
             guard let dataSource else {
@@ -568,6 +579,7 @@ extension ChatCollectionView {
 
             // The action may capture a newer Store even when the visual rows did not change.
             self.turnSummaryTapped = turnSummaryTapped
+            self.retryMessage = retryMessage
 
             let shouldScrollToBottom = self.scrollToBottomRequest != scrollToBottomRequest
             self.scrollToBottomRequest = scrollToBottomRequest
@@ -1199,6 +1211,9 @@ struct ChatRowView: View {
     /// The immutable row value rendered by this hosted view.
     let row: DisplayedChatRow
 
+    /// Routes optimistic retry taps back to the workspace feature.
+    let retryMessage: @MainActor (UUID) -> Void
+
     /// Routes summary disclosure back through the representable to feature state.
     let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
 
@@ -1207,6 +1222,10 @@ struct ChatRowView: View {
         switch row {
         case .humanMessage(let message):
             HumanMessageRowView(row: message)
+        case .optimisticMessage(let message):
+            HumanMessageRowView(optimisticMessage: message) {
+                retryMessage(message.id)
+            }
         case let .assistantTextChunk(_, chunk, isMostRecentTextInTurn):
             AssistantMessageTextView(
                 chunk: chunk,

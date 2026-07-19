@@ -64,7 +64,7 @@ struct WorkspaceUIHookRouteTests {
                         .origin: "https://malicious.example",
                     ],
                     body: ByteBuffer(
-                        string: "{\"requestId\":\"\(command.requestID)\"}"
+                        string: "{\"requestId\":\"\(command.requestID)\",\"result\":{\"type\":\"accepted\",\"messageId\":\"message-id\",\"state\":\"sent\"}}"
                     )
                 ) { response in
                     #expect(response.status == .forbidden)
@@ -79,7 +79,7 @@ struct WorkspaceUIHookRouteTests {
                         .origin: WorkspaceUIHookRoute.origin,
                     ],
                     body: ByteBuffer(
-                        string: "{\"requestId\":\"\(command.requestID)\"}"
+                        string: "{\"requestId\":\"\(command.requestID)\",\"result\":{\"type\":\"accepted\",\"messageId\":\"message-id\",\"state\":\"sent\"}}"
                     )
                 ) { response in
                     #expect(response.status == .noContent)
@@ -91,7 +91,7 @@ struct WorkspaceUIHookRouteTests {
             }
         }
 
-        try await send.value
+        #expect(try await send.value.messageID == "message-id")
     }
 
     @Test("Hook script admits only Conductor or narrow originless script loads")

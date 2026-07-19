@@ -217,8 +217,7 @@ public enum Server {
             return try await MessageRoute.post(
                 request: request,
                 context: context,
-                database: database,
-                commandTimeout: uiCommandTimeout
+                database: database
             )
         }
 

@@ -1,5 +1,5 @@
 //
-//  SwiftUIView.swift
+//  HumanMessageRowView.swift
 //  ConductorChat
 //
 //  Created by Gannon Prudomme on 7/10/26.
@@ -12,10 +12,50 @@ import SwiftUI
 struct HumanMessageRowView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    let row: Turn.Row.HumanMessageRow
-    
+    private let content: String
+    private let retry: (@MainActor () -> Void)?
+    private let status: DisplayedChatRow.OptimisticMessage.Status?
+
+    init(row: Turn.Row.HumanMessageRow) {
+        self.content = row.content
+        self.retry = nil
+        self.status = nil
+    }
+
+    init(
+        optimisticMessage: DisplayedChatRow.OptimisticMessage,
+        retry: @escaping @MainActor () -> Void
+    ) {
+        self.content = optimisticMessage.content
+        self.retry = retry
+        self.status = optimisticMessage.status
+    }
+
     var body: some View {
-        ParsedContentView(content: row.content)
+        VStack(alignment: .trailing, spacing: 6) {
+            messageBubble
+
+            if let status {
+                HStack(spacing: 8) {
+                    Text(status.label)
+                        .font(.theme(.small))
+                        .foregroundStyle(.theme(.textSecondary))
+
+                    if status.canRetry, let retry {
+                        Button("Retry message", action: retry)
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textPrimary))
+                            .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityValue(status?.accessibilityValue ?? "")
+    }
+
+    private var messageBubble: some View {
+        ParsedContentView(content: content)
             .textSelection(.enabled)
             .font(.theme(.body))
             .foregroundStyle(.theme(.highlightForeground))
@@ -34,7 +74,7 @@ struct HumanMessageRowView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
             .contextMenu {
                 Button {
-                    UIPasteboard.general.string = row.content
+                    UIPasteboard.general.string = content
                 } label: {
                     Label {
                         Text("Copy")
@@ -112,7 +152,7 @@ struct HumanMessageRowView: View {
                     content: "Content"
                 )
             )
-            
+
             HumanMessageRowView(
                 row: Turn.Row.HumanMessageRow(
                     id: "12345",

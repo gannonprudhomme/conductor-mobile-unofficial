@@ -397,6 +397,7 @@ struct ChatCollectionViewTests {
             scrollToBottomRequest: 1,
             animation: nil,
             turnSummaryTapped: { _ in },
+            retryMessage: { _ in },
             in: collectionView
         )
         #expect(coordinator.needsScrollToBottom)
@@ -449,6 +450,7 @@ struct ChatCollectionViewTests {
             rows: [message, collapsedSummary],
             animation: nil,
             turnSummaryTapped: { _ in },
+            retryMessage: { _ in },
             in: collectionView
         )
 
@@ -457,6 +459,7 @@ struct ChatCollectionViewTests {
             rows: [message, expandedSummary],
             animation: .default,
             turnSummaryTapped: { _ in },
+            retryMessage: { _ in },
             in: collectionView
         )
         #expect(collectionView.stopScrollingCount == 1)
@@ -470,6 +473,7 @@ struct ChatCollectionViewTests {
             rows: [],
             animation: nil,
             turnSummaryTapped: { _ in },
+            retryMessage: { _ in },
             in: collectionView
         )
         #expect(collectionView.stopScrollingCount == 3)

@@ -39,11 +39,12 @@ public struct WorkspaceUIHook: Sendable {
     var listenerUnavailable: @Sendable () async -> Void
     var sendMessage: @Sendable (
         _ requestID: UUID,
+        _ attemptID: UUID,
         _ sessionID: Session.ID,
         _ workspaceID: Workspace.ID,
         _ content: String,
         _ mode: MessageMode
-    ) async throws -> Void
+    ) async throws -> MessageReceipt
     var stopSession: @Sendable (
         _ requestID: UUID,
         _ sessionID: Session.ID,
@@ -84,13 +85,44 @@ public struct WorkspaceUIHook: Sendable {
         case sent
     }
 
+    struct MessageReceipt: Equatable, Sendable {
+        let messageID: String
+    }
+
     struct CommandResult: Decodable, Sendable {
         let requestID: UUID
         let error: String?
+        let result: Result?
+
+        init(requestID: UUID, error: String? = nil, result: Result? = nil) {
+            self.requestID = requestID
+            self.error = error
+            self.result = result
+        }
+
+        struct Result: Decodable, Sendable {
+            let type: ResultType
+            let messageID: String?
+            let reason: String?
+            let state: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case type
+                case messageID = "messageId"
+                case reason
+                case state
+            }
+        }
+
+        enum ResultType: String, Decodable, Sendable {
+            case accepted
+            case rejected
+        }
 
         private enum CodingKeys: String, CodingKey {
             case requestID = "requestId"
             case error
+            case result
         }
     }
 
@@ -102,7 +134,11 @@ public struct WorkspaceUIHook: Sendable {
 
 extension WorkspaceUIHook: DependencyKey {
     public static var liveValue: Self {
-        let state = WorkspaceUIHookState()
+        live(clock: ContinuousClock())
+    }
+
+    static func live(clock: some Clock<Duration>) -> Self {
+        let state = WorkspaceUIHookState(clock: clock)
         return Self(
             isConnected: { await state.isConnected },
             connect: { await state.connect() },
@@ -132,9 +168,10 @@ extension WorkspaceUIHook: DependencyKey {
                 )
             },
             listenerUnavailable: { await state.listenerUnavailable() },
-            sendMessage: { requestID, sessionID, workspaceID, content, mode in
+            sendMessage: { requestID, attemptID, sessionID, workspaceID, content, mode in
                 try await state.sendMessage(
                     requestID: requestID,
+                    attemptID: attemptID,
                     sessionID: sessionID,
                     workspaceID: workspaceID,
                     content: content,
@@ -178,11 +215,35 @@ extension DependencyValues {
     }
 }
 
+extension WorkspaceUIHook {
+    func sendMessage(
+        requestID: UUID,
+        sessionID: Session.ID,
+        workspaceID: Workspace.ID,
+        content: String,
+        mode: MessageMode
+    ) async throws -> MessageReceipt {
+        try await sendMessage(
+            requestID,
+            requestID,
+            sessionID,
+            workspaceID,
+            content,
+            mode
+        )
+    }
+}
+
 private actor WorkspaceUIHookState {
+    private let clock: AnyClock<Duration>
     private var activeConnection: ConnectionState?
     private var dispatchedCreationIDs: Set<Workspace.ID> = []
     private var isMutationInFlight = false
     private var pendingCommands: [UUID: PendingCommand] = [:]
+
+    init(clock: any Clock<Duration>) {
+        self.clock = AnyClock(clock)
+    }
 
     var isConnected: Bool {
         activeConnection != nil
@@ -275,16 +336,52 @@ private actor WorkspaceUIHookState {
     }
 
     func didCompleteCommand(_ result: WorkspaceUIHook.CommandResult) -> Bool {
-        guard let command = pendingCommands.removeValue(forKey: result.requestID) else {
+        guard let command = pendingCommands[result.requestID] else {
             return false
         }
 
-        if let error = result.error {
+        guard command.deadline.map({ clock.now < $0 }) ?? true else {
+            pendingCommands[result.requestID] = nil
+            command.continuation.finish(
+                throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+            )
+            return false
+        }
+
+        pendingCommands[result.requestID] = nil
+
+        if command.kind == .message, let result = result.result {
+            switch result.type {
+            case .accepted:
+                guard let messageID = result.messageID,
+                      !messageID.isEmpty,
+                      result.state == "sent" else {
+                    command.continuation.finish(
+                        throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+                    )
+                    return true
+                }
+                command.continuation.yield(
+                    .message(.init(messageID: messageID))
+                )
+                command.continuation.finish()
+            case .rejected:
+                command.continuation.finish(
+                    throwing: WorkspaceUIHook.CommandDispatchError.commandFailed(
+                        result.reason ?? "Conductor rejected the message."
+                    )
+                )
+            }
+        } else if let error = result.error {
             command.continuation.finish(
                 throwing: WorkspaceUIHook.CommandDispatchError.commandFailed(error)
             )
+        } else if command.kind == .message {
+            command.continuation.finish(
+                throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+            )
         } else {
-            command.continuation.yield(())
+            command.continuation.yield(.completed)
             command.continuation.finish()
         }
         return true
@@ -292,31 +389,56 @@ private actor WorkspaceUIHookState {
 
     func sendMessage(
         requestID: UUID,
+        attemptID: UUID,
         sessionID: Session.ID,
         workspaceID: Workspace.ID,
         content: String,
         mode: WorkspaceUIHook.MessageMode
-    ) async throws {
+    ) async throws -> WorkspaceUIHook.MessageReceipt {
         let event = try Self.messageEvent(
             requestID: requestID,
+            attemptID: attemptID,
             sessionID: sessionID,
             workspaceID: workspaceID,
             content: content,
             mode: mode
         )
-        let (results, continuation) = try enqueueCommand(requestID: requestID, event: event)
+        let deadline = clock.now.advanced(by: .seconds(5))
+        let (results, continuation) = try enqueueCommand(
+            requestID: requestID,
+            event: event,
+            deadline: deadline,
+            kind: .message
+        )
+        Task { [weak self, clock] in
+            try? await clock.sleep(until: deadline)
+            await self?.expireCommand(requestID: requestID)
+        }
         defer {
             continuation.finish()
             pendingCommands[requestID] = nil
         }
 
-        for try await _ in results {
-            return
-        }
-        if Task.isCancelled {
-            throw CancellationError()
+        do {
+            for try await result in results {
+                guard case .message(let receipt) = result else {
+                    throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+                }
+                return receipt
+            }
+        } catch {
+            throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
         }
         throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+    }
+
+    private func expireCommand(requestID: UUID) {
+        guard let command = pendingCommands.removeValue(forKey: requestID) else {
+            return
+        }
+        command.continuation.finish(
+            throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+        )
     }
 
     func stopSession(
@@ -331,7 +453,12 @@ private actor WorkspaceUIHookState {
         defer { isMutationInFlight = false }
 
         let event = try Self.stopSessionEvent(requestID: requestID, sessionID: sessionID)
-        let (results, continuation) = try enqueueCommand(requestID: requestID, event: event)
+        let (results, continuation) = try enqueueCommand(
+            requestID: requestID,
+            event: event,
+            deadline: nil,
+            kind: .command
+        )
         defer {
             continuation.finish()
             pendingCommands[requestID] = nil
@@ -474,19 +601,25 @@ private actor WorkspaceUIHookState {
 
     private func enqueueCommand(
         requestID: UUID,
-        event: String
+        event: String,
+        deadline: AnyClock<Duration>.Instant?,
+        kind: PendingCommand.Kind
     ) throws -> (
-        results: AsyncThrowingStream<Void, any Error>,
-        continuation: AsyncThrowingStream<Void, any Error>.Continuation
+        results: AsyncThrowingStream<PendingResult, any Error>,
+        continuation: AsyncThrowingStream<PendingResult, any Error>.Continuation
     ) {
         guard let connection = activeConnection else {
             throw WorkspaceUIHook.CommandDispatchError.listenerUnavailable
         }
 
-        let (results, continuation) = AsyncThrowingStream<Void, any Error>.makeStream(
+        let (results, continuation) = AsyncThrowingStream<PendingResult, any Error>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
-        pendingCommands[requestID] = PendingCommand(continuation: continuation)
+        pendingCommands[requestID] = PendingCommand(
+            continuation: continuation,
+            deadline: deadline,
+            kind: kind
+        )
 
         switch connection.continuation.yield(event) {
         case .dropped, .terminated:
@@ -510,7 +643,19 @@ private actor WorkspaceUIHookState {
     }
 
     private struct PendingCommand {
-        let continuation: AsyncThrowingStream<Void, any Error>.Continuation
+        let continuation: AsyncThrowingStream<PendingResult, any Error>.Continuation
+        let deadline: AnyClock<Duration>.Instant?
+        let kind: Kind
+
+        enum Kind: Equatable {
+            case command
+            case message
+        }
+    }
+
+    private enum PendingResult: Sendable {
+        case completed
+        case message(WorkspaceUIHook.MessageReceipt)
     }
 
     private enum StopEvent: Sendable {
@@ -530,6 +675,14 @@ private actor WorkspaceUIHookState {
         struct SendMessage: Encodable {
             let content: String
             let mode: WorkspaceUIHook.MessageMode
+
+            private enum CodingKeys: String, CodingKey {
+                case attemptID = "attemptId"
+                case content
+                case mode
+            }
+
+            let attemptID: UUID
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -542,6 +695,7 @@ private actor WorkspaceUIHookState {
 
     private static func messageEvent(
         requestID: UUID,
+        attemptID: UUID,
         sessionID: Session.ID,
         workspaceID: Workspace.ID,
         content: String,
@@ -553,7 +707,8 @@ private actor WorkspaceUIHookState {
             workspaceID: workspaceID,
             sendMessage: MessageCommand.SendMessage(
                 content: content,
-                mode: mode
+                mode: mode,
+                attemptID: attemptID
             )
         )
         let data = try JSONEncoder().encode(command)

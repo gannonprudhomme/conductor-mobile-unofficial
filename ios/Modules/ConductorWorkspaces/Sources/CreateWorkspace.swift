@@ -110,20 +110,19 @@ public struct CreateWorkspace: Sendable {
                             try Workspace.upsert { createdWorkspace.workspace }.execute(database)
                             try Session.upsert { createdWorkspace.session }.execute(database)
                         }
-                        let message: Message? = if prompt.isEmpty {
-                            nil
-                        } else {
-                            try await desktopClient.sendMessage(
+                        if !prompt.isEmpty {
+                            let result = await desktopClient.sendMessage(
                                 workspaceID: createdWorkspace.workspace.id,
                                 sessionID: createdWorkspace.session.id,
                                 message: prompt,
                                 model: model,
-                                isFastModeEnabled: isFastModeEnabled
+                                attemptID: uuid()
                             )
-                        }
-                        if let message {
-                            try await database.write { database in
-                                try Message.upsert { message }.execute(database)
+                            switch result {
+                            case .accepted:
+                                break
+                            case let .rejected(reason), let .unknown(reason):
+                                throw PromptDeliveryError(reason: reason)
                             }
                         }
                         await send(
@@ -188,6 +187,12 @@ public struct CreateWorkspace: Sendable {
         }
         .ifLet(\.$alert, action: \.alert)
     }
+}
+
+private struct PromptDeliveryError: LocalizedError {
+    let reason: String
+
+    var errorDescription: String? { reason }
 }
 
 public struct WorkspaceCreationResult: Equatable, Sendable {

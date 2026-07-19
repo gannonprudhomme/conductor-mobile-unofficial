@@ -29,21 +29,21 @@ public struct Chat: Sendable {
 
         @Shared var messageDraft: String
 
+        @Shared var outbox: MessageOutbox
+
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
         var isFastModeEnabled: Bool
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
-        var isMessageSendInFlight = false
         var isStopInFlight = false
         var hasObservedSessionModelChange = false
         var hasUserSelectedModel = false
         var scrollToBottomRequest = 0
         var shouldFocusMessageField = false
 
-        /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
-        var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
+        var messageIDToBubbleID: [Message.ID: UUID] = [:]
         var selectedModel: Session.Model
 
         /// The turns + parsed rows (e.g. `Message.content` -> `AgentEvent`)
@@ -58,33 +58,66 @@ public struct Chat: Sendable {
         var rows: [DisplayedChatRowWithPadding]? = nil
 
         var shouldShowEmptyChat: Bool {
-            !isLoadingMessages && isMessageSnapshotEmpty
+            !isLoadingMessages && isMessageSnapshotEmpty && !hasOptimisticMessages
         }
 
         var allowsAgentSwitching: Bool {
             shouldShowEmptyChat && !isMessageSendInFlight
         }
 
-        mutating func updateRows(sessionStatus: Session.Status) {
-            guard let turns else {
-                rows = nil
-                return
-            }
+        var hasOptimisticMessages: Bool {
+            !optimisticBubbles.isEmpty
+        }
 
-            rows = turns.flattenedChatRows(
-                activeTurnID: sessionStatus == .working ? turns.last?.id : nil,
+        var isMessageSendInFlight: Bool {
+            outbox[session.workspaceID, session.id].contains { bubble in
+                bubble.attempts.contains { $0.state == .sending }
+            }
+        }
+
+        private var optimisticBubbles: [MessageOutbox.Bubble] {
+            let claimedBubbleIDs = Set(messageIDToBubbleID.values)
+            return outbox[session.workspaceID, session.id].filter {
+                !claimedBubbleIDs.contains($0.bubbleID)
+            }
+        }
+
+        mutating func updateRows(sessionStatus: Session.Status) {
+            var rows = (turns ?? []).flattenedChatRows(
+                activeTurnID: sessionStatus == .working ? turns?.last?.id : nil,
                 expandedSummaryIDs: expandedSummaryIDs
             )
+            let optimisticRows = optimisticBubbles.map { bubble in
+                DisplayedChatRowWithPadding(
+                    content: .optimisticMessage(
+                        .init(
+                            id: bubble.bubbleID,
+                            content: bubble.content,
+                            status: bubble.presentationStatus
+                        )
+                    ),
+                    topPadding: 12,
+                    bottomPadding: 12
+                )
+            }
+            if case .turnInProgress = rows.last?.content {
+                rows.insert(contentsOf: optimisticRows, at: rows.index(before: rows.endIndex))
+            } else {
+                rows.append(contentsOf: optimisticRows)
+            }
+            self.rows = rows
         }
 
         init(
             session: Session,
             messages: [Message] = [],
+            outbox: Shared<MessageOutbox> = Shared(.messageOutbox),
             selectedModel: Session.Model? = nil,
             shouldFocusMessageField: Bool = false
         ) {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
+            self._outbox = outbox
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
             self._session = FetchOne(
                 wrappedValue: session,
@@ -118,15 +151,14 @@ public struct Chat: Sendable {
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
-                && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
                 && lhs.shouldFocusMessageField == rhs.shouldFocusMessageField
-                && lhs.confirmedMessagesAwaitingInitialSnapshot
-                    == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
+                && lhs.messageIDToBubbleID == rhs.messageIDToBubbleID
+                && lhs.outbox == rhs.outbox
                 && lhs.selectedModel == rhs.selectedModel
         }
 
@@ -145,17 +177,8 @@ public struct Chat: Sendable {
         )
         case loadMessagesFailed(any Error)
         case messagesUpdated([Message])
-        /// Sent after POST returns its persisted row, before writing it locally. The message
-        /// appears when that write is observed; this buffers it against an older first snapshot.
-        case messageConfirmed(
-            sessionID: Session.ID,
-            message: Message
-        )
+        case retryButtonTapped(UUID)
         case sendButtonTapped
-        case sendMessageResponse(
-            sessionID: Session.ID,
-            result: Result<String, any Error>
-        )
         case sessionModelChanged(Session.Model)
         case sessionFastModeChanged(Bool)
         case sessionStatusChanged(Session.Status)
@@ -212,7 +235,8 @@ public struct Chat: Sendable {
                 state.isMessageSnapshotEmpty = messages.isEmpty
                 state.turns = Turn.parse(
                     messages: messages,
-                    reusing: state.turns ?? []
+                    reusing: state.turns ?? [],
+                    messageIDToBubbleID: state.messageIDToBubbleID
                 )
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
@@ -221,29 +245,14 @@ public struct Chat: Sendable {
                 guard sessionID == state.sessionID else {
                     return .none
                 }
-                // A completed send can race with an older first WebSocket snapshot. Prefer the
-                // snapshot's copy when IDs overlap, and append only confirmed rows it omitted.
-                let responseMessageIDs = Set(messages.map(\.id))
-                let confirmedMessagesMissingFromSnapshot = state
-                    .confirmedMessagesAwaitingInitialSnapshot
-                    .filter { !responseMessageIDs.contains($0.id) }
-                // After the first snapshot, database observation owns subsequent updates.
-                state.confirmedMessagesAwaitingInitialSnapshot.removeAll()
                 state.isMessageSnapshotEmpty = messages.isEmpty
-                    && confirmedMessagesMissingFromSnapshot.isEmpty
                 state.turns = Turn.parse(
-                    messages: messages + confirmedMessagesMissingFromSnapshot,
-                    reusing: state.turns ?? []
+                    messages: messages,
+                    reusing: state.turns ?? [],
+                    messageIDToBubbleID: state.messageIDToBubbleID
                 )
                 state.updateRows(sessionStatus: state.session.status)
                 state.isLoadingMessages = false
-                return .none
-
-            case let .messageConfirmed(sessionID, message):
-                guard sessionID == state.sessionID, state.isLoadingMessages else {
-                    return .none
-                }
-                state.confirmedMessagesAwaitingInitialSnapshot.append(message)
                 return .none
 
             case .sessionStatusChanged(let status):
@@ -274,70 +283,7 @@ public struct Chat: Sendable {
                 return .none
 
             case .sendButtonTapped:
-                let message = state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !message.isEmpty, !state.isMessageSendInFlight else {
-                    return .none
-                }
-
-                state.isMessageSendInFlight = true
-                state.scrollToBottomRequest &+= 1
-                return .run {
-                    [
-                        model = state.selectedModel,
-                        isFastModeEnabled = state.isFastModeEnabled,
-                        sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
-                    ] send in
-                    let result = await Result {
-                        if let canonicalMessage = try await desktopClient.sendMessage(
-                            workspaceID: workspaceID,
-                            sessionID: sessionID,
-                            message: message,
-                            model: model,
-                            isFastModeEnabled: isFastModeEnabled
-                        ) {
-                            await send(
-                                .messageConfirmed(
-                                    sessionID: sessionID,
-                                    message: canonicalMessage
-                                )
-                            )
-                            do {
-                                try await reconcileMessage(canonicalMessage)
-                            } catch {
-                                Logger.chat.error("Failed to reconcile sent message: \(error)")
-                            }
-                        }
-                        return message
-                    }
-
-                    await send(
-                        .sendMessageResponse(
-                            sessionID: sessionID,
-                            result: result
-                        )
-                    )
-                }
-
-            case let .sendMessageResponse(sessionID, result):
-                // Send requests intentionally survive session navigation, so a late response
-                // must not mutate the chat that replaced the request's originating session.
-                guard sessionID == state.sessionID else {
-                    return .none
-                }
-
-                state.isMessageSendInFlight = false
-                switch result {
-                case let .success(message):
-                    if state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines) == message {
-                        state.$messageDraft.withLock { $0 = "" }
-                    }
-                    return .none
-
-                case .failure:
-                    // Send errors are displayed by the parent ``WorkspaceChat``.
-                    return .none
-                }
+                return .none
 
             case .stopButtonTapped:
                 guard state.session.status == .working, !state.isStopInFlight else {
@@ -377,7 +323,7 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case .loadMessagesFailed:
+            case .loadMessagesFailed, .retryButtonTapped:
                 return .none
 
             case .binding:
@@ -417,15 +363,6 @@ public struct Chat: Sendable {
         }
     }
 
-    private func reconcileMessage(_ message: Message) async throws {
-        try await database.write { database in
-            guard try Message.find(message.id).fetchOne(database) == nil else {
-                return
-            }
-            try Message.insert { message }.execute(database)
-        }
-    }
-
     private func reconcileSession(_ session: Session) async throws {
         try await database.write { database in
             if let existingSession = try Session.find(session.id).fetchOne(database),
@@ -450,6 +387,22 @@ public struct Chat: Sendable {
         try await database.write { db in
             try Message.upsert { messages }
                 .execute(db)
+        }
+    }
+}
+
+private extension MessageOutbox.Bubble {
+    var presentationStatus: DisplayedChatRow.OptimisticMessage.Status {
+        if attempts.contains(where: { $0.state == .sending }) {
+            .sending
+        } else if attempts.contains(where: {
+            if case .accepted = $0.state { true } else { false }
+        }) {
+            .accepted
+        } else if attempts.contains(where: { $0.state == .unknown }) {
+            .unknown
+        } else {
+            .rejected
         }
     }
 }
@@ -480,7 +433,7 @@ struct ChatView: View {
     var body: some View {
         collectionView
             .overlay {
-                if store.isLoadingMessages {
+                if store.isLoadingMessages && !store.hasOptimisticMessages {
                     ProgressView()
                         .progressViewStyle(.network)
                         .tint(.theme(.textSecondary))
@@ -554,6 +507,9 @@ struct ChatView: View {
                 safeAreaInsets: proxy.safeAreaInsets,
                 turnSummaryTapped: {
                     store.send(.turnSummaryTapped($0), animation: .default)
+                },
+                retryMessage: {
+                    store.send(.retryButtonTapped($0))
                 }
             )
             // Draw beneath every bar and the keyboard; the proxy insets keep rows unobscured.

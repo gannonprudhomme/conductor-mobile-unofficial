@@ -396,6 +396,7 @@ isolatedTest("message commands call the explicit controller modes and report res
   };
   shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
     calls.push(["sent", arguments_]);
+    return { messageId: "message-1", state: "sent" };
   };
   shell.messageProcessingController.enqueueMessage = async (...arguments_) => {
     calls.push(["queued", arguments_]);
@@ -422,10 +423,16 @@ isolatedTest("message commands call the explicit controller modes and report res
       message: "Run the tests.",
       workspaceId: "workspace-1",
       includeAttachments: false,
+      turnId: "request-1-attempt",
     }],
   ]);
   assert.deepEqual(environment.commandResults[0], {
     requestId: "request-1",
+    result: {
+      type: "accepted",
+      messageId: "message-1",
+      state: "sent",
+    },
   });
 
   source.onmessage(messageCommand({
@@ -451,9 +458,35 @@ isolatedTest("message commands call the explicit controller modes and report res
   ]);
   assert.deepEqual(environment.commandResults[1], {
     requestId: "request-2",
-    error: "Rejected.",
+    result: { type: "rejected", reason: "Rejected." },
   });
   assert.equal(environment.errors[0][1].message, "Rejected.");
+});
+
+isolatedTest("invalid browser success is reported as rejected", async () => {
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendMessageImmediately = async () => ({
+    messageId: "",
+    state: "sent",
+  });
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+    result: {
+      type: "rejected",
+      reason: "Conductor returned an invalid message receipt.",
+    },
+  });
 });
 
 isolatedTest("command result reporting retries without executing twice", async () => {
@@ -462,6 +495,7 @@ isolatedTest("command result reporting retries without executing twice", async (
   shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
   shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
     calls.push(arguments_);
+    return { messageId: "message-1", state: "sent" };
   };
   const environment = installHookGlobals({ shell });
   environment.commandResultFailures = 1;
@@ -733,7 +767,7 @@ function messageCommand({ requestId, ...sendMessage }) {
       requestId,
       sessionId: "session-1",
       workspaceId: "workspace-1",
-      sendMessage,
+      sendMessage: { attemptId: `${requestId}-attempt`, ...sendMessage },
     }),
   };
 }

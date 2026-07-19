@@ -103,7 +103,16 @@ struct ChatTests {
 
             emptySnapshot.isLoadingMessages = false
             #expect(emptySnapshot.allowsAgentSwitching)
-            emptySnapshot.isMessageSendInFlight = true
+            emptySnapshot.$outbox.withLock {
+                $0[emptySnapshot.session.workspaceID, emptySnapshot.sessionID] = [
+                    .init(
+                        bubbleID: UUID(),
+                        content: "Sending",
+                        model: emptySnapshot.selectedModel,
+                        attempts: [.init(attemptID: UUID(), state: .sending)]
+                    )
+                ]
+            }
             #expect(!emptySnapshot.allowsAgentSwitching)
         }
     }
@@ -469,51 +478,6 @@ struct ChatTests {
         }
     }
 
-    @Test("An initial response preserves a canonical message received while loading")
-    func initialResponsePreservesCanonicalMessage() async throws {
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview()
-            let message = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
-                turnID: "turn-1"
-            )
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            }
-
-            await store.send(
-                .messageConfirmed(
-                    sessionID: session.id,
-                    message: message
-                )
-            ) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [message]
-            }
-            await store.send(
-                .initialMessagesResponse(
-                    sessionID: session.id,
-                    messages: []
-                )
-            ) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = []
-                $0.isLoadingMessages = false
-            }
-            #expect(!store.state.shouldShowEmptyChat)
-            try expectHumanPresentationCaches(
-                store.state,
-                turnID: "turn-1",
-                startedAt: message.createdAt,
-                messages: [.init(id: message.id, content: "Run the tests.")]
-            )
-        }
-    }
-
     @Test("Fetched default model applies only before a compatible user selection")
     func defaultModel() async throws {
         try await withDependencies {
@@ -600,280 +564,6 @@ struct ChatTests {
                 $0.hasUserSelectedModel = true
             }
             await store.send(.sessionModelChanged(.gpt5_4))
-        }
-    }
-
-    @Test("Steering forwards the selected model and fast mode, then clears the draft")
-    func messageSendSucceeds() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-
-            let session = Session.preview(status: .working, isFastModeEnabled: true)
-            let sentMessage = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Please run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
-                turnID: "turn-1"
-            )
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(sessionID == session.id)
-                    #expect(message == "Please run the tests.")
-                    #expect(model == .gpt_5_6_terra)
-                    #expect(isFastModeEnabled)
-                    return sentMessage
-                }
-            }
-
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
-                $0.selectedModel = .gpt_5_6_terra
-                $0.hasUserSelectedModel = true
-            }
-            store.state.$messageDraft.withLock { $0 = "  Please run the tests.  " }
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.messageConfirmed) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [sentMessage]
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            await store.finish()
-
-            let persistedMessage = try await database.read { database in
-                try Message.find(sentMessage.id).fetchOne(database)
-            }
-            expectNoDifference(persistedMessage, sentMessage)
-        }
-    }
-
-    @Test("A legacy send response still completes successfully")
-    func legacyMessageSendSucceeds() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview()
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in nil }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-        }
-    }
-
-    @Test("A send response preserves a draft edited while the request was in flight")
-    func editedDraftIsPreserved() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview()
-            let (responses, responseContinuation) = AsyncStream<Message?>.makeStream()
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
-                    for await response in responses {
-                        return response
-                    }
-                    throw TestError()
-                }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            store.state.$messageDraft.withLock { $0 = "Only run unit tests." }
-
-            responseContinuation.yield(Optional<Message>.none)
-            await store.receive(\.sendMessageResponse) {
-                $0.isMessageSendInFlight = false
-            }
-            responseContinuation.finish()
-            await store.finish()
-        }
-    }
-
-    @Test("An observed message wins over the HTTP response with the same ID")
-    func observedMessageWins() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-
-            let session = Session.preview()
-            let observedMessage = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Observed canonical content",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_801),
-                turnID: "turn-1"
-            )
-            let responseMessage = Message(
-                id: observedMessage.id,
-                sessionID: session.id,
-                role: .user,
-                content: "Run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
-                turnID: "turn-1"
-            )
-            try await database.write { database in
-                try Message.insert { observedMessage }.execute(database)
-            }
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.messageConfirmed) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            await store.finish()
-
-            let persistedMessage = try await database.read { database in
-                try Message.find(observedMessage.id).fetchOne(database)
-            }
-            expectNoDifference(persistedMessage, observedMessage)
-        }
-    }
-
-    @Test("A reconciliation failure completes without producing a load failure")
-    func messageReconciliationFailureStillCompletes() async throws {
-        let database = try appDatabase()
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.defaultDatabase = database
-        } operation: {
-            let session = Session.preview()
-            let responseMessage = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800)
-            )
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            try database.close()
-
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.messageConfirmed) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            await store.finish()
-        }
-    }
-
-    @Test("A send failure keeps the message draft")
-    func messageSendFails() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = try makeSession()
-            let state = Chat.State(session: session)
-            state.$messageDraft.withLock { $0 = "Please try this again." }
-            let store = TestStore(initialState: state) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
-                    throw TestError()
-                }
-            }
-
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.isMessageSendInFlight = false
-            }
-        }
-    }
-
-    @Test("Fast mode changes locally and is sent with the next message")
-    func fastModeChangesLocally() async throws {
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = try makeSession()
-            let isRecordedFastModeEnabled = LockIsolated<Bool?>(nil)
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(sessionID == session.id)
-                    #expect(message == "Use the next setting.")
-                    #expect(model == session.model)
-                    isRecordedFastModeEnabled.withValue { $0 = isFastModeEnabled }
-                    return nil
-                }
-            }
-
-            await store.send(.fastModeButtonTapped) {
-                $0.isFastModeEnabled = false
-            }
-            #expect(isRecordedFastModeEnabled.value == nil)
-
-            store.state.$messageDraft.withLock { $0 = "Use the next setting." }
-            await store.send(.sendButtonTapped) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            expectNoDifference(isRecordedFastModeEnabled.value, false)
         }
     }
 
@@ -1179,6 +869,8 @@ private enum DisplayedRowProjection: Equatable {
         self = switch row {
         case .humanMessage(let message):
             .human(id: message.id, content: message.content)
+        case .optimisticMessage(let message):
+            .human(id: row.id, content: message.content)
         case .assistantTextChunk, .assistantToolCall, .assistantError:
             .assistant(id: row.id)
         case .turnInProgress(let progress):

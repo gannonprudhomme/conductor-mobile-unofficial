@@ -66,16 +66,7 @@ struct CreateWorkspaceTests {
             repositoryID: repository.id
         )
         let database = try appDatabase()
-        let sentMessage = Message(
-            id: "message",
-            sessionID: session.id,
-            role: .user,
-            content: "Run the tests.",
-            createdAt: Date(timeIntervalSince1970: 1_783_555_200),
-            turnID: "turn"
-        )
-
-        try await withDependencies {
+        await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
             var state = CreateWorkspace.State(repositories: [repository])
@@ -105,13 +96,13 @@ struct CreateWorkspaceTests {
                     sessionID,
                     message,
                     model,
-                    isFastModeEnabled in
+                    attemptID in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
-                    #expect(isFastModeEnabled)
-                    return sentMessage
+                    #expect(attemptID == UUID(1))
+                    return .accepted(messageID: "message")
                 }
             }
 
@@ -135,11 +126,6 @@ struct CreateWorkspaceTests {
                     )
                 )
             )
-
-            let message = try await database.read { database in
-                try Message.find(sentMessage.id).fetchOne(database)
-            }
-            expectNoDifference(message, sentMessage)
         }
     }
 

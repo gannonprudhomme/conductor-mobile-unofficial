@@ -268,7 +268,8 @@ extension Turn {
     /// Called immediately once we receive Messages from the host
     static func parse(
         messages: [Message],
-        reusing previousTurns: [Turn]
+        reusing previousTurns: [Turn],
+        messageIDToBubbleID: [Message.ID: UUID] = [:]
     ) -> [Turn] {
         let reusableTextContentByMessageID: [String: Row.AssistantMessage.TextContent] =
             previousTurns.reduce(into: [:]) { result, turn in
@@ -301,7 +302,12 @@ extension Turn {
                     turns[existingTurnIndex].finishedAt = nil
                 }
 
-                row = .humanMessageRow(.init(id: message.id, content: content))
+                row = .humanMessageRow(
+                    .init(
+                        id: messageIDToBubbleID[message.id]?.uuidString ?? message.id,
+                        content: content
+                    )
+                )
             case .assistant:
                 do {
                     let agentEvent: AgentEvent = try JSONDecoder().decode(AgentEvent.self, from: Data(content.utf8))
@@ -431,6 +437,7 @@ private extension AgentEvent.SystemEvent {
 /// - Includes `turnSummary`, `turnInProgress`, and `turnFooter`, which are not actual `Message`s, but are derived from them.
 enum DisplayedChatRow: Equatable, Identifiable {
     case humanMessage(Turn.Row.HumanMessageRow)
+    case optimisticMessage(OptimisticMessage)
     case assistantTextChunk(
         messageID: String,
         chunk: Turn.Row.AssistantMessage.TextContent.Chunk,
@@ -446,6 +453,54 @@ enum DisplayedChatRow: Equatable, Identifiable {
         let id: Turn.ID
         let elapsedTime: TimeInterval
         let copyableText: String
+    }
+
+    struct OptimisticMessage: Equatable, Identifiable {
+        let id: UUID
+        let content: String
+        let status: Status
+
+        enum Status: Equatable {
+            case accepted
+            case rejected
+            case sending
+            case unknown
+
+            var accessibilityValue: String {
+                switch self {
+                case .accepted:
+                    "Sent, syncing"
+                case .rejected:
+                    "Not sent"
+                case .sending:
+                    "Sending"
+                case .unknown:
+                    "Delivery unconfirmed"
+                }
+            }
+
+            var label: String {
+                switch self {
+                case .accepted:
+                    "Sent · syncing…"
+                case .rejected:
+                    "Not sent"
+                case .sending:
+                    "Sending…"
+                case .unknown:
+                    "Delivery unconfirmed"
+                }
+            }
+
+            var canRetry: Bool {
+                switch self {
+                case .rejected, .unknown:
+                    true
+                case .accepted, .sending:
+                    false
+                }
+            }
+        }
     }
 
     struct TurnSummary: Equatable, Identifiable {
@@ -491,6 +546,8 @@ enum DisplayedChatRow: Equatable, Identifiable {
         switch self {
         case .humanMessage(let row):
             "human:\(row.id)"
+        case .optimisticMessage(let message):
+            "human:\(message.id.uuidString)"
         case let .assistantTextChunk(messageID, chunk, _):
             "assistant:\(messageID):chunk:\(chunk.id)"
         case let .assistantToolCall(messageID, _),
@@ -544,7 +601,7 @@ enum ChatRowLayout {
         in rows: [DisplayedChatRow]
     ) -> (top: CGFloat, bottom: CGFloat) {
         switch row {
-        case .humanMessage:
+        case .humanMessage, .optimisticMessage:
             return (12, 12)
         case .assistantTextChunk(_, let chunk, _):
             // Markdown chunks and consecutive assistant messages are separate rendered rows.

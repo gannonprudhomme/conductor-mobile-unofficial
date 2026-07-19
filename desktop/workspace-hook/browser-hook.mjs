@@ -308,15 +308,25 @@ function parseCommand(data) {
 }
 
 async function executeAndReportCommand(services, command) {
+  let result;
   try {
-    await executeCommand(services, command);
+    result = await executeCommand(services, command);
   } catch (error) {
-    await reportCommandResult(services.commandResultURL, command, {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    const reason = error instanceof Error ? error.message : String(error);
+    await reportCommandResult(
+      services.commandResultURL,
+      command,
+      command.field === "sendMessage"
+        ? { result: { type: "rejected", reason } }
+        : { error: reason },
+    );
     throw error;
   }
-  await reportCommandResult(services.commandResultURL, command, {});
+  await reportCommandResult(
+    services.commandResultURL,
+    command,
+    command.field === "sendMessage" ? { result } : {},
+  );
 }
 
 async function reportCommandResult(commandResultURL, command, result) {
@@ -408,13 +418,28 @@ async function executeCommand(
 
         switch (command.value.mode) {
           case "sent":
-            await messageProcessingController.sendMessageImmediately({
+            if (typeof command.value.attemptId !== "string" || !command.value.attemptId) {
+              throw new Error("The message attempt ID is invalid.");
+            }
+            const result = await messageProcessingController.sendMessageImmediately({
               session,
               message: command.value.content,
               workspaceId: command.workspaceId,
               includeAttachments: false,
+              turnId: command.value.attemptId,
             });
-            return;
+            if (
+              typeof result?.messageId !== "string"
+              || !result.messageId
+              || result.state !== "sent"
+            ) {
+              throw new Error("Conductor returned an invalid message receipt.");
+            }
+            return {
+              type: "accepted",
+              messageId: result.messageId,
+              state: result.state,
+            };
           case "queued":
             await messageProcessingController.enqueueMessage({
               session,

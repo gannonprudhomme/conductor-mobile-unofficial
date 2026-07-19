@@ -45,8 +45,10 @@ public struct DesktopClient: Sendable {
         _ sessionID: String,
         _ message: String,
         _ model: Session.Model,
-        _ isFastModeEnabled: Bool
-    ) async throws -> Message?
+        _ attemptID: UUID
+    ) async -> MessageDeliveryResult = { _, _, _, _, _ in
+        .unknown(reason: "Delivery could not be determined.")
+    }
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> UIHookMutationPath
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> UIHookMutationPath
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> UIHookMutationPath
@@ -72,6 +74,12 @@ public struct DesktopClient: Sendable {
             self.name = name
             self.icon = icon
         }
+    }
+
+    public enum MessageDeliveryResult: Equatable, Sendable {
+        case accepted(messageID: Message.ID)
+        case rejected(reason: String)
+        case unknown(reason: String)
     }
 }
 
@@ -227,15 +235,13 @@ extension DesktopClient: DependencyKey {
                 WorkspacePatchBody(branch: branch),
                 at: workspaceURL(workspaceID: workspaceID)
             )
-        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled in
-            try await post(
-                SendMessageRequest(
-                    message: message,
-                    model: model.rawValue,
-                    isFastModeEnabled: isFastModeEnabled
-                ),
-                to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
-                decoding: Message.self
+        } sendMessage: { workspaceID, sessionID, message, model, attemptID in
+            await sendMessage(
+                workspaceID: workspaceID,
+                sessionID: sessionID,
+                message: message,
+                model: model,
+                attemptID: attemptID
             )
         } setWorkspacePinned: { workspaceID, isPinned in
             try await patch(
@@ -330,14 +336,80 @@ extension DesktopClient: DependencyKey {
     }
 
     private struct SendMessageRequest: Encodable {
+        let attemptID: UUID
         let message: String
         let model: String
-        let isFastModeEnabled: Bool
 
         private enum CodingKeys: String, CodingKey {
+            case attemptID = "attemptId"
             case message
             case model
-            case isFastModeEnabled = "fast_mode"
+        }
+    }
+
+    private struct SendMessageResponse: Decodable {
+        let attemptID: UUID
+        let result: Result
+
+        enum Result: Decodable {
+            case accepted(messageID: Message.ID)
+            case rejected(reason: String)
+            case unknown(reason: String)
+
+            private enum CodingKeys: String, CodingKey {
+                case messageID = "messageId"
+                case reason
+                case type
+            }
+
+            private enum ResultType: String, Decodable {
+                case accepted
+                case rejected
+                case unknown
+            }
+
+            init(from decoder: any Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                switch try container.decode(ResultType.self, forKey: .type) {
+                case .accepted:
+                    let messageID = try container.decode(Message.ID.self, forKey: .messageID)
+                    guard !messageID.isEmpty else {
+                        throw DecodingError.dataCorruptedError(
+                            forKey: .messageID,
+                            in: container,
+                            debugDescription: "The message ID is empty."
+                        )
+                    }
+                    self = .accepted(messageID: messageID)
+                case .rejected:
+                    self = .rejected(
+                        reason: try Self.reason(from: container)
+                    )
+                case .unknown:
+                    self = .unknown(
+                        reason: try Self.reason(from: container)
+                    )
+                }
+            }
+
+            private static func reason(
+                from container: KeyedDecodingContainer<CodingKeys>
+            ) throws -> String {
+                let reason = try container.decode(String.self, forKey: .reason)
+                guard !reason.isEmpty else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .reason,
+                        in: container,
+                        debugDescription: "The delivery reason is empty."
+                    )
+                }
+                return reason
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case attemptID = "attemptId"
+            case result
         }
     }
 
@@ -353,6 +425,68 @@ extension DesktopClient: DependencyKey {
     private static func messagesURL(workspaceID: String, sessionID: String) throws -> URL {
         try sessionURL(workspaceID: workspaceID, sessionID: sessionID)
             .appending(path: "messages")
+    }
+
+    private static func sendMessage(
+        workspaceID: String,
+        sessionID: String,
+        message: String,
+        model: Session.Model,
+        attemptID: UUID
+    ) async -> MessageDeliveryResult {
+        let request: URLRequest
+        do {
+            request = try jsonRequest(
+                method: "POST",
+                body: SendMessageRequest(
+                    attemptID: attemptID,
+                    message: message,
+                    model: model.rawValue
+                ),
+                url: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
+                timeoutInterval: 10
+            )
+        } catch {
+            return .rejected(
+                reason: "The message request could not be created: \(error.localizedDescription)"
+            )
+        }
+
+        let responseData: Data
+        let response: URLResponse
+        do {
+            (responseData, response) = try await data(for: request)
+        } catch {
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+
+        guard let response = response as? HTTPURLResponse else {
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+        guard response.statusCode == 200 else {
+            if response.statusCode == 400 {
+                let reason = errorMessage(from: responseData)
+                return .rejected(
+                    reason: reason.isEmpty ? "Message was rejected." : reason
+                )
+            }
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+        guard let response = try? JSONDecoder.conductor.decode(
+            SendMessageResponse.self,
+            from: responseData
+        ), response.attemptID == attemptID else {
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+
+        return switch response.result {
+        case .accepted(let messageID):
+            .accepted(messageID: messageID)
+        case .rejected(let reason):
+            .rejected(reason: reason)
+        case .unknown(let reason):
+            .unknown(reason: reason)
+        }
     }
 
     // /workspaces/{workspaceID}/sessions/{sessionID}
@@ -451,9 +585,13 @@ extension DesktopClient: DependencyKey {
     private static func jsonRequest<Body: Encodable>(
         method: String,
         body: Body,
-        url: URL
+        url: URL,
+        timeoutInterval: TimeInterval? = nil
     ) throws -> URLRequest {
         var request = URLRequest(url: url)
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
+        }
         request.httpMethod = method
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

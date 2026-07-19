@@ -6,13 +6,44 @@
 //
 
 import Foundation
+import Clocks
 import SharedConductorData
 import Testing
 
 @testable import ConductorMobileServer
 
 struct WorkspaceUIHookTests {
-    @Test("Commands return generic browser acceptance or rejection")
+    @Test("A callback at the absolute deadline loses")
+    func absoluteMessageDeadline() async throws {
+        let clock = TestClock()
+        let uiHook = WorkspaceUIHook.live(clock: clock)
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let requestID = UUID()
+        let send = Task {
+            try await uiHook.sendMessage(
+                requestID: requestID,
+                attemptID: UUID(),
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "Run the tests.",
+                mode: .sent
+            )
+        }
+        _ = await events.next()
+
+        await clock.advance(by: .seconds(5))
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: acceptedMessageResult(requestID: requestID)
+            ) == false
+        )
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.deliveryUnknown) {
+            try await send.value
+        }
+    }
+
+    @Test("Message commands require a tagged accepted browser receipt")
     func sendMessage() async throws {
         let uiHook = WorkspaceUIHook.liveValue
         let unavailableRequestID = UUID()
@@ -44,15 +75,13 @@ struct WorkspaceUIHookTests {
         #expect(command.workspaceID == "workspace-1")
         #expect(command.sendMessage.content == "Run the tests.")
         #expect(command.sendMessage.mode == "sent")
+        #expect(command.sendMessage.attemptID == sentRequestID)
         #expect(
             await uiHook.didCompleteCommand(
-                result: WorkspaceUIHook.CommandResult(
-                    requestID: command.requestID,
-                    error: nil
-                )
+                result: acceptedMessageResult(requestID: command.requestID)
             )
         )
-        try await send.value
+        #expect(try await send.value.messageID == "message-id")
 
         let rejectedRequestID = UUID()
         let rejectedSend = Task {
@@ -69,11 +98,16 @@ struct WorkspaceUIHookTests {
             await uiHook.didCompleteCommand(
                 result: WorkspaceUIHook.CommandResult(
                     requestID: rejectedCommand.requestID,
-                    error: "Nope."
+                    result: .init(
+                        type: .rejected,
+                        messageID: nil,
+                        reason: "Nope.",
+                        state: nil
+                    )
                 )
             )
         )
-        await #expect(throws: WorkspaceUIHook.CommandDispatchError.commandFailed("Nope.")) {
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.deliveryUnknown) {
             try await rejectedSend.value
         }
     }
@@ -112,22 +146,16 @@ struct WorkspaceUIHookTests {
         #expect(Set(commands.map(\.requestID)) == [firstRequestID, secondRequestID])
         #expect(
             await uiHook.didCompleteCommand(
-                result: WorkspaceUIHook.CommandResult(
-                    requestID: secondRequestID,
-                    error: nil
-                )
+                result: acceptedMessageResult(requestID: secondRequestID)
             )
         )
         #expect(
             await uiHook.didCompleteCommand(
-                result: WorkspaceUIHook.CommandResult(
-                    requestID: firstRequestID,
-                    error: nil
-                )
+                result: acceptedMessageResult(requestID: firstRequestID)
             )
         )
-        try await first.value
-        try await second.value
+        #expect(try await first.value.messageID == "message-id")
+        #expect(try await second.value.messageID == "message-id")
     }
 
     @Test("Canceling a message command removes its pending callback")
@@ -148,7 +176,7 @@ struct WorkspaceUIHookTests {
         _ = await events.next()
 
         send.cancel()
-        await #expect(throws: CancellationError.self) {
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.deliveryUnknown) {
             try await send.value
         }
         #expect(
@@ -612,8 +640,15 @@ private struct TestMessageCommand: Decodable {
     let sendMessage: SendMessage
 
     struct SendMessage: Decodable {
+        let attemptID: UUID
         let content: String
         let mode: String
+
+        private enum CodingKeys: String, CodingKey {
+            case attemptID = "attemptId"
+            case content
+            case mode
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -622,6 +657,21 @@ private struct TestMessageCommand: Decodable {
         case workspaceID = "workspaceId"
         case sendMessage
     }
+}
+
+private func acceptedMessageResult(
+    requestID: UUID,
+    messageID: String = "message-id"
+) -> WorkspaceUIHook.CommandResult {
+    WorkspaceUIHook.CommandResult(
+        requestID: requestID,
+        result: .init(
+            type: .accepted,
+            messageID: messageID,
+            reason: nil,
+            state: "sent"
+        )
+    )
 }
 
 private enum PersistenceError: Error, Equatable {

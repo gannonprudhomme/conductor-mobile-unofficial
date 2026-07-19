@@ -9,6 +9,7 @@ import ComposableArchitecture
 import ConductorMobileData
 import Foundation
 import SharedConductorData
+@_spi(Internals) import Sharing
 import SQLiteData
 @testable import ConductorChat
 import Testing
@@ -30,6 +31,7 @@ struct WorkspaceChatTests {
         )
 
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { db in
                 try Workspace.upsert { workspace }.execute(db)
@@ -412,7 +414,9 @@ struct WorkspaceChatTests {
                 }
             }
 
-            let task = await store.send(.task)
+            let task = await store.send(.task) {
+                $0.hasNormalizedRestoredOutbox = true
+            }
 
             continuation.yield([session])
             await store.receive(\.loadSessionsResponse.success) {
@@ -549,6 +553,7 @@ struct WorkspaceChatTests {
         let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
 
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
                 try Session.upsert { activeSession }.execute(database)
@@ -803,33 +808,40 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
+                $0.uuid = .incrementing
                 $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, _ in
                     #expect(workspaceID == workspace.id)
                     #expect(sessionID == activeSession.id)
                     #expect(message == "Run the tests.")
                     #expect(model == activeSession.model)
                     for await _ in responses {
-                        throw TestError()
+                        return .unknown(reason: "Delivery could not be determined.")
                     }
-                    throw TestError()
+                    return .unknown(reason: "Delivery could not be determined.")
                 }
             }
+            store.exhaustivity = .off(showSkippedAssertions: false)
 
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.chat(.sendButtonTapped)) {
-                $0.chat?.isMessageSendInFlight = true
-                $0.chat?.scrollToBottomRequest = 1
-            }
+            await store.send(.chat(.sendButtonTapped))
+            #expect(store.state.chat?.isMessageSendInFlight == true)
             await store.send(.sessionButtonTapped(selectedSession)) {
                 $0.hasUserSelectedSession = true
-                $0.chat = Chat.State(session: selectedSession)
+                $0.chat = Chat.State(
+                    session: selectedSession,
+                    outbox: $0.$outbox
+                )
             }
 
             responseContinuation.yield()
-            await store.receive(\.chat.sendMessageResponse)
             responseContinuation.finish()
             await store.finish()
+            #expect(store.state.chat?.sessionID == selectedSession.id)
+            #expect(
+                store.state.outbox[workspace.id, activeSession.id]
+                    .first?.attempts.first?.state == .unknown
+            )
         }
     }
 
@@ -1121,46 +1133,6 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("When chat fails to send a message, an alert is presented and dismissed")
-    func chatFailsToSendMessage() async throws {
-        let workspace = try makeWorkspace(activeSessionID: "active")
-        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-            try $0.defaultDatabase.write { db in
-                try Session.upsert { activeSession }.execute(db)
-            }
-        } operation: {
-            let store = TestStore(
-                initialState: WorkspaceChat.State(
-                    workspaceWithRepository: WorkspaceWithRepository(
-                        workspace: workspace,
-                        repository: nil
-                    )
-                )
-            ) {
-                WorkspaceChat()
-            }
-
-            await store.send(
-                .chat(
-                    .sendMessageResponse(
-                        sessionID: activeSession.id,
-                        result: .failure(TestError())
-                    )
-                )
-            ) {
-                $0.destination = .alert(
-                    .failedToSendMessage(message: TestError().localizedDescription)
-                )
-            }
-            await store.send(.destination(.dismiss)) {
-                $0.destination = nil
-            }
-        }
-    }
-
     @Test("When chat fails to stop a session, an alert is presented and dismissed")
     func chatFailsToStopSession() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -1272,21 +1244,6 @@ struct WorkspaceChatTests {
             await store.send(.chat(.loadMessagesFailed(error)))
             await store.send(
                 .chat(
-                    .sendMessageResponse(
-                        sessionID: activeSession.id,
-                        result: .failure(error)
-                    )
-                )
-            ) {
-                $0.destination = .alert(
-                    .failedToSendMessage(message: error.localizedDescription)
-                )
-            }
-            await store.send(.destination(.dismiss)) {
-                $0.destination = nil
-            }
-            await store.send(
-                .chat(
                     .stopSessionResponse(
                         sessionID: activeSession.id,
                         result: .failure(error)
@@ -1356,7 +1313,9 @@ struct WorkspaceChatTests {
                 }
             }
 
-            let task = await store.send(.task)
+            let task = await store.send(.task) {
+                $0.hasNormalizedRestoredOutbox = true
+            }
 
             firstContinuation.finish(throwing: TestError())
             await store.receive(\.loadSessionsResponse.failure) {
@@ -1380,6 +1339,374 @@ struct WorkspaceChatTests {
             #expect(secondConnectionCancelled.value)
         }
     }
+
+    @Test("A failed initial outbox save retains the draft and never posts")
+    func initialSaveFailure() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        @Shared(FailingOutboxKey()) var outbox = MessageOutbox()
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: $outbox
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _, _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .accepted(messageID: "unexpected")
+                }
+                $0.uuid = .incrementing
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+            store.state.chat?.$messageDraft.withLock { $0 = "  Run the tests.  " }
+
+            await store.send(.chat(.sendButtonTapped))
+            await store.finish()
+
+            #expect(requestCount.value == 0)
+            #expect(store.state.chat?.messageDraft == "  Run the tests.  ")
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+            #expect(store.state.$outbox.saveError != nil)
+        }
+    }
+
+    @Test("Editing while the explicit save is suspended preserves the new draft")
+    func editedDraftDuringSave() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let saveGate = OutboxSaveGate()
+        @Shared(SuspendingOutboxKey(gate: saveGate)) var outbox = MessageOutbox()
+        let request = LockIsolated<RecordedSend?>(nil)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: $outbox
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, message, model, attemptID in
+                    request.setValue(.init(message: message, model: model, attemptID: attemptID))
+                    return .accepted(messageID: "message-1")
+                }
+                $0.uuid = .incrementing
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+            store.state.chat?.$messageDraft.withLock { $0 = "  Run the tests.  " }
+
+            await store.send(.chat(.sendButtonTapped))
+            while !saveGate.isWaiting {
+                await Task.yield()
+            }
+            store.state.chat?.$messageDraft.withLock { $0 = "Only run unit tests." }
+            saveGate.succeed()
+            await store.finish()
+
+            #expect(store.state.chat?.messageDraft == "Only run unit tests.")
+            #expect(request.value?.message == "Run the tests.")
+            #expect(request.value?.model == session.model)
+            #expect(
+                store.state.outbox[workspace.id, session.id]
+                    .first?.attempts.first?.state == .accepted(messageID: "message-1")
+            )
+        }
+    }
+
+    @Test("Retry uses persisted content and model without touching the draft")
+    func retryUsesPersistedBubble() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(10)
+        let originalAttemptID = UUID(11)
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Persisted content",
+                model: .gpt_5_6_terra,
+                attempts: [.init(attemptID: originalAttemptID, state: .rejected)]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("retry-outbox-\(UUID())")
+        )
+        let request = LockIsolated<RecordedSend?>(nil)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, message, model, attemptID in
+                    request.setValue(.init(message: message, model: model, attemptID: attemptID))
+                    return .rejected(reason: "Not enqueued.")
+                }
+                $0.uuid = .incrementing
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+            store.state.chat?.$messageDraft.withLock { $0 = "Unrelated draft" }
+
+            await store.send(.chat(.retryButtonTapped(bubbleID)))
+            await store.finish()
+
+            #expect(request.value?.message == "Persisted content")
+            #expect(request.value?.model == .gpt_5_6_terra)
+            #expect(request.value?.attemptID != originalAttemptID)
+            #expect(store.state.chat?.messageDraft == "Unrelated draft")
+            #expect(
+                store.state.outbox[workspace.id, session.id]
+                    .first?.attempts.map(\.state) == [.rejected, .rejected]
+            )
+        }
+    }
+
+    @Test("Restoration normalizes sending to unknown but session switching does not")
+    func restorationNormalization() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+        let otherSession = try makeSession(id: "other", workspaceID: workspace.id)
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, activeSession.id] = [
+            .init(
+                bubbleID: UUID(20),
+                content: "Sending",
+                model: activeSession.model,
+                attempts: [.init(attemptID: UUID(21), state: .sending)]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("restored-outbox-\(UUID())")
+        )
+        let (sessions, sessionsContinuation) = AsyncThrowingStream<
+            [Session],
+            any Error
+        >.makeStream()
+        defer { sessionsContinuation.finish() }
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { [activeSession, otherSession] }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.observeSessions = { _ in sessions }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.sessionButtonTapped(otherSession))
+            #expect(
+                store.state.outbox[workspace.id, activeSession.id]
+                    .first?.attempts.first?.state == .sending
+            )
+            let task = await store.send(.task)
+            #expect(
+                store.state.outbox[workspace.id, activeSession.id]
+                    .first?.attempts.first?.state == .unknown
+            )
+            await task.cancel()
+        }
+    }
+
+    @Test("Canonical confirmation installs the alias before durable removal")
+    func canonicalAliasAndRemoval() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(30)
+        let acceptedAttemptID = UUID(31)
+        let retryAttemptID = UUID(32)
+        let message = Message(
+            id: "message-1",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: acceptedAttemptID.uuidString
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Run the tests.",
+                model: session.model,
+                attempts: [
+                    .init(attemptID: acceptedAttemptID, state: .accepted(messageID: message.id)),
+                    .init(attemptID: retryAttemptID, state: .sending),
+                ]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("canonical-outbox-\(UUID())")
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+                try Message.upsert { message }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.messagesUpdated([message])))
+            #expect(store.state.messageIDToBubbleID[message.id] == bubbleID)
+            #expect(store.state.outbox[workspace.id, session.id].count == 1)
+            #expect(store.state.chat?.rows?.map(\.id).contains("human:\(bubbleID)") == true)
+
+            await store.send(
+                .messageSendResponse(
+                    .init(
+                        workspaceID: workspace.id,
+                        sessionID: session.id,
+                        bubbleID: bubbleID,
+                        attemptID: retryAttemptID
+                    ),
+                    .rejected(reason: "Not enqueued.")
+                )
+            )
+            await store.finish()
+            #expect(store.state.messageIDToBubbleID[message.id] == bubbleID)
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+        }
+    }
+}
+
+private struct RecordedSend: Equatable, Sendable {
+    let message: String
+    let model: Session.Model
+    let attemptID: UUID
+}
+
+private struct FailingOutboxKey: SharedKey {
+    let id = UUID()
+
+    func load(
+        context: LoadContext<MessageOutbox>,
+        continuation: LoadContinuation<MessageOutbox>
+    ) {
+        continuation.resumeReturningInitialValue()
+    }
+
+    func subscribe(
+        context: LoadContext<MessageOutbox>,
+        subscriber: SharedSubscriber<MessageOutbox>
+    ) -> SharedSubscription {
+        SharedSubscription { }
+    }
+
+    func save(
+        _ value: MessageOutbox,
+        context: SaveContext,
+        continuation: SaveContinuation
+    ) {
+        continuation.resume(throwing: OutboxTestError.saveFailed)
+    }
+}
+
+private struct SuspendingOutboxKey: SharedKey {
+    let id = UUID()
+    let gate: OutboxSaveGate
+
+    func load(
+        context: LoadContext<MessageOutbox>,
+        continuation: LoadContinuation<MessageOutbox>
+    ) {
+        continuation.resumeReturningInitialValue()
+    }
+
+    func subscribe(
+        context: LoadContext<MessageOutbox>,
+        subscriber: SharedSubscriber<MessageOutbox>
+    ) -> SharedSubscription {
+        SharedSubscription { }
+    }
+
+    func save(
+        _ value: MessageOutbox,
+        context: SaveContext,
+        continuation: SaveContinuation
+    ) {
+        switch context {
+        case .didSet:
+            continuation.resume()
+        case .userInitiated:
+            gate.suspendFirst(continuation)
+        }
+    }
+}
+
+private final class OutboxSaveGate: @unchecked Sendable {
+    private let continuation = LockIsolated<SaveContinuation?>(nil)
+    private let hasSuspended = LockIsolated(false)
+
+    var isWaiting: Bool { continuation.value != nil }
+
+    func suspendFirst(_ continuation: SaveContinuation) {
+        let shouldSuspend = hasSuspended.withValue { hasSuspended in
+            defer { hasSuspended = true }
+            return !hasSuspended
+        }
+        if shouldSuspend {
+            self.continuation.setValue(continuation)
+        } else {
+            continuation.resume()
+        }
+    }
+
+    func succeed() {
+        continuation.withValue {
+            $0?.resume()
+            $0 = nil
+        }
+    }
+}
+
+private enum OutboxTestError: Error {
+    case saveFailed
 }
 
 private func makeSession(
