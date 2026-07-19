@@ -6,11 +6,287 @@
 //
 
 import Foundation
+import SharedConductorData
 import Testing
 
 @testable import ConductorMobileServer
 
 struct WorkspaceUIHookTests {
+    @Test("Commands return generic browser acceptance or rejection")
+    func sendMessage() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let unavailableRequestID = UUID()
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.listenerUnavailable) {
+            try await uiHook.sendMessage(
+                requestID: unavailableRequestID,
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "Run the tests.",
+                mode: .sent
+            )
+        }
+
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let sentRequestID = UUID()
+        let send = Task {
+            try await uiHook.sendMessage(
+                requestID: sentRequestID,
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "Run the tests.",
+                mode: .sent
+            )
+        }
+        let command = try decodeMessageCommand(try #require(await events.next()))
+        #expect(command.requestID == sentRequestID)
+        #expect(command.sessionID == "session-1")
+        #expect(command.workspaceID == "workspace-1")
+        #expect(command.sendMessage.content == "Run the tests.")
+        #expect(command.sendMessage.mode == "sent")
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(
+                    requestID: command.requestID,
+                    error: nil
+                )
+            )
+        )
+        try await send.value
+
+        let rejectedRequestID = UUID()
+        let rejectedSend = Task {
+            try await uiHook.sendMessage(
+                requestID: rejectedRequestID,
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "Fail.",
+                mode: .queued
+            )
+        }
+        let rejectedCommand = try decodeMessageCommand(try #require(await events.next()))
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(
+                    requestID: rejectedCommand.requestID,
+                    error: "Nope."
+                )
+            )
+        )
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.commandFailed("Nope.")) {
+            try await rejectedSend.value
+        }
+    }
+
+    @Test("Message command acknowledgements complete independently across sessions")
+    func overlappingMessages() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let firstRequestID = UUID()
+        let secondRequestID = UUID()
+
+        let first = Task {
+            try await uiHook.sendMessage(
+                requestID: firstRequestID,
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "First",
+                mode: .sent
+            )
+        }
+        let second = Task {
+            try await uiHook.sendMessage(
+                requestID: secondRequestID,
+                sessionID: "session-2",
+                workspaceID: "workspace-1",
+                content: "Second",
+                mode: .sent
+            )
+        }
+
+        let commands = try [
+            decodeMessageCommand(try #require(await events.next())),
+            decodeMessageCommand(try #require(await events.next())),
+        ]
+        #expect(Set(commands.map(\.requestID)) == [firstRequestID, secondRequestID])
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(
+                    requestID: secondRequestID,
+                    error: nil
+                )
+            )
+        )
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(
+                    requestID: firstRequestID,
+                    error: nil
+                )
+            )
+        )
+        try await first.value
+        try await second.value
+    }
+
+    @Test("Canceling a message command removes its pending callback")
+    func cancelMessage() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let requestID = UUID()
+        let send = Task {
+            try await uiHook.sendMessage(
+                requestID: requestID,
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "Slow",
+                mode: .sent
+            )
+        }
+        _ = await events.next()
+
+        send.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await send.value
+        }
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(
+                    requestID: requestID,
+                    error: nil
+                )
+            ) == false
+        )
+    }
+
+    @Test("Disconnecting loses an enqueued command callback")
+    func disconnectMessage() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let requestID = UUID()
+        let send = Task {
+            try await uiHook.sendMessage(
+                requestID: requestID,
+                sessionID: "session-1",
+                workspaceID: "workspace-1",
+                content: "Slow",
+                mode: .sent
+            )
+        }
+        _ = await events.next()
+
+        await uiHook.disconnect(connectionID: connection.id)
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.deliveryUnknown) {
+            try await send.value
+        }
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(requestID: requestID, error: nil)
+            ) == false
+        )
+    }
+
+    @Test("Stop commands serialize mutations until accepted persistence completes")
+    func stopSession() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let requestID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let stoppedSession = workspaceUIHookSession()
+        let (persistence, persistenceContinuation) = AsyncStream<Session>.makeStream()
+        let stop = Task {
+            try await uiHook.stopSession(
+                requestID: requestID,
+                sessionID: "session-\"1"
+            ) {
+                for await session in persistence {
+                    return session
+                }
+                return nil
+            }
+        }
+
+        #expect(
+            await events.next()
+                == "data: {\"requestId\":\"11111111-2222-3333-4444-555555555555\",\"sessionId\":\"session-\\\"1\",\"stopSession\":true}\n\n"
+        )
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(requestID: requestID, error: nil)
+            )
+        )
+        await #expect(throws: WorkspaceUIHook.DispatchError.mutationInFlight) {
+            try await uiHook.dispatch(
+                command: .workspace(
+                    id: "workspace-1",
+                    mutation: .pinned(isPinned: true)
+                ),
+                fallback: {},
+                waitUntilChangeAvailableInDatabase: {}
+            )
+        }
+
+        persistenceContinuation.yield(stoppedSession)
+        persistenceContinuation.finish()
+        #expect(try await stop.value == stoppedSession)
+    }
+
+    @Test("Stop commands classify accepted and unknown persistence timeouts")
+    func stopTimeouts() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        let acceptedRequestID = UUID()
+        let (acceptedGate, acceptedGateContinuation) = AsyncStream<Void>.makeStream()
+        let accepted = Task {
+            try await uiHook.stopSession(
+                requestID: acceptedRequestID,
+                sessionID: "session-1"
+            ) {
+                for await _ in acceptedGate {
+                    return nil
+                }
+                return nil
+            }
+        }
+        _ = await events.next()
+        #expect(
+            await uiHook.didCompleteCommand(
+                result: WorkspaceUIHook.CommandResult(requestID: acceptedRequestID, error: nil)
+            )
+        )
+        await Task.yield()
+        acceptedGateContinuation.yield(())
+        acceptedGateContinuation.finish()
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.persistenceTimedOut) {
+            try await accepted.value
+        }
+
+        let unknownRequestID = UUID()
+        let (unknownGate, unknownGateContinuation) = AsyncStream<Void>.makeStream()
+        let unknown = Task {
+            try await uiHook.stopSession(
+                requestID: unknownRequestID,
+                sessionID: "session-1"
+            ) {
+                for await _ in unknownGate {
+                    return nil
+                }
+                return nil
+            }
+        }
+        _ = await events.next()
+        await uiHook.disconnect(connectionID: connection.id)
+        unknownGateContinuation.yield(())
+        unknownGateContinuation.finish()
+        await #expect(throws: WorkspaceUIHook.CommandDispatchError.deliveryUnknown) {
+            try await unknown.value
+        }
+    }
+
     @Test("Session creation requires a listener and emits its workspace command")
     func createSession() async throws {
         let uiHook = WorkspaceUIHook.liveValue
@@ -286,6 +562,51 @@ struct WorkspaceUIHookTests {
         #expect(await uiHook.isConnected())
         await uiHook.disconnect(connectionID: secondConnection.id)
         #expect(await uiHook.isConnected() == false)
+    }
+}
+
+private func decodeMessageCommand(_ event: String) throws -> TestMessageCommand {
+    let prefix = "data: "
+    #expect(event.hasPrefix(prefix))
+    #expect(event.hasSuffix("\n\n"))
+    let payload = event.dropFirst(prefix.count).dropLast(2)
+    return try JSONDecoder().decode(TestMessageCommand.self, from: Data(payload.utf8))
+}
+
+private func workspaceUIHookSession() -> Session {
+    Session(
+        id: "session-1",
+        workspaceID: "workspace-1",
+        title: "Stopped",
+        agentType: .codex,
+        isHidden: false,
+        createdAt: "2026-07-12T00:00:00Z",
+        updatedAt: "2026-07-12T00:00:01Z",
+        lastUserMessageAt: nil,
+        status: .idle,
+        model: .gpt5_5,
+        unreadCount: 0,
+        freshlyCompacted: 0,
+        contextTokenCount: 0
+    )
+}
+
+private struct TestMessageCommand: Decodable {
+    let requestID: UUID
+    let sessionID: String
+    let workspaceID: String
+    let sendMessage: SendMessage
+
+    struct SendMessage: Decodable {
+        let content: String
+        let mode: String
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case sessionID = "sessionId"
+        case workspaceID = "workspaceId"
+        case sendMessage
     }
 }
 

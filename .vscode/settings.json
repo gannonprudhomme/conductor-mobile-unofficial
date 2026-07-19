@@ -1,8 +1,0 @@
-{
-  "rust-analyzer.linkedProjects": [
-    "desktop/Bridge/Installer/Cargo.toml"
-  ],
-  "typescript.tsdk": "desktop/Bridge/Proxy/node_modules/typescript/lib",
-  "typescript.validate.enable": true,
-  "js/ts.tsdk.path": "desktop/Bridge/Proxy/node_modules/typescript/lib"
-}

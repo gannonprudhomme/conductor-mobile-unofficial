@@ -80,6 +80,34 @@ enum WorkspaceUIHookRoute {
         )
     }
 
+    static func commandResult(
+        request: Request,
+        context: Server.RequestContext
+    ) async throws -> Response {
+        guard request.headers[.origin] == origin else {
+            logDenied(route: "command-result", request: request)
+            return Response(status: .forbidden, headers: resultHeaders(isAdmitted: false))
+        }
+
+        let result = try await request.decode(
+            as: WorkspaceUIHook.CommandResult.self,
+            context: context
+        )
+        @Dependency(\.workspaceUIHook) var uiHook
+        guard await uiHook.didCompleteCommand(result: result) else {
+            return Response(status: .notFound, headers: resultHeaders(isAdmitted: true))
+        }
+        return Response(status: .noContent, headers: resultHeaders(isAdmitted: true))
+    }
+
+    static func commandResultPreflight(request: Request) -> Response {
+        guard request.headers[.origin] == origin else {
+            logDenied(route: "command-result-preflight", request: request)
+            return Response(status: .forbidden, headers: resultHeaders(isAdmitted: false))
+        }
+        return Response(status: .noContent, headers: resultHeaders(isAdmitted: true))
+    }
+
     private enum HookAdmission {
         case conductor
         case originlessScript
@@ -137,6 +165,16 @@ enum WorkspaceUIHookRoute {
         ]
         if isAdmitted {
             headers[.accessControlAllowOrigin] = origin
+        }
+        return headers
+    }
+
+    private static func resultHeaders(isAdmitted: Bool) -> HTTPFields {
+        var headers: HTTPFields = [.vary: "Origin"]
+        if isAdmitted {
+            headers[.accessControlAllowOrigin] = origin
+            headers[.accessControlAllowMethods] = "POST"
+            headers[.accessControlAllowHeaders] = "Content-Type"
         }
         return headers
     }

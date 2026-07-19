@@ -8,7 +8,6 @@
 import Dependencies
 import Foundation
 import Hummingbird
-import Logging
 import SharedConductorData
 import SQLiteData
 
@@ -16,12 +15,14 @@ enum MessageRoute {
     static func post(
         request: Request,
         context: Server.RequestContext,
-        database: any DatabaseWriter
+        database: any DatabaseWriter,
+        commandTimeout: Duration
     ) async throws -> Response {
-        @Dependency(\.continuousClock) var clock
-        @Dependency(\.sidecarBridgeClient) var sidecarBridgeClient
+        @Dependency(\.continuousClock) var continuousClock
         @Dependency(\.uuid) var uuid
-        @Dependency(\.workspaceUIHook) var uiHook
+        @Dependency(\.workspaceUIHook) var workspaceUIHook
+        let clock = continuousClock
+        let uiHook = workspaceUIHook
 
         let sendMessageRequest = try await request.decode(
             as: SendMessageRequest.self,
@@ -33,50 +34,33 @@ enum MessageRoute {
         let workspaceID = try context.parameters.require("workspaceID")
         let sessionID = try context.parameters.require("sessionID")
 
-        let messageSendContext: MessageSendContext?
+        let session: Session?
         do {
-            messageSendContext = try await database.read { database in
-                let query = Session.messageSendContext(
-                    workspaceID: workspaceID,
-                    sessionID: sessionID
-                )
-                guard let row = try query.fetchOne(database) else {
-                    return nil
-                }
-
-                return MessageSendContext(
-                    agentType: row.agentType,
-                    isFastModeEnabled: row.isFastModeEnabled,
-                    lastUserMessageAt: row.lastUserMessageAt,
-                    model: row.model,
-                    workspacePath: row.workspacePath
-                )
+            session = try await database.read { database in
+                try Session
+                    .where {
+                        $0.workspaceID.eq(workspaceID)
+                            && $0.id.eq(sessionID)
+                    }
+                    .fetchOne(database)
             }
         } catch {
-            Logger.bridge.error("Failed to load message send context: \(error)")
             throw PlainTextResponseError(
                 .internalServerError,
                 message: "Could not load message send context: \(error)"
             )
         }
 
-        guard let messageSendContext else {
+        guard let session else {
             throw PlainTextResponseError(.notFound, message: "Session not found.")
         }
-        guard let workspacePath = messageSendContext.workspacePath else {
-            throw PlainTextResponseError(
-                .conflict,
-                message: "The workspace is not available locally."
-            )
-        }
-        // Use the requested model when supplied; otherwise continue with the session model.
-        let model = sendMessageRequest.model ?? messageSendContext.model.rawValue
+        let model = sendMessageRequest.model ?? session.model.rawValue
         let requestedModel = Session.Model(rawValue: model)
         let requestedAgentType: Session.AgentType
-        if model == messageSendContext.model.rawValue
-            || Session.Model.models(for: messageSendContext.agentType).contains(requestedModel) {
-            requestedAgentType = messageSendContext.agentType
-        } else if messageSendContext.lastUserMessageAt == nil,
+        if requestedModel == session.model
+            || Session.Model.models(for: session.agentType).contains(requestedModel) {
+            requestedAgentType = session.agentType
+        } else if session.lastUserMessageAt == nil,
                   let agentType = requestedModel.agentType {
             requestedAgentType = agentType
         } else {
@@ -86,11 +70,11 @@ enum MessageRoute {
             )
         }
         let isFastModeEnabled = sendMessageRequest.isFastModeEnabled
-            ?? messageSendContext.isFastModeEnabled
+            ?? session.isFastModeEnabled
             ?? false
 
         do {
-            if requestedAgentType != messageSendContext.agentType {
+            if requestedAgentType != session.agentType {
                 let didUpdate = try await uiHook.updateSessionAgentAndModel(
                     sessionID: sessionID,
                     agentType: requestedAgentType,
@@ -117,7 +101,7 @@ enum MessageRoute {
                         message: "Conductor is not connected to change the session agent."
                     )
                 }
-            } else if model != messageSendContext.model.rawValue {
+            } else if requestedModel != session.model {
                 let didUpdate = try await uiHook.updateSessionModel(
                     sessionID: sessionID,
                     model: requestedModel
@@ -150,7 +134,7 @@ enum MessageRoute {
             )
         }
 
-        if isFastModeEnabled != (messageSendContext.isFastModeEnabled ?? false) {
+        if isFastModeEnabled != (session.isFastModeEnabled ?? false) {
             do {
                 _ = try await uiHook.dispatch(
                     command: .sessionFastMode(
@@ -187,92 +171,53 @@ enum MessageRoute {
             }
         }
 
-        let messageID = uuid().uuidString
-        do {
-            try await sidecarBridgeClient.sendMessage(
-                SidecarBridgeClient.RuntimeMessageRequest(
-                    agentType: requestedAgentType.rawValue,
-                    cwd: workspacePath,
-                    isFastModeEnabled: isFastModeEnabled,
-                    message: sendMessageRequest.message,
-                    messageID: messageID,
-                    model: model,
-                    sessionID: sessionID,
-                    workspaceID: workspaceID
+        let requestID = uuid()
+        return try await withThrowingTaskGroup(of: MessageSendEvent.self) { group in
+            group.addTask {
+                do {
+                    try await uiHook.sendMessage(
+                        requestID: requestID,
+                        sessionID: sessionID,
+                        workspaceID: workspaceID,
+                        content: sendMessageRequest.message,
+                        mode: .sent
+                    )
+                    return .accepted
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let error as WorkspaceUIHook.CommandDispatchError {
+                    return .failed(error)
+                }
+            }
+            group.addTask {
+                try await clock.sleep(for: commandTimeout)
+                return .deadline
+            }
+            defer { group.cancelAll() }
+
+            guard let event = try await group.next() else {
+                throw CancellationError()
+            }
+            switch event {
+            case .accepted:
+                return Response(status: .noContent)
+            case .deadline, .failed(.deliveryUnknown), .failed(.persistenceTimedOut):
+                throw PlainTextResponseError(
+                    .serviceUnavailable,
+                    message: "Could not determine whether the message was delivered. Check the conversation before retrying."
                 )
-            )
-        } catch let error as SidecarBridgeClient.ResponseError {
-            Logger.bridge.error(
-                "Bridge request failed with status \(error.statusCode): \(error.message)"
-            )
-            throw PlainTextResponseError(
-                HTTPResponse.Status(code: error.statusCode),
-                message: error.message
-            )
-        } catch {
-            Logger.bridge.error("Failed to reach the Conductor sidecar bridge: \(error)")
-            throw PlainTextResponseError(
-                .badGateway,
-                message: "Could not reach the Conductor sidecar bridge: \(error)"
-            )
-        }
-
-        let message = try await waitForPersistedMessage(
-            id: messageID,
-            sessionID: sessionID,
-            database: database,
-            clock: clock
-        )
-        guard let message else {
-            throw PlainTextResponseError(
-                .badGateway,
-                message: "Conductor accepted the message, but it did not appear in the database before the persistence check timed out."
-            )
-        }
-
-        return try JSONEncoder.conductor.encode(
-            message,
-            from: request,
-            context: context
-        )
-    }
-
-    private static func waitForPersistedMessage<C: Clock>(
-        id: Message.ID,
-        sessionID: Session.ID,
-        database: any DatabaseReader,
-        clock: C
-    ) async throws -> Message? where C.Duration == Duration {
-        let fastPollingDuration = Duration.milliseconds(100)
-        let timeout = Duration.seconds(2)
-        let start = clock.now
-
-        while !Task.isCancelled {
-            let message = try await database.read { database in
-                try Message
-                    .where {
-                        $0.id.eq(id)
-                            && $0.sessionID.eq(sessionID)
-                    }
-                    .fetchOne(database)
+            case .failed(.commandFailed(let message)):
+                throw PlainTextResponseError(
+                    .badGateway,
+                    message: "Conductor could not send the message: \(message)"
+                )
+            case .failed(.listenerUnavailable):
+                throw PlainTextResponseError(
+                    .serviceUnavailable,
+                    message: "Conductor's workspace UI hook is unavailable."
+                )
             }
-            if let message {
-                return message
-            }
-
-            let elapsed = start.duration(to: clock.now)
-            guard elapsed < timeout else {
-                return nil
-            }
-
-            let interval: Duration = elapsed < fastPollingDuration
-                ? .milliseconds(1)
-                : .milliseconds(25)
-            let sleepDuration = min(interval, timeout - elapsed)
-            try await clock.sleep(for: sleepDuration)
         }
-
-        throw CancellationError()
     }
 
     private static func waitForPersistedSessionChange<C: Clock>(
@@ -325,15 +270,6 @@ enum MessageRoute {
         }
     }
 
-    @Selection
-    fileprivate struct MessageSendContext: Sendable {
-        let agentType: Session.AgentType
-        let isFastModeEnabled: Bool?
-        let lastUserMessageAt: String?
-        let model: Session.Model
-        let workspacePath: String?
-    }
-
     private struct SendMessageRequest: Decodable {
         let message: String
         let model: String?
@@ -345,29 +281,10 @@ enum MessageRoute {
             case isFastModeEnabled = "fast_mode"
         }
     }
-}
 
-private extension Session {
-    static func messageSendContext(
-        workspaceID: String,
-        sessionID: String
-    ) -> some SelectStatement<MessageRoute.MessageSendContext, Session, Workspace> {
-        Session
-            .where {
-                $0.workspaceID.eq(workspaceID)
-                    && $0.id.eq(sessionID)
-            }
-            .join(Workspace.all) { session, workspace in
-                session.workspaceID.eq(workspace.id)
-            }
-            .select { session, workspace in
-                MessageRoute.MessageSendContext.Columns(
-                    agentType: session.agentType,
-                    isFastModeEnabled: session.isFastModeEnabled,
-                    lastUserMessageAt: session.lastUserMessageAt,
-                    model: session.model,
-                    workspacePath: workspace.workspacePath
-                )
-            }
+    private enum MessageSendEvent: Sendable {
+        case accepted
+        case deadline
+        case failed(WorkspaceUIHook.CommandDispatchError)
     }
 }

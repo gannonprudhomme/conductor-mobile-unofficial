@@ -41,11 +41,7 @@ Steps:
 
 In order to be able to actually control Conductor **remotely**, you need to install the desktop "companion". You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
 
-#### Sidecar proxy (for sending messages)
-
-Press `Install proxy`, restart Conductor, and make sure `Bridge running` says `Running` (aka everything is green).
-
-#### UI Hook (for changing status/unread/pins)
+#### UI Hook (for sending messages, stopping agents, and changing Conductor state)
 
 1. Press `Copy Loader`
 2. In Conductor, press Cmd+Opt+I to display the Web Inspector (TODO: Replace this with the icons)
@@ -60,6 +56,10 @@ Press `Install proxy`, restart Conductor, and make sure `Bridge running` says `R
 <img src="docs/resources/02-run-snippet.png" width=400>
 
 7. Back in the desktop app, it should say "Connected" on the UI Hook row.
+
+> Upgrading from the proxy-based companion: uninstall the proxy with the old
+> companion and restart Conductor before upgrading. If you already upgraded
+> without uninstalling it, reinstall Conductor to restore its runtime.
 
 ## Setup
 
@@ -81,26 +81,14 @@ For the most part all of the data we get is from Conductor's SQLite database. As
 
 ### Writing data
 
-#### Sidecar proxy
-
-The "sidecar proxy" is how we send messages, interrupt the agent, etc. We install it by basically "man in the middle"'ing how Conductor controls agents, which is through a separate JavaScript script referred to as the "sidecar".
-
-We make this work by swapping out the `conductor-runtime` (aka the "sidecar") in `/Applications/Conductor.app/Contents/Resources/bin/.internal/conductor-runtime` with [this proxy script](desktop/Bridge/Proxy/conductor-runtime)\*. Our proxy script generally just forwards the messages it receives from the actual Conductor application to `conductor-runtime.real`\*\*. However it also starts a web server which our main desktop program calls, basically forwarding the same messages Conductor actually does when you send Codex/Claude messages or interrupt it.
-
-*we actually install [a script](desktop/Bridge/Proxy/conductor-runtime) which calls the compiled version of our [TypeScript script](desktop/Bridge/Proxy/runtime-proxy.mts) which handles the forwarding of messages to the actual `conductor-runtime`
-
-**technically we copy the original `conductor-runtime` to `~/Library/Application Support/com.conductor.app/bin/.internal/conductor-runtime.real`. But we put our proxy script in `/Applications/...` as at launch Conductor copies it from `/Applications` -> `Application Support`. This is also why you need to restart Conductor in order to install our Sidecar proxy.
-
-
 #### UI hook
 
-> Note: This part is technically optional, and is only required if you want to see changes to Status, Unread, Pinned, etc, propagate to Conductor without restarting it.
+> Note: This hook is required for sending messages, stopping agents, and for seeing Status, Unread, Pinned, etc. changes propagate to Conductor without restarting it.
 
 While Conductor does use SQLite to persist pretty much all of it's data, just writing to the database does not mean you will see the changes propagated in Conductor - at least not when it's open. (if you write to the SQLite database then restart, you will see them)
 
-As a result of this, we install a "UI Hook" where instead of writing the data to the database, we instead install a script in Tauri's Web Inspector which connects to the same server our app connects to* uses Server Sent Events (SSEs)
+As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script in Tauri's Web Inspector which connects to the desktop companion using Server Sent Events (SSEs). Sends and stops call Conductor's own loaded message-processing controller and report explicit acceptance or rejection to the companion. SQLite remains authoritative for persisted messages and the final stopped session, which still arrive on the phone through database-backed WebSocket observation.
 
-*mostly for convenience on the code side, they could be two different servers.
 
 ## Missing features
 

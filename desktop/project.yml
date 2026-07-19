@@ -36,7 +36,7 @@ targets:
       path: ConductorDesktop/Info.plist
       properties:
         CFBundleDevelopmentRegion: $(DEVELOPMENT_LANGUAGE)
-        CFBundleDisplayName: Conductor Mobile Proxy (unofficial)
+        CFBundleDisplayName: Conductor Mobile Companion
         CFBundleExecutable: $(EXECUTABLE_NAME)
         CFBundleIconFile: icon.icns
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
@@ -54,18 +54,9 @@ targets:
       - package: ConductorShared
         product: SharedConductorDesign
       - package: ConductorDesktopModules
-        product: ConductorBridge
-      - package: ConductorDesktopModules
         product: ConductorMobileServer
       - package: SwiftLog
         product: Logging
-    preBuildScripts:
-      - name: Build bridge helper and resources
-        basedOnDependencyAnalysis: false
-        script: |
-          "$SRCROOT/scripts/build-bridge-resources.sh" \
-            "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH" \
-            "$CONFIGURATION"
     settings:
       base:
         ENABLE_APP_SANDBOX: NO
@@ -73,7 +64,7 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudomme.conductor-sync-engine
         PRODUCT_MODULE_NAME: ConductorDesktop
-        PRODUCT_NAME: Conductor Mobile Proxy (unofficial)
+        PRODUCT_NAME: Conductor Mobile Companion
 schemes:
   ConductorDesktop:
     build:

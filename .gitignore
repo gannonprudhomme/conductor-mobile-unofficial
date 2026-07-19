@@ -26,9 +26,6 @@ dist-ssr/
 *.mobileprovision
 *.pem
 
-# Rust
-/desktop/Bridge/Installer/target/
-
 # Local env files
 .env*.local
 

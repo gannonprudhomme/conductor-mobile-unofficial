@@ -1,6 +1,7 @@
 // Pretty AI-slop'y. But gets the job done
 
-// Run SSE commands through Conductor's services, then let the server confirm them through SQLite.
+// Run SSE commands through Conductor's services. SQLite confirms workspace mutations, while
+// agent commands report Conductor's acceptance through a correlated callback.
 // Global keys preserve the installed controller and command ordering across cache-busted loads.
 const controllerKey = "__conductorMobileWorkspaceUIHookController";
 const commandQueueKey = "__conductorMobileWorkspaceUIHookCommandQueue";
@@ -51,10 +52,16 @@ export async function prepareWorkspaceUIHook() {
     ],
     "SessionService",
   );
+  const messageProcessingController = uniqueService(
+    shell,
+    ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
+    "MessageProcessingController",
+  );
 
   const hookBaseURL = new URL("./", moduleURL);
   const eventsURL = new URL("events", hookBaseURL);
   eventsURL.searchParams.set("revision", hookRevision);
+  const commandResultURL = new URL("command-result", hookBaseURL);
   // Keep one queue across loader runs so a replacement cannot overtake a pending setter.
   const commandQueue = globalThis[commandQueueKey] ?? { tail: Promise.resolve() };
   const controller = createController({
@@ -62,6 +69,8 @@ export async function prepareWorkspaceUIHook() {
     eventsURL,
     hookRevision,
     hookURL: new URL("hook.js", hookBaseURL),
+    commandResultURL,
+    messageProcessingController,
     sessionService,
     workspaceService,
   });
@@ -151,9 +160,11 @@ function uniqueService(module, methods, name) {
 
 function createController({
   commandQueue,
+  commandResultURL,
   eventsURL,
   hookRevision,
   hookURL,
+  messageProcessingController,
   sessionService,
   workspaceService,
 }) {
@@ -161,7 +172,7 @@ function createController({
   let isRetired = false;
   let refreshPromise;
 
-  // EventSource reconnects itself; SQLite observation replaces a browser result channel.
+  // EventSource reconnects itself; agent commands use a correlated browser result.
   const controller = {
     open() {
       if (isRetired || eventSource) return;
@@ -195,14 +206,20 @@ function createController({
           return;
         }
 
-        commandQueue.tail = commandQueue.tail
-          .then(() => executeCommand({ sessionService, workspaceService }, command))
-          .catch((error) => {
-            console.error(
-              "Conductor Mobile UI mutation failed.",
-              error,
-            );
-          });
+        const execute = () => executeAndReportCommand({
+          commandResultURL,
+          messageProcessingController,
+          sessionService,
+          workspaceService,
+        }, command);
+        const reportError = (error) => {
+          console.error("Conductor Mobile UI command failed.", error);
+        };
+        if (command.field === "sendMessage") {
+          execute().catch(reportError);
+          return;
+        }
+        commandQueue.tail = commandQueue.tail.then(execute).catch(reportError);
       };
     },
     retire() {
@@ -233,20 +250,66 @@ function parseCommand(data) {
   // The server builds these commands; this check keeps each trusted SSE frame to one mutation.
   const value = JSON.parse(data);
   const [field, ...extraFields] = Object.keys(value)
-    .filter((candidate) => candidate !== "sessionId" && candidate !== "workspaceId");
+    .filter((candidate) => !["requestId", "sessionId", "workspaceId"].includes(candidate));
   if (!field || extraFields.length > 0) {
     throw new Error("The command is invalid.");
   }
 
   return {
     field,
+    requestId: value.requestId,
     sessionId: value.sessionId,
     value: value[field],
     workspaceId: value.workspaceId,
   };
 }
 
-async function executeCommand({ sessionService, workspaceService }, command) {
+async function executeAndReportCommand(services, command) {
+  try {
+    await executeCommand(services, command);
+  } catch (error) {
+    await reportCommandResult(services.commandResultURL, command, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  await reportCommandResult(services.commandResultURL, command, {});
+}
+
+async function reportCommandResult(commandResultURL, command, result) {
+  if (!command.requestId) return;
+
+  const body = JSON.stringify({ requestId: command.requestId, ...result });
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(commandResultURL, {
+        body,
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+    } catch (error) {
+      lastError = error;
+    }
+    if (response?.ok || response?.status === 404) return;
+    if (response) {
+      lastError = new Error(`Could not report the command result (${response.status}).`);
+      if (response.status < 500) throw lastError;
+    }
+    if (attempt < 3) await delay(attempt * 50);
+  }
+  throw lastError;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function executeCommand(
+  { messageProcessingController, sessionService, workspaceService },
+  command,
+) {
   switch (command.field) {
     case "archive":
       if (command.value !== true) {
@@ -280,6 +343,39 @@ async function executeCommand({ sessionService, workspaceService }, command) {
         command.value.agentType,
         command.value.model,
       );
+      return;
+    case "sendMessage":
+      {
+        const session = (await sessionService.getSessionsForWorkspace({
+          workspaceId: command.workspaceId,
+          hidden: false,
+        })).find((candidate) => candidate?.id === command.sessionId);
+        if (!session) throw new Error("Session not found.");
+
+        switch (command.value.mode) {
+          case "sent":
+            await messageProcessingController.sendMessageImmediately({
+              session,
+              message: command.value.content,
+              workspaceId: command.workspaceId,
+              includeAttachments: false,
+            });
+            return;
+          case "queued":
+            await messageProcessingController.enqueueMessage({
+              session,
+              message: command.value.content,
+              workspaceId: command.workspaceId,
+              includeAttachments: false,
+              sendMode: command.value.mode,
+            });
+            return;
+          default:
+            throw new Error(`Unsupported message mode: ${command.value.mode}`);
+        }
+      }
+    case "stopSession":
+      await messageProcessingController.cancelSession(command.sessionId);
       return;
     case "pinned":
       await workspaceService.setWorkspacePinned({

@@ -14,9 +14,9 @@ SIGNING_IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
 NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-conductor-mobile}"
 VERSION="$1"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
-APP_NAME="Conductor Mobile Proxy (unofficial)"
+APP_NAME="Conductor Mobile Companion"
 OUTPUT_DIR="$DESKTOP_DIR/dist"
-DMG="$OUTPUT_DIR/Conductor-Mobile-Proxy-$VERSION.dmg"
+DMG="$OUTPUT_DIR/Conductor-Mobile-Companion-$VERSION.dmg"
 
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
   echo "The marketing version must contain two or three numeric components (for example, 0.1.0)." >&2
@@ -68,16 +68,7 @@ if [[ -z "$TARGET_BUILD_DIR" ]]; then
 fi
 
 APP="$TARGET_BUILD_DIR/$APP_NAME.app"
-HELPER="$APP/Contents/Helpers/conductor-bridge-installer"
-
 xcodebuild "${XCODEBUILD_ARGUMENTS[@]}" build | xcbeautify
-
-codesign \
-  --force \
-  --options runtime \
-  --timestamp \
-  --sign "$SIGNING_IDENTITY" \
-  "$HELPER"
 
 codesign \
   --force \

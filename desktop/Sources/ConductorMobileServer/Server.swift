@@ -52,8 +52,8 @@ public enum Server {
 
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
-        // Five seconds tolerates a slow Conductor UI write without holding the request indefinitely.
-        uiMutationTimeout: Duration = .seconds(5),
+        // Five seconds tolerates a slow Conductor UI command without holding the request indefinitely.
+        uiCommandTimeout: Duration = .seconds(5),
         // Workspace creation can run setup and worktree scripts, so it gets a separate timeout.
         workspaceCreationTimeout: Duration = .seconds(300),
         userSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -118,7 +118,7 @@ public enum Server {
                 context: context,
                 database: database,
                 creationTimeout: workspaceCreationTimeout,
-                uiMutationTimeout: uiMutationTimeout
+                uiMutationTimeout: uiCommandTimeout
             )
         }
 
@@ -131,7 +131,7 @@ public enum Server {
                 request: request,
                 context: context,
                 database: database,
-                persistenceTimeout: uiMutationTimeout
+                persistenceTimeout: uiCommandTimeout
             )
         }
 
@@ -217,7 +217,8 @@ public enum Server {
             return try await MessageRoute.post(
                 request: request,
                 context: context,
-                database: database
+                database: database,
+                commandTimeout: uiCommandTimeout
             )
         }
 
@@ -230,7 +231,7 @@ public enum Server {
                 request: request,
                 context: context,
                 database: database,
-                persistenceTimeout: uiMutationTimeout
+                persistenceTimeout: uiCommandTimeout
             )
         }
 
@@ -242,7 +243,8 @@ public enum Server {
             return try await StopRoute.post(
                 request: request,
                 context: context,
-                database: database
+                database: database,
+                persistenceTimeout: uiCommandTimeout
             )
         }
 
@@ -273,6 +275,23 @@ public enum Server {
             await WorkspaceUIHookRoute.events(
                 request: request,
                 revision: hookRevision
+            )
+        }
+        // A JSON POST from Conductor's `tauri://localhost` page crosses origins, so Chromium
+        // automatically sends this CORS preflight before the command-result request. Hummingbird
+        // has no `options` convenience method; `on` registers a route for an explicit HTTP method.
+        router.on(
+            "/workspace-ui-hook/command-result",
+            method: .options
+        ) { request, _ in
+            WorkspaceUIHookRoute.commandResultPreflight(request: request)
+        }
+        // After the browser hook runs a message or stop command, it posts the correlated success
+        // or failure here so the waiting mobile API request can finish with a definite result.
+        router.post("/workspace-ui-hook/command-result") { request, context in
+            try await WorkspaceUIHookRoute.commandResult(
+                request: request,
+                context: context
             )
         }
 

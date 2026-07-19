@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="$1"
 TAG="v$VERSION"
-DMG="$DESKTOP_DIR/dist/Conductor-Mobile-Proxy-$VERSION.dmg"
+DMG="$DESKTOP_DIR/dist/Conductor-Mobile-Companion-$VERSION.dmg"
 
 gh auth status
 "$SCRIPT_DIR/release.sh" "$VERSION"
@@ -21,5 +21,6 @@ gh release create \
   "$DMG" \
   --draft \
   --generate-notes \
+  --notes "Before upgrading, uninstall the runtime proxy with the previous companion and restart Conductor. If you already upgraded without uninstalling it, reinstall Conductor before using this companion." \
   --target "$(git -C "$DESKTOP_DIR" rev-parse HEAD)" \
-  --title "Conductor Mobile Proxy $VERSION"
+  --title "Conductor Mobile Companion $VERSION"

@@ -15,10 +15,12 @@ enum StopRoute {
     static func post(
         request: Request,
         context: Server.RequestContext,
-        database: any DatabaseReader
+        database: any DatabaseReader,
+        persistenceTimeout: Duration
     ) async throws -> Response {
         @Dependency(\.continuousClock) var clock
-        @Dependency(\.sidecarBridgeClient) var sidecarBridgeClient
+        @Dependency(\.uuid) var uuid
+        @Dependency(\.workspaceUIHook) var uiHook
 
         let workspaceID = try context.parameters.require("workspaceID")
         let sessionID = try context.parameters.require("sessionID")
@@ -39,36 +41,59 @@ enum StopRoute {
         guard let session else {
             throw PlainTextResponseError(.notFound, message: "Session not found.")
         }
-
-        do {
-            try await sidecarBridgeClient.stopSession(
-                SidecarBridgeClient.RuntimeStopRequest(
-                    agentType: session.agentType.rawValue,
-                    sessionID: sessionID
-                )
-            )
-        } catch let error as SidecarBridgeClient.ResponseError {
-            throw PlainTextResponseError(
-                HTTPResponse.Status(code: error.statusCode),
-                message: error.message
-            )
-        } catch {
-            throw PlainTextResponseError(
-                .badGateway,
-                message: "Could not reach the Conductor sidecar bridge: \(error)"
+        guard session.status == .working else {
+            return try JSONEncoder.conductor.encode(
+                session,
+                from: request,
+                context: context
             )
         }
 
-        let stoppedSession = try await waitForStoppedSession(
-            workspaceID: workspaceID,
-            sessionID: sessionID,
-            database: database,
-            clock: clock
-        )
-        guard let stoppedSession else {
+        let stoppedSession: Session
+        do {
+            stoppedSession = try await uiHook.stopSession(
+                requestID: uuid(),
+                sessionID: sessionID
+            ) {
+                try await waitForStoppedSession(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID,
+                    database: database,
+                    clock: clock,
+                    timeout: persistenceTimeout
+                )
+            }
+        } catch WorkspaceUIHook.CommandDispatchError.commandFailed(let message) {
             throw PlainTextResponseError(
                 .badGateway,
-                message: "Conductor accepted the stop request, but the session did not stop in the database before the persistence check timed out."
+                message: "Conductor could not stop the session: \(message)"
+            )
+        } catch WorkspaceUIHook.CommandDispatchError.listenerUnavailable {
+            throw PlainTextResponseError(
+                .serviceUnavailable,
+                message: "Conductor's workspace UI hook is unavailable."
+            )
+        } catch WorkspaceUIHook.CommandDispatchError.deliveryUnknown {
+            throw PlainTextResponseError(
+                .serviceUnavailable,
+                message: "Could not determine whether Conductor received the stop command."
+            )
+        } catch WorkspaceUIHook.CommandDispatchError.persistenceTimedOut {
+            throw PlainTextResponseError(
+                .gatewayTimeout,
+                message: "Conductor accepted the stop command, but the session remained working."
+            )
+        } catch WorkspaceUIHook.DispatchError.mutationInFlight {
+            throw PlainTextResponseError(
+                .conflict,
+                message: "Another workspace command is still in progress."
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw PlainTextResponseError(
+                .internalServerError,
+                message: "Could not stop session: \(error)"
             )
         }
 
@@ -83,10 +108,9 @@ enum StopRoute {
         workspaceID: Workspace.ID,
         sessionID: Session.ID,
         database: any DatabaseReader,
-        clock: C
+        clock: C,
+        timeout: Duration
     ) async throws -> Session? where C.Duration == Duration {
-        let fastPollingDuration = Duration.milliseconds(100)
-        let timeout = Duration.seconds(2)
         let start = clock.now
 
         while !Task.isCancelled {
@@ -104,11 +128,7 @@ enum StopRoute {
                 return nil
             }
 
-            let interval: Duration = elapsed < fastPollingDuration
-                ? .milliseconds(1)
-                : .milliseconds(25)
-            let sleepDuration = min(interval, timeout - elapsed)
-            try await clock.sleep(for: sleepDuration)
+            try await clock.sleep(for: min(.milliseconds(25), timeout - elapsed))
         }
 
         throw CancellationError()

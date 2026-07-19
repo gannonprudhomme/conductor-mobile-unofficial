@@ -235,7 +235,7 @@ struct WorkspaceRouteTests {
         } operation: {
             let application = Server.makeApplication(
                 database: database,
-                uiMutationTimeout: .milliseconds(20)
+                uiCommandTimeout: .milliseconds(20)
             )
             try await application.test(.router) { client in
                 try await client.execute(

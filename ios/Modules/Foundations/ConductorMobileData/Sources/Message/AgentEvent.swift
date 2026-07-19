@@ -9,7 +9,7 @@ import Foundation
 
 /// A normalized agent protocol event stored in ``Message/content`` for assistant-role rows.
 ///
-/// Conductor stores Claude and Codex output in this shared envelope before the mobile sidecar
+/// Conductor stores Claude and Codex output in this shared envelope before the mobile companion
 /// relays each message unchanged. Some system subtypes remain specific to one agent runtime.
 public enum AgentEvent: Decodable, Equatable {
     case assistant(AssistantEvent)

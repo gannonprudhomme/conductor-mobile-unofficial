@@ -23,6 +23,9 @@ public struct WorkspaceUIHook: Sendable {
         _ workspaceID: String,
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> Void
+    var didCompleteCommand: @Sendable (_ result: CommandResult) async -> Bool = { _ in
+        false
+    }
     var disconnect: @Sendable (_ connectionID: UUID) async -> Void
     var createWorkspace: @Sendable (
         _ command: CreateWorkspaceCommand,
@@ -34,6 +37,18 @@ public struct WorkspaceUIHook: Sendable {
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> DispatchPath
     var listenerUnavailable: @Sendable () async -> Void
+    var sendMessage: @Sendable (
+        _ requestID: UUID,
+        _ sessionID: Session.ID,
+        _ workspaceID: Workspace.ID,
+        _ content: String,
+        _ mode: MessageMode
+    ) async throws -> Void
+    var stopSession: @Sendable (
+        _ requestID: UUID,
+        _ sessionID: Session.ID,
+        _ waitUntilStopped: @escaping @Sendable () async throws -> Session?
+    ) async throws -> Session
     var updateSessionAgentAndModel: @Sendable (
         _ sessionID: Session.ID,
         _ agentType: Session.AgentType,
@@ -57,6 +72,28 @@ public struct WorkspaceUIHook: Sendable {
         case mutationInFlight
     }
 
+    enum CommandDispatchError: Error, Equatable, Sendable {
+        case commandFailed(String)
+        case deliveryUnknown
+        case listenerUnavailable
+        case persistenceTimedOut
+    }
+
+    enum MessageMode: String, Encodable, Sendable {
+        case queued
+        case sent
+    }
+
+    struct CommandResult: Decodable, Sendable {
+        let requestID: UUID
+        let error: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case requestID = "requestId"
+            case error
+        }
+    }
+
     struct Connection: Sendable {
         let events: AsyncStream<String>
         let id: UUID
@@ -75,6 +112,9 @@ extension WorkspaceUIHook: DependencyKey {
                     waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
                 )
             },
+            didCompleteCommand: { result in
+                await state.didCompleteCommand(result)
+            },
             disconnect: { connectionID in
                 await state.disconnect(connectionID: connectionID)
             },
@@ -92,6 +132,22 @@ extension WorkspaceUIHook: DependencyKey {
                 )
             },
             listenerUnavailable: { await state.listenerUnavailable() },
+            sendMessage: { requestID, sessionID, workspaceID, content, mode in
+                try await state.sendMessage(
+                    requestID: requestID,
+                    sessionID: sessionID,
+                    workspaceID: workspaceID,
+                    content: content,
+                    mode: mode
+                )
+            },
+            stopSession: { requestID, sessionID, waitUntilStopped in
+                try await state.stopSession(
+                    requestID: requestID,
+                    sessionID: sessionID,
+                    waitUntilStopped: waitUntilStopped
+                )
+            },
             updateSessionAgentAndModel: {
                 sessionID,
                 agentType,
@@ -126,6 +182,7 @@ private actor WorkspaceUIHookState {
     private var activeConnection: ConnectionState?
     private var dispatchedCreationIDs: Set<Workspace.ID> = []
     private var isMutationInFlight = false
+    private var pendingCommands: [UUID: PendingCommand] = [:]
 
     var isConnected: Bool {
         activeConnection != nil
@@ -155,6 +212,12 @@ private actor WorkspaceUIHookState {
 
         activeConnection = nil
         connection.continuation.finish()
+        for command in pendingCommands.values {
+            command.continuation.finish(
+                throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+            )
+        }
+        pendingCommands.removeAll()
     }
 
     func listenerUnavailable() {
@@ -209,6 +272,130 @@ private actor WorkspaceUIHookState {
             fallback: nil,
             waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
         )
+    }
+
+    func didCompleteCommand(_ result: WorkspaceUIHook.CommandResult) -> Bool {
+        guard let command = pendingCommands.removeValue(forKey: result.requestID) else {
+            return false
+        }
+
+        if let error = result.error {
+            command.continuation.finish(
+                throwing: WorkspaceUIHook.CommandDispatchError.commandFailed(error)
+            )
+        } else {
+            command.continuation.yield(())
+            command.continuation.finish()
+        }
+        return true
+    }
+
+    func sendMessage(
+        requestID: UUID,
+        sessionID: Session.ID,
+        workspaceID: Workspace.ID,
+        content: String,
+        mode: WorkspaceUIHook.MessageMode
+    ) async throws {
+        let event = try Self.messageEvent(
+            requestID: requestID,
+            sessionID: sessionID,
+            workspaceID: workspaceID,
+            content: content,
+            mode: mode
+        )
+        let (results, continuation) = try enqueueCommand(requestID: requestID, event: event)
+        defer {
+            continuation.finish()
+            pendingCommands[requestID] = nil
+        }
+
+        for try await _ in results {
+            return
+        }
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+    }
+
+    func stopSession(
+        requestID: UUID,
+        sessionID: Session.ID,
+        waitUntilStopped: @escaping @Sendable () async throws -> Session?
+    ) async throws -> Session {
+        guard !isMutationInFlight else {
+            throw WorkspaceUIHook.DispatchError.mutationInFlight
+        }
+        isMutationInFlight = true
+        defer { isMutationInFlight = false }
+
+        let event = try Self.stopSessionEvent(requestID: requestID, sessionID: sessionID)
+        let (results, continuation) = try enqueueCommand(requestID: requestID, event: event)
+        defer {
+            continuation.finish()
+            pendingCommands[requestID] = nil
+        }
+
+        return try await withThrowingTaskGroup(of: StopEvent.self) { group in
+            group.addTask {
+                do {
+                    for try await _ in results {
+                        return .accepted
+                    }
+                    return .deliveryUnknown
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let error as WorkspaceUIHook.CommandDispatchError {
+                    return switch error {
+                    case .commandFailed(let message):
+                        .rejected(message)
+                    case .deliveryUnknown, .listenerUnavailable, .persistenceTimedOut:
+                        .deliveryUnknown
+                    }
+                }
+            }
+            group.addTask {
+                guard let session = try await waitUntilStopped() else {
+                    return .persistenceTimedOut
+                }
+                return .persisted(session)
+            }
+            defer { group.cancelAll() }
+
+            var isAccepted = false
+            var isDeliveryUnknown = false
+            var didPersistenceTimeOut = false
+            while let event = try await group.next() {
+                switch event {
+                case .accepted:
+                    isAccepted = true
+                    if didPersistenceTimeOut {
+                        throw WorkspaceUIHook.CommandDispatchError.persistenceTimedOut
+                    }
+                case .rejected(let message):
+                    throw WorkspaceUIHook.CommandDispatchError.commandFailed(message)
+                case .deliveryUnknown:
+                    isDeliveryUnknown = true
+                    if didPersistenceTimeOut {
+                        throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+                    }
+                case .persistenceTimedOut:
+                    didPersistenceTimeOut = true
+                    if isAccepted {
+                        throw WorkspaceUIHook.CommandDispatchError.persistenceTimedOut
+                    }
+                    if isDeliveryUnknown || pendingCommands[requestID] != nil {
+                        throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+                    }
+                    continue
+                case .persisted(let session):
+                    return session
+                }
+            }
+
+            throw CancellationError()
+        }
     }
 
     func updateSessionModel(
@@ -285,9 +472,98 @@ private actor WorkspaceUIHookState {
         }
     }
 
+    private func enqueueCommand(
+        requestID: UUID,
+        event: String
+    ) throws -> (
+        results: AsyncThrowingStream<Void, any Error>,
+        continuation: AsyncThrowingStream<Void, any Error>.Continuation
+    ) {
+        guard let connection = activeConnection else {
+            throw WorkspaceUIHook.CommandDispatchError.listenerUnavailable
+        }
+
+        let (results, continuation) = AsyncThrowingStream<Void, any Error>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        pendingCommands[requestID] = PendingCommand(continuation: continuation)
+
+        switch connection.continuation.yield(event) {
+        case .dropped, .terminated:
+            pendingCommands[requestID] = nil
+            continuation.finish()
+            disconnect(connectionID: connection.id)
+            throw WorkspaceUIHook.CommandDispatchError.listenerUnavailable
+        case .enqueued:
+            return (results, continuation)
+        @unknown default:
+            pendingCommands[requestID] = nil
+            continuation.finish()
+            disconnect(connectionID: connection.id)
+            throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+        }
+    }
+
     private struct ConnectionState {
         let continuation: AsyncStream<String>.Continuation
         let id: UUID
+    }
+
+    private struct PendingCommand {
+        let continuation: AsyncThrowingStream<Void, any Error>.Continuation
+    }
+
+    private enum StopEvent: Sendable {
+        case accepted
+        case deliveryUnknown
+        case persisted(Session)
+        case persistenceTimedOut
+        case rejected(String)
+    }
+
+    private struct MessageCommand: Encodable {
+        let requestID: UUID
+        let sessionID: Session.ID
+        let workspaceID: Workspace.ID
+        let sendMessage: SendMessage
+
+        struct SendMessage: Encodable {
+            let content: String
+            let mode: WorkspaceUIHook.MessageMode
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestID = "requestId"
+            case sessionID = "sessionId"
+            case workspaceID = "workspaceId"
+            case sendMessage
+        }
+    }
+
+    private static func messageEvent(
+        requestID: UUID,
+        sessionID: Session.ID,
+        workspaceID: Workspace.ID,
+        content: String,
+        mode: WorkspaceUIHook.MessageMode
+    ) throws -> String {
+        let command = MessageCommand(
+            requestID: requestID,
+            sessionID: sessionID,
+            workspaceID: workspaceID,
+            sendMessage: MessageCommand.SendMessage(
+                content: content,
+                mode: mode
+            )
+        )
+        let data = try JSONEncoder().encode(command)
+        return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+    }
+
+    private static func stopSessionEvent(requestID: UUID, sessionID: Session.ID) throws -> String {
+        let requestID = try UIHookCommand.jsonString(requestID.uuidString)
+        let sessionID = try UIHookCommand.jsonString(sessionID)
+        return "data: {\"requestId\":\(requestID),\"sessionId\":\(sessionID),\"stopSession\":true}\n\n"
     }
 
     private static func sessionModelEvent(

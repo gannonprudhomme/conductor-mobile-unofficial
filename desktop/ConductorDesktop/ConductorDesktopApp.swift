@@ -17,14 +17,14 @@ struct ConductorDesktopApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Window("Conductor Mobile Proxy (unofficial)", id: "main") {
-            SidecarProxyView(
+        Window("Conductor Mobile Companion", id: "main") {
+            CompanionView(
                 startupErrorMessage: appDelegate.startupErrorMessage,
                 workspaceUIHookLoaderSource: appDelegate.workspaceUIHookLoaderSource
             )
                 .background(WindowConfigurator())
         }
-        .defaultSize(width: 800, height: 600)
+        .defaultSize(width: 680, height: 250)
         .windowStyle(.hiddenTitleBar)
     }
 }

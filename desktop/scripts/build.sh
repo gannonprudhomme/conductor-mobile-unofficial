@@ -18,6 +18,5 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   build | xcbeautify
 
-APP="$DERIVED_DATA_PATH/Build/Products/Debug/Conductor Mobile Proxy (unofficial).app"
-codesign --force --sign - "$APP/Contents/Helpers/conductor-bridge-installer"
+APP="$DERIVED_DATA_PATH/Build/Products/Debug/Conductor Mobile Companion.app"
 codesign --force --sign - "$APP"

@@ -159,13 +159,48 @@ isolatedTest("failed candidates preserve the installed controller", async () => 
   const environment = installHookGlobals({ shell: emptyWorkspaceShell() });
   const installedController = await prepareHook();
 
-  const { sessionService, workspaceService } = emptyWorkspaceShell();
+  const { messageProcessingController, sessionService, workspaceService } = emptyWorkspaceShell();
   environment.shell = {
+    messageProcessingController,
     sessionService,
     workspaceService,
     workspaceAlias: emptyWorkspaceShell().workspaceService,
   };
   await assert.rejects(prepareHook(), /unambiguous WorkspaceService/);
+  assert.equal(globalThis[controllerKey], installedController);
+  assert.equal(environment.eventSources.length, 1);
+  assert.equal(environment.eventSources[0].closeCount, 0);
+});
+
+isolatedTest("missing or duplicate session and message controllers preserve the installed hook", async () => {
+  const environment = installHookGlobals({ shell: emptyWorkspaceShell() });
+  const installedController = await prepareHook();
+  const shell = emptyWorkspaceShell();
+
+  environment.shell = {
+    messageProcessingController: shell.messageProcessingController,
+    workspaceService: shell.workspaceService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous SessionService/);
+
+  environment.shell = {
+    ...shell,
+    sessionAlias: emptyWorkspaceShell().sessionService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous SessionService/);
+
+  environment.shell = {
+    sessionService: shell.sessionService,
+    workspaceService: shell.workspaceService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous MessageProcessingController/);
+
+  environment.shell = {
+    ...shell,
+    messageControllerAlias: emptyWorkspaceShell().messageProcessingController,
+  };
+  await assert.rejects(prepareHook(), /unambiguous MessageProcessingController/);
+
   assert.equal(globalThis[controllerKey], installedController);
   assert.equal(environment.eventSources.length, 1);
   assert.equal(environment.eventSources[0].closeCount, 0);
@@ -222,7 +257,10 @@ isolatedTest("commands run in order with real service signatures and continue af
       calls.push(["model", sessionID, model]);
     },
   };
-  const environment = installHookGlobals({ shell: { workspaceService, sessionService } });
+  const { messageProcessingController } = emptyWorkspaceShell();
+  const environment = installHookGlobals({
+    shell: { messageProcessingController, workspaceService, sessionService },
+  });
   await prepareHook();
   const source = environment.eventSources[0];
 
@@ -269,6 +307,152 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
   assert.equal(environment.errors.at(-1)[1].message, "Unsupported workspace command: futureCommand");
   assert.equal(environment.fetches.length, 2);
+});
+
+isolatedTest("message commands call the explicit controller modes and report results", async () => {
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  const session = { id: "session-1", title: "Session" };
+  shell.sessionService.getSessionsForWorkspace = async (input) => {
+    calls.push(["sessions", input]);
+    return [session];
+  };
+  shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
+    calls.push(["sent", arguments_]);
+  };
+  shell.messageProcessingController.enqueueMessage = async (...arguments_) => {
+    calls.push(["queued", arguments_]);
+    throw new Error("Rejected.");
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(calls[0], [
+    "sessions",
+    { workspaceId: "workspace-1", hidden: false },
+  ]);
+  assert.deepEqual(calls[1], [
+    "sent",
+    [{
+      session,
+      message: "Run the tests.",
+      workspaceId: "workspace-1",
+      includeAttachments: false,
+    }],
+  ]);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+  });
+
+  source.onmessage(messageCommand({
+    requestId: "request-2",
+    content: "Fail.",
+    mode: "queued",
+  }));
+  await waitUntil(() => environment.commandResults.length === 2);
+  await waitUntil(() => environment.errors.length === 1);
+  assert.deepEqual(calls[2], [
+    "sessions",
+    { workspaceId: "workspace-1", hidden: false },
+  ]);
+  assert.deepEqual(calls[3], [
+    "queued",
+    [{
+      session,
+      message: "Fail.",
+      workspaceId: "workspace-1",
+      includeAttachments: false,
+      sendMode: "queued",
+    }],
+  ]);
+  assert.deepEqual(environment.commandResults[1], {
+    requestId: "request-2",
+    error: "Rejected.",
+  });
+  assert.equal(environment.errors[0][1].message, "Rejected.");
+});
+
+isolatedTest("command result reporting retries without executing twice", async () => {
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
+    calls.push(arguments_);
+  };
+  const environment = installHookGlobals({ shell });
+  environment.commandResultFailures = 1;
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => environment.commandResultAttempts.length === 2);
+  assert.equal(calls.length, 1);
+  assert.equal(environment.commandResults.length, 1);
+});
+
+isolatedTest("stop commands cancel the exact session and report success or errors", async () => {
+  const sessionIDs = [];
+  const shell = emptyWorkspaceShell();
+  shell.messageProcessingController.cancelSession = async (sessionID) => {
+    sessionIDs.push(sessionID);
+    if (sessionID === "session-2") throw new Error("Cannot stop.");
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(stopCommand({ requestId: "request-1", sessionId: "session-1" }));
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(environment.commandResults[0], { requestId: "request-1" });
+
+  source.onmessage(stopCommand({ requestId: "request-2", sessionId: "session-2" }));
+  await waitUntil(() => environment.commandResults.length === 2);
+  assert.deepEqual(environment.commandResults[1], {
+    requestId: "request-2",
+    error: "Cannot stop.",
+  });
+  assert.deepEqual(sessionIDs, ["session-1", "session-2"]);
+});
+
+isolatedTest("message sends bypass a blocked workspace command", async () => {
+  const pinGate = deferred();
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  shell.workspaceService.setWorkspacePinned = async () => {
+    calls.push("pin");
+    await pinGate.promise;
+  };
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendMessageImmediately = async () => {
+    calls.push("message");
+    return { messageId: "message-1", state: "sent" };
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(command({ pinned: true }));
+  await waitUntil(() => calls.length === 1);
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => calls.length === 2);
+  assert.deepEqual(calls, ["pin", "message"]);
+  await waitUntil(() => environment.commandResults.length === 1);
+  pinGate.resolve();
 });
 
 isolatedTest("workspace creation resolves when Conductor publishes the workspace", async () => {
@@ -348,6 +532,9 @@ function installHookGlobals({
     importedHookURLs: [],
     importedShellURLs: [],
     infos: [],
+    commandResultAttempts: [],
+    commandResultFailures: 0,
+    commandResults: [],
     preparedHookUpdates: 0,
     shell,
   };
@@ -391,6 +578,16 @@ function installHookGlobals({
   });
   defineGlobal("fetch", async (url, options = {}) => {
     environment.fetches.push([String(url), options]);
+    if (String(url).endsWith("/workspace-ui-hook/command-result")) {
+      const result = JSON.parse(options.body);
+      environment.commandResultAttempts.push(result);
+      if (environment.commandResultFailures > 0) {
+        environment.commandResultFailures -= 1;
+        throw new Error("Connection lost.");
+      }
+      environment.commandResults.push(result);
+      return new Response(null, { status: 204 });
+    }
     if (String(url).startsWith("http://127.0.0.1:3769/workspace-ui-hook/hook.js")) {
       return new Response("", {
         headers: { ETag: environment.hookRevision },
@@ -403,11 +600,11 @@ function installHookGlobals({
   return environment;
 }
 
-  function emptyWorkspaceShell() {
-    const workspaceService = {
-      async archiveWorkspace() {},
-      async createWorkspaceWithSetup(input) { input.onCreation(); },
-      async getWorkspaces() { return []; },
+function emptyWorkspaceShell() {
+  const workspaceService = {
+    async archiveWorkspace() {},
+    async createWorkspaceWithSetup(input) { input.onCreation(); },
+    async getWorkspaces() { return []; },
     async setWorkspacePinned() {},
     async setWorkspaceManualStatus() {},
   };
@@ -420,7 +617,12 @@ function installHookGlobals({
     async updateSessionFastMode() {},
     async updateSessionModel() {},
   };
-  return { workspaceService, sessionService };
+  const messageProcessingController = {
+    async cancelSession() {},
+    async enqueueMessage() {},
+    async sendMessageImmediately() {},
+  };
+  return { messageProcessingController, workspaceService, sessionService };
 }
 
 function command(mutation) {
@@ -429,6 +631,23 @@ function command(mutation) {
 
 function sessionCommand(mutation) {
   return { data: JSON.stringify({ sessionId: "session-1", ...mutation }) };
+}
+
+function messageCommand({ requestId, ...sendMessage }) {
+  return {
+    data: JSON.stringify({
+      requestId,
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      sendMessage,
+    }),
+  };
+}
+
+function stopCommand({ requestId, sessionId }) {
+  return {
+    data: JSON.stringify({ requestId, sessionId, stopSession: true }),
+  };
 }
 
 function isolatedTest(name, operation) {

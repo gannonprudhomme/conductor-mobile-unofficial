@@ -1,25 +1,15 @@
-# Conductor Mobile Proxy desktop app
+# Conductor Mobile Companion desktop app
 
 The desktop companion is a native SwiftUI macOS app. Its window and mobile
-server run in one Swift process. The bridge installer remains a small one-shot
-Rust helper so the existing install, repair, status, and removal behavior does
-not need to be rewritten in Swift.
+server run in one Swift process.
 
 The source boundaries are:
 
 - `ConductorDesktop/`: the macOS app entry point and SwiftUI window.
-- `Sources/ConductorBridge/`: the Swift client that invokes the bundled helper.
 - `Sources/ConductorMobileServer/`: the HTTP and WebSocket server plus
   Conductor database access used by the phone.
 - `workspace-hook/`: the saved-snippet loader and browser module that call
-  Conductor's loaded workspace and session services.
-- `Bridge/Installer/`: the retained Rust installer logic and CLI. It is a plain
-  Cargo executable; no Rust window or app shell remains.
-- `Bridge/Proxy/`: the narrow TypeScript/Node runtime proxy installed into
-  Conductor.
-
-The previous React, Vite, and Tauri app layers have been removed. Rust remains
-only where it avoids rewriting the already-tested bridge installation behavior.
+  Conductor's loaded frontend services.
 
 ## Development
 
@@ -37,49 +27,44 @@ mise run build
 mise run run
 ```
 
-XcodeGen creates `ConductorDesktop.xcodeproj`. The app build links the Swift
-bridge and server libraries, bundles `bootstrap-loader.js` and
-`browser-hook.mjs` as direct app resources, and independently builds the
-optional runtime proxy and Rust installer helper. The app is intentionally
-unsandboxed because runtime-proxy installation modifies the external
-`/Applications/Conductor.app` bundle.
+XcodeGen creates `ConductorDesktop.xcodeproj`. The app bundles
+`bootstrap-loader.js` and `browser-hook.mjs` as direct resources. It remains
+unsandboxed because it reads Conductor's database outside its own container and
+serves the mobile API.
 
 The companion runs the mobile API on `0.0.0.0:3768` and the Workspace UI Hook
-on a separate loopback-only listener at `127.0.0.1:3769`.
+on a separate loopback-only listener at `127.0.0.1:3769`. Both ports are fixed.
 
-Both ports are fixed; the companion does not read `CONDUCTOR_PORT` or a custom
-mobile API port environment variable.
+The macOS window reports whether Conductor's browser is connected and lets the
+user copy the loader. Each run makes one cache-busted import of the current
+bundled hook. The hook keeps native `EventSource` reconnection.
 
-The macOS window's Workspace UI Hook row reports whether Conductor's browser is
-connected. Copy Loader is user initiated. Each run makes one cache-busted import
-of the current bundled hook from the companion. The hook keeps native
-`EventSource` reconnection; it does not substitute a WebSocket.
+Message sends and stops use correlated commands through Conductor's loaded
+message-processing controller. `sent` messages call `sendMessageImmediately`,
+`queued` messages call `enqueueMessage`, and stops call `cancelSession`. The
+browser reports explicit command acceptance or rejection through
+`POST /workspace-ui-hook/command-result`.
+
+Message sends wait for bounded browser acceptance. If the callback is lost,
+the API reports delivery as unknown so clients can inspect the conversation
+before retrying. Stop requests hold the serialized UI-mutation slot until
+SQLite reports a non-working canonical session or the shared command deadline
+expires.
 
 `PATCH /workspaces/{workspaceID}` accepts exactly one of `unread`, `pinned`, or
-`status`. While the hook is connected, it sends a one-way SSE command
-and returns `204 No Content` once Conductor's SQLite state reflects the requested
-value. A StructuredQueries SQLite fallback is allowed only when the command was
-definitely not delivered and returns `202 Accepted`. Once a command has been
-enqueued, timeout or disconnection is ambiguous and never falls back.
+`status`. While the hook is connected, it sends a one-way SSE command and waits
+for the requested SQLite state. A StructuredQueries SQLite fallback is allowed
+only when the command was definitely not delivered. Once a command is enqueued,
+an ambiguous failure never falls back.
 
-Mobile state still arrives through resource-scoped WebSocket streams. While a
-phone is subscribed, the server observes SQLite's `data_version` and the shared
-queue's `totalChangesCount` every 3 milliseconds, then sends a full snapshot
-only when that resource changes. The polling interval begins after persistence;
-it is not a tap-to-UI latency guarantee. Repository icons and message commands
-remain HTTP routes. The SwiftUI window polls the Rust helper for bridge status
-every 500 ms. The helper preserves the existing install, uninstall, and
-reachability behavior.
-
-Run the shared-model and Swift-server tests from the repository root:
+Mobile state arrives through resource-scoped WebSocket streams backed by
+SQLite observation. Run the desktop checks from the repository root:
 
 ```sh
-swift test --package-path shared
 swift test --package-path desktop
-cargo test --manifest-path desktop/Bridge/Installer/Cargo.toml
-pnpm --dir desktop/Bridge/Proxy run test
 node --test desktop/workspace-hook/browser-hook.test.mjs
 ```
 
-The build currently targets the Mac that runs it. A distributable universal app
-will need arm64 and x86_64 slices for both the Swift app and Rust helper.
+When upgrading from a proxy-based release, uninstall the proxy with the old
+companion and restart Conductor first. If the old runtime was not restored,
+reinstall Conductor before using this companion.
