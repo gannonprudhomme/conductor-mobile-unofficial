@@ -9,6 +9,7 @@ import Combine
 import ComposableArchitecture
 import ConductorDesign
 import ConductorMobileData
+import ConductorVoiceInput
 import Foundation
 import Logging
 import SharedConductorData
@@ -36,8 +37,7 @@ public struct Chat: Sendable {
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
         var isStopInFlight = false
-        var voiceInputPhase = VoiceInputPhase.idle
-        var voiceInputLevels: [Float] = []
+        var voiceInput: VoiceInput.State
         var hasObservedSessionModelChange = false
         var hasUserSelectedModel = false
         var scrollToBottomRequest = 0
@@ -108,6 +108,7 @@ public struct Chat: Sendable {
             self.hasUserSelectedModel = selectedModel != nil
             self.selectedModel = selectedModel ?? session.model
             self.shouldFocusMessageField = shouldFocusMessageField
+            self.voiceInput = VoiceInput.State(id: session.id)
         }
 
         /// `turns` and `rows` are derived presentation caches, while `session` captures
@@ -122,8 +123,7 @@ public struct Chat: Sendable {
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
-                && lhs.voiceInputPhase == rhs.voiceInputPhase
-                && lhs.voiceInputLevels == rhs.voiceInputLevels
+                && lhs.voiceInput == rhs.voiceInput
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
@@ -149,7 +149,6 @@ public struct Chat: Sendable {
         )
         case loadMessagesFailed(any Error)
         case messagesUpdated([Message])
-        case microphoneButtonTapped
         /// Sent after POST returns its persisted row, before writing it locally. The message
         /// appears when that write is observed; this buffers it against an older first snapshot.
         case messageConfirmed(
@@ -158,16 +157,6 @@ public struct Chat: Sendable {
         )
         case sendButtonTapped
         case sendMessageResponse(
-            sessionID: Session.ID,
-            result: Result<String, any Error>
-        )
-        case speechRecordingCancelled
-        case speechRecordingLevelUpdated(Float)
-        case speechRecordingStarted(
-            sessionID: Session.ID,
-            result: Result<Void, any Error>
-        )
-        case speechTranscriptionResponse(
             sessionID: Session.ID,
             result: Result<String, any Error>
         )
@@ -180,16 +169,20 @@ public struct Chat: Sendable {
             result: Result<Void, any Error>
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
+        case voiceInput(VoiceInput.Action)
     }
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
-    @Dependency(\.speechTranscriptionClient) var speechTranscriptionClient
 
     init() { }
 
     public var body: some ReducerOf<Self> {
         BindingReducer()
+
+        Scope(state: \.voiceInput, action: \.voiceInput) {
+            VoiceInput()
+        }
 
         Reduce { state, action in
             switch action {
@@ -233,115 +226,10 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
 
-            case .microphoneButtonTapped:
-                switch state.voiceInputPhase {
-                case .idle:
-                    state.voiceInputPhase = .startingRecording
-                    state.voiceInputLevels.removeAll()
-                    return .run { [sessionID = state.session.id] send in
-                        do {
-                            try await speechTranscriptionClient.startRecording()
-                            await send(
-                                .speechRecordingStarted(
-                                    sessionID: sessionID,
-                                    result: .success(())
-                                )
-                            )
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            await send(
-                                .speechRecordingStarted(
-                                    sessionID: sessionID,
-                                    result: .failure(error)
-                                )
-                            )
-                        }
-                    }
-                    .cancellable(id: CancelID.speechRecording, cancelInFlight: true)
-
-                case .recording:
-                    state.voiceInputPhase = .transcribing
-                    state.voiceInputLevels.removeAll()
-                    return .merge(
-                        .cancel(id: CancelID.speechRecordingLevels),
-                        .run { [sessionID = state.session.id] send in
-                            do {
-                                let transcript = try await speechTranscriptionClient
-                                    .stopRecordingAndTranscribe()
-                                await send(
-                                    .speechTranscriptionResponse(
-                                        sessionID: sessionID,
-                                        result: .success(transcript)
-                                    )
-                                )
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                await send(
-                                    .speechTranscriptionResponse(
-                                        sessionID: sessionID,
-                                        result: .failure(error)
-                                    )
-                                )
-                            }
-                        }
-                        .cancellable(id: CancelID.speechRecording, cancelInFlight: true)
-                    )
-
-                case .startingRecording, .transcribing:
-                    return .none
-                }
-
-            case .speechRecordingCancelled:
-                state.voiceInputPhase = .idle
-                state.voiceInputLevels.removeAll()
-                return .merge(
-                    .cancel(id: CancelID.speechRecording),
-                    .cancel(id: CancelID.speechRecordingLevels),
-                    .run { _ in
-                        await speechTranscriptionClient.cancelRecording()
-                    }
-                )
-
-            case let .speechRecordingLevelUpdated(level):
-                guard state.voiceInputPhase == .recording else {
-                    return .none
-                }
-                state.voiceInputLevels.append(min(max(level, 0), 1))
-                if state.voiceInputLevels.count > 48 {
-                    state.voiceInputLevels.removeFirst(state.voiceInputLevels.count - 48)
-                }
-                return .none
-
-            case let .speechRecordingStarted(sessionID, result):
-                guard sessionID == state.sessionID else {
-                    return .none
-                }
-                switch result {
-                case .success:
-                    state.voiceInputPhase = .recording
-                    return .run { send in
-                        for await level in speechTranscriptionClient.recordingLevels() {
-                            await send(.speechRecordingLevelUpdated(level))
-                        }
-                    }
-                    .cancellable(id: CancelID.speechRecordingLevels, cancelInFlight: true)
-
-                case .failure:
-                    state.voiceInputPhase = .idle
-                    state.voiceInputLevels.removeAll()
-                    return .none
-                }
-
-            case let .speechTranscriptionResponse(sessionID, result):
-                guard sessionID == state.sessionID else {
-                    return .none
-                }
-                state.voiceInputPhase = .idle
-                state.voiceInputLevels.removeAll()
-                guard case let .success(transcript) = result,
-                      !transcript.isEmpty else {
+            case let .voiceInput(
+                .delegate(.transcriptionFinished(id, transcript))
+            ):
+                guard id == state.sessionID else {
                     return .none
                 }
                 state.$messageDraft.withLock { draft in
@@ -414,7 +302,7 @@ public struct Chat: Sendable {
                 let message = state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !message.isEmpty,
                       !state.isMessageSendInFlight,
-                      state.voiceInputPhase == .idle else {
+                      state.voiceInput.phase == .idle else {
                     return .none
                 }
 
@@ -519,15 +407,10 @@ public struct Chat: Sendable {
             case .loadMessagesFailed:
                 return .none
 
-            case .binding:
+            case .binding, .voiceInput:
                 return .none
             }
         }
-    }
-
-    private enum CancelID: Hashable {
-        case speechRecording
-        case speechRecordingLevels
     }
 
     private func observeMessages(_ state: State) -> Effect<Action> {
@@ -665,12 +548,14 @@ struct ChatView: View {
                         isSendInFlight: store.isMessageSendInFlight,
                         isStopInFlight: store.isStopInFlight,
                         isWorking: store.session.status == .working,
-                        voiceInputPhase: store.voiceInputPhase,
-                        voiceInputLevels: store.voiceInputLevels,
+                        voiceInputPhase: store.voiceInput.phase,
+                        voiceInputLevels: store.voiceInput.levels,
                         selectedModel: $store.selectedModel,
                         shouldFocusOnAppear: store.shouldFocusMessageField,
                         onFastModeTapped: { store.send(.fastModeButtonTapped) },
-                        onMicrophoneTapped: { store.send(.microphoneButtonTapped) },
+                        onMicrophoneTapped: {
+                            store.send(.voiceInput(.microphoneButtonTapped))
+                        },
                         onSendTapped: { store.send(.sendButtonTapped) },
                         onStopTapped: { store.send(.stopButtonTapped) }
                     )
@@ -691,7 +576,7 @@ struct ChatView: View {
                 await store.send(.task).finish()
             }
             .onDisappear {
-                store.send(.speechRecordingCancelled)
+                store.send(.voiceInput(.cancel))
             }
             .preferredColorScheme(.dark)
     }

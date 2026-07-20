@@ -1229,9 +1229,10 @@ struct WorkspaceChatTests {
 
             await store.send(
                 .chat(
-                    .speechTranscriptionResponse(
-                        sessionID: activeSession.id,
-                        result: .failure(TestError())
+                    .voiceInput(
+                        .delegate(
+                            .failed(id: activeSession.id, error: TestError())
+                        )
                     )
                 )
             ) {

@@ -240,24 +240,25 @@ struct CreateWorkspaceTests {
                 }
             }
 
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .transcribing
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
             }
             store.state.$prompt.withLock { $0 = "Inspect these files." }
 
             transcriptContinuation.yield("Then run the tests.")
-            await store.receive(\.speechTranscriptionResponse) {
+            await store.receive(\.voiceInput.transcriptionResponse) {
                 $0.$prompt.withLock {
                     $0 = "Inspect these files. Then run the tests."
                 }
-                $0.voiceInputPhase = .idle
+                $0.voiceInput.phase = .idle
             }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
             transcriptContinuation.finish()
             await store.finish()
         }
@@ -279,19 +280,20 @@ struct CreateWorkspaceTests {
                 }
             }
 
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .transcribing
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
             }
-            await store.receive(\.speechTranscriptionResponse) {
+            await store.receive(\.voiceInput.transcriptionResponse) {
                 $0.$prompt.withLock { $0 = "Run the tests." }
-                $0.voiceInputPhase = .idle
+                $0.voiceInput.phase = .idle
             }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
         }
     }
 
@@ -309,17 +311,17 @@ struct CreateWorkspaceTests {
                 $0.speechTranscriptionClient.stopRecordingAndTranscribe = { "" }
             }
 
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .transcribing
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
             }
-            await store.receive(\.speechTranscriptionResponse) {
-                $0.voiceInputPhase = .idle
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
             }
 
             #expect(store.state.prompt == "Keep this prompt.")
@@ -342,7 +344,7 @@ struct CreateWorkspaceTests {
                 }
             }
 
-            await store.send(.speechRecordingCancelled)
+            await store.send(.voiceInput(.cancel))
             await store.finish()
 
             #expect(wasCancelled.value)

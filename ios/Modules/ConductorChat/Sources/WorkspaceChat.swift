@@ -361,9 +361,8 @@ public struct WorkspaceChat: Sendable {
                 )
                 return .none
 
-            case let .chat(.speechRecordingStarted(sessionID, .failure(error))),
-                 let .chat(.speechTranscriptionResponse(sessionID, .failure(error))):
-                guard state.chat?.sessionID == sessionID else {
+            case let .chat(.voiceInput(.delegate(.failed(id, error)))):
+                guard state.chat?.sessionID == id else {
                     return .none
                 }
 

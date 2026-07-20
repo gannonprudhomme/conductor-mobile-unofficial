@@ -8,6 +8,7 @@
 import ComposableArchitecture
 import ConductorDesign
 import ConductorMobileData
+import ConductorVoiceInput
 import LucideIcons
 import SharedConductorData
 import Sharing
@@ -31,8 +32,7 @@ public struct CreateWorkspace: Sendable {
 
         public var selectedRepositoryID: Repository.ID
         public var selectedModel = Session.Model.gpt_5_6_sol
-        var voiceInputLevels: [Float] = []
-        var voiceInputPhase = VoiceInputPhase.idle
+        var voiceInput = VoiceInput.State(id: "createWorkspace")
         var workspaceID: Workspace.ID?
 
         public init(
@@ -57,11 +57,7 @@ public struct CreateWorkspace: Sendable {
         case createWorkspaceSucceeded(CreatedWorkspace, selectedModel: Session.Model)
         case defaultModelFetched(Session.Model)
         case delegate(Delegate)
-        case microphoneButtonTapped
-        case speechRecordingCancelled
-        case speechRecordingLevelUpdated(Float)
-        case speechRecordingStarted(Result<Void, any Error>)
-        case speechTranscriptionResponse(Result<String, any Error>)
+        case voiceInput(VoiceInput.Action)
 
         public enum Alert: Equatable {}
 
@@ -72,13 +68,16 @@ public struct CreateWorkspace: Sendable {
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
-    @Dependency(\.speechTranscriptionClient) var speechTranscriptionClient
     @Dependency(\.uuid) var uuid
 
     public init() {}
 
     public var body: some ReducerOf<Self> {
         BindingReducer()
+
+        Scope(state: \.voiceInput, action: \.voiceInput) {
+            VoiceInput()
+        }
 
         Reduce { state, action in
             switch action {
@@ -91,7 +90,7 @@ public struct CreateWorkspace: Sendable {
                 }
 
             case .createButtonTapped:
-                guard !state.isCreateAPIInFlight, state.voiceInputPhase == .idle else {
+                guard !state.isCreateAPIInFlight, state.voiceInput.phase == .idle else {
                     return .none
                 }
                 let workspaceID = state.workspaceID ?? uuid().uuidString.lowercased()
@@ -190,133 +189,30 @@ public struct CreateWorkspace: Sendable {
                 }
                 return .none
 
-            case .microphoneButtonTapped:
-                guard !state.isCreateAPIInFlight else {
-                    return .none
-                }
-                switch state.voiceInputPhase {
-                case .idle:
-                    state.voiceInputPhase = .startingRecording
-                    state.voiceInputLevels.removeAll()
-                    return .run { send in
-                        do {
-                            try await speechTranscriptionClient.startRecording()
-                            await send(.speechRecordingStarted(.success(())))
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            await send(.speechRecordingStarted(.failure(error)))
-                        }
+            case let .voiceInput(
+                .delegate(.transcriptionFinished(_, transcript))
+            ):
+                state.$prompt.withLock { prompt in
+                    if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        prompt = transcript
+                    } else {
+                        let separator = prompt.last?.isWhitespace == true ? "" : " "
+                        prompt += separator + transcript
                     }
-                    .cancellable(id: CancelID.speechRecording, cancelInFlight: true)
-
-                case .recording:
-                    state.voiceInputPhase = .transcribing
-                    state.voiceInputLevels.removeAll()
-                    return .merge(
-                        .cancel(id: CancelID.speechRecordingLevels),
-                        .run { send in
-                            do {
-                                let transcript = try await speechTranscriptionClient
-                                    .stopRecordingAndTranscribe()
-                                await send(.speechTranscriptionResponse(.success(transcript)))
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                await send(.speechTranscriptionResponse(.failure(error)))
-                            }
-                        }
-                        .cancellable(id: CancelID.speechRecording, cancelInFlight: true)
-                    )
-
-                case .startingRecording, .transcribing:
-                    return .none
-                }
-
-            case .speechRecordingCancelled:
-                state.voiceInputPhase = .idle
-                state.voiceInputLevels.removeAll()
-                return .merge(
-                    .cancel(id: CancelID.speechRecording),
-                    .cancel(id: CancelID.speechRecordingLevels),
-                    .run { _ in
-                        await speechTranscriptionClient.cancelRecording()
-                    }
-                )
-
-            case let .speechRecordingLevelUpdated(level):
-                guard state.voiceInputPhase == .recording else {
-                    return .none
-                }
-                state.voiceInputLevels.append(min(max(level, 0), 1))
-                if state.voiceInputLevels.count > 48 {
-                    state.voiceInputLevels.removeFirst(state.voiceInputLevels.count - 48)
                 }
                 return .none
 
-            case let .speechRecordingStarted(result):
-                guard state.voiceInputPhase == .startingRecording else {
-                    return .none
-                }
-                switch result {
-                case .success:
-                    state.voiceInputPhase = .recording
-                    return .run { send in
-                        for await level in speechTranscriptionClient.recordingLevels() {
-                            await send(.speechRecordingLevelUpdated(level))
-                        }
-                    }
-                    .cancellable(id: CancelID.speechRecordingLevels, cancelInFlight: true)
+            case let .voiceInput(.delegate(.failed(_, error))):
+                state.alert = .failedToTranscribeSpeech(
+                    message: error.localizedDescription
+                )
+                return .none
 
-                case let .failure(error):
-                    state.alert = .failedToTranscribeSpeech(
-                        message: error.localizedDescription
-                    )
-                    state.voiceInputPhase = .idle
-                    state.voiceInputLevels.removeAll()
-                    return .none
-                }
-
-            case let .speechTranscriptionResponse(result):
-                guard state.voiceInputPhase == .transcribing else {
-                    return .none
-                }
-                state.voiceInputPhase = .idle
-                state.voiceInputLevels.removeAll()
-                switch result {
-                case let .success(transcript):
-                    guard !transcript.isEmpty else {
-                        return .none
-                    }
-                    state.$prompt.withLock { prompt in
-                        if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            prompt = transcript
-                        } else {
-                            let separator = prompt.last?.isWhitespace == true ? "" : " "
-                            prompt += separator + transcript
-                        }
-                    }
-                    return .none
-
-                case let .failure(error):
-                    state.alert = .failedToTranscribeSpeech(
-                        message: error.localizedDescription
-                    )
-                    return .none
-                }
-
-            case .alert, .binding, .delegate:
+            case .alert, .binding, .delegate, .voiceInput:
                 return .none
             }
         }
         .ifLet(\.$alert, action: \.alert)
-    }
-}
-
-private extension CreateWorkspace {
-    enum CancelID {
-        case speechRecording
-        case speechRecordingLevels
     }
 }
 
@@ -369,7 +265,7 @@ public struct CreateWorkspaceView: View {
             await store.send(.task).finish()
         }
         .onDisappear {
-            store.send(.speechRecordingCancelled)
+            store.send(.voiceInput(.cancel))
         }
     }
 
@@ -430,13 +326,13 @@ public struct CreateWorkspaceView: View {
         .accessibilityLabel("Repository")
         .accessibilityValue(selectedRepositoryName)
         .tint(.theme(.textPrimary))
-        .disabled(store.isCreateAPIInFlight || store.voiceInputPhase != .idle)
+        .disabled(store.isCreateAPIInFlight || store.voiceInput.phase != .idle)
     }
 
     private var promptEditor: some View {
         PromptTextView(
             text: Binding(store.$prompt),
-            isEditable: !store.isCreateAPIInFlight && store.voiceInputPhase == .idle
+            isEditable: !store.isCreateAPIInFlight && store.voiceInput.phase == .idle
         )
             .font(.theme(.body))
             .foregroundStyle(.theme(.textPrimary))
@@ -452,13 +348,13 @@ public struct CreateWorkspaceView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .disabled(store.isCreateAPIInFlight || store.voiceInputPhase != .idle)
+            .disabled(store.isCreateAPIInFlight || store.voiceInput.phase != .idle)
             .accessibilityLabel("Workspace prompt")
     }
 
     private var bottomRow: some View {
         Group {
-            if store.voiceInputPhase == .idle {
+            if store.voiceInput.phase == .idle {
                 HStack(spacing: 8) {
                     ModelAndFastModeControls(
                         agentType: store.agentType,
@@ -473,27 +369,31 @@ public struct CreateWorkspaceView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     VoiceInputButton(
-                        phase: store.voiceInputPhase,
+                        phase: store.voiceInput.phase,
                         isEnabled: !store.isCreateAPIInFlight,
                         accessibilityIdentifier: "createWorkspace.voiceInput",
                         idleAccessibilityLabel: "Record workspace prompt",
-                        action: { store.send(.microphoneButtonTapped) }
+                        action: {
+                            store.send(.voiceInput(.microphoneButtonTapped))
+                        }
                     )
 
                     createButton
                 }
             } else {
                 VoiceInputTakeover(
-                    phase: store.voiceInputPhase,
-                    levels: store.voiceInputLevels,
+                    phase: store.voiceInput.phase,
+                    levels: store.voiceInput.levels,
                     accessibilityIdentifier: "createWorkspace.voiceInput",
-                    onStopTapped: { store.send(.microphoneButtonTapped) }
+                    onStopTapped: {
+                        store.send(.voiceInput(.microphoneButtonTapped))
+                    }
                 )
                 .frame(maxWidth: .infinity)
             }
         }
         .frame(maxWidth: .infinity)
-        .animation(.default, value: store.voiceInputPhase)
+        .animation(.default, value: store.voiceInput.phase)
         .padding(.top, 8)
     }
 

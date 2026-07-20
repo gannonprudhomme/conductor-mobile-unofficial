@@ -1,19 +1,15 @@
 //
-//  VoiceInput.swift
-//  ConductorDesign
+//  VoiceInputControls.swift
+//  ConductorVoiceInput
 //
-//  Created by Gannon Prudomme on 7/19/26.
+//  Created by Gannon Prudomme on 7/20/26.
 //
 
+import ComposableArchitecture
+import ConductorDesign
+import ConductorMobileData
 import LucideIcons
 import SwiftUI
-
-public enum VoiceInputPhase: Equatable, Sendable {
-    case idle
-    case startingRecording
-    case recording
-    case transcribing
-}
 
 public struct VoiceInputButton: View {
     @ScaledMetric(relativeTo: ThemeFontStyle.body.textStyle)
@@ -212,5 +208,112 @@ private struct VoiceInputStatus: View {
         .font(.theme(.small))
         .foregroundStyle(.theme(.textSecondary))
         .frame(maxWidth: .infinity, minHeight: 40, alignment: .center)
+    }
+}
+
+#Preview("Voice input phases") {
+    VStack(spacing: 20) {
+        VoiceInputButton(
+            phase: .idle,
+            isEnabled: true,
+            accessibilityIdentifier: "preview.voiceInput",
+            idleAccessibilityLabel: "Record prompt",
+            action: {}
+        )
+
+        VoiceInputStatus(title: "Starting recording…")
+
+        VoiceInputTakeover(
+            phase: .recording,
+            levels: [0.1, 0.35, 0.8, 0.45, 1, 0.6, 0.2],
+            accessibilityIdentifier: "preview.voiceInput",
+            onStopTapped: {}
+        )
+
+        VoiceInputStatus(title: "Transcribing…")
+    }
+    .padding()
+    .background(.theme(.background))
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Interactive mock") {
+    VoiceInputPreview()
+        .preferredColorScheme(.dark)
+}
+
+@Reducer
+private struct VoiceInputPreviewFeature {
+    @ObservableState
+    struct State: Equatable {
+        var transcript = "Tap the microphone to test the mocked recorder."
+        var voiceInput = VoiceInput.State(id: "preview")
+    }
+
+    enum Action {
+        case voiceInput(VoiceInput.Action)
+    }
+
+    var body: some ReducerOf<Self> {
+        Scope(state: \.voiceInput, action: \.voiceInput) {
+            VoiceInput()
+        }
+        Reduce { state, action in
+            switch action {
+            case let .voiceInput(
+                .delegate(.transcriptionFinished(_, transcript))
+            ):
+                state.transcript = transcript
+                return .none
+
+            case .voiceInput:
+                return .none
+            }
+        }
+    }
+}
+
+@MainActor
+private struct VoiceInputPreview: View {
+    let store: StoreOf<VoiceInputPreviewFeature>
+
+    init() {
+        store = Store(initialState: VoiceInputPreviewFeature.State()) {
+            VoiceInputPreviewFeature()
+        } withDependencies: {
+            $0.speechTranscriptionClient = .previewValue
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(store.transcript)
+                .font(.theme(.body))
+                .foregroundStyle(.theme(.textPrimary))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if store.voiceInput.phase == .idle {
+                VoiceInputButton(
+                    phase: store.voiceInput.phase,
+                    isEnabled: true,
+                    accessibilityIdentifier: "preview.voiceInput",
+                    idleAccessibilityLabel: "Record prompt",
+                    action: {
+                        store.send(.voiceInput(.microphoneButtonTapped))
+                    }
+                )
+            } else {
+                VoiceInputTakeover(
+                    phase: store.voiceInput.phase,
+                    levels: store.voiceInput.levels,
+                    accessibilityIdentifier: "preview.voiceInput",
+                    onStopTapped: {
+                        store.send(.voiceInput(.microphoneButtonTapped))
+                    }
+                )
+            }
+        }
+        .padding()
+        .background(.theme(.background))
     }
 }

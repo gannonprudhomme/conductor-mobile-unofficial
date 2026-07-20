@@ -6,6 +6,7 @@
 //
 
 import ConductorDesign
+import ConductorVoiceInput
 import LucideIcons
 import SharedConductorData
 import SwiftUI

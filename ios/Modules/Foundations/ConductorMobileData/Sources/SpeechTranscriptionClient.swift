@@ -22,6 +22,33 @@ public struct SpeechTranscriptionClient: Sendable {
 }
 
 extension SpeechTranscriptionClient: DependencyKey {
+    public static var previewValue: Self {
+        Self(
+            cancelRecording: {},
+            recordingLevels: {
+                AsyncStream { continuation in
+                    let levels: [Float] = [0.1, 0.35, 0.8, 0.45, 1, 0.6, 0.2]
+                    let task = Task {
+                        var index = 0
+                        while !Task.isCancelled {
+                            continuation.yield(levels[index])
+                            index = (index + 1) % levels.count
+                            try? await Task.sleep(for: .milliseconds(80))
+                        }
+                    }
+                    continuation.onTermination = { _ in task.cancel() }
+                }
+            },
+            startRecording: {
+                try await Task.sleep(for: .milliseconds(300))
+            },
+            stopRecordingAndTranscribe: {
+                try await Task.sleep(for: .seconds(1))
+                return "This transcript came from the preview mock."
+            }
+        )
+    }
+
     public static var testValue: Self {
         var client = Self()
         client.cancelRecording = { }

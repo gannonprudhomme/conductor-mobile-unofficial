@@ -98,11 +98,11 @@ struct ChatTests {
             #expect(original != finishedLoading)
 
             var recording = original
-            recording.voiceInputPhase = .recording
+            recording.voiceInput.phase = .recording
             #expect(original != recording)
 
             var metering = original
-            metering.voiceInputLevels = [0.5]
+            metering.voiceInput.levels = [0.5]
             #expect(original != metering)
 
             var emptySnapshot = original
@@ -150,20 +150,21 @@ struct ChatTests {
                 }
             }
 
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
             store.state.$messageDraft.withLock { $0 = "   " }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .transcribing
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
             }
-            await store.receive(\.speechTranscriptionResponse) {
-                $0.$messageDraft.withLock { $0 = "Run the unit tests." }
-                $0.voiceInputPhase = .idle
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
             }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
+            #expect(store.state.messageDraft == "Run the unit tests.")
         }
     }
 
@@ -186,25 +187,24 @@ struct ChatTests {
                 }
             }
 
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
             store.state.$messageDraft.withLock { $0 = "Inspect this file." }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .transcribing
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
             }
             store.state.$messageDraft.withLock { $0 = "Inspect these files." }
 
             transcriptContinuation.yield("Then run the tests.")
-            await store.receive(\.speechTranscriptionResponse) {
-                $0.$messageDraft.withLock {
-                    $0 = "Inspect these files. Then run the tests."
-                }
-                $0.voiceInputPhase = .idle
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
             }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
+            #expect(store.state.messageDraft == "Inspect these files. Then run the tests.")
             transcriptContinuation.finish()
             await store.finish()
         }
@@ -224,17 +224,17 @@ struct ChatTests {
             }
 
             store.state.$messageDraft.withLock { $0 = "Keep this draft." }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .transcribing
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
             }
-            await store.receive(\.speechTranscriptionResponse) {
-                $0.voiceInputPhase = .idle
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
             }
         }
     }
@@ -256,14 +256,14 @@ struct ChatTests {
             }
 
             store.state.$messageDraft.withLock { $0 = "Keep this draft." }
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
-            await store.send(.speechRecordingCancelled) {
-                $0.voiceInputPhase = .idle
+            await store.send(.voiceInput(.cancel)) {
+                $0.voiceInput.phase = .idle
             }
             await store.finish()
 
@@ -287,7 +287,7 @@ struct ChatTests {
                 }
             }
 
-            await store.send(.speechRecordingCancelled)
+            await store.send(.voiceInput(.cancel))
             await store.finish()
 
             #expect(wasCancelled.value)
@@ -309,25 +309,25 @@ struct ChatTests {
                 $0.speechTranscriptionClient.startRecording = { }
             }
 
-            await store.send(.microphoneButtonTapped) {
-                $0.voiceInputPhase = .startingRecording
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
             }
-            await store.receive(\.speechRecordingStarted) {
-                $0.voiceInputPhase = .recording
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
             }
 
             levelContinuation.yield(0.25)
-            await store.receive(\.speechRecordingLevelUpdated, 0.25) {
-                $0.voiceInputLevels = [0.25]
+            await store.receive(\.voiceInput.recordingLevelUpdated, 0.25) {
+                $0.voiceInput.levels = [0.25]
             }
             levelContinuation.yield(2)
-            await store.receive(\.speechRecordingLevelUpdated, 2) {
-                $0.voiceInputLevels = [0.25, 1]
+            await store.receive(\.voiceInput.recordingLevelUpdated, 2) {
+                $0.voiceInput.levels = [0.25, 1]
             }
 
-            await store.send(.speechRecordingCancelled) {
-                $0.voiceInputPhase = .idle
-                $0.voiceInputLevels = []
+            await store.send(.voiceInput(.cancel)) {
+                $0.voiceInput.phase = .idle
+                $0.voiceInput.levels = []
             }
             levelContinuation.finish()
             await store.finish()
