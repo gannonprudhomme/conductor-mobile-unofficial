@@ -30,10 +30,9 @@ extension SpeechTranscriptionClient: DependencyKey {
                     let levels: [Float] = [0.1, 0.35, 0.8, 0.45, 1, 0.6, 0.2]
                     let task = Task {
                         var index = 0
-                        while !Task.isCancelled {
+                        for await _ in ContinuousClock().timer(interval: .milliseconds(80)) {
                             continuation.yield(levels[index])
                             index = (index + 1) % levels.count
-                            try? await Task.sleep(for: .milliseconds(80))
                         }
                     }
                     continuation.onTermination = { _ in task.cancel() }
@@ -63,9 +62,8 @@ extension SpeechTranscriptionClient: DependencyKey {
             recordingLevels: {
                 AsyncStream { continuation in
                     let task = Task {
-                        while !Task.isCancelled {
+                        for await _ in ContinuousClock().timer(interval: .milliseconds(50)) {
                             continuation.yield(await transcriber.recordingLevel())
-                            try? await Task.sleep(for: .milliseconds(50))
                         }
                     }
                     continuation.onTermination = { _ in task.cancel() }
