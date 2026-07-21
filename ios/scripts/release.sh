@@ -54,27 +54,36 @@ if [[ -f "$REPO_DIR/.env.testflight.local" ]]; then
 fi
 
 app_store_connect_token() {
-  local output
-  local token
+  if ! ASC_API_KEY_ID="$ASC_API_KEY_ID" \
+    ASC_API_ISSUER_ID="$ASC_API_ISSUER_ID" \
+    ASC_API_KEY_PATH="$ASC_API_KEY_PATH" \
+    ruby -ropenssl -rjson -rbase64 <<'RUBY'
+def base64url(value)
+  Base64.urlsafe_encode64(value, padding: false)
+end
 
-  if ! output="$(
-    xcrun altool \
-      --generate-jwt \
-      --apiKey "$ASC_API_KEY_ID" \
-      --apiIssuer "$ASC_API_ISSUER_ID" \
-      --p8-file-path "$ASC_API_KEY_PATH" 2>&1
-  )"; then
+now = Time.now.to_i
+header = base64url(JSON.generate(alg: "ES256", kid: ENV.fetch("ASC_API_KEY_ID"), typ: "JWT"))
+payload = base64url(
+  JSON.generate(
+    iss: ENV.fetch("ASC_API_ISSUER_ID"),
+    iat: now,
+    exp: now + 600,
+    aud: "appstoreconnect-v1"
+  )
+)
+unsigned_token = "#{header}.#{payload}"
+key = OpenSSL::PKey::EC.new(File.read(ENV.fetch("ASC_API_KEY_PATH")))
+der_signature = key.dsa_sign_asn1(OpenSSL::Digest::SHA256.digest(unsigned_token))
+signature = OpenSSL::ASN1.decode(der_signature).value
+  .map { |integer| integer.value.to_s(2).rjust(32, "\0") }
+  .join
+print "#{unsigned_token}.#{base64url(signature)}"
+RUBY
+  then
     echo "Could not generate an App Store Connect token." >&2
     return 1
   fi
-
-  token="$(printf '%s\n' "$output" | awk -F. 'NF == 3 && /^eyJ/ { token = $0 } END { print token }')"
-  if [[ -z "$token" ]]; then
-    echo "App Store Connect did not return a token." >&2
-    return 1
-  fi
-
-  printf '%s' "$token"
 }
 
 app_store_connect_get() {
