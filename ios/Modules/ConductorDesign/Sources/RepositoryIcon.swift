@@ -11,6 +11,7 @@ import LucideIcons
 import SwiftUI
 
 public struct RepositoryIcon: View {
+    @Environment(\.displayScale) private var displayScale
     @ScaledMetric private var scaledSize: CGFloat
 
     private let iconName: String?
@@ -112,9 +113,47 @@ public struct RepositoryIcon: View {
     }
 
     private func prepareRemoteImage(_ image: UIImage) async -> UIImage? {
-        await image.byPreparingThumbnail(
-            ofSize: CGSize(width: scaledSize, height: scaledSize)
+        await Self.prepareRemoteImage(
+            image,
+            size: scaledSize,
+            displayScale: displayScale
         )
+    }
+
+    static func prepareRemoteImage(
+        _ image: UIImage,
+        size: CGFloat,
+        displayScale: CGFloat
+    ) async -> UIImage? {
+        // Thumbnailing preserves the source scale, so normalize it before restoring display scale.
+        let thumbnailSize = CGSize(
+            width: size * displayScale / image.scale,
+            height: size * displayScale / image.scale
+        )
+        guard let thumbnail = await image.byPreparingThumbnail(ofSize: thumbnailSize),
+            let cgImage = thumbnail.cgImage
+        else {
+            return nil
+        }
+        let normalizedImage = UIImage(
+            cgImage: cgImage,
+            scale: displayScale,
+            orientation: thumbnail.imageOrientation
+        )
+        let bounds = CGRect(origin: .zero, size: normalizedImage.size)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = displayScale
+        // UIKit-backed menus discard SwiftUI clip shapes, so bake the shared radius into pixels.
+        return UIGraphicsImageRenderer(
+            size: bounds.size,
+            format: format
+        ).image { _ in
+            UIBezierPath(
+                roundedRect: bounds,
+                cornerRadius: size / 5
+            ).addClip()
+            normalizedImage.draw(in: bounds)
+        }
     }
 
     private var fallbackIcon: some View {
