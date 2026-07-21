@@ -225,6 +225,7 @@ public struct CreateWorkspaceView: View {
             content
         }
         .alert($store.scope(state: \.alert, action: \.alert))
+        .presentationDetents([.large])
         .preferredColorScheme(.dark)
         .task {
             await store.send(.task).finish()
@@ -244,7 +245,6 @@ public struct CreateWorkspaceView: View {
             .background(.theme(.background))
             .scrollEdgeEffectStyle(.soft, for: .bottom)
             .scrollEdgeEffectStyle(.soft, for: .top)
-            .presentationDetents([.medium, .large])
             .safeAreaBar(edge: .bottom) {
                 bottomRow
                     .padding(.horizontal, 24)

@@ -692,7 +692,6 @@ public struct WorkspacesView: View {
                     }
                 ) { createWorkspaceStore in
                     CreateWorkspaceView(store: createWorkspaceStore)
-                        .presentationDetents([.medium, .large])
                         .presentationBackground(.theme(.background))
                         .navigationTransition(.zoom(sourceID: "new-workspace", in: namespace))
                 }
