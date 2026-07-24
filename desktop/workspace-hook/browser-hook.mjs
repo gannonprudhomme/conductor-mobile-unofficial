@@ -7,8 +7,9 @@ const controllerKey = "__conductorMobileWorkspaceUIHookController";
 const commandQueueKey = "__conductorMobileWorkspaceUIHookCommandQueue";
 const expectedOrigin = "tauri://localhost";
 const shellPathPattern = /^\/assets\/shell-[^/]+\.js$/;
+const rootIndexPathPattern = /^\/assets\/index-[^/]+\.js$/;
 const renderAppPathPattern = /^\/assets\/renderApp-[^/]+\.js$/;
-// Only renderApp's static shell import identifies the chunk containing the services we need.
+// Older builds put the services in a shell chunk; current builds export them from the root index.
 const directShellImportPattern =
   /(?:^|[;\n\r])\s*import(?=\s|["'{*])(?:\s*["'](\.\/shell-[^/"']+\.js)["']|[^;\n\r]*?\bfrom\s*["'](\.\/shell-[^/"']+\.js)["'])/g;
 export async function prepareWorkspaceUIHook() {
@@ -26,47 +27,12 @@ export async function prepareWorkspaceUIHook() {
     throw new Error("Unexpected Conductor origin: " + globalThis.location.origin);
   }
 
-  const shellURL = await findShellURL();
-  const shell = await import(shellURL);
-  const workspaceService = uniqueService(
-    shell,
-    [
-      "archiveWorkspace",
-      "createWorkspaceWithSetup",
-      "getWorkspaces",
-      "markUserSetBranchName",
-      "setWorkspacePinned",
-      "setWorkspaceManualStatus",
-    ],
-    "WorkspaceService",
-  );
-  const gitService = uniqueService(
-    shell,
-    [
-      "refreshLocalBranch",
-      "refreshWorkspaceChanges",
-      "renameBranch",
-    ],
-    "GitService",
-  );
-  const sessionService = uniqueService(
-    shell,
-    [
-      "createSession",
-      "getSessionsForWorkspace",
-      "setSessionAgentAndModel",
-      "markWorkspaceAsRead",
-      "setUnread",
-      "updateSessionFastMode",
-      "updateSessionModel",
-    ],
-    "SessionService",
-  );
-  const messageProcessingController = uniqueService(
-    shell,
-    ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
-    "MessageProcessingController",
-  );
+  const {
+    gitService,
+    messageProcessingController,
+    sessionService,
+    workspaceService,
+  } = await findConductorServices();
 
   const hookBaseURL = new URL("./", moduleURL);
   const eventsURL = new URL("events", hookBaseURL);
@@ -93,7 +59,7 @@ export async function prepareWorkspaceUIHook() {
   return controller;
 }
 
-async function findShellURL() {
+async function findConductorServices() {
   // Module preloads recover early assets that have fallen out of Resource Timing's buffer.
   const resourceURLs = globalThis.performance
     .getEntriesByType("resource")
@@ -101,6 +67,10 @@ async function findShellURL() {
   const modulePreloadURLs = Array.from(
     globalThis.document.querySelectorAll('link[rel="modulepreload"][href]'),
     (link) => link.href,
+  );
+  const moduleScriptURLs = Array.from(
+    globalThis.document.querySelectorAll('script[type="module"][src]'),
+    (script) => script.src,
   );
   const renderAppURLs = matchingAssetURLs(
     [...resourceURLs, ...modulePreloadURLs],
@@ -118,18 +88,78 @@ async function findShellURL() {
     throw new Error("Could not load Conductor's renderApp module.");
   }
   const source = await response.text();
-  const importedPaths = Array.from(
+  const importedShellPaths = Array.from(
     source.matchAll(directShellImportPattern),
     (match) => match[1] ?? match[2],
   );
-  if (importedPaths.length !== 1) {
-    throw new Error("Could not resolve one unambiguous shell import from renderApp.");
+  const serviceModuleURLs = [
+    ...matchingAssetURLs(importedShellPaths, shellPathPattern, renderAppURL),
+    ...matchingAssetURLs(moduleScriptURLs, rootIndexPathPattern, globalThis.location.href),
+  ];
+  if (serviceModuleURLs.length === 0) {
+    throw new Error("Could not resolve one unambiguous Conductor service module.");
   }
-  const importedShellURLs = matchingAssetURLs(importedPaths, shellPathPattern, renderAppURL);
-  if (importedShellURLs.length !== 1) {
-    throw new Error("Could not resolve one unambiguous shell import from renderApp.");
+
+  if (serviceModuleURLs.length === 1) {
+    return resolveConductorServices(await import(serviceModuleURLs[0]));
   }
-  return importedShellURLs[0];
+
+  const candidates = [];
+  for (const serviceModuleURL of serviceModuleURLs) {
+    try {
+      const serviceModule = await import(serviceModuleURL);
+      candidates.push(resolveConductorServices(serviceModule));
+    } catch {
+      // Ignore referenced modules that do not contain Conductor's required services.
+    }
+  }
+  if (candidates.length !== 1) {
+    throw new Error("Could not resolve one unambiguous Conductor service module.");
+  }
+  return candidates[0];
+}
+
+function resolveConductorServices(serviceModule) {
+  const workspaceService = uniqueService(
+    serviceModule,
+    [
+      "archiveWorkspace",
+      "createWorkspaceWithSetup",
+      "getWorkspaces",
+      "markUserSetBranchName",
+      "setWorkspacePinned",
+      "setWorkspaceManualStatus",
+    ],
+    "WorkspaceService",
+  );
+  const gitService = uniqueService(
+    serviceModule,
+    [
+      "refreshLocalBranch",
+      "refreshWorkspaceChanges",
+      "renameBranch",
+    ],
+    "GitService",
+  );
+  const sessionService = uniqueService(
+    serviceModule,
+    [
+      "createSession",
+      "getSessionsForWorkspace",
+      "setSessionAgentAndModel",
+      "markWorkspaceAsRead",
+      "setUnread",
+      "updateSessionFastMode",
+      "updateSessionModel",
+    ],
+    "SessionService",
+  );
+  const messageProcessingController = uniqueService(
+    serviceModule,
+    ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
+    "MessageProcessingController",
+  );
+  return { gitService, messageProcessingController, sessionService, workspaceService };
 }
 
 // Normalize and deduplicate only exact Conductor asset URLs before fetching or importing them.

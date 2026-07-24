@@ -96,7 +96,7 @@ isolatedTest("a stale hook imports and prepares the latest served revision", asy
   assert.equal(environment.preparedHookUpdates, 1);
 });
 
-isolatedTest("renderApp requires one narrow direct shell import", async () => {
+isolatedTest("renderApp uses only narrow direct shell imports", async () => {
   const environment = installHookGlobals({
     resources: [
       "/assets/shell-old.js",
@@ -125,12 +125,57 @@ isolatedTest("renderApp requires one narrow direct shell import", async () => {
   assert.equal(environment.eventSources.length, 1);
 });
 
+isolatedTest("renderApp selects the service-bearing shell from multiple direct imports", async () => {
+  const workspaceShell = emptyWorkspaceShell();
+  const environment = installHookGlobals({
+    renderAppSource: `
+      import { syntax } from "./shell-syntax.js";
+      import { workspace } from "./shell-workspace.js";
+    `,
+    shells: {
+      "tauri://localhost/assets/shell-syntax.js": {
+        syntax: {},
+        workspaceService: workspaceShell.workspaceService,
+      },
+      "tauri://localhost/assets/shell-workspace.js": workspaceShell,
+    },
+  });
+
+  await prepareHook();
+
+  assert.deepEqual(environment.importedShellURLs, [
+    "tauri://localhost/assets/shell-syntax.js",
+    "tauri://localhost/assets/shell-workspace.js",
+  ]);
+  assert.equal(environment.eventSources.length, 1);
+});
+
+isolatedTest("discovery follows renderApp's root index service module", async () => {
+  const environment = installHookGlobals({
+    moduleScripts: ["/assets/index-current.js"],
+    resources: [
+      "/assets/renderApp-current.js",
+    ],
+    renderAppSource: 'const unrelatedChunks = ["assets/index-icons.js"];',
+    shells: {
+      "tauri://localhost/assets/index-current.js": emptyWorkspaceShell(),
+    },
+  });
+
+  await prepareHook();
+
+  assert.deepEqual(environment.importedShellURLs, [
+    "tauri://localhost/assets/index-current.js",
+  ]);
+  assert.equal(environment.eventSources.length, 1);
+});
+
 isolatedTest("renderApp rejects ambiguous direct shell imports", async () => {
   installHookGlobals({
     renderAppSource: 'import { a } from "./shell-one.js";import { b } from "./shell-two.js";',
     shell: emptyWorkspaceShell(),
   });
-  await assert.rejects(prepareHook(), /unambiguous shell import/);
+  await assert.rejects(prepareHook(), /unambiguous Conductor service module/);
 });
 
 isolatedTest("hook discovery requires the top frame and exact Conductor asset origin", async () => {
@@ -533,8 +578,12 @@ const browserHookSource = fs.readFile(new URL("./browser-hook.mjs", import.meta.
       'const moduleURL = new URL("http://127.0.0.1:3769/workspace-ui-hook/hook.js?revision=%22revision-1%22");',
     )
     .replace(
-      "const shell = await import(shellURL);",
-      "const shell = await globalThis.__workspaceHookImportShell(shellURL);",
+      "const serviceModule = await import(serviceModuleURL);",
+      "const serviceModule = await globalThis.__workspaceHookImportShell(serviceModuleURL);",
+    )
+    .replace(
+      "return resolveConductorServices(await import(serviceModuleURLs[0]));",
+      "return resolveConductorServices(await globalThis.__workspaceHookImportShell(serviceModuleURLs[0]));",
     )
     .replace(
       "const module = await import(latestHookURL.href);",
@@ -552,9 +601,11 @@ function prepareHook() {
 
 function installHookGlobals({
   modulePreloads = [],
+  moduleScripts = [],
   renderAppSource = 'import "./shell-main.js";',
   resources = ["tauri://localhost/assets/renderApp-main.js"],
   shell,
+  shells,
 }) {
   const environment = {
     errors: [],
@@ -569,13 +620,18 @@ function installHookGlobals({
     commandResults: [],
     preparedHookUpdates: 0,
     shell,
+    shells,
   };
   defineGlobal("window", globalThis);
   defineGlobal("top", globalThis);
   defineGlobal("document", {
-    querySelectorAll: () => modulePreloads.map((href) => ({
-      href: new URL(href, globalThis.location.href).href,
-    })),
+    querySelectorAll: (selector) => {
+      const values = selector.startsWith("link") ? modulePreloads : moduleScripts;
+      return values.map((value) => {
+        const url = new URL(value, globalThis.location.href).href;
+        return { href: url, src: url };
+      });
+    },
   });
   defineGlobal("location", { href: "tauri://localhost/", origin: "tauri://localhost" });
   defineGlobal("performance", { getEntriesByType: () => resources.map((name) => ({ name })) });
@@ -598,7 +654,7 @@ function installHookGlobals({
   defineGlobal("EventSource", FakeEventSource);
   defineGlobal("__workspaceHookImportShell", async (url) => {
     environment.importedShellURLs.push(String(url));
-    return environment.shell;
+    return environment.shells?.[String(url)] ?? environment.shell;
   });
   defineGlobal("__workspaceHookImport", async (url) => {
     environment.importedHookURLs.push(String(url));
