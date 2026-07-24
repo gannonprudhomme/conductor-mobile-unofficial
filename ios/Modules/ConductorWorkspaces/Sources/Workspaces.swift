@@ -1049,7 +1049,7 @@ public struct WorkspacesView: View {
 
                 if let repositoryName {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text("Filter by")
+                        Text("Filtered by")
                             .foregroundStyle(.theme(.textPrimary))
                         Text(repositoryName)
                             .fontWeight(.semibold)
