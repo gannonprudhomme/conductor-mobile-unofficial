@@ -173,4 +173,14 @@ public enum VoiceInputPhase: Equatable, Sendable {
     case startingRecording
     case recording
     case transcribing
+
+    public var shouldShowTakeover: Bool {
+        switch self {
+        case .recording, .transcribing:
+            true
+
+        case .idle, .startingRecording:
+            false
+        }
+    }
 }

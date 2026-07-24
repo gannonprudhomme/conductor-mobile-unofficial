@@ -146,13 +146,10 @@ public struct VoiceInputTakeover: View {
                 )
             }
 
-        case .startingRecording:
-            VoiceInputStatus(title: "Starting recording…")
-
         case .transcribing:
             VoiceInputStatus(title: "Transcribing…")
 
-        case .idle:
+        case .idle, .startingRecording:
             EmptyView()
         }
     }
@@ -221,7 +218,13 @@ private struct VoiceInputStatus: View {
             action: {}
         )
 
-        VoiceInputStatus(title: "Starting recording…")
+        VoiceInputButton(
+            phase: .startingRecording,
+            isEnabled: false,
+            accessibilityIdentifier: "preview.voiceInput",
+            idleAccessibilityLabel: "Record prompt",
+            action: {}
+        )
 
         VoiceInputTakeover(
             phase: .recording,
@@ -292,10 +295,10 @@ private struct VoiceInputPreview: View {
                 .foregroundStyle(.theme(.textPrimary))
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if store.voiceInput.phase == .idle {
+            if !store.voiceInput.phase.shouldShowTakeover {
                 VoiceInputButton(
                     phase: store.voiceInput.phase,
-                    isEnabled: true,
+                    isEnabled: store.voiceInput.phase == .idle,
                     accessibilityIdentifier: "preview.voiceInput",
                     idleAccessibilityLabel: "Record prompt",
                     action: {

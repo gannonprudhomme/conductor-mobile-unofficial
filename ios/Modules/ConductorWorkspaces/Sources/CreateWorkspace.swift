@@ -354,7 +354,7 @@ public struct CreateWorkspaceView: View {
 
     private var bottomRow: some View {
         Group {
-            if store.voiceInput.phase == .idle {
+            if !store.voiceInput.phase.shouldShowTakeover {
                 HStack(spacing: 8) {
                     ModelAndFastModeControls(
                         agentType: store.agentType,
@@ -365,12 +365,16 @@ public struct CreateWorkspaceView: View {
                         onSelectModel: { store.selectedModel = $0 }
                     )
                     .tint(.theme(.textPrimary))
-                    .disabled(store.isCreateAPIInFlight)
+                    .disabled(
+                        store.isCreateAPIInFlight
+                            || store.voiceInput.phase != .idle
+                    )
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     VoiceInputButton(
                         phase: store.voiceInput.phase,
-                        isEnabled: !store.isCreateAPIInFlight,
+                        isEnabled: !store.isCreateAPIInFlight
+                            && store.voiceInput.phase == .idle,
                         accessibilityIdentifier: "createWorkspace.voiceInput",
                         idleAccessibilityLabel: "Record workspace prompt",
                         action: {
@@ -399,6 +403,7 @@ public struct CreateWorkspaceView: View {
 
     private var createButton: some View {
         let isEnabled = !store.isCreateAPIInFlight
+            && store.voiceInput.phase == .idle
 
         return Button {
             store.send(.createButtonTapped)

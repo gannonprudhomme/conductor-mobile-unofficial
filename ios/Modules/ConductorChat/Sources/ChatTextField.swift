@@ -66,7 +66,7 @@ struct ChatTextField: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            if voiceInputPhase == .idle {
+            if !voiceInputPhase.shouldShowTakeover {
                 textField
 
                 bottomRowButtons

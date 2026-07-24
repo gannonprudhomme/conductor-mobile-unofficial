@@ -100,4 +100,12 @@ struct VoiceInputTests {
             .transcriptionResponse(id: "old", result: .success("Ignore me"))
         )
     }
+
+    @Test("Only recording and transcription take over the composer")
+    func takeoverPresentation() {
+        #expect(!VoiceInputPhase.idle.shouldShowTakeover)
+        #expect(!VoiceInputPhase.startingRecording.shouldShowTakeover)
+        #expect(VoiceInputPhase.recording.shouldShowTakeover)
+        #expect(VoiceInputPhase.transcribing.shouldShowTakeover)
+    }
 }
