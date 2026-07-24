@@ -44,7 +44,7 @@ In order to be able to actually control Conductor **remotely**, you need to inst
 #### UI Hook (for sending messages, stopping agents, renaming branches, and changing Conductor state)
 
 1. Press `Copy Loader`
-2. In Conductor, press Cmd+Opt+I to display the Web Inspector (TODO: Replace this with the icons)
+2. In Conductor, press Cmd+Opt+I to display the Web Inspector
 3. Go to the `Sources` tab
 4. Press the `+` button in the bottom left, and select `Console Snippet`
 
