@@ -1218,8 +1218,7 @@ struct ChatRowView: View {
                 .foregroundStyle(.theme(.textPrimary))
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .assistantError(_, let message):
-            Text("Error: \(message)")
-                .foregroundStyle(.theme(.destructive))
+            AssistantErrorMessageView(errorMessage: message)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .turnInProgress(let row):
             TurnInProgressView(row: row)
