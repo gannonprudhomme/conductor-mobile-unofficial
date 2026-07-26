@@ -180,7 +180,7 @@ enum MessageRoute {
                         sessionID: sessionID,
                         workspaceID: workspaceID,
                         content: sendMessageRequest.message,
-                        mode: .sent
+                        mode: sendMessageRequest.mode ?? .sent
                     )
                     return .accepted
                 } catch is CancellationError {
@@ -274,11 +274,13 @@ enum MessageRoute {
         let message: String
         let model: String?
         let isFastModeEnabled: Bool?
+        let mode: WorkspaceUIHook.MessageMode?
 
         private enum CodingKeys: String, CodingKey {
             case message
             case model
             case isFastModeEnabled = "fast_mode"
+            case mode
         }
     }
 

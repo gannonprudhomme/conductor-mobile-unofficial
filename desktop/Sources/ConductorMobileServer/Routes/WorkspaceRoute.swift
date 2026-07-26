@@ -234,7 +234,7 @@ enum WorkspaceRoute {
             case .listenerUnavailable:
                 throw PlainTextResponseError(
                     .serviceUnavailable,
-                    message: "Conductor's workspace UI hook is unavailable."
+                    message: "Conductor's UI hook is not connected."
                 )
             case .mutationInFlight:
                 throw PlainTextResponseError(

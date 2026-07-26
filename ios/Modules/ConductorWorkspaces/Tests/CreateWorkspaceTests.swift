@@ -105,12 +105,14 @@ struct CreateWorkspaceTests {
                     sessionID,
                     message,
                     model,
-                    isFastModeEnabled in
+                    isFastModeEnabled,
+                    mode in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(mode == .steer)
                     return sentMessage
                 }
             }

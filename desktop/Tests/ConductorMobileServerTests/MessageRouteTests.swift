@@ -71,7 +71,7 @@ struct MessageRouteTests {
                     method: .post,
                     headers: [.contentType: "application/json"],
                     body: ByteBuffer(
-                        string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra","fast_mode":true}"#
+                        string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra","fast_mode":true,"mode":"queued"}"#
                     )
                 ) { response in
                     #expect(response.status == .noContent)
@@ -84,7 +84,7 @@ struct MessageRouteTests {
             await recorder.message == MessageRouteRecorder.RecordedMessage(
                 sessionID: "session-1",
                 content: "  Run the tests.  ",
-                mode: .sent
+                mode: .queued
             )
         )
         #expect(await recorder.updatedSessionID == "session-1")
@@ -165,7 +165,13 @@ struct MessageRouteTests {
             }
         }
 
-        #expect(await recorder.message?.content == "Run normally.")
+        #expect(
+            await recorder.message == MessageRouteRecorder.RecordedMessage(
+                sessionID: "session-1",
+                content: "Run normally.",
+                mode: .sent
+            )
+        )
     }
 
     @Test("POST message does not send when Fast Mode delivery fails")

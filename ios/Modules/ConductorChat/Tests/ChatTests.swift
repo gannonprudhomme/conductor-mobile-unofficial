@@ -77,6 +77,24 @@ struct ChatTests {
         }
     }
 
+    @Test("Reconnecting stays centered until the collapsed queue would overlap it")
+    func reconnectingPosition() {
+        #expect(
+            ChatView.reconnectingHorizontalOffset(
+                containerWidth: 390,
+                reconnectingWidth: 100,
+                queueTrailingExtent: 120
+            ) == 0
+        )
+        #expect(
+            ChatView.reconnectingHorizontalOffset(
+                containerWidth: 390,
+                reconnectingWidth: 100,
+                queueTrailingExtent: 150
+            ) == -17
+        )
+    }
+
     @Test("State equality tracks presentation state but not derived caches")
     func stateEquality() throws {
         try withDependencies {
@@ -469,6 +487,41 @@ struct ChatTests {
         }
     }
 
+    @Test("An initial queued-only response remains visible without creating a turn")
+    func queuedOnlyInitialResponse() async throws {
+        let session = try makeSession()
+        let message = Message(
+            id: "queued",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests next",
+            createdAt: Date(timeIntervalSince1970: 0),
+            queueOrder: 1
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .initialMessagesResponse(
+                    sessionID: session.id,
+                    messages: [message]
+                )
+            ) {
+                $0.isLoadingMessages = false
+            }
+
+            #expect(!store.state.isMessageSnapshotEmpty)
+            #expect(store.state.turns?.isEmpty == true)
+            #expect(store.state.rows?.isEmpty == true)
+            #expect(!store.state.shouldShowEmptyChat)
+        }
+    }
+
     @Test("An initial response preserves a canonical message received while loading")
     func initialResponsePreservesCanonicalMessage() async throws {
         try await withDependencies {
@@ -623,12 +676,19 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
+                $0.desktopClient.sendMessage = {
+                    workspaceID,
+                    sessionID,
+                    message,
+                    model,
+                    isFastModeEnabled,
+                    mode in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(mode == .steer)
                     return sentMessage
                 }
             }
@@ -638,7 +698,7 @@ struct ChatTests {
                 $0.hasUserSelectedModel = true
             }
             store.state.$messageDraft.withLock { $0 = "  Please run the tests.  " }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -658,6 +718,43 @@ struct ChatTests {
         }
     }
 
+    @Test("Queueing sends the queued mode and clears the draft")
+    func messageQueueSucceeds() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(status: .working)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = {
+                    workspaceID,
+                    sessionID,
+                    message,
+                    _,
+                    _,
+                    mode in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    #expect(message == "Run these after the current task.")
+                    #expect(mode == .queue)
+                    return nil
+                }
+            }
+
+            store.state.$messageDraft.withLock { $0 = "Run these after the current task." }
+            await store.send(.sendButtonTapped(.queue)) {
+                $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.$messageDraft.withLock { $0 = "" }
+                $0.isMessageSendInFlight = false
+            }
+        }
+    }
+
     @Test("A legacy send response still completes successfully")
     func legacyMessageSendSucceeds() async throws {
         try await withDependencies {
@@ -668,11 +765,11 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in nil }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in nil }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -694,7 +791,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
                     for await response in responses {
                         return response
                     }
@@ -703,7 +800,7 @@ struct ChatTests {
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -749,11 +846,11 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -791,13 +888,13 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
             try database.close()
 
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -824,12 +921,12 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
                     throw TestError()
                 }
             }
 
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -849,11 +946,18 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
+                $0.desktopClient.sendMessage = {
+                    workspaceID,
+                    sessionID,
+                    message,
+                    model,
+                    isFastModeEnabled,
+                    mode in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Use the next setting.")
                     #expect(model == session.model)
+                    #expect(mode == .steer)
                     isRecordedFastModeEnabled.withValue { $0 = isFastModeEnabled }
                     return nil
                 }
@@ -865,7 +969,7 @@ struct ChatTests {
             #expect(isRecordedFastModeEnabled.value == nil)
 
             store.state.$messageDraft.withLock { $0 = "Use the next setting." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }

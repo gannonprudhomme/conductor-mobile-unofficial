@@ -12,7 +12,7 @@ import Testing
 @testable import ConductorMobileServer
 
 struct QueriesTests {
-    @Test("Message query excludes tool results")
+    @Test("Message query excludes tool results and includes queued messages")
     func messagesExcludeToolResults() throws {
         let database = try testConductorDatabase()
         try database.write { database in
@@ -49,7 +49,12 @@ struct QueriesTests {
                         'text', 'session', 'assistant',
                         '{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}',
                         '2026-07-15T00:00:04Z'
+                      ),
+                      (
+                        'queued', 'session', 'user', 'Run the integration tests',
+                        '2026-07-15T00:00:05Z'
                       );
+                    UPDATE session_messages SET queue_order = 1 WHERE id = 'queued';
                     """
             )
         }
@@ -60,6 +65,8 @@ struct QueriesTests {
                 .fetchAll(database)
         }
 
-        #expect(messages.map(\.id) == ["human", "tool-use", "text"])
+        #expect(messages.map(\.id) == ["human", "tool-use", "text", "queued"])
+        #expect(messages.last?.sentAt == nil)
+        #expect(messages.last?.queueOrder == 1)
     }
 }

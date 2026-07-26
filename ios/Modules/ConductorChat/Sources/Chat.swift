@@ -31,6 +31,7 @@ public struct Chat: Sendable {
 
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
+        var queuedMessages: QueuedMessages.State
         var isFastModeEnabled: Bool
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
@@ -58,7 +59,7 @@ public struct Chat: Sendable {
         var rows: [DisplayedChatRowWithPadding]? = nil
 
         var shouldShowEmptyChat: Bool {
-            !isLoadingMessages && isMessageSnapshotEmpty
+            !isLoadingMessages && isMessageSnapshotEmpty && queuedMessages.messages.isEmpty
         }
 
         var allowsAgentSwitching: Bool {
@@ -86,6 +87,7 @@ public struct Chat: Sendable {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
+            self.queuedMessages = QueuedMessages.State(session: session)
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -94,7 +96,10 @@ public struct Chat: Sendable {
             self._messages = FetchAll(
                 wrappedValue: messages,
                 Message
-                    .where { $0.sessionID.eq(session.id) }
+                    .where {
+                        $0.sessionID.eq(session.id)
+                            && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
+                    }
                     .order {
                         (
                             $0.sentAt.asc(nulls: .last),
@@ -112,6 +117,7 @@ public struct Chat: Sendable {
         /// status-driven changes.
         public static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.messages == rhs.messages
+                && lhs.queuedMessages == rhs.queuedMessages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
@@ -151,7 +157,8 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             message: Message
         )
-        case sendButtonTapped
+        case queuedMessages(QueuedMessages.Action)
+        case sendButtonTapped(DesktopClient.MessageMode)
         case sendMessageResponse(
             sessionID: Session.ID,
             result: Result<String, any Error>
@@ -175,6 +182,10 @@ public struct Chat: Sendable {
     public var body: some ReducerOf<Self> {
         BindingReducer()
 
+        Scope(state: \.queuedMessages, action: \.queuedMessages) {
+            QueuedMessages()
+        }
+
         Reduce { state, action in
             switch action {
             case .task:
@@ -186,12 +197,7 @@ public struct Chat: Sendable {
                         await send(.defaultModelFetched(model))
                     },
                     observeMessages(state),
-                    .publisher {
-                        state.$messages
-                            .publisher
-                            .removeDuplicates()
-                            .map(Action.messagesUpdated)
-                    }
+                    observePersistedMessages(state)
                 )
 
             case let .defaultModelFetched(model):
@@ -229,10 +235,11 @@ public struct Chat: Sendable {
                     .filter { !responseMessageIDs.contains($0.id) }
                 // After the first snapshot, database observation owns subsequent updates.
                 state.confirmedMessagesAwaitingInitialSnapshot.removeAll()
-                state.isMessageSnapshotEmpty = messages.isEmpty
-                    && confirmedMessagesMissingFromSnapshot.isEmpty
+                let displayedMessages = messages + confirmedMessagesMissingFromSnapshot
+                let transcriptMessages = displayedMessages.filter(Self.isTranscriptMessage)
+                state.isMessageSnapshotEmpty = displayedMessages.isEmpty
                 state.turns = Turn.parse(
-                    messages: messages + confirmedMessagesMissingFromSnapshot,
+                    messages: transcriptMessages,
                     reusing: state.turns ?? []
                 )
                 state.updateRows(sessionStatus: state.session.status)
@@ -273,7 +280,7 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
 
-            case .sendButtonTapped:
+            case let .sendButtonTapped(mode):
                 let message = state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !message.isEmpty, !state.isMessageSendInFlight else {
                     return .none
@@ -294,7 +301,8 @@ public struct Chat: Sendable {
                             sessionID: sessionID,
                             message: message,
                             model: model,
-                            isFastModeEnabled: isFastModeEnabled
+                            isFastModeEnabled: isFastModeEnabled,
+                            mode: mode
                         ) {
                             await send(
                                 .messageConfirmed(
@@ -380,7 +388,7 @@ public struct Chat: Sendable {
             case .loadMessagesFailed:
                 return .none
 
-            case .binding:
+            case .binding, .queuedMessages:
                 return .none
             }
         }
@@ -415,6 +423,18 @@ public struct Chat: Sendable {
                 await send(.loadMessagesFailed(error))
             }
         }
+    }
+
+    private func observePersistedMessages(_ state: State) -> Effect<Action> {
+        .publisher {
+            state.$messages.publisher
+                .removeDuplicates()
+                .map(Action.messagesUpdated)
+        }
+    }
+
+    private static func isTranscriptMessage(_ message: Message) -> Bool {
+        message.sentAt != nil || message.queueOrder == nil
     }
 
     private func reconcileMessage(_ message: Message) async throws {
@@ -474,11 +494,48 @@ private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.D
 }
 
 struct ChatView: View {
+    private static let reconnectingQueueSpacing: CGFloat = 12
+
     @Bindable var store: StoreOf<Chat>
+    @State private var composerHeight: CGFloat = 0
+    @State private var queuedMessagesWidth: CGFloat = 0
+    @State private var reconnectingSize: CGSize = .zero
+    @ScaledMetric(relativeTo: ThemeFontStyle.body.textStyle)
+    private var queuedMessageRowHeight: CGFloat = 44
     let directoryName: String
 
     var body: some View {
-        collectionView
+        let queuedMessagesStore = store.scope(
+            state: \.queuedMessages,
+            action: \.queuedMessages
+        )
+
+        GeometryReader { proxy in
+            let statusLayout = if queuedMessagesStore.isExpanded {
+                AnyLayout(VStackLayout(spacing: 8))
+            } else {
+                AnyLayout(ZStackLayout(alignment: .trailing))
+            }
+            let reconnectingHorizontalOffset = if queuedMessagesStore.isExpanded
+                || queuedMessagesStore.displayedMessages.isEmpty {
+                CGFloat.zero
+            } else {
+                Self.reconnectingHorizontalOffset(
+                    containerWidth: proxy.size.width,
+                    reconnectingWidth: reconnectingSize.width,
+                    queueTrailingExtent: max(
+                        0,
+                        queuedMessagesWidth - QueuedMessagesPresentation.horizontalPadding
+                    )
+                )
+            }
+
+            collectionView(
+                bottomInset: bottomInset(
+                    safeAreaBottom: proxy.safeAreaInsets.bottom,
+                    queuedMessagesStore: queuedMessagesStore
+                )
+            )
             .overlay {
                 if store.isLoadingMessages {
                     ProgressView()
@@ -495,63 +552,139 @@ struct ChatView: View {
                 Color.theme(.background)
                     .ignoresSafeArea()
             }
-            .safeAreaBar(edge: .bottom) {
-                VStack(spacing: 8) {
-                    if store.connectionStatus != .connected {
-                        Label {
-                            Text("Reconnecting")
-                        } icon: {
-                            ProgressView()
-                                .progressViewStyle(.network)
-                                .tint(.theme(.textSecondary))
-                                .controlSize(.mini)
-                        }
-                            .labelStyle(.conductorSmall)
-                            .font(.theme(.small))
-                            .foregroundStyle(.theme(.textSecondary))
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-
-                    ChatTextField(
-                        text: Binding(store.$messageDraft),
-                        agentType: store.session.agentType,
-                        allowsAgentSwitching: store.allowsAgentSwitching,
-                        isFastModeEnabled: store.isFastModeEnabled,
-                        isSendInFlight: store.isMessageSendInFlight,
-                        isStopInFlight: store.isStopInFlight,
-                        isWorking: store.session.status == .working,
-                        selectedModel: $store.selectedModel,
-                        shouldFocusOnAppear: store.shouldFocusMessageField,
-                        onFastModeTapped: { store.send(.fastModeButtonTapped) },
-                        onSendTapped: { store.send(.sendButtonTapped) },
-                        onStopTapped: { store.send(.stopButtonTapped) }
-                    )
-                }
-                .animation(.default, value: store.connectionStatus)
+            .overlay(alignment: .bottom) {
+                bottomOverlay(
+                    statusLayout: statusLayout,
+                    queuedMessagesStore: queuedMessagesStore,
+                    reconnectingHorizontalOffset: reconnectingHorizontalOffset
+                )
             }
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
-            .onChange(of: store.session.status) { _, status in
-                store.send(.sessionStatusChanged(status))
-            }
-            .onChange(of: store.session.model) { _, model in
-                store.send(.sessionModelChanged(model))
-            }
-            .onChange(of: store.session.isFastModeEnabled) { _, isFastModeEnabled in
-                store.send(.sessionFastModeChanged(isFastModeEnabled ?? false))
-            }
-            .task(id: store.session.id) {
-                await store.send(.task).finish()
-            }
-            .preferredColorScheme(.dark)
+        }
+        .onChange(of: store.session.status) { _, status in
+            store.send(.sessionStatusChanged(status))
+        }
+        .onChange(of: store.session.model) { _, model in
+            store.send(.sessionModelChanged(model))
+        }
+        .onChange(of: store.session.isFastModeEnabled) { _, isFastModeEnabled in
+            store.send(.sessionFastModeChanged(isFastModeEnabled ?? false))
+        }
+        .task(id: store.session.id) {
+            await store.send(.task).finish()
+        }
+        .preferredColorScheme(.dark)
     }
 
-    private var collectionView: some View {
+    private func bottomOverlay(
+        statusLayout: AnyLayout,
+        queuedMessagesStore: StoreOf<QueuedMessages>,
+        reconnectingHorizontalOffset: CGFloat
+    ) -> some View {
+        VStack(spacing: 8) {
+            statusLayout {
+                if store.connectionStatus != .connected {
+                    Label {
+                        Text("Reconnecting")
+                    } icon: {
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.textSecondary))
+                            .controlSize(.mini)
+                    }
+                    .labelStyle(.conductorSmall)
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
+                    .fixedSize()
+                    .onGeometryChange(for: CGSize.self) { geometry in
+                        geometry.size
+                    } action: { size in
+                        reconnectingSize = size
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .offset(x: reconnectingHorizontalOffset)
+                    .animation(.default, value: reconnectingHorizontalOffset)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                if !queuedMessagesStore.displayedMessages.isEmpty {
+                    QueuedMessagesView(
+                        store: queuedMessagesStore
+                    )
+                    .id(store.session.id)
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.size.width
+                    } action: { width in
+                        queuedMessagesWidth = width
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            ChatTextField(
+                text: composerText(queuedMessagesStore: queuedMessagesStore),
+                agentType: store.session.agentType,
+                allowsAgentSwitching: store.allowsAgentSwitching,
+                isFastModeEnabled: store.isFastModeEnabled,
+                isEditingQueuedMessage: queuedMessagesStore.isEditing,
+                isSendInFlight: queuedMessagesStore.isEditing
+                    ? queuedMessagesStore.isEditInFlight
+                    : store.isMessageSendInFlight,
+                isStopInFlight: store.isStopInFlight,
+                isWorking: store.session.status == .working,
+                selectedModel: $store.selectedModel,
+                shouldFocusOnAppear: store.shouldFocusMessageField,
+                onFastModeTapped: {
+                    store.send(.fastModeButtonTapped)
+                },
+                onCancelEditingTapped: {
+                    queuedMessagesStore.send(.cancelEditButtonTapped)
+                },
+                onSendTapped: {
+                    if queuedMessagesStore.isEditing {
+                        queuedMessagesStore.send(.finishEditButtonTapped)
+                    } else {
+                        store.send(.sendButtonTapped(.steer))
+                    }
+                },
+                onQueueTapped: {
+                    store.send(.sendButtonTapped(.queue))
+                },
+                onStopTapped: { store.send(.stopButtonTapped) }
+            )
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.size.height
+            } action: { height in
+                withAnimation(
+                    composerHeight == 0
+                    ? nil
+                    : QueuedMessagesPresentation.disclosureAnimation
+                ) {
+                    composerHeight = height
+                }
+            }
+        }
+        .animation(.default, value: store.connectionStatus)
+        .animation(.default, value: queuedMessagesStore.displayedMessages)
+        .animation(
+            QueuedMessagesPresentation.disclosureAnimation,
+            value: queuedMessagesStore.isEditing
+        )
+    }
+
+    private func collectionView(bottomInset: CGFloat) -> some View {
         GeometryReader { proxy in
             ChatCollectionView(
                 rows: store.rows ?? [],
                 scrollToBottomRequest: store.scrollToBottomRequest,
-                safeAreaInsets: proxy.safeAreaInsets,
+                safeAreaInsets: EdgeInsets(
+                    top: proxy.safeAreaInsets.top,
+                    leading: proxy.safeAreaInsets.leading,
+                    bottom: max(proxy.safeAreaInsets.bottom, bottomInset),
+                    trailing: proxy.safeAreaInsets.trailing
+                ),
+                contentInsetAnimationDuration: QueuedMessagesPresentation.animationDuration,
                 turnSummaryTapped: {
                     store.send(.turnSummaryTapped($0), animation: .default)
                 }
@@ -559,6 +692,66 @@ struct ChatView: View {
             // Draw beneath every bar and the keyboard; the proxy insets keep rows unobscured.
             .ignoresSafeArea(edges: [.top, .bottom])
         }
+    }
+
+    static func reconnectingHorizontalOffset(
+        containerWidth: CGFloat,
+        reconnectingWidth: CGFloat,
+        queueTrailingExtent: CGFloat
+    ) -> CGFloat {
+        let centeredRightEdge = containerWidth / 2 + reconnectingWidth / 2
+        let queueLeadingEdge = containerWidth - queueTrailingExtent
+        return min(
+            0,
+            queueLeadingEdge - reconnectingQueueSpacing - centeredRightEdge
+        )
+    }
+
+    private func composerText(
+        queuedMessagesStore: StoreOf<QueuedMessages>
+    ) -> Binding<String> {
+        if queuedMessagesStore.isEditing {
+            Binding(
+                get: { queuedMessagesStore.editDraft },
+                set: {
+                    queuedMessagesStore.send(.binding(.set(\.editDraft, $0)))
+                }
+            )
+        } else {
+            Binding(store.$messageDraft)
+        }
+    }
+
+    private func bottomInset(
+        safeAreaBottom: CGFloat,
+        queuedMessagesStore: StoreOf<QueuedMessages>
+    ) -> CGFloat {
+        let spacing: CGFloat = 8
+        let queueHeight = if queuedMessagesStore.displayedMessages.isEmpty {
+            CGFloat.zero
+        } else {
+            QueuedMessagesPresentation.height(
+                isExpanded: queuedMessagesStore.isExpanded,
+                rowHeight: queuedMessageRowHeight,
+                numRows: queuedMessagesStore.displayedMessages.count
+            )
+        }
+        let connectionHeight = if store.connectionStatus == .connected {
+            CGFloat.zero
+        } else {
+            reconnectingSize.height
+        }
+        let statusHeight = if queuedMessagesStore.isExpanded,
+                              queueHeight > 0,
+                              connectionHeight > 0 {
+            connectionHeight + spacing + queueHeight
+        } else {
+            max(connectionHeight, queueHeight)
+        }
+
+        return safeAreaBottom
+            + composerHeight
+            + (statusHeight > 0 ? spacing + statusHeight : 0)
     }
 
     private struct EmptyChatView: View {
@@ -592,13 +785,32 @@ private struct ChatPreview: View {
 
     init(
         status: DesktopClient.ConnectionStatus,
-        shouldCycleStatus: Bool = false
+        shouldCycleStatus: Bool = false,
+        queuedMessageContents: [String] = [],
+        isQueuePaused: Bool = false,
+        isResumeInFlight: Bool = false
     ) {
         let content = try! ChatPreviewContent()
+        var session = content.session
+        // session.queuePausedAt = isQueuePaused ? "2026-07-26T12:00:00Z" : nil
+        session.status = isQueuePaused ? .idle : .working
+        
+        let queuedMessages = queuedMessageContents.enumerated().map { offset, content in
+            Message(
+                id: "preview-queued-message-\(offset)",
+                sessionID: session.id,
+                role: .user,
+                content: content,
+                createdAt: Date(
+                    timeIntervalSince1970: 1_790_000_000 + TimeInterval(offset)
+                ),
+                queueOrder: offset + 1
+            )
+        }
         let _ = try! prepareDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { db in
-                try Message.upsert { content.messages }
+                try Message.upsert { content.messages + queuedMessages }
                     .execute(db)
             }
             $0.desktopClient.observeMessages = { _, _ in
@@ -606,6 +818,7 @@ private struct ChatPreview: View {
                     continuation.yield([])
                 }
             }
+            $0.desktopClient.resumeQueuedMessages = { _, _ in }
         }
 
         let (connectionStatus, store) = withDependencies {
@@ -614,9 +827,12 @@ private struct ChatPreview: View {
         } operation: {
             @Shared(.desktopConnectionStatus) var connectionStatus
             $connectionStatus.withLock { $0 = status }
+            var state = Chat.State(session: session)
+            state.queuedMessages.isExpanded = !queuedMessages.isEmpty
+            state.queuedMessages.isResumeInFlight = isResumeInFlight
             return (
                 $connectionStatus,
-                Store(initialState: Chat.State(session: content.session)) {
+                Store(initialState: state) {
                     Chat()
                 }
             )
@@ -625,6 +841,7 @@ private struct ChatPreview: View {
         self.shouldCycleStatus = shouldCycleStatus
         self.store = store
     }
+
     var body: some View {
         NavigationStack {
             ChatView(store: store, directoryName: "tacoma-v1")
@@ -678,5 +895,50 @@ private extension DesktopClient.ConnectionStatus {
 
 #Preview("Offline") {
     ChatPreview(status: .disconnected)
+}
+
+#Preview("Queue · 1 short") {
+    ChatPreview(
+        status: .connected,
+        queuedMessageContents: ["Run the tests."]
+    )
+}
+
+#Preview("Queue · 5 mixed") {
+    ChatPreview(
+        status: .connected,
+        queuedMessageContents: [
+            "Run the tests.",
+            "Fix the empty state spacing.",
+            "Check whether reconnecting preserves the queued messages.",
+            "Update the copy.",
+            "Please review the entire queue flow and verify that long queued messages truncate cleanly without moving the action and reorder controls off screen.",
+        ]
+    )
+}
+
+#Preview("Queue resuming · 1 long") {
+    ChatPreview(
+        status: .connected,
+        queuedMessageContents: [
+            "Please verify that a long queued message truncates to one line while the fake resume request is in flight and its progress indicator is visible.",
+        ],
+        isQueuePaused: true,
+        isResumeInFlight: true
+    )
+}
+
+#Preview("Queue paused · 5 mixed") {
+    ChatPreview(
+        status: .connected,
+        queuedMessageContents: [
+            "Run the tests.",
+            "Fix the empty state spacing.",
+            "Check whether reconnecting preserves the queued messages.",
+            "Update the copy.",
+            "Please review the entire queue flow and verify that long queued messages truncate cleanly without moving the Resume button off screen.",
+        ],
+        isQueuePaused: true
+    )
 }
 #endif

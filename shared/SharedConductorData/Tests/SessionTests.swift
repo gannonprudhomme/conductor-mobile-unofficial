@@ -58,7 +58,8 @@ struct SessionTests {
                   "fast_mode": true,
                   "unread_count": 0,
                   "freshly_compacted": 0,
-                  "context_token_count": 1234
+                  "context_token_count": 1234,
+                  "queue_paused_at": "2026-07-18T08:00:00Z"
                 }
                 """.utf8
             )
@@ -68,5 +69,6 @@ struct SessionTests {
         #expect(session.agentType == .codex)
         #expect(session.isHidden)
         #expect(session.isFastModeEnabled == true)
+        #expect(session.queuePausedAt == "2026-07-18T08:00:00Z")
     }
 }

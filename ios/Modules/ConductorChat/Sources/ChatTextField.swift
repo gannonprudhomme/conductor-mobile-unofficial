@@ -18,12 +18,15 @@ struct ChatTextField: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
     let isFastModeEnabled: Bool
+    let isEditingQueuedMessage: Bool
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
     let shouldFocusOnAppear: Bool
     let onFastModeTapped: @MainActor () -> Void
+    let onCancelEditingTapped: @MainActor () -> Void
     let onSendTapped: @MainActor () -> Void
+    let onQueueTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
     init(
@@ -31,31 +34,41 @@ struct ChatTextField: View {
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool,
         isFastModeEnabled: Bool,
+        isEditingQueuedMessage: Bool = false,
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
         selectedModel: Binding<Session.Model>,
         shouldFocusOnAppear: Bool = false,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onCancelEditingTapped: @escaping @MainActor () -> Void = { },
         onSendTapped: @escaping @MainActor () -> Void,
+        onQueueTapped: @escaping @MainActor () -> Void = { },
         onStopTapped: @escaping @MainActor () -> Void
     ) {
         self._text = text
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
         self.isFastModeEnabled = isFastModeEnabled
+        self.isEditingQueuedMessage = isEditingQueuedMessage
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
         self._selectedModel = selectedModel
         self.shouldFocusOnAppear = shouldFocusOnAppear
         self.onFastModeTapped = onFastModeTapped
+        self.onCancelEditingTapped = onCancelEditingTapped
         self.onSendTapped = onSendTapped
+        self.onQueueTapped = onQueueTapped
         self.onStopTapped = onStopTapped
     }
 
     var body: some View {
         VStack(spacing: 12) {
+            if isEditingQueuedMessage {
+                editingHeader
+            }
+
             textField
 
             bottomRowButtons
@@ -74,6 +87,26 @@ struct ChatTextField: View {
             }
             isFocused = true
         }
+        .onChange(of: isEditingQueuedMessage) { _, isEditing in
+            if isEditing {
+                isFocused = true
+            }
+        }
+    }
+
+    private var editingHeader: some View {
+        HStack(spacing: 8) {
+            Text("Editing queued message")
+                .font(.theme(.small))
+                .foregroundStyle(.theme(.textSecondary))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Cancel", action: onCancelEditingTapped)
+                .font(.theme(.small))
+                .foregroundStyle(.theme(.accent))
+                .disabled(isAnyActionInFlight)
+        }
+        .accessibilityElement(children: .contain)
     }
 
     private var textField: some View {
@@ -106,7 +139,7 @@ struct ChatTextField: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
-                if isWorking || isStopInFlight {
+                if !isEditingQueuedMessage && (isWorking || isStopInFlight) {
                     StopButton(
                         isEnabled: !isAnyActionInFlight,
                         isInFlight: isStopInFlight,
@@ -114,11 +147,16 @@ struct ChatTextField: View {
                     )
                 }
 
-                if (!isWorking && !isStopInFlight) || hasSendableText || isSendInFlight {
+                if isEditingQueuedMessage
+                    || (!isWorking && !isStopInFlight)
+                    || hasSendableText
+                    || isSendInFlight {
                     SendButton(
+                        isEditingQueuedMessage: isEditingQueuedMessage,
                         isEnabled: hasSendableText && !isAnyActionInFlight,
                         isInFlight: isSendInFlight,
-                        action: onSendTapped
+                        primaryAction: onSendTapped,
+                        queueAction: onQueueTapped
                     )
                 }
             }
@@ -138,28 +176,41 @@ struct ChatTextField: View {
     }
 
     private struct SendButton: View {
+        let isEditingQueuedMessage: Bool
         let isEnabled: Bool
         let isInFlight: Bool
-        let action: @MainActor () -> Void
+        let primaryAction: @MainActor () -> Void
+        let queueAction: @MainActor () -> Void
 
         var body: some View {
-            Button(action: action) {
-                Label {
-                    Text("Send message")
-                } icon: {
-                    if isInFlight {
-                        ProgressView()
-                            .progressViewStyle(.network)
-                            .tint(.theme(.background))
-                    } else {
-                        LucideIcon(Lucide.arrowUp, style: .body)
+            Group {
+                if isEditingQueuedMessage || !isEnabled {
+                    Button(action: primaryAction) {
+                        label
+                    }
+                } else {
+                    Menu {
+                        Button(action: primaryAction) {
+                            Label {
+                                Text("Steer")
+                            } icon: {
+                                ColoredMenuImage(Lucide.arrowUp)
+                            }
+                        }
+
+                        Button(action: queueAction) {
+                            Label {
+                                Text("Queue")
+                            } icon: {
+                                ColoredMenuImage(Lucide.cornerDownLeft)
+                            }
+                        }
+                    } label: {
+                        label
+                    } primaryAction: {
+                        primaryAction()
                     }
                 }
-                .labelStyle(.iconOnly)
-                .font(.theme(.body))
-                .foregroundStyle(.theme(.background))
-                .tint(.theme(.background))
-                .padding(8)
             }
             .disabled(!isEnabled)
             .accessibilityIdentifier("chat.send")
@@ -172,6 +223,28 @@ struct ChatTextField: View {
             .sensoryFeedback(.selection, trigger: isInFlight) { _, isInFlight in
                 isInFlight
             }
+        }
+
+        private var label: some View {
+            Label {
+                Text(isEditingQueuedMessage ? "Save queued message" : "Send message")
+            } icon: {
+                if isInFlight {
+                    ProgressView()
+                        .progressViewStyle(.network)
+                        .tint(.theme(.background))
+                } else {
+                    LucideIcon(
+                        isEditingQueuedMessage ? Lucide.check : Lucide.arrowUp,
+                        style: .body
+                    )
+                }
+            }
+            .labelStyle(.iconOnly)
+            .font(.theme(.body))
+            .foregroundStyle(.theme(.background))
+            .tint(.theme(.background))
+            .padding(8)
         }
     }
 

@@ -217,7 +217,7 @@ isolatedTest("failed candidates preserve the installed controller", async () => 
   assert.equal(environment.eventSources[0].closeCount, 0);
 });
 
-isolatedTest("missing or duplicate Git, session, and message controllers preserve the installed hook", async () => {
+isolatedTest("missing or duplicate hook services preserve the installed hook", async () => {
   const environment = installHookGlobals({ shell: emptyWorkspaceShell() });
   const installedController = await prepareHook();
   const shell = emptyWorkspaceShell();
@@ -238,6 +238,21 @@ isolatedTest("missing or duplicate Git, session, and message controllers preserv
   environment.shell = {
     gitService: shell.gitService,
     messageProcessingController: shell.messageProcessingController,
+    sessionService: shell.sessionService,
+    workspaceService: shell.workspaceService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous AgentService/);
+
+  environment.shell = {
+    ...shell,
+    agentAlias: emptyWorkspaceShell().agentService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous AgentService/);
+
+  environment.shell = {
+    agentService: shell.agentService,
+    gitService: shell.gitService,
+    messageProcessingController: shell.messageProcessingController,
     workspaceService: shell.workspaceService,
   };
   await assert.rejects(prepareHook(), /unambiguous SessionService/);
@@ -249,6 +264,7 @@ isolatedTest("missing or duplicate Git, session, and message controllers preserv
   await assert.rejects(prepareHook(), /unambiguous SessionService/);
 
   environment.shell = {
+    agentService: shell.agentService,
     gitService: shell.gitService,
     sessionService: shell.sessionService,
     workspaceService: shell.workspaceService,
@@ -300,9 +316,21 @@ isolatedTest("commands run in order with real service signatures and continue af
       throw new Error("Setter failed.");
     },
   };
+  const agentService = {
+    async processNextMessage(sessionID) {
+      calls.push(["processNextMessage", sessionID]);
+    },
+    async sendQueuedMessageImmediately(input) {
+      calls.push(["steerQueuedMessage", input]);
+      return true;
+    },
+  };
   const sessionService = {
     async createSession(input) {
       calls.push(["createSession", input]);
+    },
+    async deleteQueuedMessage(input) {
+      calls.push(["deleteQueuedMessage", input]);
     },
     async getSessionsForWorkspace(input) {
       calls.push(["sessions", input]);
@@ -326,10 +354,28 @@ isolatedTest("commands run in order with real service signatures and continue af
     async updateSessionModel(sessionID, model) {
       calls.push(["model", sessionID, model]);
     },
+    async reorderQueuedMessages(input) {
+      calls.push(["queue", input]);
+    },
+    async pauseQueue(input) {
+      calls.push(["pauseQueue", input]);
+    },
+    async resumeQueue(input) {
+      calls.push(["resumeQueue", input]);
+    },
+    async editQueuedMessage(input) {
+      calls.push(["editQueuedMessage", input]);
+    },
   };
   const { messageProcessingController } = emptyWorkspaceShell();
   const environment = installHookGlobals({
-    shell: { gitService, messageProcessingController, workspaceService, sessionService },
+    shell: {
+      agentService,
+      gitService,
+      messageProcessingController,
+      sessionService,
+      workspaceService,
+    },
   });
   await prepareHook();
   const source = environment.eventSources[0];
@@ -352,15 +398,28 @@ isolatedTest("commands run in order with real service signatures and continue af
   }));
   replacementSource.onmessage(command({ futureCommand: true }));
   replacementSource.onmessage(sessionCommand({ fastMode: true }));
+  replacementSource.onmessage(queueCommand(["message-2", "message-1"]));
+  replacementSource.onmessage(sessionCommand({ queuePaused: true }));
+  replacementSource.onmessage(sessionCommand({ deleteQueuedMessage: "message-1" }));
+  replacementSource.onmessage(sessionCommand({ steerQueuedMessage: "message-2" }));
+  replacementSource.onmessage(sessionCommand({
+    queuedMessageEdit: {
+      messageId: "message-1",
+      content: "Updated",
+      resumeQueue: true,
+    },
+  }));
+  replacementSource.onmessage(sessionCommand({ queuePaused: false }));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
   replacementSource.onmessage({ data: JSON.stringify({ id: "obsolete", workspaceId: "workspace-1", pinned: true }) });
+  replacementSource.onmessage({ data: JSON.stringify({ sessionId: "session-1", orderedIds: ["duplicate", "duplicate"] }) });
   replacementSource.onmessage({ data: "not json" });
   assert.equal(calls.length, 1);
-  assert.equal(environment.errors.length, 3);
+  assert.equal(environment.errors.length, 4);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 14);
-  await waitUntil(() => environment.errors.length === 5);
+  await waitUntil(() => calls.length === 24);
+  await waitUntil(() => environment.errors.length === 6);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
     ["status", { workspaceId: "workspace-1", status: "in-review" }],
@@ -380,6 +439,20 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["userSetBranch", "workspace-1"],
     ["agentAndModel", "session-1", "claude", "fable-5"],
     ["fastMode", { sessionId: "session-1", fastMode: true }],
+    ["queue", { sessionId: "session-1", orderedIds: ["message-2", "message-1"] }],
+    ["pauseQueue", { sessionId: "session-1" }],
+    ["deleteQueuedMessage", { messageId: "message-1", sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
+    ["steerQueuedMessage", { messageId: "message-2", sessionId: "session-1" }],
+    ["editQueuedMessage", {
+      sessionId: "session-1",
+      messageId: "message-1",
+      content: "Updated",
+    }],
+    ["resumeQueue", { sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
+    ["resumeQueue", { sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
   assert.equal(environment.errors.at(-1)[1].message, "Unsupported workspace command: futureCommand");
@@ -694,6 +767,10 @@ function emptyWorkspaceShell() {
     async refreshWorkspaceChanges() {},
     async renameBranch() {},
   };
+  const agentService = {
+    async processNextMessage() {},
+    async sendQueuedMessageImmediately() { return true; },
+  };
   const workspaceService = {
     async archiveWorkspace() {},
     async createWorkspaceWithSetup(input) { input.onCreation(); },
@@ -704,19 +781,30 @@ function emptyWorkspaceShell() {
   };
   const sessionService = {
     async createSession() {},
+    async deleteQueuedMessage() {},
     async getSessionsForWorkspace() { return []; },
     async setSessionAgentAndModel() {},
     async setUnread() {},
     async markWorkspaceAsRead() {},
     async updateSessionFastMode() {},
     async updateSessionModel() {},
+    async reorderQueuedMessages() {},
+    async pauseQueue() {},
+    async resumeQueue() {},
+    async editQueuedMessage() {},
   };
   const messageProcessingController = {
     async cancelSession() {},
     async enqueueMessage() {},
     async sendMessageImmediately() {},
   };
-  return { gitService, messageProcessingController, workspaceService, sessionService };
+  return {
+    agentService,
+    gitService,
+    messageProcessingController,
+    sessionService,
+    workspaceService,
+  };
 }
 
 function command(mutation) {
@@ -742,6 +830,10 @@ function stopCommand({ requestId, sessionId }) {
   return {
     data: JSON.stringify({ requestId, sessionId, stopSession: true }),
   };
+}
+
+function queueCommand(orderedIds) {
+  return { data: JSON.stringify({ sessionId: "session-1", orderedIds }) };
 }
 
 function isolatedTest(name, operation) {

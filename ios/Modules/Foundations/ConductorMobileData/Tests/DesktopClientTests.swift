@@ -170,7 +170,8 @@ struct DesktopClientTests {
                     sessionID: "session-1",
                     message: "Run the tests.",
                     model: .gpt_5_6_terra,
-                    isFastModeEnabled: false
+                    isFastModeEnabled: false,
+                    mode: .steer
                 )
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
@@ -198,6 +199,13 @@ struct DesktopClientTests {
                     agentType: .codex,
                     model: .gpt_5_6_sol,
                     isFastModeEnabled: false
+                )
+            }
+            await #expect(throws: DesktopClientError.invalidServerAddress) {
+                try await DesktopClient.liveValue.reorderQueuedMessages(
+                    workspaceID: "workspace-1",
+                    sessionID: "session-1",
+                    messageIDs: ["message-2", "message-1"]
                 )
             }
         }
@@ -247,6 +255,192 @@ struct DesktopClientTests {
         expectNoDifference(object, [:])
     }
 
+    @Test("Reordering queued messages sends the complete order")
+    func reorderQueuedMessages() async throws {
+        let recordedRequest = LockIsolated<URLRequest?>(nil)
+        DesktopClientURLProtocol.handler.setValue { request in
+            recordedRequest.setValue(request)
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 204,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            try await DesktopClient.liveValue.reorderQueuedMessages(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                messageIDs: ["message-2", "message-1"]
+            )
+        }
+
+        let request = try #require(recordedRequest.value)
+        expectNoDifference(request.httpMethod, "PATCH")
+        expectNoDifference(
+            request.url?.path,
+            "/workspaces/workspace-1/sessions/session-1/messages/queue"
+        )
+        let body = try #require(request.bodyData)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: body) as? [String: [String]]
+        )
+        expectNoDifference(
+            object,
+            ["message_ids": ["message-2", "message-1"]]
+        )
+    }
+
+    @Test("Deleting and steering queued messages use their message endpoints")
+    func queuedMessageActions() async throws {
+        let recordedRequests = LockIsolated<[URLRequest]>([])
+        DesktopClientURLProtocol.handler.setValue { request in
+            recordedRequests.withValue { $0.append(request) }
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 204,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            try await DesktopClient.liveValue.deleteQueuedMessage(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                messageID: "message-1"
+            )
+            try await DesktopClient.liveValue.steerQueuedMessage(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                messageID: "message-2"
+            )
+        }
+
+        let requests = recordedRequests.value
+        expectNoDifference(requests.map(\.httpMethod), ["DELETE", "POST"])
+        expectNoDifference(
+            requests.compactMap { $0.url?.path },
+            [
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-2/steer",
+            ]
+        )
+    }
+
+    @Test("Queued-message editing uses its begin, save, and resume endpoints")
+    func editQueuedMessage() async throws {
+        let message = Message(
+            id: "message-1",
+            sessionID: "session-1",
+            role: .user,
+            content: "Original",
+            createdAt: Date(timeIntervalSince1970: 1_783_555_200),
+            queueOrder: 1
+        )
+        let recordedRequests = LockIsolated<[URLRequest]>([])
+        DesktopClientURLProtocol.handler.setValue { request in
+            recordedRequests.withValue { $0.append(request) }
+            let response = HTTPURLResponse(
+                url: try #require(request.url),
+                statusCode: request.url?.path.hasSuffix("/edit") == true ? 200 : 204,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            if response.statusCode == 200 {
+                return (
+                    response,
+                    try JSONEncoder.conductor.encode(
+                        DesktopClient.QueuedMessageEdit(
+                            message: message,
+                            shouldResumeQueue: true
+                        )
+                    )
+                )
+            }
+            return (response, Data())
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let edit = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            let edit = try await DesktopClient.liveValue.beginQueuedMessageEdit(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                messageID: "message-1"
+            )
+            try await DesktopClient.liveValue.finishQueuedMessageEdit(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                messageID: "message-1",
+                content: "Updated",
+                shouldResumeQueue: true
+            )
+            try await DesktopClient.liveValue.resumeQueuedMessages(
+                workspaceID: "workspace-1",
+                sessionID: "session-1"
+            )
+            return edit
+        }
+
+        expectNoDifference(edit.message, message)
+        #expect(edit.shouldResumeQueue)
+        let requests = recordedRequests.value
+        expectNoDifference(requests.map(\.httpMethod), ["POST", "PATCH", "POST"])
+        expectNoDifference(
+            requests.compactMap { $0.url?.path },
+            [
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1/edit",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/resume",
+            ]
+        )
+        let body = try #require(requests[1].bodyData)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        #expect(object["content"] as? String == "Updated")
+        #expect(object["resume_queue"] as? Bool == true)
+    }
+
     @Test("Sending a message returns the canonical database row")
     func sendMessage() async throws {
         let message = Message(
@@ -288,7 +482,8 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
-                isFastModeEnabled: true
+                isFastModeEnabled: true,
+                mode: .queue
             )
         }
 
@@ -305,7 +500,8 @@ struct DesktopClientTests {
         #expect(object["message"] as? String == "Run the tests.")
         #expect(object["model"] as? String == "gpt-5.6-terra")
         #expect(object["fast_mode"] as? Bool == true)
-        #expect(object.count == 3)
+        #expect(object["mode"] as? String == "queued")
+        #expect(object.count == 4)
     }
 
     @Test("Sending supports a legacy no-content response")
@@ -339,7 +535,8 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
-                isFastModeEnabled: false
+                isFastModeEnabled: false,
+                mode: .steer
             )
         }
 

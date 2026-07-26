@@ -207,6 +207,93 @@ public enum Server {
             }
         }
 
+        router.patch(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.patch(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.post(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}/edit"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.beginEditing(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.post(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}/steer"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.steer(
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.patch(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.finishEditing(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.delete(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.delete(
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.post(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/resume"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.resume(
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
         // Apply the same browser boundary to commands. The native app sends no Origin, while
         // browser JavaScript does, so an arbitrary webpage cannot mutate a workspace or session.
         router.post("/workspaces/{workspaceID}/sessions/{sessionID}/messages") { request, context in

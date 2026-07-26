@@ -28,6 +28,7 @@ export async function prepareWorkspaceUIHook() {
   }
 
   const {
+    agentService,
     gitService,
     messageProcessingController,
     sessionService,
@@ -41,6 +42,7 @@ export async function prepareWorkspaceUIHook() {
   // Keep one queue across loader runs so a replacement cannot overtake a pending setter.
   const commandQueue = globalThis[commandQueueKey] ?? { tail: Promise.resolve() };
   const controller = createController({
+    agentService,
     commandQueue,
     eventsURL,
     gitService,
@@ -141,13 +143,23 @@ function resolveConductorServices(serviceModule) {
     ],
     "GitService",
   );
+  const agentService = uniqueService(
+    serviceModule,
+    ["processNextMessage", "sendQueuedMessageImmediately"],
+    "AgentService",
+  );
   const sessionService = uniqueService(
     serviceModule,
     [
       "createSession",
+      "deleteQueuedMessage",
+      "editQueuedMessage",
       "getSessionsForWorkspace",
-      "setSessionAgentAndModel",
       "markWorkspaceAsRead",
+      "pauseQueue",
+      "reorderQueuedMessages",
+      "resumeQueue",
+      "setSessionAgentAndModel",
       "setUnread",
       "updateSessionFastMode",
       "updateSessionModel",
@@ -159,7 +171,13 @@ function resolveConductorServices(serviceModule) {
     ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
     "MessageProcessingController",
   );
-  return { gitService, messageProcessingController, sessionService, workspaceService };
+  return {
+    agentService,
+    gitService,
+    messageProcessingController,
+    sessionService,
+    workspaceService,
+  };
 }
 
 // Normalize and deduplicate only exact Conductor asset URLs before fetching or importing them.
@@ -200,6 +218,7 @@ function uniqueService(module, methods, name) {
 }
 
 function createController({
+  agentService,
   commandQueue,
   commandResultURL,
   eventsURL,
@@ -249,6 +268,7 @@ function createController({
         }
 
         const execute = () => executeAndReportCommand({
+          agentService,
           commandResultURL,
           gitService,
           messageProcessingController,
@@ -292,6 +312,79 @@ async function refreshHook({ hookRevision, hookURL }) {
 function parseCommand(data) {
   // The server builds these commands; this check keeps each trusted SSE frame to one mutation.
   const value = JSON.parse(data);
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === 2
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && Array.isArray(value.orderedIds)
+    && value.orderedIds.length > 0
+    && value.orderedIds.every(
+      (messageId) => typeof messageId === "string" && messageId.length > 0,
+    )
+    && new Set(value.orderedIds).size === value.orderedIds.length
+  ) {
+    return {
+      field: "queueOrder",
+      value: {
+        sessionId: value.sessionId,
+        orderedIds: value.orderedIds,
+      },
+    };
+  }
+  if (value && typeof value === "object" && "orderedIds" in value) {
+    throw new Error("The command is invalid.");
+  }
+
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === 2
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && typeof value.queuePaused === "boolean"
+  ) {
+    return {
+      field: "queuePaused",
+      sessionId: value.sessionId,
+      value: value.queuePaused,
+    };
+  }
+  if (value && typeof value === "object" && "queuePaused" in value) {
+    throw new Error("The command is invalid.");
+  }
+
+  const edit = value?.queuedMessageEdit;
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === 2
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && edit
+    && typeof edit === "object"
+    && !Array.isArray(edit)
+    && Object.keys(edit).length === 3
+    && typeof edit.messageId === "string"
+    && edit.messageId.length > 0
+    && typeof edit.content === "string"
+    && edit.content.trim().length > 0
+    && typeof edit.resumeQueue === "boolean"
+  ) {
+    return {
+      field: "queuedMessageEdit",
+      sessionId: value.sessionId,
+      value: edit,
+    };
+  }
+  if (value && typeof value === "object" && "queuedMessageEdit" in value) {
+    throw new Error("The command is invalid.");
+  }
+
   const [field, ...extraFields] = Object.keys(value)
     .filter((candidate) => !["requestId", "sessionId", "workspaceId"].includes(candidate));
   if (!field || extraFields.length > 0) {
@@ -350,7 +443,13 @@ function delay(milliseconds) {
 }
 
 async function executeCommand(
-  { gitService, messageProcessingController, sessionService, workspaceService },
+  {
+    agentService,
+    gitService,
+    messageProcessingController,
+    sessionService,
+    workspaceService,
+  },
   command,
 ) {
   switch (command.field) {
@@ -430,6 +529,49 @@ async function executeCommand(
       }
     case "stopSession":
       await messageProcessingController.cancelSession(command.sessionId);
+      return;
+    case "queueOrder":
+      await sessionService.reorderQueuedMessages(command.value);
+      return;
+    case "deleteQueuedMessage":
+      if (typeof command.value !== "string" || command.value.length === 0) {
+        throw new Error("The queued-message delete command is invalid.");
+      }
+      await sessionService.deleteQueuedMessage({
+        messageId: command.value,
+        sessionId: command.sessionId,
+      });
+      await agentService.processNextMessage(command.sessionId);
+      return;
+    case "queuePaused":
+      await sessionService[command.value ? "pauseQueue" : "resumeQueue"]({
+        sessionId: command.sessionId,
+      });
+      if (!command.value) {
+        await agentService.processNextMessage(command.sessionId);
+      }
+      return;
+    case "queuedMessageEdit":
+      await sessionService.editQueuedMessage({
+        sessionId: command.sessionId,
+        messageId: command.value.messageId,
+        content: command.value.content,
+      });
+      if (command.value.resumeQueue) {
+        await sessionService.resumeQueue({ sessionId: command.sessionId });
+        await agentService.processNextMessage(command.sessionId);
+      }
+      return;
+    case "steerQueuedMessage":
+      if (typeof command.value !== "string" || command.value.length === 0) {
+        throw new Error("The queued-message steer command is invalid.");
+      }
+      if (!await agentService.sendQueuedMessageImmediately({
+        messageId: command.value,
+        sessionId: command.sessionId,
+      })) {
+        throw new Error("The queued message is no longer available.");
+      }
       return;
     case "pinned":
       await workspaceService.setWorkspacePinned({

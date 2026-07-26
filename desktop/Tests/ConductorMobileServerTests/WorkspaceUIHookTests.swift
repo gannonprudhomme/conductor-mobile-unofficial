@@ -460,6 +460,90 @@ struct WorkspaceUIHookTests {
         #expect(didDispatchAgentAndModel)
     }
 
+    @Test("Queue frames carry the full order and require an active listener")
+    func queueFrame() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        await #expect(throws: WorkspaceUIHook.DispatchError.listenerUnavailable) {
+            try await uiHook.reorderQueue(
+                sessionID: "session-1",
+                messageIDs: ["message-2", "message-1"],
+                waitUntilChangeAvailableInDatabase: {}
+            )
+        }
+
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+        try await uiHook.reorderQueue(
+            sessionID: "session-1",
+            messageIDs: ["message-2", "message-1"],
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        let event = try #require(await events.next())
+        #expect(event.hasPrefix("data: "))
+        #expect(event.hasSuffix("\n\n"))
+
+        let data = try #require(
+            event
+                .split(separator: "\n")
+                .first?
+                .dropFirst("data: ".count)
+                .data(using: .utf8)
+        )
+        let value = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(value["sessionId"] as? String == "session-1")
+        #expect(value["orderedIds"] as? [String] == ["message-2", "message-1"])
+    }
+
+    @Test("Queue frames carry pause, edit, delete, and steer intent")
+    func queueEditFrames() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+
+        try await uiHook.setQueuePaused(
+            sessionID: "session-1",
+            isPaused: true,
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        let pause = try eventObject(try #require(await events.next()))
+        #expect(pause["sessionId"] as? String == "session-1")
+        #expect(pause["queuePaused"] as? Bool == true)
+
+        try await uiHook.editQueuedMessage(
+            sessionID: "session-1",
+            messageID: "message-1",
+            content: "Updated",
+            shouldResumeQueue: true,
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        let edit = try eventObject(try #require(await events.next()))
+        #expect(edit["sessionId"] as? String == "session-1")
+        let editValue = try #require(edit["queuedMessageEdit"] as? [String: Any])
+        #expect(editValue["messageId"] as? String == "message-1")
+        #expect(editValue["content"] as? String == "Updated")
+        #expect(editValue["resumeQueue"] as? Bool == true)
+
+        try await uiHook.deleteQueuedMessage(
+            sessionID: "session-1",
+            messageID: "message-1",
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        let delete = try eventObject(try #require(await events.next()))
+        #expect(delete["sessionId"] as? String == "session-1")
+        #expect(delete["deleteQueuedMessage"] as? String == "message-1")
+
+        try await uiHook.steerQueuedMessage(
+            sessionID: "session-1",
+            messageID: "message-2",
+            waitUntilChangeAvailableInDatabase: {}
+        )
+        let steer = try eventObject(try #require(await events.next()))
+        #expect(steer["sessionId"] as? String == "session-1")
+        #expect(steer["steerQueuedMessage"] as? String == "message-2")
+    }
+
     @Test("Fallback holds the global slot without waiting for persistence")
     func disconnectedFallback() async throws {
         let uiHook = WorkspaceUIHook.liveValue
@@ -622,6 +706,19 @@ private struct TestMessageCommand: Decodable {
         case workspaceID = "workspaceId"
         case sendMessage
     }
+}
+
+private func eventObject(_ event: String) throws -> [String: Any] {
+    let data = try #require(
+        event
+            .split(separator: "\n")
+            .first?
+            .dropFirst("data: ".count)
+            .data(using: .utf8)
+    )
+    return try #require(
+        JSONSerialization.jsonObject(with: data) as? [String: Any]
+    )
 }
 
 private enum PersistenceError: Error, Equatable {

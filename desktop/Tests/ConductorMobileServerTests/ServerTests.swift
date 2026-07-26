@@ -343,6 +343,8 @@ struct ServerTests {
                 "/workspaces",
                 "/workspaces/workspace-1/sessions",
                 "/workspaces/workspace-1/sessions/session-1/messages",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1/edit",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/resume",
                 "/workspaces/workspace-1/sessions/session-1/stop",
             ] {
                 try await client.execute(
@@ -356,6 +358,22 @@ struct ServerTests {
 
             try await client.execute(
                 uri: "/workspaces/workspace-1",
+                method: .patch,
+                headers: [.origin: "https://malicious.example"]
+            ) { response in
+                #expect(response.status == .forbidden)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/workspace-1/sessions/session-1/messages/queue",
+                method: .patch,
+                headers: [.origin: "https://malicious.example"]
+            ) { response in
+                #expect(response.status == .forbidden)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1",
                 method: .patch,
                 headers: [.origin: "https://malicious.example"]
             ) { response in

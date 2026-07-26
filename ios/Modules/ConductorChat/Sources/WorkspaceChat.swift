@@ -95,6 +95,11 @@ public struct WorkspaceChat: Sendable {
             let branch = branchNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             return !isRenamingBranch && !branch.isEmpty && branch != workspace.branch
         }
+
+        var isQueuedMessageEditLocked: Bool {
+            chat?.queuedMessages.isEditStartInFlight == true
+                || chat?.queuedMessages.isEditing == true
+        }
     }
 
     @Reducer
@@ -166,6 +171,7 @@ public struct WorkspaceChat: Sendable {
                 // The workspace and session snapshots are persisted independently. Do not let a
                 // workspace update clear or replace the chat while SQLite is still catching up.
                 guard !state.hasUserSelectedSession,
+                      !state.isQueuedMessageEditLocked,
                       let activeSessionID,
                       let activeSession = state.activeSessions.first(where: {
                           $0.id == activeSessionID
@@ -248,6 +254,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .createSessionButtonTapped:
+                guard !state.isQueuedMessageEditLocked else {
+                    return .none
+                }
                 guard state.activeSessions.count < 5 else {
                     state.destination = .alert(.maximumTabsReached)
                     return .none
@@ -274,7 +283,8 @@ public struct WorkspaceChat: Sendable {
                 state.isCreatingSession = false
                 state.sessionIDAwaitingObservation = hasObservedSession ? nil : session.id
                 state.sessionIDsBeforeCreation = nil
-                if state.chat?.sessionID != session.id {
+                if !state.isQueuedMessageEditLocked,
+                   state.chat?.sessionID != session.id {
                     state.chat = Chat.State(
                         session: session,
                         shouldFocusMessageField: true
@@ -298,10 +308,12 @@ public struct WorkspaceChat: Sendable {
                    }) {
                     state.hasUserSelectedSession = true
                     state.sessionIDsBeforeCreation = nil
-                    state.chat = Chat.State(
-                        session: createdSession,
-                        shouldFocusMessageField: true
-                    )
+                    if !state.isQueuedMessageEditLocked {
+                        state.chat = Chat.State(
+                            session: createdSession,
+                            shouldFocusMessageField: true
+                        )
+                    }
                 }
                 if sessions.contains(where: { $0.id == state.sessionIDAwaitingObservation }) {
                     state.sessionIDAwaitingObservation = nil
@@ -361,6 +373,85 @@ public struct WorkspaceChat: Sendable {
                 )
                 return .none
 
+            case let .chat(.queuedMessages(.deleteResponse(
+                sessionID,
+                _,
+                .failure(error)
+            ))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to delete queued message: \(error)")
+                state.destination = .alert(
+                    .failedToDeleteQueuedMessage(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .chat(.queuedMessages(.beginEditResponse(
+                sessionID,
+                _,
+                .failure(error)
+            ))),
+                 let .chat(.queuedMessages(.cancelEditResponse(sessionID, .failure(error)))),
+                 let .chat(.queuedMessages(.finishEditResponse(
+                    sessionID,
+                    _,
+                    .failure(error)
+                 ))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to edit queued message: \(error)")
+                state.destination = .alert(
+                    .failedToEditQueuedMessage(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .chat(.queuedMessages(.reorderResponse(
+                sessionID,
+                .failure(error)
+            ))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to reorder queued messages: \(error)")
+                state.destination = .alert(
+                    .failedToReorderQueuedMessages(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .chat(.queuedMessages(.resumeResponse(
+                sessionID,
+                .failure(error)
+            ))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to resume queue: \(error)")
+                state.destination = .alert(
+                    .failedToResumeQueue(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .chat(.queuedMessages(.steerResponse(
+                sessionID,
+                _,
+                .failure(error)
+            ))):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+
+                Logger.chat.error("Failed to steer queued message: \(error)")
+                state.destination = .alert(
+                    .failedToSteerQueuedMessage(message: error.localizedDescription)
+                )
+                return .none
+
             case let .chat(.stopSessionResponse(sessionID, .failure(error))):
                 guard state.chat?.sessionID == sessionID else {
                     return .none
@@ -378,6 +469,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .sessionButtonTapped(session):
+                guard !state.isQueuedMessageEditLocked else {
+                    return .none
+                }
                 /// Session button was tapped, don't let a new active session switch it for the lifetime of this
                 state.hasUserSelectedSession = true
                 state.sessionIDAwaitingObservation = nil
@@ -550,6 +644,11 @@ public struct WorkspaceChat: Sendable {
         hasUserSelectedSession: Bool,
         sessionIDAwaitingObservation: Session.ID?
     ) -> Chat.State? {
+        if currentChat?.queuedMessages.isEditStartInFlight == true
+            || currentChat?.queuedMessages.isEditing == true {
+            return currentChat
+        }
+
         let activeSessions = sessions.filter { !$0.isHidden } // Archived sessions are displayed separately and cannot remain selected in the chat.
         if let sessionIDAwaitingObservation,
            currentChat?.sessionID == sessionIDAwaitingObservation {
@@ -716,6 +815,46 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
         }
     }
 
+    static func failedToEditQueuedMessage(message: String) -> Self {
+        AlertState {
+            TextState("Failed to edit queued message")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToDeleteQueuedMessage(message: String) -> Self {
+        AlertState {
+            TextState("Failed to delete queued message")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToReorderQueuedMessages(message: String) -> Self {
+        AlertState {
+            TextState("Failed to reorder queued messages")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToResumeQueue(message: String) -> Self {
+        AlertState {
+            TextState("Failed to resume queue")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToSteerQueuedMessage(message: String) -> Self {
+        AlertState {
+            TextState("Failed to steer queued message")
+        } message: {
+            TextState(message)
+        }
+    }
+
     static func failedToStopSession(message: String) -> Self {
         AlertState {
             TextState("Failed to stop agent")
@@ -769,6 +908,7 @@ public struct WorkspaceChatView: View {
             }
             .labelStyle(.conductorExtraSmall)
         }
+        .navigationBarBackButtonHidden(store.isQueuedMessageEditLocked)
         .toolbar {
             toolbarMenu
         }
@@ -784,6 +924,7 @@ public struct WorkspaceChatView: View {
             } createSession: {
                 store.send(.createSessionButtonTapped)
             }
+            .disabled(store.isQueuedMessageEditLocked)
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .overlay {

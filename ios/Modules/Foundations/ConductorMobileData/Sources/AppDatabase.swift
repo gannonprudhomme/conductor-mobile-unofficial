@@ -99,6 +99,16 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Add session queue pause") { db in
+        try #sql(
+            """
+            ALTER TABLE "sessions"
+            ADD COLUMN "queue_paused_at" TEXT;
+            """
+        )
+        .execute(db)
+    }
+
     migrator.registerMigration("Create repos") { db in
         try #sql(
             """

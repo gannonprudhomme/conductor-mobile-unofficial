@@ -118,7 +118,8 @@ public struct CreateWorkspace: Sendable {
                                 sessionID: createdWorkspace.session.id,
                                 message: prompt,
                                 model: model,
-                                isFastModeEnabled: isFastModeEnabled
+                                isFastModeEnabled: isFastModeEnabled,
+                                mode: .steer
                             )
                         }
                         if let message {
