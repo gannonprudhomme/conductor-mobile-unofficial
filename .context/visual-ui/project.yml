@@ -1,0 +1,25 @@
+name: ConductorVisualUITests
+
+options:
+  deploymentTarget:
+    iOS: "18.0"
+
+targets:
+  ConductorVisualUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - Tests
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: NO
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.visual-tests
+
+schemes:
+  ConductorVisualUITests:
+    build:
+      targets:
+        ConductorVisualUITests: test
+    test:
+      targets:
+        - ConductorVisualUITests

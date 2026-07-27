@@ -1,0 +1,4164 @@
+diff --git a/.conductor/settings.toml b/.conductor/settings.toml
+index d955671e6..5b6f25c6f 100644
+--- a/.conductor/settings.toml
++++ b/.conductor/settings.toml
+@@ -1,5 +1,5 @@
+ "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+-file_include_globs = ".env.testflight.local\n"
++file_include_globs = ".env.testflight.local\n.env.conductor-api-key\n"
+ 
+ [scripts]
+ archive = "mise run clean-sims"
+diff --git a/.gitignore b/.gitignore
+index f936f5461..095d3dfc2 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,6 +28,7 @@ dist-ssr/
+ 
+ # Local env files
+ .env*.local
++.env.conductor-api-key
+ 
+ # Editor directories and files
+ xcuserdata/
+diff --git a/README.md b/README.md
+index 5a721f809..d1f04f6ee 100644
+--- a/README.md
++++ b/README.md
+@@ -75,6 +75,18 @@ When you open the iOS app it'll immediately open the Settings screen in order to
+ 
+ ## How does it work?
+ 
++### Experimental Conductor Cloud API
++
++This prototype originally used only the local desktop companion because it
++predates Conductor's public API. It now also has an experimental, intentionally
++incomplete API path for cloud workspaces: add an API key in Settings, then
++browse or create cloud workspaces alongside local ones and open their sessions
++directly on iPhone.
++
++The public API is beta and this is not a production authentication system. API
++keys are stored in the device Keychain; no key is bundled with the app,
++committed to the repository, or collected by this project.
++
+ ### Reading data
+ 
+ For the most part all of the data we get is from Conductor's SQLite database. Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms, which you might want to reduce - and if there are any changes we send them to the app over a web socket.
+@@ -94,7 +106,6 @@ As a result of this, we install a "UI Hook" where instead of writing the data to
+ 
+ The core of it works for what I personally need (from my testing!), but I'm certainly missing a ton of features:
+ 
+-- Conductor Cloud
+ - File diffs / file viewing
+   - I just use GitHub for this!
+ - Tool use results
+diff --git a/ios/Modules/ConductorChat/Sources/Chat.swift b/ios/Modules/ConductorChat/Sources/Chat.swift
+index 404489efa..4ec579f52 100644
+--- a/ios/Modules/ConductorChat/Sources/Chat.swift
++++ b/ios/Modules/ConductorChat/Sources/Chat.swift
+@@ -7,6 +7,7 @@
+ 
+ import Combine
+ import ComposableArchitecture
++import ConductorCloud
+ import ConductorDesign
+ import ConductorMobileData
+ import Foundation
+@@ -22,6 +23,11 @@ import SwiftUI
+ public struct Chat: Sendable {
+     public typealias TurnSummaryID = String
+ 
++    enum Backend: Equatable, Sendable {
++        case cloud
++        case desktop
++    }
++
+     @ObservableState
+     public struct State: Equatable {
+         @Shared(.desktopConnectionStatus)
+@@ -31,6 +37,9 @@ public struct Chat: Sendable {
+ 
+         @FetchAll var messages: [Message]
+         @FetchOne var session: Session
++        let backend: Backend
++        var cloudMessages: [Message] = []
++        var cloudSessionStatus: Session.Status?
+         var isFastModeEnabled: Bool
+         var isLoadingMessages = true
+         var isMessageSnapshotEmpty = false
+@@ -38,7 +47,9 @@ public struct Chat: Sendable {
+         var isStopInFlight = false
+         var hasObservedSessionModelChange = false
+         var hasUserSelectedModel = false
++        var lastCloudMessageID: String?
+         var scrollToBottomRequest = 0
++        var shouldSendInitialPrompt = false
+         var shouldFocusMessageField = false
+ 
+         /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
+@@ -62,7 +73,21 @@ public struct Chat: Sendable {
+         }
+ 
+         var allowsAgentSwitching: Bool {
+-            shouldShowEmptyChat && !isMessageSendInFlight
++            backend == .desktop
++                && shouldShowEmptyChat
++                && !isMessageSendInFlight
++        }
++
++        var isCloud: Bool {
++            backend == .cloud
++        }
++
++        var sessionStatus: Session.Status {
++            cloudSessionStatus ?? session.status
++        }
++
++        var nextCloudPollDelay: Duration {
++            sessionStatus == .working ? .seconds(3) : .seconds(8)
+         }
+ 
+         mutating func updateRows(sessionStatus: Session.Status) {
+@@ -83,6 +108,7 @@ public struct Chat: Sendable {
+             selectedModel: Session.Model? = nil,
+             shouldFocusMessageField: Bool = false
+         ) {
++            self.backend = .desktop
+             @Shared(.messageDrafts) var messageDrafts
+             self._messageDraft = $messageDrafts[draftFor: session.id]
+             self.isFastModeEnabled = session.isFastModeEnabled ?? false
+@@ -108,12 +134,49 @@ public struct Chat: Sendable {
+             self.shouldFocusMessageField = shouldFocusMessageField
+         }
+ 
++        init(
++            cloudSession: CloudSession,
++            workspaceID: String,
++            initialPrompt: String = "",
++            shouldFocusMessageField: Bool = false
++        ) {
++            let session = Session(
++                cloudSession: cloudSession,
++                workspaceID: workspaceID
++            )
++
++            self.backend = .cloud
++            @Shared(.messageDrafts) var messageDrafts
++            self._messageDraft = $messageDrafts[draftFor: session.id]
++            self.isFastModeEnabled = session.isFastModeEnabled ?? false
++            self._session = FetchOne(
++                wrappedValue: session,
++                Session.find(session.id),
++                animation: .default
++            )
++            self._messages = FetchAll(
++                wrappedValue: [],
++                Message.where { $0.sessionID.eq(session.id) }
++            )
++            self.hasUserSelectedModel = true
++            self.selectedModel = session.model
++            self.shouldFocusMessageField = shouldFocusMessageField
++                || !initialPrompt.isEmpty
++            self.shouldSendInitialPrompt = !initialPrompt.isEmpty
++            if !initialPrompt.isEmpty {
++                self.$messageDraft.withLock { $0 = initialPrompt }
++            }
++        }
++
+         /// `turns` and `rows` are derived presentation caches, while `session` captures
+         /// status-driven changes.
+         public static func == (lhs: Self, rhs: Self) -> Bool {
+-            lhs.messages == rhs.messages
++            lhs.backend == rhs.backend
++                && lhs.messages == rhs.messages
+                 && lhs.session == rhs.session
+                 && lhs.connectionStatus == rhs.connectionStatus
++                && lhs.cloudMessages == rhs.cloudMessages
++                && lhs.cloudSessionStatus == rhs.cloudSessionStatus
+                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
+                 && lhs.messageDraft == rhs.messageDraft
+                 && lhs.isLoadingMessages == rhs.isLoadingMessages
+@@ -122,7 +185,9 @@ public struct Chat: Sendable {
+                 && lhs.isStopInFlight == rhs.isStopInFlight
+                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
+                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
++                && lhs.lastCloudMessageID == rhs.lastCloudMessageID
+                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
++                && lhs.shouldSendInitialPrompt == rhs.shouldSendInitialPrompt
+                 && lhs.shouldFocusMessageField == rhs.shouldFocusMessageField
+                 && lhs.confirmedMessagesAwaitingInitialSnapshot
+                     == rhs.confirmedMessagesAwaitingInitialSnapshot
+@@ -134,8 +199,18 @@ public struct Chat: Sendable {
+         var sessionID: Session.ID { session.id }
+     }
+ 
++    public struct CloudSnapshot: Equatable, Sendable {
++        let messages: [CloudTranscriptMessage]
++        let status: CloudSessionStatusResponse
++    }
++
+     public enum Action: BindableAction {
+         case binding(BindingAction<State>)
++        case cloudPoll
++        case cloudSnapshotResponse(
++            isInitial: Bool,
++            Result<CloudSnapshot, any Error>
++        )
+         case task
+         case defaultModelFetched(Session.Model)
+         case fastModeButtonTapped
+@@ -165,10 +240,18 @@ public struct Chat: Sendable {
+             result: Result<Void, any Error>
+         )
+         case turnSummaryTapped(Chat.TurnSummaryID)
++        case viewDisappeared
++    }
++
++    private enum CancelID {
++        case cloudPolling
+     }
+ 
++    @Dependency(\.cloudAPIClient) var cloudAPIClient
++    @Dependency(\.continuousClock) var clock
+     @Dependency(\.defaultDatabase) var database
+     @Dependency(\.desktopClient) var desktopClient
++    @Dependency(\.uuid) var uuid
+ 
+     init() { }
+ 
+@@ -178,6 +261,13 @@ public struct Chat: Sendable {
+         Reduce { state, action in
+             switch action {
+             case .task:
++                if state.backend == .cloud {
++                    return loadCloudSnapshot(
++                        sessionID: state.sessionID,
++                        after: nil,
++                        isInitial: true
++                    )
++                }
+                 return .merge(
+                     .run { send in
+                         guard let model = try? await desktopClient.fetchDefaultModel() else {
+@@ -194,6 +284,80 @@ public struct Chat: Sendable {
+                     }
+                 )
+ 
++            case .cloudPoll:
++                guard state.backend == .cloud else {
++                    return .none
++                }
++                return loadCloudSnapshot(
++                    sessionID: state.sessionID,
++                    after: state.lastCloudMessageID,
++                    isInitial: false
++                )
++
++            case let .cloudSnapshotResponse(isInitial, result):
++                guard state.backend == .cloud else {
++                    return .none
++                }
++
++                switch result {
++                case let .failure(error):
++                    if isInitial {
++                        state.isLoadingMessages = false
++                    }
++                    return .merge(
++                        .send(.loadMessagesFailed(error)),
++                        scheduleCloudPoll(after: state.nextCloudPollDelay)
++                    )
++
++                case let .success(snapshot):
++                    let transcriptMessages = CloudTranscriptMessage.normalized(
++                        snapshot.messages
++                    )
++                    let incomingMessages = transcriptMessages.flatMap(\.chatMessages)
++                    if isInitial {
++                        state.cloudMessages = incomingMessages
++                        state.isLoadingMessages = false
++                        state.isMessageSnapshotEmpty = transcriptMessages.isEmpty
++                    } else {
++                        let incomingIDs = Set(incomingMessages.map(\.id))
++                        state.cloudMessages.removeAll { incomingIDs.contains($0.id) }
++                        state.cloudMessages.append(contentsOf: incomingMessages)
++                        if !incomingMessages.isEmpty {
++                            state.scrollToBottomRequest &+= 1
++                        }
++                    }
++                    state.cloudMessages.sort {
++                        if $0.createdAt != $1.createdAt {
++                            $0.createdAt < $1.createdAt
++                        } else {
++                            $0.id < $1.id
++                        }
++                    }
++                    state.lastCloudMessageID = transcriptMessages.last?.id
++                        ?? state.lastCloudMessageID
++                    state.cloudSessionStatus = Session.Status(
++                        rawValue: snapshot.status.status.rawValue
++                    )
++                    state.turns = Turn.parse(
++                        messages: state.cloudMessages,
++                        reusing: state.turns ?? []
++                    )
++                    state.updateRows(sessionStatus: state.sessionStatus)
++
++                    let shouldSendInitialPrompt = isInitial
++                        && state.shouldSendInitialPrompt
++                        && !state.messageDraft
++                            .trimmingCharacters(in: .whitespacesAndNewlines)
++                            .isEmpty
++                    if isInitial {
++                        state.shouldSendInitialPrompt = false
++                    }
++                    return .merge(
++                        scheduleCloudPoll(after: state.nextCloudPollDelay),
++                        shouldSendInitialPrompt ? .send(.sendButtonTapped) : .none
++                    )
++                }
++
+             case let .defaultModelFetched(model):
+                 guard !state.hasObservedSessionModelChange,
+                       !state.hasUserSelectedModel,
+@@ -247,6 +411,9 @@ public struct Chat: Sendable {
+                 return .none
+ 
+             case .sessionStatusChanged(let status):
++                guard state.backend == .desktop else {
++                    return .none
++                }
+                 state.updateRows(sessionStatus: status)
+                 return .none
+ 
+@@ -263,6 +430,9 @@ public struct Chat: Sendable {
+                 return .none
+ 
+             case .fastModeButtonTapped:
++                guard state.backend == .desktop else {
++                    return .none
++                }
+                 state.isFastModeEnabled.toggle()
+                 return .none
+ 
+@@ -270,7 +440,7 @@ public struct Chat: Sendable {
+                 if state.expandedSummaryIDs.remove(summaryID) == nil {
+                     state.expandedSummaryIDs.insert(summaryID)
+                 }
+-                state.updateRows(sessionStatus: state.session.status)
++                state.updateRows(sessionStatus: state.sessionStatus)
+                 return .none
+ 
+             case .sendButtonTapped:
+@@ -281,14 +451,27 @@ public struct Chat: Sendable {
+ 
+                 state.isMessageSendInFlight = true
+                 state.scrollToBottomRequest &+= 1
++                let messageID = state.backend == .cloud
++                    ? uuid().uuidString.lowercased()
++                    : ""
+                 return .run {
+                     [
++                        backend = state.backend,
+                         model = state.selectedModel,
+                         isFastModeEnabled = state.isFastModeEnabled,
++                        messageID,
+                         sessionID = state.session.id,
+                         workspaceID = state.session.workspaceID,
+                     ] send in
+                     let result = await Result {
++                        if backend == .cloud {
++                            _ = try await cloudAPIClient.sendMessage(
++                                sessionID: sessionID,
++                                messageID: messageID,
++                                message: message
++                            )
++                            return message
++                        }
+                         if let canonicalMessage = try await desktopClient.sendMessage(
+                             workspaceID: workspaceID,
+                             sessionID: sessionID,
+@@ -332,6 +515,14 @@ public struct Chat: Sendable {
+                     if state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines) == message {
+                         state.$messageDraft.withLock { $0 = "" }
+                     }
++                    if state.backend == .cloud {
++                        state.cloudSessionStatus = .working
++                        state.updateRows(sessionStatus: .working)
++                        return scheduleCloudPoll(
++                            after: .seconds(1),
++                            cancelInFlight: true
++                        )
++                    }
+                     return .none
+ 
+                 case .failure:
+@@ -340,13 +531,24 @@ public struct Chat: Sendable {
+                 }
+ 
+             case .stopButtonTapped:
+-                guard state.session.status == .working, !state.isStopInFlight else {
++                guard state.sessionStatus == .working, !state.isStopInFlight else {
+                     return .none
+                 }
+ 
+                 state.isStopInFlight = true
+-                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
++                return .run {
++                    [
++                        backend = state.backend,
++                        sessionID = state.session.id,
++                        workspaceID = state.session.workspaceID,
++                    ] send in
+                     let result = await Result {
++                        if backend == .cloud {
++                            _ = try await cloudAPIClient.cancelSession(
++                                sessionID: sessionID
++                            )
++                            return
++                        }
+                         if let canonicalSession = try await desktopClient.stopSession(
+                             workspaceID: workspaceID,
+                             sessionID: sessionID
+@@ -367,7 +569,7 @@ public struct Chat: Sendable {
+                     )
+                 }
+ 
+-            case let .stopSessionResponse(sessionID, _):
++            case let .stopSessionResponse(sessionID, result):
+                 // Like sends, stop requests intentionally survive session navigation, so ignore
+                 // responses for a session that has since been replaced.
+                 guard sessionID == state.sessionID else {
+@@ -375,17 +577,72 @@ public struct Chat: Sendable {
+                 }
+ 
+                 state.isStopInFlight = false
++                if state.backend == .cloud, case .success = result {
++                    state.cloudSessionStatus = .idle
++                    state.updateRows(sessionStatus: .idle)
++                }
+                 return .none
+ 
+             case .loadMessagesFailed:
+                 return .none
+ 
++            case .viewDisappeared:
++                return .cancel(id: CancelID.cloudPolling)
++
+             case .binding:
+                 return .none
+             }
+         }
+     }
+ 
++    private func loadCloudSnapshot(
++        sessionID: String,
++        after messageID: String?,
++        isInitial: Bool
++    ) -> Effect<Action> {
++        .run { send in
++            await send(
++                .cloudSnapshotResponse(
++                    isInitial: isInitial,
++                    await Result {
++                        async let status = cloudAPIClient.sessionStatus(
++                            sessionID: sessionID
++                        )
++                        let messages = if let messageID {
++                            try await cloudAPIClient.messagesAfter(
++                                sessionID: sessionID,
++                                messageID: messageID
++                            )
++                        } else {
++                            try await cloudAPIClient.allMessages(
++                                sessionID: sessionID
++                            )
++                        }
++                        return try await CloudSnapshot(
++                            messages: messages,
++                            status: status
++                        )
++                    }
++                )
++            )
++        }
++        .cancellable(id: CancelID.cloudPolling, cancelInFlight: true)
++    }
++
++    private func scheduleCloudPoll(
++        after duration: Duration,
++        cancelInFlight: Bool = false
++    ) -> Effect<Action> {
++        .run { send in
++            try await clock.sleep(for: duration)
++            await send(.cloudPoll)
++        }
++        .cancellable(
++            id: CancelID.cloudPolling,
++            cancelInFlight: cancelInFlight
++        )
++    }
++
+     private func observeMessages(_ state: State) -> Effect<Action> {
+         .run {
+             [
+@@ -395,11 +652,17 @@ public struct Chat: Sendable {
+             ] send in
+             var isAwaitingInitialResponse = initiallyIsLoadingMessages
+             await WebSocketHelpers.observe {
+-                desktopClient.observeMessages(
++                let request = try await messageSyncRequest(sessionID: sessionID)
++                return desktopClient.observeMessages(
+                     workspaceID: workspaceID,
++                    sessionID: sessionID,
++                    request: request
++                )
++            } onValue: { response in
++                let messages = try await reconcileMessages(
++                    response,
+                     sessionID: sessionID
+                 )
+-            } onValue: { messages in
+                 if isAwaitingInitialResponse {
+                     isAwaitingInitialResponse = false
+                     await send(
+@@ -409,7 +672,6 @@ public struct Chat: Sendable {
+                         )
+                     )
+                 }
+-                try await storeMessages(messages)
+             } onFailure: { error in
+                 Logger.chat.error("Failed to load messages: \(error)")
+                 await send(.loadMessagesFailed(error))
+@@ -440,18 +702,99 @@ public struct Chat: Sendable {
+         }
+     }
+ 
+-    @concurrent private func storeMessages(
+-        _ messages: [Message]
+-    ) async throws {
+-        guard !messages.isEmpty else {
+-            return
++    @concurrent func messageSyncRequest( // only non-private for tests
++        sessionID: Session.ID
++    ) async throws -> MessageSyncRequest {
++        let messages = try await database.read { database in
++            try fetchMessages(sessionID: sessionID, from: database)
++        }
++        var fingerprints: [Message.ID: Data] = [:]
++        for message in messages {
++            fingerprints[message.id] = try message.syncFingerprint()
++        }
++        return MessageSyncRequest(fingerprints: fingerprints)
++    }
++
++    @concurrent func reconcileMessages( // only non-private for tests
++        _ response: MessageSyncResponse,
++        sessionID: Session.ID
++    ) async throws -> [Message] {
++        guard response.messages.allSatisfy({ $0.sessionID == sessionID }) else {
++            throw MessageReconciliationError.invalidSession
++        }
++
++        guard !response.messages.isEmpty || !response.deletedMessageIDs.isEmpty else {
++            return try await database.read { database in
++                try fetchMessages(sessionID: sessionID, from: database)
++            }
+         }
+ 
+-        try await database.write { db in
+-            try Message.upsert { messages }
+-                .execute(db)
++        return try await database.write { database in
++            if !response.deletedMessageIDs.isEmpty {
++                try Message
++                    .where {
++                        $0.id.in(response.deletedMessageIDs)
++                            && $0.sessionID.eq(sessionID)
++                    }
++                    .delete()
++                    .execute(database)
++            }
++            if !response.messages.isEmpty {
++                try Message.upsert { response.messages }.execute(database)
++            }
++            return try fetchMessages(sessionID: sessionID, from: database)
+         }
+     }
++
++    private func fetchMessages(
++        sessionID: Session.ID,
++        from database: Database
++    ) throws -> [Message] {
++        try Message
++            .where { $0.sessionID.eq(sessionID) }
++            .order {
++                (
++                    $0.sentAt.asc(nulls: .last),
++                    $0.createdAt,
++                    $0.id
++                )
++            }
++            .fetchAll(database)
++    }
++}
++
++extension Session {
++    init(
++        cloudSession: CloudSession,
++        workspaceID: String,
++        status: Status = .idle
++    ) {
++        let model = Model(
++            rawValue: cloudSession.model
++                ?? cloudSession.resolvedModel
++                ?? Model.gpt_5_6_sol.rawValue
++        )
++        self.init(
++            id: cloudSession.id,
++            workspaceID: workspaceID,
++            title: cloudSession.name ?? "Untitled",
++            agentType: model.agentType ?? .codex,
++            isHidden: cloudSession.archivedAt != nil,
++            createdAt: "",
++            updatedAt: "",
++            lastUserMessageAt: nil,
++            status: status,
++            model: model,
++            unreadCount: 0,
++            freshlyCompacted: 0,
++            contextTokenCount: 0,
++            isFastModeEnabled: cloudSession.fastMode
++        )
++    }
++}
++
++enum MessageReconciliationError: Error { // only non-private for tests
++    case invalidSession
+ }
+ 
+ private extension Dictionary where Key == Session.ID, Value == String {
+@@ -473,6 +816,369 @@ private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.D
+     }
+ }
+ 
++extension CloudTranscriptMessage {
++    var chatMessages: [Message] {
++        guard case let .object(content) = content,
++              let contentType = content["type"]?.stringValue
++        else {
++            return []
++        }
++
++        let turnID = content["turnId"]?.stringValue ?? id
++        switch contentType {
++        case "userMessage":
++            guard let text = content["message"]?.stringValue else {
++                return []
++            }
++            return [
++                Message(
++                    id: id,
++                    sessionID: sessionID,
++                    role: .user,
++                    content: text,
++                    createdAt: receivedAt,
++                    sentAt: receivedAt,
++                    turnID: turnID,
++                    senderID: content["senderId"]?.stringValue
++                ),
++            ]
++
++        case "agent":
++            guard case let .object(rawPayload) = content["rawPayload"],
++                  case let .object(event) = rawPayload["event"]
++            else {
++                return []
++            }
++            return normalizedAgentMessages(event: event, turnID: turnID)
++
++        default:
++            return []
++        }
++    }
++
++    private func normalizedAgentMessages(
++        event: [String: CloudJSONValue],
++        turnID: String
++    ) -> [Message] {
++        guard let eventType = event["type"]?.stringValue else {
++            return []
++        }
++
++        switch eventType {
++        case "item.started", "item.completed":
++            guard case let .object(item) = event["item"],
++                  let itemType = item["type"]?.stringValue
++            else {
++                return []
++            }
++            return normalizedItemMessages(
++                item,
++                itemType: itemType,
++                isCompleted: eventType == "item.completed",
++                turnID: turnID
++            )
++
++        case "turn.completed":
++            return message(
++                event: [
++                    "type": "result",
++                    "usage": [
++                        "input_tokens": 0,
++                        "output_tokens": 0,
++                        "cache_read_input_tokens": 0,
++                    ],
++                ],
++                turnID: turnID
++            )
++
++        case "turn.failed", "error":
++            let error = event["error"]?.displayString
++                ?? event["message"]?.stringValue
++                ?? "The cloud agent reported an error."
++            return message(
++                event: [
++                    "type": "error",
++                    "content": error,
++                    "willRetry": false,
++                ],
++                turnID: turnID
++            )
++
++        default:
++            return []
++        }
++    }
++
++    private func normalizedItemMessages(
++        _ item: [String: CloudJSONValue],
++        itemType: String,
++        isCompleted: Bool,
++        turnID: String
++    ) -> [Message] {
++        let toolUseID = item["id"]?.stringValue ?? id
++
++        switch (itemType, isCompleted) {
++        case ("agentMessage", true):
++            guard let text = item["text"]?.stringValue, !text.isEmpty else {
++                return []
++            }
++            return message(
++                event: assistantEvent(
++                    content: [
++                        "type": "text",
++                        "text": text,
++                    ]
++                ),
++                turnID: turnID
++            )
++
++        case ("commandExecution", false):
++            return message(
++                event: assistantEvent(
++                    content: toolUse(
++                        id: toolUseID,
++                        name: "Bash",
++                        input: [
++                            "command": item["command"]?.stringValue ?? "",
++                        ]
++                    )
++                ),
++                turnID: turnID
++            )
++
++        case ("commandExecution", true):
++            let status = item["status"]?.stringValue
++            let exitCode = item["exitCode"]?.integerValue
++            return message(
++                event: toolResult(
++                    id: toolUseID,
++                    content: item["aggregatedOutput"]?.stringValue ?? "",
++                    isError: status == "failed" || (exitCode.map { $0 != 0 } ?? false)
++                ),
++                turnID: turnID
++            )
++
++        case ("imageView", false):
++            return message(
++                event: assistantEvent(
++                    content: toolUse(
++                        id: toolUseID,
++                        name: "Read",
++                        input: [
++                            "file_path": item["path"]?.stringValue ?? "",
++                        ]
++                    )
++                ),
++                turnID: turnID
++            )
++
++        case ("imageView", true):
++            return message(
++                event: toolResult(id: toolUseID, content: "", isError: false),
++                turnID: turnID
++            )
++
++        case ("mcpToolCall", false):
++            let server = item["server"]?.stringValue ?? "unknown"
++            let tool = item["tool"]?.stringValue ?? "unknown"
++            return message(
++                event: assistantEvent(
++                    content: toolUse(
++                        id: toolUseID,
++                        name: "mcp__\(server)__\(tool)",
++                        input: item["arguments"]?.foundationObject ?? [:]
++                    )
++                ),
++                turnID: turnID
++            )
++
++        case ("mcpToolCall", true):
++            let status = item["status"]?.stringValue
++            let error = item["error"]?.displayString
++            return message(
++                event: toolResult(
++                    id: toolUseID,
++                    content: error
++                        ?? item["result"]?.displayString
++                        ?? "",
++                    isError: error != nil || status == "failed"
++                ),
++                turnID: turnID
++            )
++
++        case ("fileChange", _):
++            guard case let .array(changes) = item["changes"] else {
++                return []
++            }
++            return changes.enumerated().flatMap { index, change -> [Message] in
++                guard case let .object(change) = change else {
++                    return []
++                }
++                let changeID = "\(toolUseID):\(index)"
++                if isCompleted {
++                    return message(
++                        event: toolResult(
++                            id: changeID,
++                            content: "",
++                            isError: item["status"]?.stringValue == "failed"
++                        ),
++                        turnID: turnID,
++                        idSuffix: index
++                    )
++                }
++                return message(
++                    event: assistantEvent(
++                        content: toolUse(
++                            id: changeID,
++                            name: "Edit",
++                            input: [
++                                "file_path": change["path"]?.stringValue ?? "",
++                                "old_string": "",
++                                "new_string": change["diff"]?.stringValue ?? "",
++                            ]
++                        )
++                    ),
++                    turnID: turnID,
++                    idSuffix: index
++                )
++            }
++
++        default:
++            return []
++        }
++    }
++
++    private func message(
++        event: [String: Any],
++        turnID: String,
++        idSuffix: Int? = nil
++    ) -> [Message] {
++        guard JSONSerialization.isValidJSONObject(event),
++              let data = try? JSONSerialization.data(
++                  withJSONObject: event,
++                  options: .sortedKeys
++              ),
++              let content = String(data: data, encoding: .utf8)
++        else {
++            return []
++        }
++        return [
++            Message(
++                id: idSuffix.map { "\(id):\($0)" } ?? id,
++                sessionID: sessionID,
++                role: .assistant,
++                content: content,
++                createdAt: receivedAt,
++                sentAt: receivedAt,
++                turnID: turnID
++            ),
++        ]
++    }
++
++    private func assistantEvent(content: [String: Any]) -> [String: Any] {
++        [
++            "type": "assistant",
++            "message": [
++                "role": "assistant",
++                "content": [content],
++            ],
++        ]
++    }
++
++    private func toolUse(
++        id: String,
++        name: String,
++        input: [String: Any]
++    ) -> [String: Any] {
++        [
++            "type": "tool_use",
++            "id": id,
++            "name": name,
++            "input": input,
++        ]
++    }
++
++    private func toolResult(
++        id: String,
++        content: String,
++        isError: Bool
++    ) -> [String: Any] {
++        [
++            "type": "user",
++            "message": [
++                "role": "user",
++                "content": [
++                    [
++                        "type": "tool_result",
++                        "tool_use_id": id,
++                        "content": content,
++                        "is_error": isError,
++                    ],
++                ],
++            ],
++        ]
++    }
++}
++
++private extension CloudJSONValue {
++    var stringValue: String? {
++        guard case let .string(value) = self else {
++            return nil
++        }
++        return value
++    }
++
++    var integerValue: Int64? {
++        switch self {
++        case let .integer(value):
++            value
++        case let .number(value):
++            Int64(exactly: value)
++        default:
++            nil
++        }
++    }
++
++    var foundationObject: [String: Any]? {
++        guard case let .object(value) = self else {
++            return nil
++        }
++        return value.mapValues(\.foundationValue)
++    }
++
++    var foundationValue: Any {
++        switch self {
++        case .null:
++            NSNull()
++        case let .bool(value):
++            value
++        case let .integer(value):
++            value
++        case let .number(value):
++            value
++        case let .string(value):
++            value
++        case let .array(value):
++            value.map(\.foundationValue)
++        case let .object(value):
++            value.mapValues(\.foundationValue)
++        }
++    }
++
++    var displayString: String? {
++        if let stringValue {
++            return stringValue
++        }
++        guard JSONSerialization.isValidJSONObject(foundationValue),
++              let data = try? JSONSerialization.data(withJSONObject: foundationValue),
++              let string = String(data: data, encoding: .utf8)
++        else {
++            return nil
++        }
++        return string
++    }
++}
++
+ struct ChatView: View {
+     @Bindable var store: StoreOf<Chat>
+     let directoryName: String
+@@ -497,7 +1203,7 @@ struct ChatView: View {
+             }
+             .safeAreaBar(edge: .bottom) {
+                 VStack(spacing: 8) {
+-                    if store.connectionStatus != .connected {
++                    if !store.isCloud, store.connectionStatus != .connected {
+                         Label {
+                             Text("Reconnecting")
+                         } icon: {
+@@ -518,9 +1224,10 @@ struct ChatView: View {
+                         agentType: store.session.agentType,
+                         allowsAgentSwitching: store.allowsAgentSwitching,
+                         isFastModeEnabled: store.isFastModeEnabled,
++                        isFastModeButtonDisabled: store.isCloud,
+                         isSendInFlight: store.isMessageSendInFlight,
+                         isStopInFlight: store.isStopInFlight,
+-                        isWorking: store.session.status == .working,
++                        isWorking: store.sessionStatus == .working,
+                         selectedModel: $store.selectedModel,
+                         shouldFocusOnAppear: store.shouldFocusMessageField,
+                         onFastModeTapped: { store.send(.fastModeButtonTapped) },
+@@ -543,6 +1250,9 @@ struct ChatView: View {
+             .task(id: store.session.id) {
+                 await store.send(.task).finish()
+             }
++            .onDisappear {
++                store.send(.viewDisappeared)
++            }
+             .preferredColorScheme(.dark)
+     }
+ 
+@@ -601,9 +1311,11 @@ private struct ChatPreview: View {
+                 try Message.upsert { content.messages }
+                     .execute(db)
+             }
+-            $0.desktopClient.observeMessages = { _, _ in
++            $0.desktopClient.observeMessages = { _, _, _ in
+                 AsyncThrowingStream { continuation in
+-                    continuation.yield([])
++                    continuation.yield(
++                        MessageSyncResponse(messages: [], deletedMessageIDs: [])
++                    )
+                 }
+             }
+         }
+diff --git a/ios/Modules/ConductorChat/Sources/ChatTextField.swift b/ios/Modules/ConductorChat/Sources/ChatTextField.swift
+index 4a48b94e6..26a235712 100644
+--- a/ios/Modules/ConductorChat/Sources/ChatTextField.swift
++++ b/ios/Modules/ConductorChat/Sources/ChatTextField.swift
+@@ -18,6 +18,7 @@ struct ChatTextField: View {
+     let agentType: Session.AgentType
+     let allowsAgentSwitching: Bool
+     let isFastModeEnabled: Bool
++    let isFastModeButtonDisabled: Bool
+     let isSendInFlight: Bool
+     let isStopInFlight: Bool
+     let isWorking: Bool
+@@ -31,6 +32,7 @@ struct ChatTextField: View {
+         agentType: Session.AgentType,
+         allowsAgentSwitching: Bool,
+         isFastModeEnabled: Bool,
++        isFastModeButtonDisabled: Bool = false,
+         isSendInFlight: Bool,
+         isStopInFlight: Bool,
+         isWorking: Bool,
+@@ -44,6 +46,7 @@ struct ChatTextField: View {
+         self.agentType = agentType
+         self.allowsAgentSwitching = allowsAgentSwitching
+         self.isFastModeEnabled = isFastModeEnabled
++        self.isFastModeButtonDisabled = isFastModeButtonDisabled
+         self.isSendInFlight = isSendInFlight
+         self.isStopInFlight = isStopInFlight
+         self.isWorking = isWorking
+@@ -98,7 +101,7 @@ struct ChatTextField: View {
+                 agentType: agentType,
+                 allowsAgentSwitching: allowsAgentSwitching,
+                 isFastModeEnabled: isFastModeEnabled,
+-                isFastModeButtonDisabled: isAnyActionInFlight,
++                isFastModeButtonDisabled: isFastModeButtonDisabled || isAnyActionInFlight,
+                 selectedModel: selectedModel,
+                 onFastModeTapped: onFastModeTapped,
+                 onSelectModel: { selectedModel = $0 }
+diff --git a/ios/Modules/ConductorChat/Sources/WorkspaceChat.swift b/ios/Modules/ConductorChat/Sources/WorkspaceChat.swift
+index 24753bd57..434f63b76 100644
+--- a/ios/Modules/ConductorChat/Sources/WorkspaceChat.swift
++++ b/ios/Modules/ConductorChat/Sources/WorkspaceChat.swift
+@@ -980,7 +980,7 @@ public struct WorkspaceChatView: View {
+         (store.workspace.unread ?? 0) > 0
+     }
+ 
+-    private struct SessionPicker: View {
++    struct SessionPicker: View {
+         let sessions: [Session]
+         let selectedSessionID: Session.ID?
+         let isCreatingSession: Bool
+@@ -1141,10 +1141,13 @@ public struct WorkspaceChatView: View {
+                 continuation.yield(content.sessions)
+             }
+         }
+-        $0.desktopClient.observeMessages = { _, sessionID in
++        $0.desktopClient.observeMessages = { _, sessionID, _ in
+             AsyncThrowingStream { continuation in
+                 continuation.yield(
+-                    content.messages.filter { $0.sessionID == sessionID }
++                    MessageSyncResponse(
++                        messages: content.messages.filter { $0.sessionID == sessionID },
++                        deletedMessageIDs: []
++                    )
+                 )
+             }
+         }
+diff --git a/ios/Modules/ConductorChat/Tests/ChatTests.swift b/ios/Modules/ConductorChat/Tests/ChatTests.swift
+index 204adbbf7..6783a6aa2 100644
+--- a/ios/Modules/ConductorChat/Tests/ChatTests.swift
++++ b/ios/Modules/ConductorChat/Tests/ChatTests.swift
+@@ -14,6 +14,7 @@ import Sharing
+ import SQLiteData
+ import SwiftUI
+ @testable import ConductorChat
++@testable import ConductorCloud
+ import Testing
+ import UIKit
+ 
+@@ -170,13 +171,15 @@ struct ChatTests {
+         } operation: {
+             let clock = TestClock()
+             let (firstStream, firstContinuation) = AsyncThrowingStream<
+-                [Message],
++                MessageSyncResponse,
+                 any Error
+             >.makeStream()
+             let (secondStream, secondContinuation) = AsyncThrowingStream<
+-                [Message],
++                MessageSyncResponse,
+                 any Error
+             >.makeStream()
++            let (connections, connectionContinuation) = AsyncStream<Int>.makeStream()
++            var connectionIterator = connections.makeAsyncIterator()
+             let connectionCount = LockIsolated(0)
+             let session = try makeSession()
+             let secondConnectionCancelled = LockIsolated(false)
+@@ -191,14 +194,16 @@ struct ChatTests {
+                 Chat()
+             } withDependencies: {
+                 $0.continuousClock = clock
+-                $0.desktopClient.observeMessages = { workspaceID, sessionID in
++                $0.desktopClient.observeMessages = { workspaceID, sessionID, request in
+                     #expect(workspaceID == session.workspaceID)
+                     #expect(sessionID == session.id)
++                    #expect(request.fingerprints.isEmpty)
+ 
+                     let count = connectionCount.withValue {
+                         $0 += 1
+                         return $0
+                     }
++                    connectionContinuation.yield(count)
+                     return switch count {
+                     case 1:
+                         firstStream
+@@ -216,9 +221,12 @@ struct ChatTests {
+             }
+             #expect(try #require(store.state.turns).isEmpty)
+             #expect(try #require(store.state.rows).isEmpty)
+-            #expect(connectionCount.value == 1)
++            let firstConnection = await connectionIterator.next()
++            #expect(firstConnection == 1)
+ 
+-            firstContinuation.yield([])
++            firstContinuation.yield(
++                MessageSyncResponse(messages: [], deletedMessageIDs: [])
++            )
+             await store.receive(\.initialMessagesResponse) {
+                 $0.isLoadingMessages = false
+             }
+@@ -228,10 +236,12 @@ struct ChatTests {
+             #expect(connectionCount.value == 1)
+ 
+             await clock.advance(by: .seconds(1))
+-            #expect(connectionCount.value == 2)
++            let secondConnection = await connectionIterator.next()
++            #expect(secondConnection == 2)
+ 
+             await task.cancel()
+             #expect(secondConnectionCancelled.value)
++            connectionContinuation.finish()
+         }
+     }
+ 
+@@ -269,16 +279,17 @@ struct ChatTests {
+         mutableUpdatedLateMessage.content = "Updated late message"
+         let updatedLateMessage = mutableUpdatedLateMessage
+         let (stream, continuation) = AsyncThrowingStream<
+-            [Message],
++            MessageSyncResponse,
+             any Error
+         >.makeStream()
+         let store = TestStore(initialState: Chat.State(session: session)) {
+             Chat()
+         } withDependencies: {
+             $0.defaultDatabase = database
+-            $0.desktopClient.observeMessages = { workspaceID, sessionID in
++            $0.desktopClient.observeMessages = { workspaceID, sessionID, request in
+                 #expect(workspaceID == session.workspaceID)
+                 #expect(sessionID == session.id)
++                #expect(request.fingerprints.keys.sorted() == ["early", "late"])
+                 return stream
+             }
+         }
+@@ -296,7 +307,12 @@ struct ChatTests {
+             ]
+         )
+ 
+-        continuation.yield([lateMessage, updatedEarlyMessage])
++        continuation.yield(
++            MessageSyncResponse(
++                messages: [lateMessage, updatedEarlyMessage],
++                deletedMessageIDs: []
++            )
++        )
+         await store.receive(\.initialMessagesResponse) {
+             $0.isLoadingMessages = false
+         }
+@@ -310,7 +326,12 @@ struct ChatTests {
+                 .init(id: "late", content: "Message late"),
+             ]
+         )
+-        continuation.yield([updatedLateMessage])
++        continuation.yield(
++            MessageSyncResponse(
++                messages: [updatedLateMessage],
++                deletedMessageIDs: []
++            )
++        )
+         await store.receive(\.messagesUpdated)
+         try expectHumanPresentationCaches(
+             store.state,
+@@ -388,6 +409,117 @@ struct ChatTests {
+         }
+     }
+ 
++    @Test("An empty sync acknowledgement preserves cached messages")
++    func emptySyncAcknowledgement() async throws {
++        let database = try appDatabase()
++        let session = try makeSession()
++        let message = try makeMessage(
++            id: "cached",
++            sessionID: session.id,
++            createdAt: "2026-07-09 01:00:00"
++        )
++        try await database.write { db in
++            try Message.insert { message }.execute(db)
++        }
++        let baselineChangeCount = try await database.write { $0.totalChangesCount }
++
++        let messages = try await withDependencies {
++            $0.defaultDatabase = database
++        } operation: {
++            try await Chat().reconcileMessages(
++                MessageSyncResponse(messages: [], deletedMessageIDs: []),
++                sessionID: session.id
++            )
++        }
++
++        expectNoDifference(messages, [message])
++        #expect(
++            try await database.write { $0.totalChangesCount }
++                == baselineChangeCount
++        )
++    }
++
++    @Test("Message sync applies upserts and session-scoped deletions atomically")
++    func messageSyncReconciliation() async throws {
++        let database = try appDatabase()
++        let session = try makeSession()
++        let stale = try makeMessage(
++            id: "stale",
++            sessionID: session.id,
++            createdAt: "2026-07-09 01:00:00"
++        )
++        let otherSessionMessage = try makeMessage(
++            id: "other",
++            sessionID: "session-2",
++            createdAt: "2026-07-09 00:00:00"
++        )
++        var updated = try makeMessage(
++            id: "updated",
++            sessionID: session.id,
++            createdAt: "2026-07-09 02:00:00"
++        )
++        updated.content = "Updated"
++        try await database.write { db in
++            try Message.insert { [stale, otherSessionMessage] }.execute(db)
++        }
++
++        let messages = try await withDependencies {
++            $0.defaultDatabase = database
++        } operation: {
++            try await Chat().reconcileMessages(
++                MessageSyncResponse(
++                    messages: [updated],
++                    deletedMessageIDs: [stale.id, otherSessionMessage.id]
++                ),
++                sessionID: session.id
++            )
++        }
++
++        expectNoDifference(messages, [updated])
++        let storedOtherMessage = try await database.read {
++            try Message.find(otherSessionMessage.id).fetchOne($0)
++        }
++        expectNoDifference(storedOtherMessage, otherSessionMessage)
++    }
++
++    @Test("Message sync rejects rows from another session without mutating the cache")
++    func messageSyncRejectsAnotherSession() async throws {
++        let database = try appDatabase()
++        let sessionID = "session-1"
++        let cached = try makeMessage(
++            id: "cached",
++            sessionID: sessionID,
++            createdAt: "2026-07-09 01:00:00"
++        )
++        let incoming = try makeMessage(
++            id: "incoming",
++            sessionID: "session-2",
++            createdAt: "2026-07-09 02:00:00"
++        )
++        try await database.write { db in
++            try Message.insert { cached }.execute(db)
++        }
++
++        await #expect(throws: MessageReconciliationError.self) {
++            try await withDependencies {
++                $0.defaultDatabase = database
++            } operation: {
++                try await Chat().reconcileMessages(
++                    MessageSyncResponse(
++                        messages: [incoming],
++                        deletedMessageIDs: [cached.id]
++                    ),
++                    sessionID: sessionID
++                )
++            }
++        }
++
++        let storedMessages = try await database.read {
++            try Message.order(by: \.id).fetchAll($0)
++        }
++        expectNoDifference(storedMessages, [cached])
++    }
++
+     @Test("An empty initial response replaces cached presentation and shows the empty state")
+     func emptyInitialResponse() async throws {
+         let session = try makeSession()
+@@ -1097,6 +1229,299 @@ struct ChatTests {
+             )
+         }
+     }
++
++    @Test("Cloud summary taps preserve the shared working status")
++    func cloudTurnSummaryTappedPreservesWorkingStatus() async throws {
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let completedTurn = Turn(
++                id: "turn-1",
++                startedAt: Date(timeIntervalSince1970: 1_000),
++                rows: [
++                    .humanMessageRow(.init(id: "human-1", content: "Inspect it")),
++                    .assistantMessage(
++                        .toolCall(
++                            messageID: "tool-1",
++                            toolCall: .readFile(
++                                toolUseID: "tool-1",
++                                filePath: "File.swift"
++                            )
++                        )
++                    ),
++                    .assistantMessage(
++                        .text(
++                            messageID: "final-1",
++                            content: .init("Inspected"),
++                            isMostRecentTextInTurn: true
++                        )
++                    ),
++                ]
++            )
++            let activeTurn = Turn(
++                id: "turn-2",
++                startedAt: Date(timeIntervalSince1970: 2_000),
++                rows: [
++                    .humanMessageRow(.init(id: "human-2", content: "Fix it")),
++                ]
++            )
++            let summaryID = "turn-1:human-1"
++            var state = Chat.State(
++                cloudSession: cloudSession(),
++                workspaceID: "workspace-1"
++            )
++            state.cloudSessionStatus = .working
++            state.turns = [completedTurn, activeTurn]
++            state.updateRows(sessionStatus: state.sessionStatus)
++            let store = TestStore(initialState: state) {
++                Chat()
++            }
++
++            await store.send(.turnSummaryTapped(summaryID)) {
++                $0.expandedSummaryIDs = [summaryID]
++                $0.rows = [completedTurn, activeTurn].flattenedChatRows(
++                    activeTurnID: activeTurn.id,
++                    expandedSummaryIDs: [summaryID]
++                )
++            }
++            let rows = try #require(store.state.rows)
++            #expect(
++                rows.contains {
++                    if case .turnInProgress = $0.content {
++                        true
++                    } else {
++                        false
++                    }
++                }
++            )
++        }
++    }
++
++    @Test("Real cloud transcript events use the canonical chat rows")
++    func cloudTranscriptUsesCanonicalRows() async throws {
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let transcript = try cloudTranscriptMessages()
++            let canonicalMessages = transcript.flatMap(\.chatMessages)
++            let status = CloudSessionStatusResponse(
++                workspaceID: "workspace-1",
++                sessionID: "session-1",
++                status: .working,
++                updatedAt: try #require(transcript.last?.receivedAt)
++            )
++            let clock = TestClock()
++            let store = TestStore(
++                initialState: Chat.State(
++                    cloudSession: cloudSession(),
++                    workspaceID: "workspace-1"
++                )
++            ) {
++                Chat()
++            } withDependencies: {
++                $0.continuousClock = clock
++            }
++
++            await store.send(
++                .cloudSnapshotResponse(
++                    isInitial: true,
++                    .success(
++                        Chat.CloudSnapshot(
++                            messages: transcript,
++                            status: status
++                        )
++                    )
++                )
++            ) {
++                $0.cloudMessages = canonicalMessages
++                $0.cloudSessionStatus = .working
++                $0.isLoadingMessages = false
++                $0.lastCloudMessageID = "agent-text"
++                $0.turns = Turn.parse(messages: canonicalMessages)
++                $0.updateRows(sessionStatus: .working)
++            }
++
++            expectNoDifference(
++                canonicalMessages.map(\.id),
++                [
++                    "user-1",
++                    "agent-command-start",
++                    "agent-command-complete",
++                    "agent-text",
++                ]
++            )
++            expectNoDifference(
++                try #require(store.state.rows).map(DisplayedRowProjection.init),
++                [
++                    .human(id: "user-1", content: "Run the tests."),
++                    .assistant(id: "assistant:agent-command-start"),
++                    .assistant(id: "assistant:agent-text:chunk:0"),
++                    .turnInProgress(
++                        id: "turn-1",
++                        startedAt: canonicalMessages[0].createdAt
++                    ),
++                ]
++            )
++
++            await store.send(.viewDisappeared)
++            await store.finish()
++        }
++    }
++
++    @Test("Cloud send uses the shared draft and send actions")
++    func cloudMessageSendSucceeds() async throws {
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let clock = TestClock()
++            let request = LockIsolated<(String, String, String)?>(nil)
++            let fixedUUID = UUID(42)
++            let store = TestStore(
++                initialState: Chat.State(
++                    cloudSession: cloudSession(),
++                    workspaceID: "workspace-1"
++                )
++            ) {
++                Chat()
++            } withDependencies: {
++                $0.continuousClock = clock
++                $0.uuid = .constant(fixedUUID)
++                $0.cloudAPIClient.sendMessage = { sessionID, messageID, message in
++                    request.setValue((sessionID, messageID, message))
++                    return CloudSendMessageResponse(
++                        messageID: "server-message",
++                        state: .queued
++                    )
++                }
++            }
++
++            store.state.$messageDraft.withLock {
++                $0 = "  Please run the tests.  "
++            }
++            await store.send(.sendButtonTapped) {
++                $0.isMessageSendInFlight = true
++                $0.scrollToBottomRequest = 1
++            }
++            await store.receive(\.sendMessageResponse) {
++                $0.$messageDraft.withLock { $0 = "" }
++                $0.cloudSessionStatus = .working
++                $0.isMessageSendInFlight = false
++            }
++            expectNoDifference(
++                request.value.map {
++                    [$0.0, $0.1, $0.2]
++                },
++                [
++                    "session-1",
++                    fixedUUID.uuidString.lowercased(),
++                    "Please run the tests.",
++                ]
++            )
++
++            await store.send(.viewDisappeared)
++            await store.finish()
++        }
++    }
++
++    @Test("Cloud task advances the transcript cursor through the shared chat")
++    func cloudTaskPollsIncrementally() async throws {
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let transcript = try cloudTranscriptMessages()
++            let canonicalMessages = transcript.flatMap(\.chatMessages)
++            let clock = TestClock()
++            let requestedCursors = LockIsolated<[String?]>([])
++            let status = CloudSessionStatusResponse(
++                workspaceID: "workspace-1",
++                sessionID: "session-1",
++                status: .working,
++                updatedAt: try #require(transcript.last?.receivedAt)
++            )
++            let store = TestStore(
++                initialState: Chat.State(
++                    cloudSession: cloudSession(),
++                    workspaceID: "workspace-1"
++                )
++            ) {
++                Chat()
++            } withDependencies: {
++                $0.continuousClock = clock
++                $0.cloudAPIClient.messages = { _, _, _, after in
++                    requestedCursors.withValue { $0.append(after) }
++                    return CloudPage(
++                        data: after == nil ? transcript : [],
++                        offset: 0,
++                        hasMore: false
++                    )
++                }
++                $0.cloudAPIClient.sessionStatus = { _ in status }
++            }
++
++            await store.send(.task)
++            await store.receive(\.cloudSnapshotResponse) {
++                $0.cloudMessages = canonicalMessages
++                $0.cloudSessionStatus = .working
++                $0.isLoadingMessages = false
++                $0.lastCloudMessageID = "agent-text"
++                $0.turns = Turn.parse(messages: canonicalMessages)
++                $0.updateRows(sessionStatus: .working)
++            }
++
++            await clock.advance(by: .seconds(3))
++            await store.receive(\.cloudPoll)
++            await store.receive(\.cloudSnapshotResponse)
++            expectNoDifference(
++                requestedCursors.value,
++                [nil, "agent-text"]
++            )
++
++            await store.send(.viewDisappeared)
++            await store.finish()
++        }
++    }
++
++    @Test("Cloud stop uses the shared stop action")
++    func cloudStopSucceeds() async throws {
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let cancelledSessionID = LockIsolated<String?>(nil)
++            var state = Chat.State(
++                cloudSession: cloudSession(),
++                workspaceID: "workspace-1"
++            )
++            state.cloudSessionStatus = .working
++            let store = TestStore(initialState: state) {
++                Chat()
++            } withDependencies: {
++                $0.cloudAPIClient.cancelSession = { sessionID in
++                    cancelledSessionID.setValue(sessionID)
++                    return CloudCancelResponse(
++                        workspaceID: "workspace-1",
++                        sessionID: sessionID,
++                        status: .idle,
++                        canceledQueuedMessages: 0
++                    )
++                }
++            }
++
++            await store.send(.stopButtonTapped) {
++                $0.isStopInFlight = true
++            }
++            await store.receive(\.stopSessionResponse) {
++                $0.cloudSessionStatus = .idle
++                $0.isStopInFlight = false
++            }
++
++            #expect(cancelledSessionID.value == "session-1")
++        }
++    }
+ }
+ 
+ @MainActor
+@@ -1158,6 +1583,123 @@ private func makeSession(status: String = "idle") throws -> Session {
+     )
+ }
+ 
++private func cloudSession() -> CloudSession {
++    CloudSession(
++        id: "session-1",
++        deepLink: CloudAPIClient.productionBaseURL,
++        name: "Cloud chat",
++        model: Session.Model.gpt_5_6_sol.rawValue
++    )
++}
++
++private func cloudTranscriptMessages() throws -> [CloudTranscriptMessage] {
++    try JSONDecoder.cloud.decode(
++        CloudPage<CloudTranscriptMessage>.self,
++        from: Data(
++            #"""
++            {
++              "data": [
++                {
++                  "id": "user-1",
++                  "sessionId": "session-1",
++                  "sessionIndex": 1,
++                  "type": "userMessage",
++                  "content": {
++                    "type": "userMessage",
++                    "id": "user-item-1",
++                    "message": "Run the tests.",
++                    "state": "sent",
++                    "turnId": "turn-1",
++                    "config": {"model": "gpt-5.6-sol"},
++                    "senderId": "user-1"
++                  },
++                  "receivedAt": "2026-07-24 15:24:17.562275+00"
++                },
++                {
++                  "id": "agent-command-start",
++                  "sessionId": "session-1",
++                  "sessionIndex": 2,
++                  "type": "agent",
++                  "content": {
++                    "type": "agent",
++                    "eventId": "event-1",
++                    "turnId": "turn-1",
++                    "userMessageId": "user-item-1",
++                    "rawPayload": {
++                      "thread_id": "thread-1",
++                      "event": {
++                        "type": "item.started",
++                        "item": {
++                          "id": "command-1",
++                          "type": "commandExecution",
++                          "command": "mise -C ios run test",
++                          "status": "inProgress"
++                        }
++                      }
++                    }
++                  },
++                  "receivedAt": "2026-07-24 15:24:18.000001+00"
++                },
++                {
++                  "id": "agent-command-complete",
++                  "sessionId": "session-1",
++                  "sessionIndex": 3,
++                  "type": "agent",
++                  "content": {
++                    "type": "agent",
++                    "eventId": "event-2",
++                    "turnId": "turn-1",
++                    "userMessageId": "user-item-1",
++                    "rawPayload": {
++                      "thread_id": "thread-1",
++                      "event": {
++                        "type": "item.completed",
++                        "item": {
++                          "id": "command-1",
++                          "type": "commandExecution",
++                          "command": "mise -C ios run test",
++                          "aggregatedOutput": "All tests passed.",
++                          "exitCode": 0,
++                          "status": "completed"
++                        }
++                      }
++                    }
++                  },
++                  "receivedAt": "2026-07-24 15:24:19.000001+00"
++                },
++                {
++                  "id": "agent-text",
++                  "sessionId": "session-1",
++                  "sessionIndex": 4,
++                  "type": "agent",
++                  "content": {
++                    "type": "agent",
++                    "eventId": "event-3",
++                    "turnId": "turn-1",
++                    "userMessageId": "user-item-1",
++                    "rawPayload": {
++                      "thread_id": "thread-1",
++                      "event": {
++                        "type": "item.completed",
++                        "item": {
++                          "id": "assistant-item-1",
++                          "type": "agentMessage",
++                          "text": "All tests passed."
++                        }
++                      }
++                    }
++                  },
++                  "receivedAt": "2026-07-24 15:24:20.000001+00"
++                }
++              ],
++              "offset": 0,
++              "hasMore": false
++            }
++            """#.utf8
++        )
++    ).data
++}
++
+ private struct TestError: LocalizedError {
+     var errorDescription: String? {
+         "Something went wrong."
+diff --git a/ios/Modules/ConductorMain/Sources/MainView.swift b/ios/Modules/ConductorMain/Sources/MainView.swift
+index 8da094a19..03410dc2e 100644
+--- a/ios/Modules/ConductorMain/Sources/MainView.swift
++++ b/ios/Modules/ConductorMain/Sources/MainView.swift
+@@ -7,6 +7,8 @@
+ 
+ import ComposableArchitecture
+ import ConductorChat
++import ConductorCloud
++import ConductorMobileData
+ import ConductorSettings
+ import ConductorWorkspaces
+ import SwiftUI
+@@ -15,6 +17,7 @@ import SwiftUI
+ public struct Main: Sendable {
+     @Reducer
+     public enum Path {
++        case cloudWorkspace(CloudWorkspaceFeature)
+         case workspaceChat(WorkspaceChat)
+     }
+ 
+@@ -25,7 +28,7 @@ public struct Main: Sendable {
+         public var workspaces = Workspaces.State()
+ 
+         public init() {
+-            // If we're missing the server address (aka on first launch), show the Settings screen immediately
++            // If we're missing the server address (aka on first launch), show Settings immediately.
+             let settings = ConductorSettings.State()
+             self.settings = settings.isServerAddressMissing ? settings : nil
+         }
+@@ -53,6 +56,30 @@ public struct Main: Sendable {
+                     state.settings = ConductorSettings.State()
+                     return .none
+ 
++                case let .workspaces(.cloudCatalog(.workspaceTapped(item))):
++                    state.path.append(
++                        .cloudWorkspace(
++                            CloudWorkspaceFeature.State(
++                                workspaceID: item.id,
++                                fallbackTitle: item.workspace.name
++                            )
++                        )
++                    )
++                    return .none
++
++                case let .workspaces(.cloudWorkspaceCreated(creation)):
++                    state.path.append(
++                        .cloudWorkspace(
++                            CloudWorkspaceFeature.State(
++                                workspaceID: creation.response.workspaceID,
++                                fallbackTitle: "Cloud workspace",
++                                initialSessionID: creation.response.sessionID,
++                                initialPrompt: creation.initialPrompt
++                            )
++                        )
++                    )
++                    return .none
++
+                 case let .workspaces(.workspaceCreated(creation)):
+                     state.path.append(
+                         .workspaceChat(
+@@ -66,11 +93,22 @@ public struct Main: Sendable {
+                     return .none
+ 
+                 case let .workspaces(.workspaceTapped(item)):
+-                    state.path.append(
+-                        .workspaceChat(
+-                            WorkspaceChat.State(workspaceWithRepository: item)
++                    if item.workspace.isCloudHosted {
++                        state.path.append(
++                            .cloudWorkspace(
++                                CloudWorkspaceFeature.State(
++                                    workspaceID: item.id,
++                                    fallbackTitle: item.workspace.displayName
++                                )
++                            )
+                         )
+-                    )
++                    } else {
++                        state.path.append(
++                            .workspaceChat(
++                                WorkspaceChat.State(workspaceWithRepository: item)
++                            )
++                        )
++                    }
+                     return .none
+ 
+                 case let .path(
+@@ -113,6 +151,9 @@ public struct MainView: View {
+             }
+         } destination: { store in
+             switch store.case {
++            case let .cloudWorkspace(store):
++                CloudWorkspaceView(store: store)
++
+             case let .workspaceChat(store):
+                 WorkspaceChatView(store: store)
+             }
+diff --git a/ios/Modules/ConductorMain/Tests/MainTests.swift b/ios/Modules/ConductorMain/Tests/MainTests.swift
+index ecb84431d..b105ea54d 100644
+--- a/ios/Modules/ConductorMain/Tests/MainTests.swift
++++ b/ios/Modules/ConductorMain/Tests/MainTests.swift
+@@ -7,10 +7,11 @@
+ 
+ import Combine
+ import ComposableArchitecture
+-import ConductorSettings
+-import SharedConductorData
++import ConductorCloud
+ import ConductorMobileData
++import ConductorSettings
+ import ConductorWorkspaces
++import SharedConductorData
+ import Sharing
+ import SQLiteData
+ import SwiftUI
+@@ -77,6 +78,122 @@ struct MainTests {
+         }
+     }
+ 
++    @Test("A cloud-badged desktop workspace uses the cloud chat backend")
++    func localCloudWorkspaceSelectionUsesCloud() async throws {
++        let workspace = Workspace.preview(
++            activeSessionID: "cloud-session",
++            branch: "cloud-workspace",
++            hostingServerURL: "https://hosting.example.test"
++        )
++        let item = WorkspaceWithRepository(
++            workspace: workspace,
++            repository: .preview()
++        )
++
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let store = TestStore(initialState: Main.State()) {
++                Main()
++            }
++
++            await store.send(.workspaces(.workspaceTapped(item))) {
++                $0.path.append(
++                    .cloudWorkspace(
++                        CloudWorkspaceFeature.State(
++                            workspaceID: item.id,
++                            fallbackTitle: item.workspace.displayName
++                        )
++                    )
++                )
++            }
++        }
++    }
++
++    @Test("A local workspace keeps using the desktop path when the API also knows its ID")
++    func deduplicatedCatalogWorkspaceSelectionUsesDesktop() async throws {
++        let workspace = Workspace.preview(
++            activeSessionID: "cloud-session",
++            branch: "cloud-workspace"
++        )
++        let item = WorkspaceWithRepository(
++            workspace: workspace,
++            repository: .preview()
++        )
++        let cloudWorkspace = CloudWorkspace(
++            id: workspace.id,
++            name: workspace.displayName,
++            createdAt: .now,
++            deepLink: try #require(URL(string: "conductor://cloud-workspace"))
++        )
++
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            var initialState = Main.State()
++            initialState.workspaces.cloudCatalog.workspaces = [
++                CloudProjectWorkspace(
++                    project: CloudProject(
++                        id: "project",
++                        name: "Project",
++                        gitRemote: "https://example.test/repository.git"
++                    ),
++                    workspace: cloudWorkspace
++                )
++            ]
++            let store = TestStore(initialState: initialState) {
++                Main()
++            }
++
++            await store.send(.workspaces(.workspaceTapped(item))) {
++                $0.path.append(
++                    .workspaceChat(
++                        WorkspaceChat.State(workspaceWithRepository: item)
++                    )
++                )
++            }
++        }
++    }
++
++    @Test("An API-only cloud workspace uses the cloud backend")
++    func cloudCatalogWorkspaceSelectionUsesCloud() async throws {
++        let item = CloudProjectWorkspace(
++            project: CloudProject(
++                id: "project",
++                name: "Project",
++                gitRemote: "https://example.test/repository.git"
++            ),
++            workspace: CloudWorkspace(
++                id: "cloud-workspace",
++                name: "API-only workspace",
++                createdAt: .now,
++                deepLink: try #require(URL(string: "conductor://cloud-workspace"))
++            )
++        )
++
++        try await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            try $0.bootstrapDatabase()
++        } operation: {
++            let store = TestStore(initialState: Main.State()) {
++                Main()
++            }
++
++            await store.send(.workspaces(.cloudCatalog(.workspaceTapped(item)))) {
++                $0.path.append(
++                    .cloudWorkspace(
++                        CloudWorkspaceFeature.State(
++                            workspaceID: item.id,
++                            fallbackTitle: item.workspace.name
++                        )
++                    )
++                )
++            }
++        }
++    }
++
+     @Test("Archived workspace delegate pops its chat")
+     func archivedWorkspacePopsChat() async throws {
+         let item = WorkspaceWithRepository(
+@@ -168,7 +285,7 @@ struct MainTests {
+             $0.defaultDatabase = database
+             $0.defaultFileStorage = .inMemory
+             $0.defaultInMemoryStorage = InMemoryStorage()
+-            $0.desktopClient.observeMessages = { _, _ in
++            $0.desktopClient.observeMessages = { _, _, _ in
+                 AsyncThrowingStream { $0.finish() }
+             }
+             $0.desktopClient.observeSessions = { _ in
+@@ -260,14 +377,14 @@ struct MainTests {
+             any Error
+         >.makeStream()
+         let (messages, messagesContinuation) = AsyncThrowingStream<
+-            [Message],
++            MessageSyncResponse,
+             any Error
+         >.makeStream()
+         let workspaceConnectionCount = LockIsolated(0)
+ 
+         try await withDependencies {
+             $0.defaultDatabase = database
+-            $0.desktopClient.observeMessages = { workspaceID, _ in
++            $0.desktopClient.observeMessages = { workspaceID, _, _ in
+                 #expect(workspaceID == cachedWorkspace.id)
+                 return messages
+             }
+diff --git a/ios/Modules/ConductorSettings/Sources/ConductorSettings.swift b/ios/Modules/ConductorSettings/Sources/ConductorSettings.swift
+index a4fe48824..46221e624 100644
+--- a/ios/Modules/ConductorSettings/Sources/ConductorSettings.swift
++++ b/ios/Modules/ConductorSettings/Sources/ConductorSettings.swift
+@@ -6,6 +6,7 @@
+ //
+ 
+ import ComposableArchitecture
++import ConductorCloud
+ import ConductorDesign
+ import ConductorMobileData
+ import Foundation
+@@ -19,6 +20,9 @@ public struct ConductorSettings: Sendable {
+     public struct State: Equatable {
+         @Presents public var alert: AlertState<Action.Alert>?
+ 
++        @Shared(.cloudCredentialConfigured)
++        public var isCloudCredentialConfigured
++
+         @Shared(.desktopDisplayConfiguration)
+         public var storedDisplayConfiguration
+ 
+@@ -26,9 +30,12 @@ public struct ConductorSettings: Sendable {
+         public var storedServerAddress
+ 
+         var connectionTestSource: ConnectionTestSource?
++        var cloudConnectionTestSource: ConnectionTestSource?
++        public var cloudAPIKey = ""
+         public var deviceIcon: DesktopClient.DeviceIcon
+         public var displayName: String
+         public var initialServerAddress: String
++        var isCloudConnectionTested = false
+ 
+         /// The server address we actually submitted & tested this session (i.e. lifetime of this view)
+         ///
+@@ -44,18 +51,21 @@ public struct ConductorSettings: Sendable {
+         }
+ 
+         var isConnectionTestInFlight: Bool {
+-            connectionTestSource != nil
++            connectionTestSource != nil || cloudConnectionTestSource != nil
+         }
+ 
+         var hasChanges: Bool {
+-            initialServerAddress != (storedServerAddress ?? "")
++            !normalizedCloudAPIKey.isEmpty
++                || initialServerAddress != (storedServerAddress ?? "")
+                 || displayName != (storedDisplayConfiguration?.name ?? "")
+                 || deviceIcon != (storedDisplayConfiguration?.icon ?? .laptop)
+         }
+ 
+         var isSaveButtonDisabled: Bool {
+-            isConnectionTestInFlight
+-                || normalizedServerAddress.isEmpty
++            if isConnectionTestInFlight {
++                return true
++            }
++            return normalizedServerAddress.isEmpty
+         }
+ 
+         public var isServerAddressMissing: Bool {
+@@ -67,8 +77,19 @@ public struct ConductorSettings: Sendable {
+         }
+ 
+         var isTestButtonDisabled: Bool {
++            if isConnectionTestInFlight {
++                return true
++            }
++            return normalizedServerAddress.isEmpty
++        }
++
++        var isCloudTestButtonDisabled: Bool {
+             isConnectionTestInFlight
+-                || normalizedServerAddress.isEmpty
++                || (normalizedCloudAPIKey.isEmpty && !isCloudCredentialConfigured)
++        }
++
++        var normalizedCloudAPIKey: String {
++            cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+         }
+ 
+         var normalizedServerAddress: String {
+@@ -79,7 +100,7 @@ public struct ConductorSettings: Sendable {
+             displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+         }
+ 
+-        enum ConnectionTestSource: Equatable {
++        public enum ConnectionTestSource: Equatable, Sendable {
+             case saveButtonTapped
+             case testButtonTapped
+         }
+@@ -88,17 +109,29 @@ public struct ConductorSettings: Sendable {
+     public enum Action: BindableAction {
+         case alert(PresentationAction<Alert>)
+         case binding(BindingAction<State>)
++        case cloudConnectionTestResult(
++            source: State.ConnectionTestSource,
++            result: Result<Void, any Error>
++        )
++        case cloudCredentialAvailabilityLoaded(Result<Bool, any Error>)
++        case cloudCredentialDeleteResult(Result<Void, any Error>)
++        case cloudSaveResult(Result<Void, any Error>)
++        case deleteCloudCredentialButtonTapped
+         case connectionTestResult(
+             serverAddress: String,
+             result: Result<Void, any Error>
+         )
+         case saveButtonTapped
++        case task
++        case testCloudConnectionButtonTapped
+         case testButtonTapped
+ 
+         public enum Alert: Equatable { }
+     }
+ 
+     @Dependency(\.desktopClient) var desktopClient
++    @Dependency(\.cloudAPIClient) var cloudAPIClient
++    @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+     @Dependency(\.dismiss) var dismiss
+ 
+     public init() { }
+@@ -108,6 +141,20 @@ public struct ConductorSettings: Sendable {
+ 
+         Reduce { state, action in
+             switch action {
++            case .task:
++                guard state.isCloudCredentialConfigured else {
++                    return .none
++                }
++                return .run { send in
++                    await send(
++                        .cloudCredentialAvailabilityLoaded(
++                            await Result {
++                                try await cloudCredentialClient.loadAPIKey() != nil
++                            }
++                        )
++                    )
++                }
++
+             case .saveButtonTapped:
+                 guard !state.isSaveButtonDisabled else {
+                     return .none
+@@ -116,6 +163,12 @@ public struct ConductorSettings: Sendable {
+                 state.displayName = state.normalizedDisplayName
+                 state.initialServerAddress = state.normalizedServerAddress
+ 
++                if !state.normalizedCloudAPIKey.isEmpty {
++                    return state.isCloudConnectionTested
++                        ? saveCloud(state: &state)
++                        : testCloudConnection(state: &state, source: .saveButtonTapped)
++                }
++
+                 if state.initialServerAddress == state.storedServerAddress
+                     || state.isServerAddressConnected {
+                     return save(state: &state)
+@@ -130,6 +183,87 @@ public struct ConductorSettings: Sendable {
+ 
+                 return testConnection(state: &state, source: .testButtonTapped)
+ 
++            case .testCloudConnectionButtonTapped:
++                guard !state.isCloudTestButtonDisabled else {
++                    return .none
++                }
++                return testCloudConnection(state: &state, source: .testButtonTapped)
++
++            case .binding(\.cloudAPIKey):
++                state.isCloudConnectionTested = false
++                return .none
++
++            case let .cloudConnectionTestResult(source, result):
++                state.cloudConnectionTestSource = nil
++                switch result {
++                case let .failure(error):
++                    state.alert = .failedToConnectToCloud(error: error)
++                    return .none
++
++                case .success:
++                    state.isCloudConnectionTested = true
++                    return source == .saveButtonTapped
++                        ? saveCloud(state: &state)
++                        : .none
++                }
++
++            case let .cloudCredentialAvailabilityLoaded(result):
++                switch result {
++                case let .failure(error):
++                    state.alert = .failedToUpdateCloudCredential(error: error)
++
++                case let .success(isConfigured):
++                    state.$isCloudCredentialConfigured.withLock { $0 = isConfigured }
++                }
++                return .none
++
++            case .deleteCloudCredentialButtonTapped:
++                guard !state.isConnectionTestInFlight else {
++                    return .none
++                }
++                return .run { send in
++                    await send(
++                        .cloudCredentialDeleteResult(
++                            await Result {
++                                try await cloudCredentialClient.deleteAPIKey()
++                            }
++                        )
++                    )
++                }
++
++            case let .cloudCredentialDeleteResult(result):
++                switch result {
++                case let .failure(error):
++                    state.alert = .failedToUpdateCloudCredential(error: error)
++
++                case .success:
++                    state.$isCloudCredentialConfigured.withLock { $0 = false }
++                    state.cloudAPIKey = ""
++                    state.isCloudConnectionTested = false
++                }
++                return .none
++
++            case let .cloudSaveResult(result):
++                state.cloudConnectionTestSource = nil
++                switch result {
++                case let .failure(error):
++                    state.alert = .failedToUpdateCloudCredential(error: error)
++                    return .none
++
++                case .success:
++                    state.$isCloudCredentialConfigured.withLock { $0 = true }
++                    state.cloudAPIKey = ""
++                    if state.initialServerAddress == state.storedServerAddress
++                        || state.isServerAddressConnected {
++                        return save(state: &state)
++                    } else {
++                        return testConnection(
++                            state: &state,
++                            source: .saveButtonTapped
++                        )
++                    }
++                }
++
+             case let .connectionTestResult(serverAddress, result):
+                 guard let source = state.connectionTestSource else {
+                     return .none
+@@ -183,6 +317,45 @@ public struct ConductorSettings: Sendable {
+         }
+     }
+ 
++    private func testCloudConnection(
++        state: inout State,
++        source: State.ConnectionTestSource
++    ) -> Effect<Action> {
++        let cloudAPIKey = state.normalizedCloudAPIKey
++        state.alert = nil
++        state.cloudConnectionTestSource = source
++        state.cloudAPIKey = cloudAPIKey
++
++        return .run { send in
++            let result = await Result {
++                let apiKey: String
++                if cloudAPIKey.isEmpty {
++                    guard let storedAPIKey = try await cloudCredentialClient.loadAPIKey() else {
++                        throw CloudAPIClientError.missingCredential
++                    }
++                    apiKey = storedAPIKey
++                } else {
++                    apiKey = cloudAPIKey
++                }
++                _ = try await cloudAPIClient.testConnection(apiKey: apiKey)
++            }
++            await send(.cloudConnectionTestResult(source: source, result: result))
++        }
++    }
++
++    private func saveCloud(state: inout State) -> Effect<Action> {
++        let cloudAPIKey = state.normalizedCloudAPIKey
++        state.cloudConnectionTestSource = .saveButtonTapped
++        return .run { send in
++            let result = await Result {
++                if !cloudAPIKey.isEmpty {
++                    try await cloudCredentialClient.saveAPIKey(apiKey: cloudAPIKey)
++                }
++            }
++            await send(.cloudSaveResult(result))
++        }
++    }
++
+     private func save(state: inout State) -> Effect<Action> {
+         state.$storedDisplayConfiguration.withLock {
+             $0 = if state.displayName.isEmpty {
+@@ -209,10 +382,27 @@ extension AlertState where Action == ConductorSettings.Action.Alert {
+             TextState(error.localizedDescription)
+         }
+     }
++
++    static func failedToConnectToCloud(error: any Error) -> Self {
++        AlertState {
++            TextState("Failed to connect to Conductor Cloud")
++        } message: {
++            TextState(error.localizedDescription)
++        }
++    }
++
++    static func failedToUpdateCloudCredential(error: any Error) -> Self {
++        AlertState {
++            TextState("Failed to update the Conductor API key")
++        } message: {
++            TextState(error.localizedDescription)
++        }
++    }
+ }
+ 
+ public struct ConductorSettingsView: View {
+     @Environment(\.dismiss) private var dismiss
++    @FocusState private var isCloudAPIKeyFocused: Bool
+     @FocusState private var isDisplayNameFocused: Bool
+     @FocusState private var isServerAddressFocused: Bool
+     @State private var isDiscardConfirmationPresented = false
+@@ -236,6 +426,9 @@ public struct ConductorSettingsView: View {
+         )
+         .interactiveDismissDisabled(store.isServerAddressMissing)
+         .preferredColorScheme(.dark)
++        .task {
++            await store.send(.task).finish()
++        }
+     }
+ 
+     private var settings: some View {
+@@ -248,10 +441,24 @@ public struct ConductorSettingsView: View {
+                     .listRowBackground(Color.clear)
+                     .listRowSeparator(.hidden, edges: .bottom)
+             } header: {
+-                Text("Connection") // font 2xl (24 px)
++                Text("Local Mac") // font 2xl (24 px)
+                     .font(.theme(.heading).weight(.medium)) // need 500
+                     .foregroundStyle(.theme(.textPrimary))
+             }
++
++            Section {
++                cloudConnectionRow
++                    .listRowBackground(Color.clear)
++
++                if store.isCloudCredentialConfigured {
++                    deleteCloudCredentialButton
++                        .listRowBackground(Color.clear)
++                }
++            } header: {
++                Text("Conductor Cloud · Experimental")
++                    .font(.theme(.heading).weight(.medium))
++                    .foregroundStyle(.theme(.textPrimary))
++            }
+         }
+         .scrollContentBackground(.hidden)
+         .background(.theme(.background))
+@@ -280,7 +487,8 @@ public struct ConductorSettingsView: View {
+             }
+ 
+             ToolbarItem(placement: .topBarTrailing) {
+-                if store.connectionTestSource == .saveButtonTapped {
++                if store.connectionTestSource == .saveButtonTapped
++                    || store.cloudConnectionTestSource == .saveButtonTapped {
+                     ProgressView()
+                         .progressViewStyle(.network)
+                         .tint(.theme(.textPrimary))
+@@ -290,6 +498,7 @@ public struct ConductorSettingsView: View {
+                         store.send(.saveButtonTapped)
+                     }
+                     .disabled(store.isSaveButtonDisabled)
++                    .accessibilityLabel("Save settings")
+                 }
+             }
+         }
+@@ -297,6 +506,80 @@ public struct ConductorSettingsView: View {
+         .animation(.default, value: store.isServerAddressConnected)
+     }
+ 
++    private var cloudConnectionRow: some View {
++        VStack(alignment: .leading, spacing: 8) {
++            VStack(alignment: .leading, spacing: 8) {
++                HStack(spacing: 8) {
++                    Text("API key")
++                        .font(.theme(.small).weight(.medium))
++                        .foregroundStyle(.theme(.textPrimary))
++
++                    if store.isCloudConnectionTested {
++                        LucideIcon(Lucide.circleCheck, style: .small)
++                            .foregroundStyle(.theme(.success))
++                            .accessibilityLabel("Connected")
++                    }
++                }
++
++                Text(
++                    store.isCloudCredentialConfigured
++                        ? "A key is saved securely in Keychain. Enter a replacement or test the saved key."
++                        : "Create a beta API key in Conductor Cloud, then test and save it here."
++                )
++                .font(.theme(.small))
++                .foregroundStyle(.theme(.textSecondary))
++            }
++            .padding(.leading, 2)
++            .frame(maxWidth: .infinity, alignment: .topLeading)
++
++            HStack(spacing: 8) {
++                SecureField(
++                    "Conductor API key",
++                    text: $store.cloudAPIKey,
++                    prompt: Text(
++                        store.isCloudCredentialConfigured
++                            ? "Saved in Keychain"
++                            : "API key"
++                    )
++                    .foregroundStyle(.theme(.textSecondary))
++                )
++                .textFieldStyle(
++                    .conductor(
++                        text: $store.cloudAPIKey,
++                        isClearButtonVisible: isCloudAPIKeyFocused
++                    )
++                )
++                .focused($isCloudAPIKeyFocused)
++                .textInputAutocapitalization(.never)
++                .autocorrectionDisabled()
++                .textContentType(.password)
++                .accessibilityIdentifier("cloudAPIKeyField")
++                .submitLabel(.done)
++                .onSubmit {
++                    store.send(.testCloudConnectionButtonTapped)
++                }
++                .disabled(store.isConnectionTestInFlight)
++
++                testCloudConnectionButton
++            }
++            .fixedSize(horizontal: false, vertical: true)
++        }
++    }
++
++    private var deleteCloudCredentialButton: some View {
++        Button(role: .destructive) {
++            store.send(.deleteCloudCredentialButtonTapped)
++        } label: {
++            Label {
++                Text("Delete saved API key")
++            } icon: {
++                LucideIcon(Lucide.trash2, style: .small)
++            }
++            .font(.theme(.body))
++        }
++        .disabled(store.isConnectionTestInFlight)
++    }
++
+     private var connectionRow: some View {
+         VStack(alignment: .leading, spacing: 8) {
+             VStack(alignment: .leading, spacing: 8) {
+@@ -412,6 +695,7 @@ public struct ConductorSettingsView: View {
+         .textInputAutocapitalization(.never)
+         .autocorrectionDisabled()
+         .textContentType(.URL)
++        .accessibilityIdentifier("serverAddressField")
+         .keyboardType(.URL)
+         .submitLabel(.done)
+         .onSubmit {
+@@ -446,6 +730,32 @@ public struct ConductorSettingsView: View {
+         .accessibilityLabel(isLoading ? "Testing connection" : "Test connection")
+     }
+ 
++    private var testCloudConnectionButton: some View {
++        let isLoading = store.cloudConnectionTestSource == .testButtonTapped
++        let isEnabled = !store.isCloudTestButtonDisabled
++
++        return Button {
++            store.send(.testCloudConnectionButtonTapped)
++        } label: {
++            Label {
++                Text("Test")
++            } icon: {
++                LucideIcon(Lucide.gauge, style: .small)
++            }
++            .opacity(isLoading ? 0 : 1)
++            .overlay {
++                if isLoading {
++                    ProgressView()
++                        .progressViewStyle(.network)
++                        .tint(.theme(.textPrimary))
++                }
++            }
++        }
++        .buttonStyle(.conductorSecondary)
++        .disabled(!isEnabled)
++        .accessibilityLabel(isLoading ? "Testing cloud connection" : "Test cloud connection")
++    }
++
+     // This modifier exists only because the compiler could not type-check all three feedbacks in `body`.
+     private struct SensoryFeedbacksViewModifier: ViewModifier {
+         var isConnectionErrorPresented: Bool
+diff --git a/ios/Modules/ConductorSettings/Tests/ConductorSettingsTests.swift b/ios/Modules/ConductorSettings/Tests/ConductorSettingsTests.swift
+index d80fc9116..cfacd2604 100644
+--- a/ios/Modules/ConductorSettings/Tests/ConductorSettingsTests.swift
++++ b/ios/Modules/ConductorSettings/Tests/ConductorSettingsTests.swift
+@@ -6,6 +6,7 @@
+ //
+ 
+ import ComposableArchitecture
++import ConductorCloud
+ import ConductorMobileData
+ import CustomDump
+ import Dependencies
+@@ -15,6 +16,29 @@ import Testing
+ 
+ @MainActor
+ struct ConductorSettingsTests {
++    @Test("A fresh launch does not access Keychain before Cloud is configured")
++    func freshLaunchDoesNotLoadCloudCredential() async {
++        let loadCount = LockIsolated(0)
++
++        await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            $0.cloudCredentialClient.loadAPIKey = {
++                loadCount.withValue { $0 += 1 }
++                Issue.record("A fresh launch should not access Keychain")
++                return nil
++            }
++        } operation: {
++            let store = TestStore(initialState: ConductorSettings.State()) {
++                ConductorSettings()
++            }
++
++            await store.send(.task)
++
++            #expect(loadCount.value == 0)
++            #expect(store.state.alert == nil)
++        }
++    }
++
+     @Test("Unsaved settings changes are detected")
+     func unsavedChanges() {
+         withDependencies {
+@@ -328,6 +352,107 @@ struct ConductorSettingsTests {
+             )
+         }
+     }
++
++    @Test("Cloud connection testing uses the draft key without saving it")
++    func testCloudConnection() async {
++        let testedKeys = LockIsolated<[String]>([])
++        let savedKeys = LockIsolated<[String]>([])
++
++        await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            $0.cloudAPIClient.testConnection = { apiKey in
++                testedKeys.withValue { $0.append(apiKey) }
++                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
++            }
++            $0.cloudCredentialClient.saveAPIKey = { apiKey in
++                savedKeys.withValue { $0.append(apiKey) }
++            }
++        } operation: {
++            let store = TestStore(initialState: ConductorSettings.State()) {
++                ConductorSettings()
++            }
++
++            await store.send(
++                .binding(.set(\.cloudAPIKey, "  synthetic-cloud-key  "))
++            ) {
++                $0.cloudAPIKey = "  synthetic-cloud-key  "
++            }
++            await store.send(.testCloudConnectionButtonTapped) {
++                $0.cloudAPIKey = "synthetic-cloud-key"
++                $0.cloudConnectionTestSource = .testButtonTapped
++            }
++            await store.receive(\.cloudConnectionTestResult) {
++                $0.cloudConnectionTestSource = nil
++                $0.isCloudConnectionTested = true
++            }
++
++            expectNoDifference(testedKeys.value, ["synthetic-cloud-key"])
++            #expect(savedKeys.value.isEmpty)
++            #expect(!store.state.isCloudCredentialConfigured)
++        }
++    }
++
++    @Test("Saving settings tests and stores both cloud and local connections")
++    func saveCloudCredentialAlongsideLocalPairing() async {
++        let checkedServerAddresses = LockIsolated<[String]>([])
++        let savedKeys = LockIsolated<[String]>([])
++        let isDismissed = LockIsolated(false)
++
++        await withDependencies {
++            $0.defaultFileStorage = .inMemory
++            $0.cloudAPIClient.testConnection = { _ in
++                CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
++            }
++            $0.cloudCredentialClient.saveAPIKey = { apiKey in
++                savedKeys.withValue { $0.append(apiKey) }
++            }
++            $0.desktopClient.checkConnection = { serverAddress in
++                checkedServerAddresses.withValue { $0.append(serverAddress) }
++            }
++            $0.dismiss = DismissEffect {
++                isDismissed.setValue(true)
++            }
++        } operation: {
++            let store = TestStore(initialState: ConductorSettings.State()) {
++                ConductorSettings()
++            }
++
++            await store.send(
++                .binding(.set(\.initialServerAddress, "my-mac"))
++            ) {
++                $0.initialServerAddress = "my-mac"
++            }
++            await store.send(
++                .binding(.set(\.cloudAPIKey, "synthetic-cloud-key"))
++            ) {
++                $0.cloudAPIKey = "synthetic-cloud-key"
++            }
++            await store.send(.saveButtonTapped) {
++                $0.cloudConnectionTestSource = .saveButtonTapped
++            }
++            await store.receive(\.cloudConnectionTestResult) {
++                $0.isCloudConnectionTested = true
++                $0.$isCloudCredentialConfigured.withLock { $0 = true }
++                $0.$storedServerAddress.withLock { $0 = "my-mac" }
++            }
++            await store.receive(\.cloudSaveResult) {
++                $0.cloudConnectionTestSource = nil
++                $0.cloudAPIKey = ""
++                $0.connectionTestSource = .saveButtonTapped
++            }
++            await store.receive(\.connectionTestResult) {
++                $0.connectionTestSource = nil
++                $0.testedServerAddress = "my-mac"
++            }
++            await store.finish()
++
++            expectNoDifference(savedKeys.value, ["synthetic-cloud-key"])
++            expectNoDifference(checkedServerAddresses.value, ["my-mac"])
++            #expect(isDismissed.value)
++            #expect(store.state.isCloudCredentialConfigured)
++            expectNoDifference(store.state.storedServerAddress, "my-mac")
++        }
++    }
+ }
+ 
+ private enum ConnectionError: LocalizedError {
+diff --git a/ios/Modules/ConductorWorkspaces/Sources/CreateWorkspace.swift b/ios/Modules/ConductorWorkspaces/Sources/CreateWorkspace.swift
+index e4350c609..141e87274 100644
+--- a/ios/Modules/ConductorWorkspaces/Sources/CreateWorkspace.swift
++++ b/ios/Modules/ConductorWorkspaces/Sources/CreateWorkspace.swift
+@@ -6,6 +6,7 @@
+ //
+ 
+ import ComposableArchitecture
++import ConductorCloud
+ import ConductorDesign
+ import ConductorMobileData
+ import LucideIcons
+@@ -20,9 +21,14 @@ public struct CreateWorkspace: Sendable {
+     @ObservableState
+     public struct State: Equatable {
+         @Presents public var alert: AlertState<Action.Alert>?
++        @Shared(.cloudCredentialConfigured)
++        public var isCloudCredentialConfigured
++
+         public var agentType = Session.AgentType.codex
++        public let cloudProjects: [CloudProject]
+         public var hasUserSelectedModel = false
+         public var isCreateAPIInFlight = false
++        public var isCloudWorkspace = false
+         public var isFastModeEnabled = false
+         public let repositories: [Repository]
+ 
+@@ -35,15 +41,63 @@ public struct CreateWorkspace: Sendable {
+ 
+         public init(
+             repositories: [Repository],
++            cloudProjects: [CloudProject] = [],
+             selectedRepositoryIDFilter: Repository.ID? = nil
+         ) {
+             precondition(!repositories.isEmpty, "CreateWorkspace requires a repository")
+             self.repositories = repositories
++            self.cloudProjects = cloudProjects
+             self.selectedRepositoryID = repositories
+                 .first { $0.id == selectedRepositoryIDFilter }?
+                 .id
+                 ?? repositories[0].id
+         }
++
++        var isCloudCreationAvailable: Bool {
++            isCloudCredentialConfigured && cloudCreationRequest != nil
++        }
++
++        var selectedRepository: Repository? {
++            repositories.first { $0.id == selectedRepositoryID }
++        }
++
++        var cloudCreationRequest: CloudCreateWorkspaceRequest? {
++            guard let repository = selectedRepository else {
++                return nil
++            }
++            if let repositoryRemote = repository.remoteURL.map(Self.normalizedGitRemote),
++               let project = cloudProjects.first(where: {
++                   Self.normalizedGitRemote($0.gitRemote) == repositoryRemote
++               }) {
++                return CloudCreateWorkspaceRequest(
++                    projectID: project.id,
++                    agent: agentType.rawValue,
++                    model: selectedModel.rawValue
++                )
++            }
++            guard let remote = repository.remoteURL,
++                  let remoteURL = URL(string: remote),
++                  remoteURL.scheme != nil
++            else {
++                return nil
++            }
++            return CloudCreateWorkspaceRequest(
++                repositoryURL: remoteURL,
++                agent: agentType.rawValue,
++                model: selectedModel.rawValue
++            )
++        }
++
++        private static func normalizedGitRemote(_ remote: String) -> String {
++            let normalized = remote
++                .lowercased()
++                .replacingOccurrences(of: "git@github.com:", with: "https://github.com/")
++                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
++            if normalized.hasSuffix(".git") {
++                return String(normalized.dropLast(4))
++            }
++            return normalized
++        }
+     }
+ 
+     public enum Action: BindableAction {
+@@ -51,6 +105,7 @@ public struct CreateWorkspace: Sendable {
+         case alert(PresentationAction<Alert>)
+         case binding(BindingAction<State>)
+         case createButtonTapped
++        case createCloudWorkspaceSucceeded(CloudWorkspaceCreationResult)
+         case createWorkspaceFailed(String)
+         case createWorkspaceSucceeded(CreatedWorkspace, selectedModel: Session.Model)
+         case defaultModelFetched(Session.Model)
+@@ -59,11 +114,13 @@ public struct CreateWorkspace: Sendable {
+         public enum Alert: Equatable {}
+ 
+         public enum Delegate: Equatable {
++            case cloudWorkspaceCreated(CloudWorkspaceCreationResult)
+             case workspaceCreated(WorkspaceCreationResult)
+         }
+     }
+ 
+     @Dependency(\.defaultDatabase) var database
++    @Dependency(\.cloudAPIClient) var cloudAPIClient
+     @Dependency(\.desktopClient) var desktopClient
+     @Dependency(\.uuid) var uuid
+ 
+@@ -86,6 +143,36 @@ public struct CreateWorkspace: Sendable {
+                 guard !state.isCreateAPIInFlight else {
+                     return .none
+                 }
++                if state.isCloudWorkspace {
++                    guard let request = state.cloudCreationRequest else {
++                        state.alert = .failedToCreateWorkspace(
++                            message: "The selected repository is not available to Conductor Cloud."
++                        )
++                        return .none
++                    }
++                    state.isCreateAPIInFlight = true
++                    return .run {
++                        [prompt = state.prompt, request] send in
++                        do {
++                            let response = try await cloudAPIClient.createWorkspace(
++                                request: request
++                            )
++                            await send(
++                                .createCloudWorkspaceSucceeded(
++                                    CloudWorkspaceCreationResult(
++                                        response: response,
++                                        initialPrompt: prompt.trimmingCharacters(
++                                            in: .whitespacesAndNewlines
++                                        )
++                                    )
++                                )
++                            )
++                        } catch {
++                            await send(.createWorkspaceFailed(error.localizedDescription))
++                        }
++                    }
++                }
++
+                 let workspaceID = state.workspaceID ?? uuid().uuidString.lowercased()
+                 state.isCreateAPIInFlight = true
+                 state.workspaceID = workspaceID
+@@ -144,6 +231,12 @@ public struct CreateWorkspace: Sendable {
+                 }
+                 return .none
+ 
++            case .binding(\.isCloudWorkspace):
++                if state.isCloudWorkspace {
++                    state.isFastModeEnabled = false
++                }
++                return .none
++
+             case let .createWorkspaceFailed(message):
+                 state.alert = .failedToCreateWorkspace(message: message)
+                 state.isCreateAPIInFlight = false
+@@ -169,6 +262,11 @@ public struct CreateWorkspace: Sendable {
+                     )
+                 )
+ 
++            case let .createCloudWorkspaceSucceeded(creation):
++                state.isCreateAPIInFlight = false
++                state.$prompt.withLock { $0 = "" }
++                return .send(.delegate(.cloudWorkspaceCreated(creation)))
++
+             case let .defaultModelFetched(model):
+                 guard !state.hasUserSelectedModel else {
+                     return .none
+@@ -203,6 +301,19 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
+     }
+ }
+ 
++public struct CloudWorkspaceCreationResult: Equatable, Sendable {
++    public let response: CloudCreateWorkspaceResponse
++    public let initialPrompt: String
++
++    public init(
++        response: CloudCreateWorkspaceResponse,
++        initialPrompt: String
++    ) {
++        self.response = response
++        self.initialPrompt = initialPrompt
++    }
++}
++
+ extension AlertState where Action == CreateWorkspace.Action.Alert {
+     static func failedToCreateWorkspace(message: String) -> Self {
+         AlertState {
+@@ -258,9 +369,34 @@ public struct CreateWorkspaceView: View {
+             .opacity(0)
+             .accessibilityHidden(true)
+             .overlay {
+-                repositoryMenu
+-                    .labelStyle(.titleAndIcon)
+-                    .frame(maxWidth: .infinity, alignment: .leading)
++                HStack(spacing: 12) {
++                    repositoryMenu
++                        .labelStyle(.titleAndIcon)
++                        .frame(maxWidth: .infinity, alignment: .leading)
++
++                    if store.isCloudCredentialConfigured {
++                        Toggle(isOn: $store.isCloudWorkspace) {
++                            HStack(spacing: 5) {
++                                CloudWorkspaceIcon(size: 16)
++
++                                Text("Cloud")
++                            }
++                            .font(.theme(.small))
++                            .foregroundStyle(.theme(.textPrimary))
++                        }
++                        .fixedSize()
++                        .tint(.theme(.accent))
++                        .disabled(
++                            store.isCreateAPIInFlight
++                                || (!store.isCloudWorkspace && !store.isCloudCreationAvailable)
++                        )
++                        .accessibilityHint(
++                            store.isCloudCreationAvailable
++                                ? "Creates this workspace in Conductor Cloud"
++                                : "The selected repository is unavailable in Conductor Cloud"
++                        )
++                    }
++                }
+             }
+     }
+ 
+@@ -321,6 +457,7 @@ public struct CreateWorkspaceView: View {
+                 agentType: store.agentType,
+                 allowsAgentSwitching: true,
+                 isFastModeEnabled: store.isFastModeEnabled,
++                isFastModeButtonDisabled: store.isCloudWorkspace,
+                 selectedModel: store.selectedModel,
+                 onFastModeTapped: { store.isFastModeEnabled.toggle() },
+                 onSelectModel: { store.selectedModel = $0 }
+diff --git a/ios/Modules/ConductorWorkspaces/Sources/WorkspaceRow.swift b/ios/Modules/ConductorWorkspaces/Sources/WorkspaceRow.swift
+index b0d6b5140..32037aae6 100644
+--- a/ios/Modules/ConductorWorkspaces/Sources/WorkspaceRow.swift
++++ b/ios/Modules/ConductorWorkspaces/Sources/WorkspaceRow.swift
+@@ -31,10 +31,17 @@ struct WorkspaceRow: View {
+             action(.open)
+         } label: {
+             Label {
+-                Text(item.workspace.displayName)
+-                    .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
+-                    .fontWeight(isUnread ? .semibold : .regular)
+-                    .lineLimit(1)
++                HStack(spacing: 5) {
++                    Text(item.workspace.displayName)
++                        .lineLimit(1)
++
++                    if item.workspace.isCloudHosted {
++                        CloudWorkspaceIcon(size: 16)
++                            .accessibilityLabel("Cloud workspace")
++                    }
++                }
++                .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
++                .fontWeight(isUnread ? .semibold : .regular)
+             } icon: {
+                 if showsRepositoryIcon {
+                     RepositoryIcon(repository: item.repository, size: 20, relativeTo: .body)
+diff --git a/ios/Modules/ConductorWorkspaces/Sources/Workspaces.swift b/ios/Modules/ConductorWorkspaces/Sources/Workspaces.swift
+index 3d85402a3..fb1b2bea2 100644
+--- a/ios/Modules/ConductorWorkspaces/Sources/Workspaces.swift
++++ b/ios/Modules/ConductorWorkspaces/Sources/Workspaces.swift
+@@ -7,12 +7,13 @@
+ 
+ import Combine
+ import ComposableArchitecture
+-import SharedConductorData
++import ConductorCloud
+ import ConductorDesign
+ import ConductorMobileData
+ import Foundation
+ import LucideIcons
+ import Logging
++import SharedConductorData
+ import Sharing
+ import SQLiteData
+ import SwiftUI
+@@ -22,6 +23,7 @@ public struct Workspaces: Sendable {
+     @ObservableState
+     public struct State: Equatable {
+         @Presents public var destination: Destination.State?
++        public var cloudCatalog = CloudWorkspaceCatalog.State()
+ 
+         @Shared(.desktopConnectionStatus)
+         public var connectionStatus
+@@ -49,6 +51,7 @@ public struct Workspaces: Sendable {
+         public var sort
+ 
+         var deferredWorkspaces: [WorkspaceWithRepository]?
++        var pendingCloudWorkspaceCreation: CloudWorkspaceCreationResult?
+         var pendingWorkspaceCreation: WorkspaceCreationResult?
+ 
+         @FetchAll(
+@@ -61,7 +64,26 @@ public struct Workspaces: Sendable {
+         var sections: [WorkspaceSection] = []
+ 
+         var hasVisibleWorkspaces: Bool {
+-            sections.contains { !$0.items.isEmpty }
++            sections.contains { !$0.items.isEmpty } || !visibleCloudWorkspaces.isEmpty
++        }
++
++        var visibleCloudWorkspaces: [CloudProjectWorkspace] {
++            let localWorkspaceIDs = Set(workspaces.map(\.id))
++            let selectedRemote = selectedRepositoryID
++                .flatMap { selectedID in
++                    repositories.first { $0.id == selectedID }?.remoteURL
++                }
++                .map(Self.normalizedGitRemote)
++
++            return cloudCatalog.workspaces.filter { item in
++                guard !localWorkspaceIDs.contains(item.id) else {
++                    return false
++                }
++                guard let selectedRemote else {
++                    return true
++                }
++                return Self.normalizedGitRemote(item.project.gitRemote) == selectedRemote
++            }
+         }
+ 
+         public init() {
+@@ -76,6 +98,17 @@ public struct Workspaces: Sendable {
+             sections = Self.sections(groupedBy: grouping, workspaces: workspaces)
+         }
+ 
++        private static func normalizedGitRemote(_ remote: String) -> String {
++            let normalized = remote
++                .lowercased()
++                .replacingOccurrences(of: "git@github.com:", with: "https://github.com/")
++                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
++            if normalized.hasSuffix(".git") {
++                return String(normalized.dropLast(4))
++            }
++            return normalized
++        }
++
+         static func sections(
+             groupedBy grouping: WorkspaceWithRepository.Grouping,
+             workspaces: [WorkspaceWithRepository]
+@@ -181,6 +214,8 @@ public struct Workspaces: Sendable {
+     }
+ 
+     public enum Action {
++        case cloudCatalog(CloudWorkspaceCatalog.Action)
++        case cloudWorkspaceCreated(CloudWorkspaceCreationResult)
+         case createButtonTapped
+         case createWorkspaceSheetDismissed
+         case destination(PresentationAction<Destination.Action>)
+@@ -213,14 +248,26 @@ public struct Workspaces: Sendable {
+     }
+ 
+     public var body: some ReducerOf<Self> {
++        Scope(state: \.cloudCatalog, action: \.cloudCatalog) {
++            CloudWorkspaceCatalog()
++        }
++
+         Reduce { state, action in
+             switch action {
+             case .task:
++                let cloudCredentialConfiguration =
++                    state.cloudCatalog.$isCloudCredentialConfigured
+                 let grouping = state.$grouping
+                 let workspaces = state.$workspaces
+                 // Shared publishers immediately replay their current values. `State.init`
+                 // already used those values to build sections, so observe only later changes.
+                 return .merge(
++                    .publisher {
++                        cloudCredentialConfiguration.publisher
++                            .removeDuplicates()
++                            .dropFirst()
++                            .map { _ in Action.cloudCatalog(.task) }
++                    },
+                     .publisher {
+                         grouping.publisher
+                             .removeDuplicates()
+@@ -233,6 +280,9 @@ public struct Workspaces: Sendable {
+                             .dropFirst()
+                             .map(Action.workspacesChanged)
+                     },
++                    state.cloudCatalog.isCloudCredentialConfigured
++                        ? .send(.cloudCatalog(.task))
++                        : .none,
+                     monitorConnection(),
+                     observeWorkspaces(state)
+                 )
+@@ -252,6 +302,7 @@ public struct Workspaces: Sendable {
+                 state.destination = .createWorkspace(
+                     CreateWorkspace.State(
+                         repositories: state.repositories,
++                        cloudProjects: state.cloudCatalog.projects,
+                         selectedRepositoryIDFilter: state.selectedRepositoryID
+                     )
+                 )
+@@ -263,6 +314,13 @@ public struct Workspaces: Sendable {
+                     workspaces: state.deferredWorkspaces ?? state.workspaces
+                 )
+                 state.deferredWorkspaces = nil
++                if let creation = state.pendingCloudWorkspaceCreation {
++                    state.pendingCloudWorkspaceCreation = nil
++                    return .run { send in
++                        try await clock.sleep(for: .milliseconds(250))
++                        await send(.cloudWorkspaceCreated(creation))
++                    }
++                }
+                 guard let creation = state.pendingWorkspaceCreation else {
+                     return .none
+                 }
+@@ -272,6 +330,13 @@ public struct Workspaces: Sendable {
+                     await send(.workspaceCreated(creation))
+                 }
+ 
++            case let .destination(
++                .presented(.createWorkspace(.delegate(.cloudWorkspaceCreated(creation))))
++            ):
++                state.destination = nil
++                state.pendingCloudWorkspaceCreation = creation
++                return .none
++
+             case let .destination(
+                 .presented(.createWorkspace(.delegate(.workspaceCreated(creation))))
+             ):
+@@ -305,6 +370,7 @@ public struct Workspaces: Sendable {
+ 
+             case let .workspacesChanged(workspaces):
+                 guard state.destination?.createWorkspace == nil,
++                      state.pendingCloudWorkspaceCreation == nil,
+                       state.pendingWorkspaceCreation == nil else {
+                     state.deferredWorkspaces = workspaces
+                     return .none
+@@ -434,7 +500,12 @@ public struct Workspaces: Sendable {
+                     )
+                 }
+ 
+-            case .destination, .settingsButtonTapped, .workspaceCreated, .workspaceTapped:
++            case .cloudCatalog,
++                 .cloudWorkspaceCreated,
++                 .destination,
++                 .settingsButtonTapped,
++                 .workspaceCreated,
++                 .workspaceTapped:
+                 return .none
+             }
+         }
+@@ -499,25 +570,7 @@ public struct Workspaces: Sendable {
+             await WebSocketHelpers.observe {
+                 desktopClient.observeWorkspaces()
+             } onValue: { snapshot in
+-                try await database.write { db in
+-                    try Repository
+-                        .upsert { snapshot.repositories }
+-                        .execute(db)
+-                    try Workspace
+-                        .upsert { snapshot.workspaces.map(\.workspace) }
+-                        .execute(db)
+-
+-                    try MobileWorkspaceState.upsert {
+-                        snapshot.workspaces.map {
+-                            MobileWorkspaceState(
+-                                workspaceID: $0.workspace.id,
+-                                isWorking: $0.isWorking,
+-                                pullRequest: snapshot.pullRequests[$0.workspace.id]
+-                            )
+-                        }
+-                    }
+-                    .execute(db)
+-                }
++                try await reconcileWorkspaceSnapshot(snapshot)
+ 
+                 if isAwaitingInitialResponse {
+                     isAwaitingInitialResponse = false
+@@ -530,6 +583,35 @@ public struct Workspaces: Sendable {
+         }
+     }
+ 
++    @concurrent func reconcileWorkspaceSnapshot( // only non-private for tests
++        _ snapshot: WorkspaceListSnapshot
++    ) async throws {
++        let workspaceIDs = snapshot.workspaces.map(\.workspace.id)
++        try await database.write { db in
++            try Workspace
++                .where { $0.id.notIn(workspaceIDs) }
++                .delete()
++                .execute(db)
++            try Repository
++                .upsert { snapshot.repositories }
++                .execute(db)
++            try Workspace
++                .upsert { snapshot.workspaces.map(\.workspace) }
++                .execute(db)
++
++            try MobileWorkspaceState.upsert {
++                snapshot.workspaces.map {
++                    MobileWorkspaceState(
++                        workspaceID: $0.workspace.id,
++                        isWorking: $0.isWorking,
++                        pullRequest: snapshot.pullRequests[$0.workspace.id]
++                    )
++                }
++            }
++            .execute(db)
++        }
++    }
++
+     private func monitorConnection() -> Effect<Action> {
+         .run { _ in
+             while !Task.isCancelled {
+@@ -613,17 +695,30 @@ public struct WorkspacesView: View {
+                     }
+                 }
+             }
++
++            if store.cloudCatalog.isCloudCredentialConfigured,
++               (
++                   store.cloudCatalog.isLoading
++                       || store.cloudCatalog.errorMessage != nil
++                       || !store.visibleCloudWorkspaces.isEmpty
++               ) {
++                CloudCatalogSection(
++                    catalog: store.scope(state: \.cloudCatalog, action: \.cloudCatalog),
++                    workspaces: store.visibleCloudWorkspaces
++                )
++            }
+         }
+         .contentMargins(.top, 0)
+         .listStyle(.plain)
+         .animation(.default, value: store.sections)
++        .animation(.default, value: store.cloudCatalog.workspaces)
+         .listSectionSpacing(0)
+         .environment(\.defaultMinListRowHeight, 44)
+         .scrollEdgeEffectStyle(.soft, for: .top)
+         .scrollContentBackground(.hidden)
+         .background(.theme(.background))
+         .overlay {
+-            if store.isLoadingWorkspaces {
++            if store.isLoadingWorkspaces && store.cloudCatalog.workspaces.isEmpty {
+                 ProgressView()
+                     .progressViewStyle(.network)
+                     .tint(.theme(.textSecondary))
+@@ -634,7 +729,11 @@ public struct WorkspacesView: View {
+                 ContentUnavailableView(
+                     "No Workspaces",
+                     systemImage: "rectangle.stack",
+-                    description: Text("Pair with Conductor on your Mac to see workspaces here.")
++                    description: Text(
++                        store.cloudCatalog.isCloudCredentialConfigured
++                            ? "Create a local or cloud workspace to see it here."
++                            : "Pair with Conductor on your Mac to see workspaces here."
++                    )
+                 )
+                 .foregroundStyle(.theme(.textPrimary))
+                 .font(.theme(.body))
+@@ -698,11 +797,73 @@ public struct WorkspacesView: View {
+             }
+             .matchedTransitionSource(id: "new-workspace", in: namespace)
+         }
++        .refreshable {
++            await store.send(.cloudCatalog(.refresh)).finish()
++        }
+         .background(.theme(.background))
+         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
+         .preferredColorScheme(.dark)
+     }
+ 
++    private struct CloudCatalogSection: View {
++        let catalog: StoreOf<CloudWorkspaceCatalog>
++        let workspaces: [CloudProjectWorkspace]
++
++        var body: some View {
++            Section {
++                if catalog.isLoading && workspaces.isEmpty {
++                    HStack(spacing: 8) {
++                        ProgressView()
++                            .progressViewStyle(.network)
++
++                        Text("Loading cloud workspaces")
++                            .foregroundStyle(.theme(.textSecondary))
++                    }
++                    .listRowBackground(Color.clear)
++                    .listRowSeparator(.hidden)
++                } else if let errorMessage = catalog.errorMessage, workspaces.isEmpty {
++                    VStack(alignment: .leading, spacing: 8) {
++                        Text(errorMessage)
++                            .font(.theme(.small))
++                            .foregroundStyle(.theme(.textSecondary))
++
++                        Button("Retry") {
++                            catalog.send(.refresh)
++                        }
++                        .buttonStyle(.conductorSecondary)
++                    }
++                    .listRowBackground(Color.clear)
++                    .listRowSeparator(.hidden)
++                } else {
++                    ForEach(workspaces) { item in
++                        CloudWorkspaceRow(
++                            item: item,
++                            status: catalog.statuses[item.id]
++                        ) {
++                            catalog.send(.workspaceTapped(item))
++                        }
++                        .padding(.leading, 12)
++                        .listRowInsets(
++                            EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
++                        )
++                        .listRowBackground(Color.clear)
++                        .listRowSeparator(.hidden)
++                    }
++                }
++            } header: {
++                Label {
++                    Text("Cloud")
++                        .font(.theme(.body))
++                        .fontWeight(.semibold)
++                } icon: {
++                    CloudWorkspaceIcon(size: 16)
++                }
++                .foregroundStyle(.theme(.textPrimary))
++                .textCase(nil)
++            }
++        }
++    }
++
+     private struct ConnectionStatusSubtitle: View {
+         let status: DesktopClient.ConnectionStatus
+         let displayConfiguration: DesktopClient.DisplayConfiguration?
+diff --git a/ios/Modules/ConductorWorkspaces/Tests/CreateWorkspaceTests.swift b/ios/Modules/ConductorWorkspaces/Tests/CreateWorkspaceTests.swift
+index 64212a694..4b9ed7f94 100644
+--- a/ios/Modules/ConductorWorkspaces/Tests/CreateWorkspaceTests.swift
++++ b/ios/Modules/ConductorWorkspaces/Tests/CreateWorkspaceTests.swift
+@@ -6,6 +6,7 @@
+ //
+ 
+ import ComposableArchitecture
++import ConductorCloud
+ import ConductorMobileData
+ import CustomDump
+ import Foundation
+@@ -143,6 +144,67 @@ struct CreateWorkspaceTests {
+         }
+     }
+ 
++    @Test("Cloud creation uses the matching project and keeps the prompt for cloud chat")
++    func createCloudWorkspace() async throws {
++        let remoteURL = "https://example.test/mobile.git"
++        let repository = Repository.preview(remoteURL: remoteURL)
++        let project = CloudProject(
++            id: "project-1",
++            name: "Mobile",
++            gitRemote: remoteURL
++        )
++        let deepLink = try #require(URL(string: "conductor://workspace/cloud-workspace"))
++        let response = CloudCreateWorkspaceResponse(
++            workspaceID: "cloud-workspace",
++            sessionID: "cloud-session",
++            deepLink: deepLink
++        )
++
++        await withDependencies {
++            $0.defaultFileStorage = .inMemory
++        } operation: {
++            let state = CreateWorkspace.State(
++                repositories: [repository],
++                cloudProjects: [project]
++            )
++            state.$isCloudCredentialConfigured.withLock { $0 = true }
++            state.$prompt.withLock { $0 = "  Run the cloud tests.  " }
++            let store = TestStore(initialState: state) {
++                CreateWorkspace()
++            } withDependencies: {
++                $0.cloudAPIClient.createWorkspace = { request in
++                    #expect(
++                        request == CloudCreateWorkspaceRequest(
++                            projectID: project.id,
++                            agent: "codex",
++                            model: "gpt-5.6-sol"
++                        )
++                    )
++                    return response
++                }
++            }
++
++            await store.send(.binding(.set(\.isCloudWorkspace, true))) {
++                $0.isCloudWorkspace = true
++            }
++            await store.send(.createButtonTapped) {
++                $0.isCreateAPIInFlight = true
++            }
++            let creation = CloudWorkspaceCreationResult(
++                response: response,
++                initialPrompt: "Run the cloud tests."
++            )
++            await store.receive(\.createCloudWorkspaceSucceeded) {
++                $0.$prompt.withLock { $0 = "" }
++                $0.isCreateAPIInFlight = false
++            }
++            await store.receive(
++                \.delegate,
++                .cloudWorkspaceCreated(creation)
++            )
++        }
++    }
++
+     @Test("Create shows an alert when creation fails")
+     func createWorkspaceFailure() async throws {
+         try await withDependencies {
+diff --git a/ios/Modules/ConductorWorkspaces/Tests/WorkspacesTests.swift b/ios/Modules/ConductorWorkspaces/Tests/WorkspacesTests.swift
+index 04be38d07..baef70c7d 100644
+--- a/ios/Modules/ConductorWorkspaces/Tests/WorkspacesTests.swift
++++ b/ios/Modules/ConductorWorkspaces/Tests/WorkspacesTests.swift
+@@ -503,6 +503,70 @@ struct WorkspacesTests {
+         }
+     }
+ 
++    @Test("A full desktop snapshot removes stale rows from the phone mirror")
++    func workspaceSnapshotReconciliation() async throws {
++        let database = try appDatabase()
++        let repository = Repository.preview(id: "repository")
++        let currentWorkspace = Workspace.preview(
++            id: "current",
++            repositoryID: repository.id
++        )
++        let staleWorkspace = Workspace.preview(
++            id: "stale",
++            repositoryID: repository.id
++        )
++        try await database.write { db in
++            try Repository.insert { repository }.execute(db)
++            try Workspace.insert { [currentWorkspace, staleWorkspace] }.execute(db)
++            try MobileWorkspaceState.insert {
++                [
++                    MobileWorkspaceState(
++                        workspaceID: currentWorkspace.id,
++                        isWorking: false
++                    ),
++                    MobileWorkspaceState(
++                        workspaceID: staleWorkspace.id,
++                        isWorking: false
++                    ),
++                ]
++            }
++            .execute(db)
++        }
++
++        try await withDependencies {
++            $0.defaultDatabase = database
++        } operation: {
++            try await Workspaces().reconcileWorkspaceSnapshot(
++                WorkspaceListSnapshot(
++                    repositories: [repository],
++                    workspaces: [
++                        WorkspaceSnapshot(
++                            workspace: currentWorkspace,
++                            isWorking: true
++                        ),
++                    ]
++                )
++            )
++        }
++
++        let storedCurrentWorkspace = try await database.read {
++            try Workspace.find(currentWorkspace.id).fetchOne($0)
++        }
++        let storedStaleWorkspace = try await database.read {
++            try Workspace.find(staleWorkspace.id).fetchOne($0)
++        }
++        let staleMobileState = try await database.read {
++            try MobileWorkspaceState.find(staleWorkspace.id).fetchOne($0)
++        }
++        let currentMobileState = try await database.read {
++            try MobileWorkspaceState.find(currentWorkspace.id).fetchOne($0)
++        }
++        expectNoDifference(storedCurrentWorkspace, currentWorkspace)
++        expectNoDifference(storedStaleWorkspace, nil)
++        expectNoDifference(staleMobileState, nil)
++        #expect(currentMobileState?.isWorking == true)
++    }
++
+     @Test("Task pings the desktop immediately and every three seconds")
+     func connectionHeartbeat() async throws {
+         try await withDependencies {
+diff --git a/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient+WebSockets.swift b/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient+WebSockets.swift
+index f5e0d0bfa..6474794f5 100644
+--- a/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient+WebSockets.swift
++++ b/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient+WebSockets.swift
+@@ -54,6 +54,43 @@ extension DesktopClient {
+             any Error
+         >.Continuation.BufferingPolicy = .bufferingNewest(1),
+         at makeURL: @escaping @Sendable (String) -> URL?
++    ) -> AsyncThrowingStream<Value, any Error> {
++        observe(
++            type,
++            bufferingPolicy: bufferingPolicy,
++            makeInitialMessage: { nil },
++            at: makeURL
++        )
++    }
++
++    static func observe<Value, Request>(
++        _ type: Value.Type,
++        sending request: Request,
++        bufferingPolicy: AsyncThrowingStream<
++            Value,
++            any Error
++        >.Continuation.BufferingPolicy = .bufferingNewest(1),
++        at makeURL: @escaping @Sendable (String) -> URL?
++    ) -> AsyncThrowingStream<Value, any Error>
++    where Value: Decodable & Sendable, Request: Encodable & Sendable {
++        observe(
++            type,
++            bufferingPolicy: bufferingPolicy,
++            makeInitialMessage: {
++                .data(try JSONEncoder.conductor.encode(request))
++            },
++            at: makeURL
++        )
++    }
++
++    private static func observe<Value: Decodable & Sendable>(
++        _ type: Value.Type,
++        bufferingPolicy: AsyncThrowingStream<
++            Value,
++            any Error
++        >.Continuation.BufferingPolicy,
++        makeInitialMessage: @escaping @Sendable () throws -> URLSessionWebSocketTask.Message?,
++        at makeURL: @escaping @Sendable (String) -> URL?
+     ) -> AsyncThrowingStream<Value, any Error> {
+         @Dependency(\.urlSession) var urlSession
+         @Shared(.desktopServerAddress) var desktopServerAddress
+@@ -77,8 +114,10 @@ extension DesktopClient {
+                 return webSocketStream(
+                     type,
+                     bufferingPolicy: bufferingPolicy,
++                    makeInitialMessage: makeInitialMessage,
+                     using: WebSocketTaskClient(
+-                        urlSession.webSocketTask(with: url)
++                        url: url,
++                        configuration: urlSession.configuration
+                     )
+                 )
+             }
+@@ -118,6 +157,43 @@ extension DesktopClient {
+             any Error
+         >.Continuation.BufferingPolicy = .bufferingNewest(1),
+         using task: WebSocketTaskClient
++    ) -> AsyncThrowingStream<Value, any Error> {
++        webSocketStream(
++            type,
++            bufferingPolicy: bufferingPolicy,
++            makeInitialMessage: { nil },
++            using: task
++        )
++    }
++
++    static func webSocketStream<Value, Request>(
++        _ type: Value.Type,
++        sending request: Request,
++        bufferingPolicy: AsyncThrowingStream<
++            Value,
++            any Error
++        >.Continuation.BufferingPolicy = .bufferingNewest(1),
++        using task: WebSocketTaskClient
++    ) -> AsyncThrowingStream<Value, any Error>
++    where Value: Decodable & Sendable, Request: Encodable & Sendable {
++        webSocketStream(
++            type,
++            bufferingPolicy: bufferingPolicy,
++            makeInitialMessage: {
++                .data(try JSONEncoder.conductor.encode(request))
++            },
++            using: task
++        )
++    }
++
++    private static func webSocketStream<Value: Decodable & Sendable>(
++        _ type: Value.Type,
++        bufferingPolicy: AsyncThrowingStream<
++            Value,
++            any Error
++        >.Continuation.BufferingPolicy,
++        makeInitialMessage: @escaping @Sendable () throws -> URLSessionWebSocketTask.Message?,
++        using task: WebSocketTaskClient
+     ) -> AsyncThrowingStream<Value, any Error> {
+         @Shared(.desktopConnectionStatus) var connectionStatus
+         let sharedConnectionStatus = $connectionStatus
+@@ -129,7 +205,6 @@ extension DesktopClient {
+         }
+ 
+         return AsyncThrowingStream(bufferingPolicy: bufferingPolicy) { continuation in
+-            task.resume()
+             let producer = Task {
+                 // A producer can fail before its termination handler is installed. In that case,
+                 // `finish` does not invoke the handler later, so the producer closes the socket.
+@@ -140,6 +215,12 @@ extension DesktopClient {
+                 }
+ 
+                 do {
++                    try await task.resume()
++
++                    if let initialMessage = try makeInitialMessage() {
++                        try await task.send(initialMessage)
++                    }
++
+                     while !Task.isCancelled {
+                         let message = try await task.receive()
+                         guard !Task.isCancelled else {
+@@ -177,7 +258,8 @@ extension DesktopClient {
+     struct WebSocketTaskClient: Sendable {
+         fileprivate var cancel: @Sendable () -> Void
+         fileprivate var receive: @Sendable () async throws -> URLSessionWebSocketTask.Message
+-        fileprivate var resume: @Sendable () -> Void
++        fileprivate var resume: @Sendable () async throws -> Void
++        fileprivate var send: @Sendable (URLSessionWebSocketTask.Message) async throws -> Void
+ 
+         init(_ task: URLSessionWebSocketTask) {
+             task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
+@@ -190,16 +272,86 @@ extension DesktopClient {
+             self.resume = {
+                 task.resume()
+             }
++            self.send = { message in
++                try await task.send(message)
++            }
++        }
++
++        init(url: URL, configuration: URLSessionConfiguration) {
++            let delegate = WebSocketConnectionDelegate()
++            let session = URLSession(
++                configuration: configuration,
++                delegate: delegate,
++                delegateQueue: nil
++            )
++            let task = session.webSocketTask(with: url)
++            task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
++            self.cancel = {
++                task.cancel(with: .goingAway, reason: nil)
++                session.invalidateAndCancel()
++            }
++            self.receive = {
++                try await task.receive()
++            }
++            self.resume = {
++                task.resume()
++                try await delegate.waitUntilOpen()
++            }
++            self.send = { message in
++                try await task.send(message)
++            }
+         }
+ 
+         init( // only exists for tests
+             cancel: @escaping @Sendable () -> Void,
+             receive: @escaping @Sendable () async throws -> URLSessionWebSocketTask.Message,
+-            resume: @escaping @Sendable () -> Void
++            resume: @escaping @Sendable () async throws -> Void,
++            send: @escaping @Sendable (
++                URLSessionWebSocketTask.Message
++            ) async throws -> Void = { _ in }
+         ) {
+             self.cancel = cancel
+             self.receive = receive
+             self.resume = resume
++            self.send = send
++        }
++    }
++}
++
++private final class WebSocketConnectionDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
++    private let openEvents: AsyncThrowingStream<Void, any Error>
++    private let openEventsContinuation: AsyncThrowingStream<Void, any Error>.Continuation
++
++    override init() {
++        (openEvents, openEventsContinuation) = AsyncThrowingStream.makeStream()
++        super.init()
++    }
++
++    func waitUntilOpen() async throws {
++        for try await _ in openEvents {
++            return
++        }
++        throw CancellationError()
++    }
++
++    func urlSession(
++        _ session: URLSession,
++        webSocketTask: URLSessionWebSocketTask,
++        didOpenWithProtocol protocol: String?
++    ) {
++        openEventsContinuation.yield()
++        openEventsContinuation.finish()
++    }
++
++    func urlSession(
++        _ session: URLSession,
++        task: URLSessionTask,
++        didCompleteWithError error: (any Error)?
++    ) {
++        if let error {
++            openEventsContinuation.finish(throwing: error)
++        } else {
++            openEventsContinuation.finish()
+         }
+     }
+ }
+diff --git a/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient.swift b/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient.swift
+index 94d47bd52..49b5066c6 100644
+--- a/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient.swift
++++ b/ios/Modules/Foundations/ConductorMobileData/Sources/DesktopClient.swift
+@@ -26,7 +26,11 @@ public struct DesktopClient: Sendable {
+     public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
+         throw CancellationError()
+     }
+-    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
++    public var observeMessages: @Sendable (
++        _ workspaceID: String,
++        _ sessionID: String,
++        _ request: MessageSyncRequest
++    ) -> AsyncThrowingStream<MessageSyncResponse, any Error> = { _, _, _ in
+         AsyncThrowingStream { $0.finish() }
+     }
+     public var observeSessions: @Sendable (_ workspaceID: String) -> AsyncThrowingStream<[Session], any Error> = { _ in
+@@ -197,12 +201,16 @@ extension DesktopClient: DependencyKey {
+         } fetchDefaultModel: {
+             let settings = try await get(SettingsResponse.self, from: settingsURL())
+             return Session.Model(rawValue: settings.defaultModel)
+-        } observeMessages: { workspaceID, sessionID in
++        } observeMessages: { workspaceID, sessionID, request in
+             // Messages are the only unbounded observation: frames after the initial snapshot
+             // contain incremental changes, so dropping one could permanently miss an update.
+             // Workspace and session frames are complete snapshots and can safely keep only the
+             // newest pending value.
+-            observe([Message].self, bufferingPolicy: .unbounded) { serverAddress in
++            observe(
++                MessageSyncResponse.self,
++                sending: request,
++                bufferingPolicy: .unbounded
++            ) { serverAddress in
+                 messagesWebSocketURL(
+                     serverAddress: serverAddress,
+                     workspaceID: workspaceID,
+diff --git a/ios/Modules/Foundations/ConductorMobileData/Sources/WebSocketHelpers.swift b/ios/Modules/Foundations/ConductorMobileData/Sources/WebSocketHelpers.swift
+index 9010cbfdb..f44ac67da 100644
+--- a/ios/Modules/Foundations/ConductorMobileData/Sources/WebSocketHelpers.swift
++++ b/ios/Modules/Foundations/ConductorMobileData/Sources/WebSocketHelpers.swift
+@@ -16,7 +16,7 @@ public enum WebSocketHelpers {
+     /// The sleep is retry backoff between connections, not message polling. It prevents a stopped
+     /// or unreachable desktop service from causing a tight reconnect loop.
+     public static func observe<Value: Sendable>(
+-        retrying makeStream: () -> AsyncThrowingStream<Value, any Error>,
++        retrying makeStream: () async throws -> AsyncThrowingStream<Value, any Error>,
+         onValue: (Value) async throws -> Void,
+         onFailure: (any Error) async -> Void
+     ) async {
+@@ -24,7 +24,7 @@ public enum WebSocketHelpers {
+ 
+         while !Task.isCancelled {
+             do {
+-                for try await value in makeStream() {
++                for try await value in try await makeStream() {
+                     try await onValue(value)
+                 }
+             } catch is CancellationError {
+diff --git a/ios/Modules/Foundations/ConductorMobileData/Sources/Workspace/Workspace+Display.swift b/ios/Modules/Foundations/ConductorMobileData/Sources/Workspace/Workspace+Display.swift
+index 44085b140..796bf5250 100644
+--- a/ios/Modules/Foundations/ConductorMobileData/Sources/Workspace/Workspace+Display.swift
++++ b/ios/Modules/Foundations/ConductorMobileData/Sources/Workspace/Workspace+Display.swift
+@@ -36,6 +36,10 @@ extension Workspace.Status {
+ }
+ 
+ extension Workspace {
++    public var isCloudHosted: Bool {
++        hostingServerURL?.isEmpty == false
++    }
++
+     public var emptyChatDirectoryName: String {
+         let workspaceNameDirectoryName = workspaceName?
+             .split(whereSeparator: \.isWhitespace)
+diff --git a/ios/Modules/Foundations/ConductorMobileData/Tests/DesktopClient+WebSocketsTests.swift b/ios/Modules/Foundations/ConductorMobileData/Tests/DesktopClient+WebSocketsTests.swift
+index accf2ad7c..d32865ddf 100644
+--- a/ios/Modules/Foundations/ConductorMobileData/Tests/DesktopClient+WebSocketsTests.swift
++++ b/ios/Modules/Foundations/ConductorMobileData/Tests/DesktopClient+WebSocketsTests.swift
+@@ -9,6 +9,7 @@
+ import CustomDump
+ import Dependencies
+ import Foundation
++import SharedConductorData
+ import Sharing
+ import Testing
+ 
+@@ -153,6 +154,105 @@ struct DesktopClientWebSocketsTests {
+         }
+     }
+ 
++    @Test("WebSocket observations wait for resume before sending their request")
++    func webSocketInitialRequest() async throws {
++        struct TestError: Error { }
++
++        let request = MessageSyncRequest(fingerprints: ["message-1": Data([0, 1])])
++        let events = LockIsolated<[String]>([])
++        let (openEvents, openEventsContinuation) = AsyncStream.makeStream(of: Void.self)
++        let receiveCount = LockIsolated(0)
++        let (resumeStarted, resumeStartedContinuation) = AsyncStream.makeStream(of: Void.self)
++        let sentRequests = LockIsolated<[MessageSyncRequest]>([])
++        let stream = DesktopClient.webSocketStream(
++            [String].self,
++            sending: request,
++            using: DesktopClient.WebSocketTaskClient {
++            } receive: {
++                let count = receiveCount.withValue {
++                    $0 += 1
++                    return $0
++                }
++                guard count == 1 else {
++                    throw CancellationError()
++                }
++                events.withValue { $0.append("receive") }
++                return .string(#"["response"]"#)
++            } resume: {
++                events.withValue { $0.append("resume") }
++                resumeStartedContinuation.yield()
++                for await _ in openEvents {
++                    break
++                }
++                events.withValue { $0.append("open") }
++            } send: { message in
++                events.withValue { $0.append("send") }
++                let data = switch message {
++                case .data(let data):
++                    data
++
++                case .string(let string):
++                    Data(string.utf8)
++
++                @unknown default:
++                    throw TestError()
++                }
++                let decodedRequest = try JSONDecoder.conductor.decode(
++                    MessageSyncRequest.self,
++                    from: data
++                )
++                sentRequests.withValue {
++                    $0.append(decodedRequest)
++                }
++            }
++        )
++        let responseTask = Task {
++            var iterator = stream.makeAsyncIterator()
++            return try await iterator.next()
++        }
++        var resumeStartedIterator = resumeStarted.makeAsyncIterator()
++
++        _ = await resumeStartedIterator.next()
++        expectNoDifference(events.value, ["resume"])
++        expectNoDifference(sentRequests.value, [])
++
++        openEventsContinuation.yield()
++        openEventsContinuation.finish()
++
++        let response = try await responseTask.value
++        expectNoDifference(try #require(response), ["response"])
++        expectNoDifference(
++            Array(events.value.prefix(4)),
++            ["resume", "open", "send", "receive"]
++        )
++        expectNoDifference(sentRequests.value, [request])
++    }
++
++    @Test("A WebSocket request send failure terminates before receiving")
++    func webSocketInitialRequestFailure() async {
++        struct TestError: Error { }
++
++        let receiveCount = LockIsolated(0)
++        let stream = DesktopClient.webSocketStream(
++            [String].self,
++            sending: MessageSyncRequest(fingerprints: [:]),
++            using: DesktopClient.WebSocketTaskClient {
++            } receive: {
++                receiveCount.withValue { $0 += 1 }
++                return .string(#"["unexpected"]"#)
++            } resume: {
++            } send: { _ in
++                throw TestError()
++            }
++        )
++        var iterator = stream.makeAsyncIterator()
++
++        await #expect(throws: TestError.self) {
++            try await iterator.next()
++        }
++        expectNoDifference(receiveCount.value, 0)
++    }
++
+     @Test("WebSocket observations retain only the newest pending snapshot")
+     func webSocketSnapshotBuffering() async throws {
+         struct TestError: Error { }
+diff --git a/ios/Modules/Package.swift b/ios/Modules/Package.swift
+index acf4b7d40..e8a0791c5 100644
+--- a/ios/Modules/Package.swift
++++ b/ios/Modules/Package.swift
+@@ -14,6 +14,7 @@ let package = Package(
+     ],
+     products: [
+         .library(name: "ConductorChat", targets: ["ConductorChat"]),
++        .library(name: "ConductorCloud", targets: ["ConductorCloud"]),
+         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
+         .library(name: "ConductorMain", targets: ["ConductorMain"]),
+         .library(name: "ConductorMobileData", targets: ["ConductorMobileData"]),
+@@ -35,6 +36,19 @@ let package = Package(
+         .package(url: "https://github.com/swiftlang/swift-syntax", exact: "603.0.2"),
+     ],
+     targets: [
++        .target(
++            name: "ConductorCloud",
++            dependencies: [
++                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
++                .product(name: "Dependencies", package: "swift-dependencies"),
++                .product(name: "DependenciesMacros", package: "swift-dependencies"),
++                .product(name: "LucideIcons", package: "lucide-icons-swift"),
++                .product(name: "Sharing", package: "swift-sharing"),
++                "ConductorDesign",
++            ],
++            path: "ConductorCloud/Sources",
++            swiftSettings: swiftSettings
++        ),
+         .target(
+             name: "ConductorMobileData",
+             dependencies: [
+@@ -60,6 +74,7 @@ let package = Package(
+                 .product(name: "Sharing", package: "swift-sharing"),
+                 .product(name: "SQLiteData", package: "sqlite-data"),
+                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
++                "ConductorCloud",
+                 "ConductorMobileData",
+                 "ConductorDesign",
+             ],
+@@ -87,6 +102,7 @@ let package = Package(
+             dependencies: [
+                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                 .product(name: "Sharing", package: "swift-sharing"),
++                "ConductorCloud",
+                 "ConductorDesign",
+                 "ConductorMobileData",
+             ],
+@@ -102,6 +118,7 @@ let package = Package(
+                 .product(name: "Logging", package: "swift-log"),
+                 .product(name: "Sharing", package: "swift-sharing"),
+                 .product(name: "SQLiteData", package: "sqlite-data"),
++                "ConductorCloud",
+                 "ConductorMobileData",
+                 "ConductorDesign",
+             ],
+@@ -113,6 +130,8 @@ let package = Package(
+             dependencies: [
+                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                 "ConductorChat",
++                "ConductorCloud",
++                "ConductorMobileData",
+                 "ConductorSettings",
+                 "ConductorWorkspaces",
+             ],
+diff --git a/ios/project.yml b/ios/project.yml
+index 95c2dd0f8..81ad8d6f4 100644
+--- a/ios/project.yml
++++ b/ios/project.yml
+@@ -62,6 +62,11 @@ targets:
+           - UIInterfaceOrientationPortrait
+           - UIInterfaceOrientationLandscapeLeft
+           - UIInterfaceOrientationLandscapeRight
++    entitlements:
++      path: ConductorMobile/ConductorMobile.entitlements
++      properties:
++        keychain-access-groups:
++          - $(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
+     dependencies:
+       - package: ConductorShared
+         product: ConductorFoundation
+@@ -112,6 +117,20 @@ targets:
+         GENERATE_INFOPLIST_FILE: YES
+         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorMobileDataTests
+         PRODUCT_NAME: $(TARGET_NAME)
++  ConductorCloudTests:
++    type: bundle.unit-test
++    platform: iOS
++    deploymentTarget: "26.0"
++    sources:
++      - path: Modules/ConductorCloud/Tests
++    dependencies:
++      - package: ConductorModules
++        product: ConductorCloud
++    settings:
++      base:
++        GENERATE_INFOPLIST_FILE: YES
++        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorCloudTests
++        PRODUCT_NAME: $(TARGET_NAME)
+   ConductorDesignTests:
+     type: bundle.unit-test
+     platform: iOS
+@@ -208,6 +227,13 @@ schemes:
+     test:
+       targets:
+         - ConductorMobileDataTests
++  ConductorCloudTests:
++    build:
++      targets:
++        ConductorCloudTests: test
++    test:
++      targets:
++        - ConductorCloudTests
+   ConductorDesignTests:
+     build:
+       targets:
+diff --git a/ios/scripts/deploy.sh b/ios/scripts/deploy.sh
+index a8d7211ae..15d58772a 100755
+--- a/ios/scripts/deploy.sh
++++ b/ios/scripts/deploy.sh
+@@ -78,9 +78,7 @@ XCODEBUILD_ARGS=(
+   -derivedDataPath "$DERIVED_DATA_PATH"
+ )
+ 
+-if [[ "$IS_SIMULATOR" == true ]]; then
+-  XCODEBUILD_ARGS+=(CODE_SIGNING_ALLOWED=NO)
+-else
++if [[ "$IS_SIMULATOR" == false ]]; then
+   XCODEBUILD_ARGS+=(-allowProvisioningUpdates)
+ fi
+ 
+diff --git a/ios/scripts/test.sh b/ios/scripts/test.sh
+index ebdc44119..b0b0d4253 100755
+--- a/ios/scripts/test.sh
++++ b/ios/scripts/test.sh
+@@ -10,6 +10,7 @@ if [[ -z "${TEST_DESTINATION:-}" ]]; then
+ fi
+ 
+ TEST_SCHEMES=(
++  ConductorCloudTests
+   ConductorChatTests
+   SharedConductorDataTests
+   ConductorMobileDataTests
+diff --git a/shared/Package.resolved b/shared/Package.resolved
+index 50633c6b2..c0c2c510f 100644
+--- a/shared/Package.resolved
++++ b/shared/Package.resolved
+@@ -132,8 +132,8 @@
+       "kind" : "remoteSourceControl",
+       "location" : "https://github.com/pointfreeco/swift-structured-queries",
+       "state" : {
+-        "revision" : "500c4cb5182842ded958ad32052ed2e35bec5fb7",
+-        "version" : "0.33.1"
++        "revision" : "dafddd843f10630aa6b5be47c1b6a59cc4ab6586",
++        "version" : "0.34.0"
+       }
+     },
+     {
+diff --git a/shared/SharedConductorData/Sources/Message.swift b/shared/SharedConductorData/Sources/Message.swift
+index 37eec23ca..e91572f0a 100644
+--- a/shared/SharedConductorData/Sources/Message.swift
++++ b/shared/SharedConductorData/Sources/Message.swift
+@@ -5,6 +5,7 @@
+ //  Created by Gannon Prudomme on 7/12/26.
+ //
+ 
++import CryptoKit
+ import Foundation
+ import SQLiteData
+ 
+@@ -72,6 +73,14 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
+     }
+ }
+ 
++public extension Message {
++    func syncFingerprint() throws -> Data {
++        let encoder = JSONEncoder.conductor
++        encoder.outputFormatting = [.sortedKeys]
++        return Data(SHA256.hash(data: try encoder.encode(self)))
++    }
++}
++
+ extension Message {
+     public struct Role: Codable, Hashable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {
+         public var rawValue: String
+diff --git a/shared/SharedConductorData/Tests/MessageTests.swift b/shared/SharedConductorData/Tests/MessageTests.swift
+index 3aac7513c..c68e4d06d 100644
+--- a/shared/SharedConductorData/Tests/MessageTests.swift
++++ b/shared/SharedConductorData/Tests/MessageTests.swift
+@@ -11,6 +11,41 @@ import SQLiteData
+ import Testing
+ 
+ struct MessageTests {
++    @Test("Message sync fingerprints are stable and include every persisted field")
++    func syncFingerprint() throws {
++        let message = fingerprintMessage()
++        let fingerprint = try message.syncFingerprint()
++        let expectedFingerprint = try #require(
++            Data(
++                base64Encoded: "nTTlm7UOOQUx7OWctQHzTi2qjeL8SqvaGrPwbEFv4qo="
++            )
++        )
++
++        #expect(fingerprint == expectedFingerprint)
++
++        let variants = [
++            fingerprintMessage(id: "message-2"),
++            changing(message, \.sessionID, to: "session-2"),
++            changing(message, \.role, to: .assistant),
++            changing(message, \.content, to: "Updated"),
++            changing(message, \.createdAt, to: Date(timeIntervalSince1970: 2)),
++            changing(message, \.sentAt, to: Date(timeIntervalSince1970: 3)),
++            changing(message, \.fullMessage, to: "Updated full message"),
++            changing(message, \.cancelledAt, to: "2026-07-16T00:00:00Z"),
++            changing(message, \.model, to: "gpt-6"),
++            changing(message, \.sdkMessageID, to: "sdk-2"),
++            changing(message, \.lastAssistantMessageID, to: "assistant-2"),
++            changing(message, \.turnID, to: "turn-2"),
++            changing(message, \.isResumableMessage, to: 0),
++            changing(message, \.queueOrder, to: 2),
++            changing(message, \.senderID, to: "sender-2"),
++        ]
++
++        for variant in variants {
++            #expect(try variant.syncFingerprint() != fingerprint)
++        }
++    }
++
+     @Test("Message decoding preserves unknown roles and nullable fields")
+     func decoding() throws {
+         let message = try JSONDecoder.conductor.decode(
+@@ -92,3 +127,33 @@ struct MessageTests {
+         #expect(messages[1].sentAt == Date(timeIntervalSince1970: 1_783_555_203.125))
+     }
+ }
++
++private func fingerprintMessage(id: String = "message-1") -> Message {
++    Message(
++        id: id,
++        sessionID: "session-1",
++        role: .user,
++        content: "Hello",
++        createdAt: Date(timeIntervalSince1970: 0),
++        sentAt: Date(timeIntervalSince1970: 1),
++        fullMessage: "Full message",
++        cancelledAt: "",
++        model: "gpt-5",
++        sdkMessageID: "sdk-1",
++        lastAssistantMessageID: "assistant-1",
++        turnID: "turn-1",
++        isResumableMessage: 1,
++        queueOrder: 1,
++        senderID: "sender-1"
++    )
++}
++
++private func changing<Value>(
++    _ message: Message,
++    _ keyPath: WritableKeyPath<Message, Value>,
++    to value: Value
++) -> Message {
++    var message = message
++    message[keyPath: keyPath] = value
++    return message
++}
