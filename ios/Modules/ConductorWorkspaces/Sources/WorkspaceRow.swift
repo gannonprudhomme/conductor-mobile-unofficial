@@ -114,7 +114,7 @@ struct WorkspaceRow: View {
             }
         }
 
-        Section {
+        Menu {
             Picker(
                 "Status",
                 selection: Binding( // no Binding initializer for sqlite-backed data, so must send an action
@@ -135,7 +135,20 @@ struct WorkspaceRow: View {
                     .tag(status)
                 }
             }
+            .labelsHidden()
             .pickerStyle(.inline)
+        } label: {
+            Label {
+                Text("Set status")
+            } icon: {
+                LinearStatusIcon(
+                    status: item.workspace.status,
+                    size: iconSize,
+                    preservesColor: true
+                )
+            }
+
+            Text(item.workspace.status.title)
         }
 
         Section {
