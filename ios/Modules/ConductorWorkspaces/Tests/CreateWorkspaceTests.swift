@@ -79,6 +79,7 @@ struct CreateWorkspaceTests {
             $0.defaultFileStorage = .inMemory
         } operation: {
             var state = CreateWorkspace.State(repositories: [repository])
+            state.agentType = .codex
             state.isFastModeEnabled = true
             state.selectedModel = .gpt_5_6_terra
             state.selectedReasoningEffort = .ultra
@@ -107,12 +108,14 @@ struct CreateWorkspaceTests {
                     message,
                     model,
                     isFastModeEnabled,
+                    mode,
                     reasoningEffort in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(mode == .steer)
                     #expect(reasoningEffort == .ultra)
                     return sentMessage
                 }
@@ -176,8 +179,22 @@ struct CreateWorkspaceTests {
         }
     }
 
-    @Test("The desktop default model seeds the picker until the user selects one")
-    func defaultModel() async {
+    @Test("Creation uses Conductor defaults before the desktop responds")
+    func conductorModelDefaults() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let state = CreateWorkspace.State(repositories: [.preview()])
+
+            #expect(state.agentType == .claude)
+            #expect(state.selectedModel == .opus5)
+            #expect(state.selectedReasoningEffort == .high)
+            #expect(!state.isFastModeEnabled)
+        }
+    }
+
+    @Test("Desktop model settings seed creation until the user makes a selection")
+    func modelSettings() async {
         await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
@@ -187,14 +204,21 @@ struct CreateWorkspaceTests {
             ) {
                 CreateWorkspace()
             } withDependencies: {
-                $0.desktopClient.fetchDefaultModel = { .sonnet5_1M }
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: .sonnet5_1M,
+                        defaultReasoningEffort: .extraHigh,
+                        isFastModeEnabled: true
+                    )
+                }
             }
 
             await store.send(.task)
-            await store.receive(\.defaultModelFetched) {
+            await store.receive(\.modelSettingsFetched) {
                 $0.agentType = .claude
+                $0.isFastModeEnabled = true
                 $0.selectedModel = .sonnet5_1M
-                $0.selectedReasoningEffort = .high
+                $0.selectedReasoningEffort = .extraHigh
             }
 
             await store.send(.binding(.set(\.selectedModel, .opus4_8_1M))) {
@@ -205,7 +229,21 @@ struct CreateWorkspaceTests {
                 $0.agentType = .codex
                 $0.selectedModel = .gpt_5_6_sol
             }
-            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+            await store.send(.binding(.set(\.isFastModeEnabled, false))) {
+                $0.hasUserSelectedFastMode = true
+                $0.isFastModeEnabled = false
+            }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: true
+                    )
+                )
+            ) {
+                $0.selectedReasoningEffort = .low
+            }
         }
     }
 
@@ -221,10 +259,12 @@ struct CreateWorkspaceTests {
             }
 
             await store.send(.reasoningEffortSelected(.medium)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .medium
             }
-            await store.send(.reasoningEffortSelected(.ultracode))
+            await store.send(.reasoningEffortSelected(.ultra))
             await store.send(.binding(.set(\.selectedModel, .gpt5_4))) {
+                $0.agentType = .codex
                 $0.hasUserSelectedModel = true
                 $0.selectedModel = .gpt5_4
             }
@@ -233,6 +273,64 @@ struct CreateWorkspaceTests {
                 $0.selectedModel = .fable5
             }
             await store.send(.reasoningEffortSelected(.ultracode)) {
+                $0.hasUserSelectedReasoningEffort = true
+                $0.selectedReasoningEffort = .ultracode
+            }
+        }
+    }
+
+    @Test("Creation uses a saved mobile override before the desktop responds")
+    func offlineMobileModelSettingsOverride() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            @Shared(.mobileModelSettingsOverride) var mobileModelSettingsOverride
+            $mobileModelSettingsOverride.withLock {
+                $0 = DesktopClient.ModelSettings(
+                    defaultModel: .gpt_5_6_terra,
+                    defaultReasoningEffort: .ultra,
+                    isFastModeEnabled: true
+                )
+            }
+
+            let state = CreateWorkspace.State(repositories: [.preview()])
+
+            #expect(state.agentType == .codex)
+            #expect(state.selectedModel == .gpt_5_6_terra)
+            #expect(state.selectedReasoningEffort == .ultra)
+            #expect(state.isFastModeEnabled)
+        }
+    }
+
+    @Test("Mobile model settings override Conductor defaults")
+    func mobileModelSettingsOverride() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let state = CreateWorkspace.State(repositories: [.preview()])
+            state.$mobileModelSettingsOverride.withLock {
+                $0 = DesktopClient.ModelSettings(
+                    defaultModel: .fable5,
+                    defaultReasoningEffort: .ultracode,
+                    isFastModeEnabled: true
+                )
+            }
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            }
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            ) {
+                $0.agentType = .claude
+                $0.isFastModeEnabled = true
+                $0.selectedModel = .fable5
                 $0.selectedReasoningEffort = .ultracode
             }
         }

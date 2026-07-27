@@ -28,6 +28,7 @@ export async function prepareWorkspaceUIHook() {
   }
 
   const {
+    agentService,
     gitService,
     messageProcessingController,
     sessionService,
@@ -39,8 +40,13 @@ export async function prepareWorkspaceUIHook() {
   eventsURL.searchParams.set("revision", hookRevision);
   const commandResultURL = new URL("command-result", hookBaseURL);
   // Keep one queue across loader runs so a replacement cannot overtake a pending setter.
-  const commandQueue = globalThis[commandQueueKey] ?? { tail: Promise.resolve() };
+  const commandQueue = globalThis[commandQueueKey] ?? {
+    pendingCancellations: new Map(),
+    tail: Promise.resolve(),
+  };
+  commandQueue.pendingCancellations ??= new Map();
   const controller = createController({
+    agentService,
     commandQueue,
     eventsURL,
     gitService,
@@ -141,18 +147,31 @@ function resolveConductorServices(serviceModule) {
     ],
     "GitService",
   );
+  const agentService = uniqueService(
+    serviceModule,
+    ["processNextMessage", "sendQueuedMessageImmediately"],
+    "AgentService",
+  );
   const sessionService = uniqueService(
     serviceModule,
     [
       "createSession",
+      "deleteQueuedMessage",
+      "editQueuedMessage",
       "getSessionsForWorkspace",
-      "setSessionAgentAndModel",
+      "hideSession",
       "markWorkspaceAsRead",
+      "pauseQueue",
+      "reorderQueuedMessages",
+      "resumeQueue",
+      "setSessionAgentAndModel",
       "setUnread",
       "updateSessionClaudeEffortLevel",
       "updateSessionCodexThinkingLevel",
+      "unhideSession",
       "updateSessionFastMode",
       "updateSessionModel",
+      "updateSessionTitle",
     ],
     "SessionService",
   );
@@ -161,7 +180,13 @@ function resolveConductorServices(serviceModule) {
     ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
     "MessageProcessingController",
   );
-  return { gitService, messageProcessingController, sessionService, workspaceService };
+  return {
+    agentService,
+    gitService,
+    messageProcessingController,
+    sessionService,
+    workspaceService,
+  };
 }
 
 // Normalize and deduplicate only exact Conductor asset URLs before fetching or importing them.
@@ -202,6 +227,7 @@ function uniqueService(module, methods, name) {
 }
 
 function createController({
+  agentService,
   commandQueue,
   commandResultURL,
   eventsURL,
@@ -251,16 +277,18 @@ function createController({
         }
 
         const execute = () => executeAndReportCommand({
+          agentService,
           commandResultURL,
           gitService,
           messageProcessingController,
+          pendingCancellations: commandQueue.pendingCancellations,
           sessionService,
           workspaceService,
         }, command);
         const reportError = (error) => {
           console.error("Conductor Mobile UI command failed.", error);
         };
-        if (command.field === "sendMessage") {
+        if (command.field === "hidden" || command.field === "sendMessage") {
           execute().catch(reportError);
           return;
         }
@@ -292,8 +320,70 @@ async function refreshHook({ hookRevision, hookURL }) {
 }
 
 function parseCommand(data) {
-  // The server builds these commands; this check keeps each trusted SSE frame to one mutation.
   const value = JSON.parse(data);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("The command is invalid.");
+  }
+
+  // Swift constructs these trusted SSE commands after validating the requested queue order.
+  if ("orderedIds" in value) {
+    return {
+      field: "queueOrder",
+      requestId: value.requestId,
+      value: {
+        sessionId: value.sessionId,
+        orderedIds: value.orderedIds,
+      },
+    };
+  }
+
+  if (
+    Object.keys(value).length === 3
+    && typeof value.requestId === "string"
+    && value.requestId.length > 0
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && typeof value.queuePaused === "boolean"
+  ) {
+    return {
+      field: "queuePaused",
+      requestId: value.requestId,
+      sessionId: value.sessionId,
+      value: value.queuePaused,
+    };
+  }
+  if (value && typeof value === "object" && "queuePaused" in value) {
+    throw new Error("The command is invalid.");
+  }
+
+  const edit = value?.queuedMessageEdit;
+  if (
+    Object.keys(value).length === 3
+    && typeof value.requestId === "string"
+    && value.requestId.length > 0
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && edit
+    && typeof edit === "object"
+    && !Array.isArray(edit)
+    && Object.keys(edit).length === 3
+    && typeof edit.messageId === "string"
+    && edit.messageId.length > 0
+    && typeof edit.content === "string"
+    && edit.content.trim().length > 0
+    && typeof edit.resumeQueue === "boolean"
+  ) {
+    return {
+      field: "queuedMessageEdit",
+      requestId: value.requestId,
+      sessionId: value.sessionId,
+      value: edit,
+    };
+  }
+  if (value && typeof value === "object" && "queuedMessageEdit" in value) {
+    throw new Error("The command is invalid.");
+  }
+
   const [field, ...extraFields] = Object.keys(value)
     .filter((candidate) => !["requestId", "sessionId", "workspaceId"].includes(candidate));
   if (!field || extraFields.length > 0) {
@@ -352,7 +442,14 @@ function delay(milliseconds) {
 }
 
 async function executeCommand(
-  { gitService, messageProcessingController, sessionService, workspaceService },
+  {
+    agentService,
+    gitService,
+    messageProcessingController,
+    pendingCancellations,
+    sessionService,
+    workspaceService,
+  },
   command,
 ) {
   switch (command.field) {
@@ -389,6 +486,41 @@ async function executeCommand(
           onCreation: resolve,
         }).catch(reject);
       });
+      return;
+    case "hidden":
+      const sessionInput = {
+        sessionId: command.sessionId,
+        workspaceId: command.workspaceId,
+      };
+      if (!command.value) {
+        try {
+          await pendingCancellations.get(command.sessionId);
+        } catch {
+          // A failed close leaves the session visible, but a later restore may still unhide it.
+        }
+        await sessionService.unhideSession(sessionInput);
+        return;
+      }
+      const previousCancellation = pendingCancellations.get(command.sessionId);
+      const cancellation = (async () => {
+        try {
+          await previousCancellation;
+        } catch {
+          // A newer close can retry after an earlier cancellation failed.
+        }
+        await messageProcessingController.cancelSession(command.sessionId, {
+          compressLogsAfterStop: true,
+        });
+        await sessionService.hideSession(sessionInput);
+      })();
+      pendingCancellations.set(command.sessionId, cancellation);
+      try {
+        await cancellation;
+      } finally {
+        if (pendingCancellations.get(command.sessionId) === cancellation) {
+          pendingCancellations.delete(command.sessionId);
+        }
+      }
       return;
     case "model":
       await sessionService.updateSessionModel(command.sessionId, command.value);
@@ -438,6 +570,49 @@ async function executeCommand(
     case "stopSession":
       await messageProcessingController.cancelSession(command.sessionId);
       return;
+    case "queueOrder":
+      await sessionService.reorderQueuedMessages(command.value);
+      return;
+    case "deleteQueuedMessage":
+      if (typeof command.value !== "string" || command.value.length === 0) {
+        throw new Error("The queued-message delete command is invalid.");
+      }
+      await sessionService.deleteQueuedMessage({
+        messageId: command.value,
+        sessionId: command.sessionId,
+      });
+      await agentService.processNextMessage(command.sessionId);
+      return;
+    case "queuePaused":
+      await sessionService[command.value ? "pauseQueue" : "resumeQueue"]({
+        sessionId: command.sessionId,
+      });
+      if (!command.value) {
+        await agentService.processNextMessage(command.sessionId);
+      }
+      return;
+    case "queuedMessageEdit":
+      await sessionService.editQueuedMessage({
+        sessionId: command.sessionId,
+        messageId: command.value.messageId,
+        content: command.value.content,
+      });
+      if (command.value.resumeQueue) {
+        await sessionService.resumeQueue({ sessionId: command.sessionId });
+        await agentService.processNextMessage(command.sessionId);
+      }
+      return;
+    case "steerQueuedMessage":
+      if (typeof command.value !== "string" || command.value.length === 0) {
+        throw new Error("The queued-message steer command is invalid.");
+      }
+      if (!await agentService.sendQueuedMessageImmediately({
+        messageId: command.value,
+        sessionId: command.sessionId,
+      })) {
+        throw new Error("The queued message is no longer available.");
+      }
+      return;
     case "pinned":
       await workspaceService.setWorkspacePinned({
         workspaceId: command.workspaceId,
@@ -448,6 +623,13 @@ async function executeCommand(
       await workspaceService.setWorkspaceManualStatus({
         workspaceId: command.workspaceId,
         status: command.value,
+      });
+      return;
+    case "title":
+      await sessionService.updateSessionTitle({
+        sessionId: command.sessionId,
+        workspaceId: command.workspaceId,
+        title: command.value,
       });
       return;
     case "unread":

@@ -14,7 +14,9 @@ import Sharing
 @DependencyClient
 public struct DesktopClient: Sendable {
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
+    public var beginQueuedMessageEdit: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageID: Message.ID) async throws -> QueuedMessageEdit
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
+    public var closeSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
     public var createSession: @Sendable (_ workspaceID: String) async throws -> Session
     public var createWorkspace: @Sendable (
         _ workspaceID: Workspace.ID,
@@ -23,10 +25,11 @@ public struct DesktopClient: Sendable {
         _ model: Session.Model,
         _ isFastModeEnabled: Bool
     ) async throws -> CreatedWorkspace
-    public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
+    public var deleteQueuedMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageID: Message.ID) async throws -> Void
+    public var fetchModelSettings: @Sendable () async throws -> ModelSettings = {
         throw CancellationError()
     }
-    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
+    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<MessageSyncEvent, any Error> = { _, _ in
         AsyncThrowingStream { $0.finish() }
     }
     public var observeSessions: @Sendable (_ workspaceID: String) -> AsyncThrowingStream<[Session], any Error> = { _ in
@@ -40,18 +43,31 @@ public struct DesktopClient: Sendable {
         _ workspaceID: String,
         _ branch: String
     ) async throws -> Void
+    public var renameSession: @Sendable (_ workspaceID: String, _ sessionID: String, _ title: String) async throws -> Void
+    public var restoreSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
+    public var finishQueuedMessageEdit: @Sendable (
+        _ workspaceID: String,
+        _ sessionID: String,
+        _ messageID: Message.ID,
+        _ content: String,
+        _ shouldResumeQueue: Bool
+    ) async throws -> Void
+    public var reorderQueuedMessages: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageIDs: [Message.ID]) async throws -> Void
+    public var resumeQueuedMessages: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
     public var sendMessage: @Sendable (
         _ workspaceID: String,
         _ sessionID: String,
         _ message: String,
         _ model: Session.Model,
         _ isFastModeEnabled: Bool,
+        _ mode: MessageMode,
         _ reasoningEffort: Session.ReasoningEffort?
     ) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> UIHookMutationPath
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> UIHookMutationPath
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> UIHookMutationPath
     public var stopSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Session?
+    public var steerQueuedMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageID: Message.ID) async throws -> Void
 
     public enum ConnectionStatus: Equatable, Sendable {
         case connected
@@ -65,6 +81,11 @@ public struct DesktopClient: Sendable {
         case server
     }
 
+    public enum MessageMode: String, Codable, Equatable, Sendable {
+        case queue = "queued"
+        case steer = "sent"
+    }
+
     public struct DisplayConfiguration: Codable, Equatable, Sendable {
         public var name: String
         public var icon: DeviceIcon
@@ -72,6 +93,43 @@ public struct DesktopClient: Sendable {
         public init(name: String, icon: DeviceIcon) {
             self.name = name
             self.icon = icon
+        }
+    }
+
+    public struct ModelSettings: Codable, Equatable, Sendable {
+        public static let conductorDefaults = Self(
+            defaultModel: .opus5,
+            defaultReasoningEffort: .high,
+            isFastModeEnabled: false
+        )
+
+        public var defaultModel: Session.Model
+        public var defaultReasoningEffort: Session.ReasoningEffort
+        public var isFastModeEnabled: Bool
+
+        public init(
+            defaultModel: Session.Model,
+            defaultReasoningEffort: Session.ReasoningEffort,
+            isFastModeEnabled: Bool
+        ) {
+            self.defaultModel = defaultModel
+            self.defaultReasoningEffort = defaultReasoningEffort
+            self.isFastModeEnabled = isFastModeEnabled
+        }
+    }
+
+    public struct QueuedMessageEdit: Codable, Equatable, Sendable {
+        public let message: Message
+        public let shouldResumeQueue: Bool
+
+        public init(message: Message, shouldResumeQueue: Bool) {
+            self.message = message
+            self.shouldResumeQueue = shouldResumeQueue
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case shouldResumeQueue = "should_resume_queue"
         }
     }
 }
@@ -162,8 +220,24 @@ extension DesktopClient: DependencyKey {
                 WorkspacePatchBody(shouldArchive: true),
                 at: workspaceURL(workspaceID: workspaceID)
             )
+        } beginQueuedMessageEdit: { workspaceID, sessionID, messageID in
+            guard let edit = try await post(
+                [String: String](),
+                to: try queueURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: messageID)
+                    .appending(path: "edit"),
+                decoding: QueuedMessageEdit.self
+            ) else {
+                throw DesktopClientError.invalidResponse
+            }
+            return edit
         } checkConnection: { serverAddress in
             try await ping(serverAddress: serverAddress)
+        } closeSession: { workspaceID, sessionID in
+            _ = try await patch(
+                SessionPatchBody(isHidden: true),
+                at: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
         } createSession: { workspaceID in
             guard let session = try await post(
                 [String: String](),
@@ -195,15 +269,31 @@ extension DesktopClient: DependencyKey {
                 throw DesktopClientError.invalidResponse
             }
             return createdWorkspace
-        } fetchDefaultModel: {
+        } deleteQueuedMessage: { workspaceID, sessionID, messageID in
+            let request = try jsonRequest(
+                method: "DELETE",
+                body: [String: String](),
+                url: try queueURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: messageID)
+            )
+            let (data, response) = try await data(for: request)
+            try validateSuccessfulHTTPResponse(response, data: data)
+        } fetchModelSettings: {
             let settings = try await get(SettingsResponse.self, from: settingsURL())
-            return Session.Model(rawValue: settings.defaultModel)
+            let defaultModel = Session.Model(rawValue: settings.defaultModel)
+            return ModelSettings(
+                defaultModel: defaultModel,
+                defaultReasoningEffort: settings.defaultReasoningEffort.map {
+                    Session.ReasoningEffort(rawValue: $0)
+                } ?? defaultModel.defaultReasoningEffort,
+                isFastModeEnabled: settings.defaultFastMode ?? false
+            )
         } observeMessages: { workspaceID, sessionID in
             // Messages are the only unbounded observation: frames after the initial snapshot
             // contain incremental changes, so dropping one could permanently miss an update.
             // Workspace and session frames are complete snapshots and can safely keep only the
             // newest pending value.
-            observe([Message].self, bufferingPolicy: .unbounded) { serverAddress in
+            observe(MessageSyncEvent.self, bufferingPolicy: .unbounded) { serverAddress in
                 messagesWebSocketURL(
                     serverAddress: serverAddress,
                     workspaceID: workspaceID,
@@ -228,12 +318,57 @@ extension DesktopClient: DependencyKey {
                 WorkspacePatchBody(branch: branch),
                 at: workspaceURL(workspaceID: workspaceID)
             )
-        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled, reasoningEffort in
+        } renameSession: { workspaceID, sessionID, title in
+            _ = try await patch(
+                SessionPatchBody(title: title),
+                at: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
+        } restoreSession: { workspaceID, sessionID in
+            _ = try await patch(
+                SessionPatchBody(isHidden: false),
+                at: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
+        } finishQueuedMessageEdit: {
+            workspaceID,
+            sessionID,
+            messageID,
+            content,
+            shouldResumeQueue in
+            let request = try jsonRequest(
+                method: "PATCH",
+                body: QueuedMessageEditBody(
+                    content: content,
+                    shouldResumeQueue: shouldResumeQueue
+                ),
+                url: queueURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: messageID)
+            )
+            let (data, response) = try await data(for: request)
+            try validateSuccessfulHTTPResponse(response, data: data)
+        } reorderQueuedMessages: { workspaceID, sessionID, messageIDs in
+            let request = try jsonRequest(
+                method: "PATCH",
+                body: QueueOrderBody(messageIDs: messageIDs),
+                url: queueURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
+            let (data, response) = try await data(for: request)
+            try validateSuccessfulHTTPResponse(response, data: data)
+        } resumeQueuedMessages: { workspaceID, sessionID in
+            let request = try jsonRequest(
+                method: "POST",
+                body: [String: String](),
+                url: queueURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: "resume")
+            )
+            let (data, response) = try await data(for: request)
+            try validateSuccessfulHTTPResponse(response, data: data)
+        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled, mode, reasoningEffort in
             try await post(
                 SendMessageRequest(
                     message: message,
                     model: model.rawValue,
                     isFastModeEnabled: isFastModeEnabled,
+                    mode: mode,
                     reasoningEffort: reasoningEffort
                 ),
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
@@ -262,6 +397,16 @@ extension DesktopClient: DependencyKey {
                     .appending(path: "stop"),
                 decoding: Session.self
             )
+        } steerQueuedMessage: { workspaceID, sessionID, messageID in
+            let request = try jsonRequest(
+                method: "POST",
+                body: [String: String](),
+                url: try queueURL(workspaceID: workspaceID, sessionID: sessionID)
+                    .appending(path: messageID)
+                    .appending(path: "steer")
+            )
+            let (data, response) = try await data(for: request)
+            try validateSuccessfulHTTPResponse(response, data: data)
         }
     }
 
@@ -335,18 +480,22 @@ extension DesktopClient: DependencyKey {
         let message: String
         let model: String
         let isFastModeEnabled: Bool
+        let mode: MessageMode
         let reasoningEffort: Session.ReasoningEffort?
 
         private enum CodingKeys: String, CodingKey {
             case message
             case model
             case isFastModeEnabled = "fast_mode"
+            case mode
             case reasoningEffort = "reasoning_effort"
         }
     }
 
     private struct SettingsResponse: Decodable {
         let defaultModel: String
+        let defaultFastMode: Bool?
+        let defaultReasoningEffort: String?
     }
 
     private static func settingsURL() throws -> URL {
@@ -357,6 +506,11 @@ extension DesktopClient: DependencyKey {
     private static func messagesURL(workspaceID: String, sessionID: String) throws -> URL {
         try sessionURL(workspaceID: workspaceID, sessionID: sessionID)
             .appending(path: "messages")
+    }
+
+    private static func queueURL(workspaceID: String, sessionID: String) throws -> URL {
+        try messagesURL(workspaceID: workspaceID, sessionID: sessionID)
+            .appending(path: "queue")
     }
 
     // /workspaces/{workspaceID}/sessions/{sessionID}
@@ -532,6 +686,34 @@ struct WorkspacePatchBody: Encodable, Sendable {
     }
 }
 
+private struct SessionPatchBody: Encodable, Sendable {
+    var isHidden: Bool? = nil
+    var title: String? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case isHidden = "hidden"
+        case title
+    }
+}
+
+struct QueueOrderBody: Encodable, Sendable {
+    let messageIDs: [Message.ID]
+
+    private enum CodingKeys: String, CodingKey {
+        case messageIDs = "message_ids"
+    }
+}
+
+struct QueuedMessageEditBody: Encodable, Sendable {
+    let content: String
+    let shouldResumeQueue: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case content
+        case shouldResumeQueue = "resume_queue"
+    }
+}
+
 public extension DesktopClient {
     // GET /repositories/{repositoryID}/icon
     static func repositoryIconURL(for repository: Repository) -> URL? {
@@ -568,6 +750,19 @@ where Self == FileStorageKey<DesktopClient.DisplayConfiguration?>.Default {
             .fileStorage(
                 .applicationSupportDirectory
                     .appending(component: "desktop-display-configuration.json")
+            ),
+            default: nil,
+        ]
+    }
+}
+
+public extension SharedKey
+where Self == FileStorageKey<DesktopClient.ModelSettings?>.Default {
+    static var mobileModelSettingsOverride: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "mobile-model-settings-override.json")
             ),
             default: nil,
         ]

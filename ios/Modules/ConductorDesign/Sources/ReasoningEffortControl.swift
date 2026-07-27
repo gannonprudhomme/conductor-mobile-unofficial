@@ -9,25 +9,25 @@ import ConductorMobileData
 import SharedConductorData
 import SwiftUI
 
-public struct ReasoningEffortControl: View {
-    @State private var displayedEffort: Session.ReasoningEffort?
-
+public struct ReasoningEffortMenu<SourceLabel: View>: View {
     let availableEfforts: [Session.ReasoningEffort]
     let selectedEffort: Session.ReasoningEffort?
     let isDisabled: Bool
     let onSelect: @MainActor (Session.ReasoningEffort) -> Void
+    let label: (Session.ReasoningEffort?) -> SourceLabel
 
     public init(
         availableEfforts: [Session.ReasoningEffort],
         selectedEffort: Session.ReasoningEffort?,
         isDisabled: Bool = false,
-        onSelect: @escaping @MainActor (Session.ReasoningEffort) -> Void
+        onSelect: @escaping @MainActor (Session.ReasoningEffort) -> Void,
+        @ViewBuilder label: @escaping (Session.ReasoningEffort?) -> SourceLabel
     ) {
         self.availableEfforts = availableEfforts
         self.selectedEffort = selectedEffort
         self.isDisabled = isDisabled
         self.onSelect = onSelect
-        _displayedEffort = State(initialValue: selectedEffort)
+        self.label = label
     }
 
     public var body: some View {
@@ -53,12 +53,49 @@ public struct ReasoningEffortControl: View {
                             usesUltraAppearance: effort.usesUltraAppearance
                         )
                     }
-                        .tag(Optional(effort))
+                    .tag(Optional(effort))
                 }
             }
             .labelsHidden()
             .pickerStyle(.inline)
         } label: {
+            label(selectedEffort)
+        }
+        .menuOrder(.fixed)
+        .disabled(isDisabled)
+        .accessibilityLabel("Reasoning effort")
+        .accessibilityValue(selectedEffort?.displayName ?? "Unavailable")
+    }
+}
+
+public struct ReasoningEffortControl: View {
+    @State private var displayedEffort: Session.ReasoningEffort?
+
+    let availableEfforts: [Session.ReasoningEffort]
+    let selectedEffort: Session.ReasoningEffort?
+    let isDisabled: Bool
+    let onSelect: @MainActor (Session.ReasoningEffort) -> Void
+
+    public init(
+        availableEfforts: [Session.ReasoningEffort],
+        selectedEffort: Session.ReasoningEffort?,
+        isDisabled: Bool = false,
+        onSelect: @escaping @MainActor (Session.ReasoningEffort) -> Void
+    ) {
+        self.availableEfforts = availableEfforts
+        self.selectedEffort = selectedEffort
+        self.isDisabled = isDisabled
+        self.onSelect = onSelect
+        _displayedEffort = State(initialValue: selectedEffort)
+    }
+
+    public var body: some View {
+        ReasoningEffortMenu(
+            availableEfforts: availableEfforts,
+            selectedEffort: selectedEffort,
+            isDisabled: isDisabled,
+            onSelect: onSelect
+        ) { _ in
             ZStack(alignment: .leading) {
                 // Menu snapshots its source label while dismissing. Keeping each
                 // effort in place lets opacity animate without clipping that snapshot.
@@ -85,10 +122,6 @@ public struct ReasoningEffortControl: View {
                 displayedEffort = selectedEffort
             }
         }
-        .menuOrder(.fixed)
-        .disabled(isDisabled)
-        .accessibilityLabel("Reasoning effort")
-        .accessibilityValue(selectedEffort?.displayName ?? "Unavailable")
     }
 
     private func effortLabel(for effort: Session.ReasoningEffort) -> some View {

@@ -217,7 +217,7 @@ isolatedTest("failed candidates preserve the installed controller", async () => 
   assert.equal(environment.eventSources[0].closeCount, 0);
 });
 
-isolatedTest("missing or duplicate Git, session, and message controllers preserve the installed hook", async () => {
+isolatedTest("missing or duplicate hook services preserve the installed hook", async () => {
   const environment = installHookGlobals({ shell: emptyWorkspaceShell() });
   const installedController = await prepareHook();
   const shell = emptyWorkspaceShell();
@@ -238,6 +238,21 @@ isolatedTest("missing or duplicate Git, session, and message controllers preserv
   environment.shell = {
     gitService: shell.gitService,
     messageProcessingController: shell.messageProcessingController,
+    sessionService: shell.sessionService,
+    workspaceService: shell.workspaceService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous AgentService/);
+
+  environment.shell = {
+    ...shell,
+    agentAlias: emptyWorkspaceShell().agentService,
+  };
+  await assert.rejects(prepareHook(), /unambiguous AgentService/);
+
+  environment.shell = {
+    agentService: shell.agentService,
+    gitService: shell.gitService,
+    messageProcessingController: shell.messageProcessingController,
     workspaceService: shell.workspaceService,
   };
   await assert.rejects(prepareHook(), /unambiguous SessionService/);
@@ -249,6 +264,7 @@ isolatedTest("missing or duplicate Git, session, and message controllers preserv
   await assert.rejects(prepareHook(), /unambiguous SessionService/);
 
   environment.shell = {
+    agentService: shell.agentService,
     gitService: shell.gitService,
     sessionService: shell.sessionService,
     workspaceService: shell.workspaceService,
@@ -300,13 +316,31 @@ isolatedTest("commands run in order with real service signatures and continue af
       throw new Error("Setter failed.");
     },
   };
+  const agentService = {
+    async processNextMessage(sessionID) {
+      calls.push(["processNextMessage", sessionID]);
+    },
+    async sendQueuedMessageImmediately(input) {
+      calls.push(["steerQueuedMessage", input]);
+      return true;
+    },
+  };
   const sessionService = {
     async createSession(input) {
       calls.push(["createSession", input]);
     },
+    async deleteQueuedMessage(input) {
+      calls.push(["deleteQueuedMessage", input]);
+    },
     async getSessionsForWorkspace(input) {
       calls.push(["sessions", input]);
       return [{ id: "session-1" }];
+    },
+    async hideSession(input) {
+      calls.push(["hide", input]);
+    },
+    async unhideSession(input) {
+      calls.push(["unhide", input]);
     },
     async setUnread(sessionID, isUnread) {
       calls.push(["unread", sessionID, isUnread]);
@@ -328,10 +362,37 @@ isolatedTest("commands run in order with real service signatures and continue af
     async updateSessionModel(sessionID, model) {
       calls.push(["model", sessionID, model]);
     },
+    async updateSessionTitle(input) {
+      calls.push(["title", input]);
+    },
+    async reorderQueuedMessages(input) {
+      calls.push(["queue", input]);
+    },
+    async pauseQueue(input) {
+      calls.push(["pauseQueue", input]);
+    },
+    async resumeQueue(input) {
+      calls.push(["resumeQueue", input]);
+    },
+    async editQueuedMessage(input) {
+      calls.push(["editQueuedMessage", input]);
+    },
   };
-  const { messageProcessingController } = emptyWorkspaceShell();
+  const messageProcessingController = {
+    async cancelSession(sessionID, options) {
+      calls.push(["cancel", sessionID, options]);
+    },
+    async enqueueMessage() {},
+    async sendMessageImmediately() {},
+  };
   const environment = installHookGlobals({
-    shell: { gitService, messageProcessingController, workspaceService, sessionService },
+    shell: {
+      agentService,
+      gitService,
+      messageProcessingController,
+      sessionService,
+      workspaceService,
+    },
   });
   await prepareHook();
   const source = environment.eventSources[0];
@@ -354,6 +415,31 @@ isolatedTest("commands run in order with real service signatures and continue af
   }));
   replacementSource.onmessage(command({ futureCommand: true }));
   replacementSource.onmessage(sessionCommand({ fastMode: true }));
+  replacementSource.onmessage({
+    data: JSON.stringify({
+      sessionId: "session-1",
+      title: "Renamed chat",
+      workspaceId: "workspace-1",
+    }),
+  });
+  replacementSource.onmessage(queueCommand(["message-2", "message-1"], "queue-order"));
+  replacementSource.onmessage(sessionCommand({ queuePaused: true }, "queue-pause"));
+  replacementSource.onmessage(sessionCommand(
+    { deleteQueuedMessage: "message-1" },
+    "queue-delete",
+  ));
+  replacementSource.onmessage(sessionCommand(
+    { steerQueuedMessage: "message-2" },
+    "queue-steer",
+  ));
+  replacementSource.onmessage(sessionCommand({
+    queuedMessageEdit: {
+      messageId: "message-1",
+      content: "Updated",
+      resumeQueue: true,
+    },
+  }, "queue-edit"));
+  replacementSource.onmessage(sessionCommand({ queuePaused: false }, "queue-resume"));
   replacementSource.onmessage(command({ pinned: true, unread: false }));
   replacementSource.onmessage({ data: JSON.stringify({ id: "obsolete", workspaceId: "workspace-1", pinned: true }) });
   replacementSource.onmessage({ data: "not json" });
@@ -361,7 +447,7 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.errors.length, 3);
 
   pinGate.resolve();
-  await waitUntil(() => calls.length === 14);
+  await waitUntil(() => calls.length === 25);
   await waitUntil(() => environment.errors.length === 5);
   assert.deepEqual(calls, [
     ["pin", { workspaceId: "workspace-1", pinned: true }],
@@ -382,10 +468,196 @@ isolatedTest("commands run in order with real service signatures and continue af
     ["userSetBranch", "workspace-1"],
     ["agentAndModel", "session-1", "claude", "fable-5"],
     ["fastMode", { sessionId: "session-1", fastMode: true }],
+    ["title", {
+      sessionId: "session-1",
+      title: "Renamed chat",
+      workspaceId: "workspace-1",
+    }],
+    ["queue", { sessionId: "session-1", orderedIds: ["message-2", "message-1"] }],
+    ["pauseQueue", { sessionId: "session-1" }],
+    ["deleteQueuedMessage", { messageId: "message-1", sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
+    ["steerQueuedMessage", { messageId: "message-2", sessionId: "session-1" }],
+    ["editQueuedMessage", {
+      sessionId: "session-1",
+      messageId: "message-1",
+      content: "Updated",
+    }],
+    ["resumeQueue", { sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
+    ["resumeQueue", { sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
   ]);
   assert.deepEqual(persistedUnreadSessionIDs, ["session-1"]);
   assert.equal(environment.errors.at(-1)[1].message, "Unsupported workspace command: futureCommand");
-  assert.equal(environment.fetches.length, 2);
+  assert.equal(
+    environment.fetches.filter(
+      ([url]) => !url.endsWith("/workspace-ui-hook/command-result"),
+    ).length,
+    2,
+  );
+});
+
+isolatedTest("slow cancellation blocks only its matching session", async () => {
+  const cancellationGate = deferred();
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.hideSession = async (input) => {
+    calls.push(["hide", input]);
+  };
+  shell.sessionService.unhideSession = async (input) => {
+    calls.push(["unhide", input]);
+  };
+  shell.sessionService.updateSessionTitle = async (input) => {
+    calls.push(["title", input]);
+  };
+  shell.messageProcessingController.cancelSession = async (sessionID, options) => {
+    calls.push(["cancel", sessionID, options]);
+    await cancellationGate.promise;
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage({
+    data: JSON.stringify({
+      hidden: true,
+      requestId: "request-close",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+    }),
+  });
+  source.onmessage({
+    data: JSON.stringify({
+      hidden: false,
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+    }),
+  });
+  source.onmessage({
+    data: JSON.stringify({
+      hidden: false,
+      sessionId: "session-2",
+      workspaceId: "workspace-1",
+    }),
+  });
+  source.onmessage({
+    data: JSON.stringify({
+      sessionId: "session-1",
+      title: "Renamed chat",
+      workspaceId: "workspace-1",
+    }),
+  });
+
+  await waitUntil(() =>
+    calls.some((call) => call[0] === "cancel")
+      && calls.some((call) => call[0] === "title")
+      && calls.some((call) => call[0] === "unhide" && call[1].sessionId === "session-2")
+  );
+  assert.deepEqual(calls[0], [
+    "cancel",
+    "session-1",
+    { compressLogsAfterStop: true },
+  ]);
+  assert.equal(calls.some((call) => call[0] === "hide"), false);
+  assert.equal(calls.some((call) => (
+    call[0] === "title"
+      && call[1].sessionId === "session-1"
+      && call[1].title === "Renamed chat"
+  )), true);
+  assert.equal(calls.some((call) => (
+    call[0] === "unhide" && call[1].sessionId === "session-2"
+  )), true);
+  assert.equal(
+    calls.some((call) => call[0] === "unhide" && call[1].sessionId === "session-1"),
+    false,
+  );
+  assert.equal(environment.commandResults.length, 0);
+
+  cancellationGate.resolve();
+  await waitUntil(() =>
+    calls.some((call) => call[0] === "unhide" && call[1].sessionId === "session-1")
+  );
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(environment.commandResults[0], { requestId: "request-close" });
+  assert.equal(
+    calls.findIndex((call) => call[0] === "cancel")
+      < calls.findIndex((call) => call[0] === "hide"),
+    true,
+  );
+});
+
+isolatedTest("cancellation failure keeps the session visible and reports close failure", async () => {
+  const calls = [];
+  const cancellationError = new Error("Cancellation failed.");
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.hideSession = async (input) => {
+    calls.push(["hide", input]);
+  };
+  shell.sessionService.unhideSession = async (input) => {
+    calls.push(["unhide", input]);
+  };
+  shell.messageProcessingController.cancelSession = async (sessionID, options) => {
+    calls.push(["cancel", sessionID, options]);
+    throw cancellationError;
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(hiddenCommand("session-1", true));
+  source.onmessage(hiddenCommand("session-1", false));
+
+  await waitUntil(() => calls.length === 2);
+  assert.equal(calls.some((call) => call[0] === "hide"), false);
+  assert.deepEqual(calls[1], [
+    "unhide",
+    { sessionId: "session-1", workspaceId: "workspace-1" },
+  ]);
+  assert.deepEqual(environment.errors, [[
+    "Conductor Mobile UI command failed.",
+    cancellationError,
+  ]]);
+});
+
+isolatedTest("completed cancellation cannot clear a newer cancellation", async () => {
+  const firstCancellationGate = deferred();
+  const secondCancellationGate = deferred();
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.hideSession = async () => {};
+  shell.sessionService.unhideSession = async (input) => {
+    calls.push(["unhide", input]);
+  };
+  shell.messageProcessingController.cancelSession = async () => {
+    const cancellationNumber = calls.filter((call) => call[0] === "cancel").length + 1;
+    calls.push(["cancel", cancellationNumber]);
+    await (cancellationNumber === 1
+      ? firstCancellationGate.promise
+      : secondCancellationGate.promise);
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(hiddenCommand("session-1", true));
+  await waitUntil(() => calls.length === 1);
+  source.onmessage(hiddenCommand("session-1", true));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.length, 1);
+
+  firstCancellationGate.resolve();
+  await waitUntil(() => calls.length === 2);
+  source.onmessage(hiddenCommand("session-1", false));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.some((call) => call[0] === "unhide"), false);
+
+  secondCancellationGate.resolve();
+  await waitUntil(() => calls.length === 3);
+  assert.deepEqual(calls[2], [
+    "unhide",
+    { sessionId: "session-1", workspaceId: "workspace-1" },
+  ]);
 });
 
 isolatedTest("message commands persist effort, call the explicit controller modes, and report results", async () => {
@@ -522,6 +794,47 @@ isolatedTest("stop commands cancel the exact session and report success or error
     error: "Cannot stop.",
   });
   assert.deepEqual(sessionIDs, ["session-1", "session-2"]);
+});
+
+isolatedTest("queue commands report failures after partial service work", async () => {
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.deleteQueuedMessage = async (input) => {
+    calls.push(["deleteQueuedMessage", input]);
+    throw new Error("Message was already sent.");
+  };
+  shell.sessionService.resumeQueue = async (input) => {
+    calls.push(["resumeQueue", input]);
+  };
+  shell.agentService.processNextMessage = async (sessionID) => {
+    calls.push(["processNextMessage", sessionID]);
+    throw new Error("Could not restart queue processing.");
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(sessionCommand(
+    { deleteQueuedMessage: "message-1" },
+    "request-delete",
+  ));
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-delete",
+    error: "Message was already sent.",
+  });
+
+  source.onmessage(sessionCommand({ queuePaused: false }, "request-resume"));
+  await waitUntil(() => environment.commandResults.length === 2);
+  assert.deepEqual(environment.commandResults[1], {
+    requestId: "request-resume",
+    error: "Could not restart queue processing.",
+  });
+  assert.deepEqual(calls, [
+    ["deleteQueuedMessage", { messageId: "message-1", sessionId: "session-1" }],
+    ["resumeQueue", { sessionId: "session-1" }],
+    ["processNextMessage", "session-1"],
+  ]);
 });
 
 isolatedTest("message sends bypass a blocked workspace command", async () => {
@@ -716,6 +1029,10 @@ function emptyWorkspaceShell() {
     async refreshWorkspaceChanges() {},
     async renameBranch() {},
   };
+  const agentService = {
+    async processNextMessage() {},
+    async sendQueuedMessageImmediately() { return true; },
+  };
   const workspaceService = {
     async archiveWorkspace() {},
     async createWorkspaceWithSetup(input) { input.onCreation(); },
@@ -726,29 +1043,59 @@ function emptyWorkspaceShell() {
   };
   const sessionService = {
     async createSession() {},
+    async deleteQueuedMessage() {},
     async getSessionsForWorkspace() { return []; },
     async setSessionAgentAndModel() {},
+    async hideSession() {},
+    async unhideSession() {},
     async setUnread() {},
     async markWorkspaceAsRead() {},
     async updateSessionClaudeEffortLevel() {},
     async updateSessionCodexThinkingLevel() {},
     async updateSessionFastMode() {},
     async updateSessionModel() {},
+    async updateSessionTitle() {},
+    async reorderQueuedMessages() {},
+    async pauseQueue() {},
+    async resumeQueue() {},
+    async editQueuedMessage() {},
   };
   const messageProcessingController = {
     async cancelSession() {},
     async enqueueMessage() {},
     async sendMessageImmediately() {},
   };
-  return { gitService, messageProcessingController, workspaceService, sessionService };
+  return {
+    agentService,
+    gitService,
+    messageProcessingController,
+    sessionService,
+    workspaceService,
+  };
 }
 
 function command(mutation) {
   return { data: JSON.stringify({ workspaceId: "workspace-1", ...mutation }) };
 }
 
-function sessionCommand(mutation) {
-  return { data: JSON.stringify({ sessionId: "session-1", ...mutation }) };
+function sessionCommand(mutation, requestId) {
+  return {
+    data: JSON.stringify({
+      ...(requestId ? { requestId } : {}),
+      sessionId: "session-1",
+      ...mutation,
+    }),
+  };
+}
+
+function hiddenCommand(sessionId, hidden) {
+  return {
+    data: JSON.stringify({
+      hidden,
+      sessionId,
+      workspaceId: "workspace-1",
+    }),
+  };
 }
 
 function messageCommand({ requestId, ...sendMessage }) {
@@ -765,6 +1112,16 @@ function messageCommand({ requestId, ...sendMessage }) {
 function stopCommand({ requestId, sessionId }) {
   return {
     data: JSON.stringify({ requestId, sessionId, stopSession: true }),
+  };
+}
+
+function queueCommand(orderedIds, requestId) {
+  return {
+    data: JSON.stringify({
+      ...(requestId ? { requestId } : {}),
+      sessionId: "session-1",
+      orderedIds,
+    }),
   };
 }
 

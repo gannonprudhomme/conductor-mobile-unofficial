@@ -234,7 +234,7 @@ enum WorkspaceRoute {
             case .listenerUnavailable:
                 throw PlainTextResponseError(
                     .serviceUnavailable,
-                    message: "Conductor's workspace UI hook is unavailable."
+                    message: "Conductor's UI hook is not connected."
                 )
             case .mutationInFlight:
                 throw PlainTextResponseError(
@@ -621,21 +621,6 @@ extension WorkspaceMutation: Decodable {
             .unread(isUnread: try container.decode(Bool.self, forKey: key))
         default:
             throw RequestDecodingError.invalidBody
-        }
-    }
-
-    private struct AnyCodingKey: CodingKey {
-        let intValue: Int?
-        let stringValue: String
-
-        init?(intValue: Int) {
-            self.intValue = intValue
-            self.stringValue = String(intValue)
-        }
-
-        init?(stringValue: String) {
-            self.intValue = nil
-            self.stringValue = stringValue
         }
     }
 

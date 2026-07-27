@@ -12,6 +12,7 @@ import ConductorFoundation
 import ConductorMain
 import ConductorMobileData
 import Dependencies
+import Foundation
 import Logging
 import Sharing
 import SwiftUI
@@ -27,6 +28,12 @@ struct ConductorMobileApp: App {
 
         try! prepareDependencies {
             try $0.bootstrapDatabase()
+
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-workspace-chat-ui-test") {
+                try $0.prepareWorkspaceChatUITest()
+            }
+            #endif
         }
 
         #if DEBUG

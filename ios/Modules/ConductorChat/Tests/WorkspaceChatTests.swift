@@ -747,6 +747,86 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Session rename is feature-owned, trimmed, and submitted")
+    func sessionRename() async throws {
+        let workspace = try makeWorkspace()
+        let session = try makeSession(
+            id: "session",
+            workspaceID: workspace.id,
+            title: "Old title"
+        )
+        let requests = LockIsolated<[String]>([])
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.renameSession = { workspaceID, sessionID, title in
+                    requests.withValue {
+                        $0.append("\(workspaceID):\(sessionID):\(title)")
+                    }
+                }
+            }
+
+            await store.send(.renameSessionButtonTapped(session)) {
+                $0.renamingSession = session
+                $0.sessionTitleDraft = "Old title"
+                $0.destination = .renameSession
+            }
+            await store.send(.binding(.set(\.sessionTitleDraft, "  New title  "))) {
+                $0.sessionTitleDraft = "  New title  "
+            }
+            await store.send(.renameSessionSubmitted) {
+                $0.renamingSession = nil
+                $0.sessionTitleDraft = "New title"
+                $0.destination = nil
+            }
+            await store.receive(\.renameSessionResponse)
+            #expect(requests.value == ["\(workspace.id):\(session.id):New title"])
+        }
+    }
+
+    @Test("Feature failures replace session rename presentation")
+    func featureFailureReplacesSessionRename() async throws {
+        let workspace = try makeWorkspace()
+        let session = try makeSession(id: "session", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.renameSessionButtonTapped(session)) {
+                $0.renamingSession = session
+                $0.sessionTitleDraft = session.title
+                $0.destination = .renameSession
+            }
+            await store.send(.closeSessionResponse(.failure(TestError()))) {
+                $0.destination = .alert(
+                    .failedToCloseSession(message: TestError().localizedDescription)
+                )
+            }
+        }
+    }
+
     @Test("Creating a sixth tab presents the local limit without making a request")
     func sessionCreationLimit() async throws {
         let workspace = try makeWorkspace(activeSessionID: "session-0")
@@ -803,11 +883,12 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, _, _ in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, _, mode, _ in
                     #expect(workspaceID == workspace.id)
                     #expect(sessionID == activeSession.id)
                     #expect(message == "Run the tests.")
                     #expect(model == activeSession.model)
+                    #expect(mode == .steer)
                     for await _ in responses {
                         throw TestError()
                     }
@@ -817,7 +898,7 @@ struct WorkspaceChatTests {
 
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.chat(.sendButtonTapped)) {
+            await store.send(.chat(.sendButtonTapped(.steer))) {
                 $0.chat?.isMessageSendInFlight = true
                 $0.chat?.scrollToBottomRequest = 1
             }
@@ -917,7 +998,8 @@ struct WorkspaceChatTests {
                 $0.destination = .archivedSessions(
                     ArchivedSessions.State(
                         workspaceID: workspace.id,
-                        sessions: [session]
+                        sessions: [session],
+                        activeSessions: [activeSession]
                     )
                 )
             }
@@ -1088,6 +1170,63 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Concise transcripts are copied from the local message cache")
+    func copyConciseTranscriptLocally() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let messages = [
+            Message(
+                id: "user",
+                sessionID: session.id,
+                role: .user,
+                content: "Summarize this",
+                createdAt: .distantPast,
+                turnID: "turn"
+            ),
+            Message(
+                id: "assistant",
+                sessionID: session.id,
+                role: .assistant,
+                content: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#,
+                createdAt: .distantPast.addingTimeInterval(1),
+                turnID: "turn"
+            ),
+        ]
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+                try Message.upsert { messages }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(.copyConciseTranscriptButtonTapped(session))
+            await store.receive(\.copyConciseTranscriptResponse.success) {
+                $0.conciseTranscript = """
+                    ## User
+
+                    Summarize this
+
+                    ## Assistant
+
+                    Done.
+                    """
+                $0.transcriptCopyCount = 1
+            }
+        }
+    }
+
     @Test("When chat fails to load messages, an alert is presented and dismissed")
     func chatFailsToLoadMessages() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -1157,6 +1296,154 @@ struct WorkspaceChatTests {
             }
             await store.send(.destination(.dismiss)) {
                 $0.destination = nil
+            }
+        }
+    }
+
+    @Test("When a queue reorder fails, an alert is presented and dismissed")
+    func queueReorderFails() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .queuedMessages(
+                        .reorderResponse(
+                            sessionID: activeSession.id,
+                            result: .failure(TestError())
+                        )
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToReorderQueuedMessages(
+                        message: TestError().localizedDescription
+                    )
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
+    @Test("When resuming a queue fails, an alert is presented and dismissed")
+    func resumeQueueFails() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .queuedMessages(
+                        .resumeResponse(
+                            sessionID: activeSession.id,
+                            result: .failure(TestError())
+                        )
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToResumeQueue(message: TestError().localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
+    @Test("When a queued message action fails, an alert is presented")
+    func queuedMessageActionFails() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .queuedMessages(
+                        .deleteResponse(
+                            sessionID: activeSession.id,
+                            messageID: "message-1",
+                            result: .failure(TestError())
+                        )
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToDeleteQueuedMessage(
+                        message: TestError().localizedDescription
+                    )
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(
+                .chat(
+                    .queuedMessages(
+                        .steerResponse(
+                            sessionID: activeSession.id,
+                            messageID: "message-1",
+                            result: .failure(TestError())
+                        )
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToSteerQueuedMessage(
+                        message: TestError().localizedDescription
+                    )
+                )
             }
         }
     }
@@ -1388,17 +1675,19 @@ private func makeSession(
     isHidden: Bool = false,
     createdAt: String = "2026-07-09 00:00:00",
     status: String = "idle",
+    title: String? = nil,
     unreadCount: Int = 0,
     updatedAt: String = "2026-07-09 01:00:00"
 ) throws -> Session {
-    try JSONDecoder().decode(
+    let title = title ?? "Session \(id)"
+    return try JSONDecoder().decode(
         Session.self,
         from: Data(
             """
             {
               "id": "\(id)",
               "workspace_id": "\(workspaceID)",
-              "title": "Session \(id)",
+              "title": "\(title)",
               "agent_type": "claude",
               "is_hidden": \(isHidden),
               "created_at": "\(createdAt)",

@@ -109,11 +109,14 @@ struct ServerTests {
                     method: .get
                 ) { response in
                     #expect(response.status == .ok)
-                    let settings = try? JSONDecoder.conductor.decode(
-                        [String: String].self,
-                        from: Data(response.body.readableBytesView)
+                    let settings = try #require(
+                        JSONSerialization.jsonObject(
+                            with: Data(response.body.readableBytesView)
+                        ) as? [String: Any]
                     )
-                    #expect(settings == ["defaultModel": "gpt-5.6-sol"])
+                    #expect(settings["defaultModel"] as? String == "gpt-5.6-sol")
+                    #expect(settings["defaultFastMode"] as? Bool == false)
+                    #expect(settings["defaultReasoningEffort"] as? String == "high")
                 }
 
                 for uri in [
@@ -231,10 +234,12 @@ struct ServerTests {
                 ) { inbound, _, _ in
                     var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
                     let initial = try decode(
-                        [Message].self,
+                        MessageSyncEvent.self,
                         from: try #require(await iterator.next())
                     )
-                    #expect(initial.map(\.id) == ["message-1"])
+                    #expect(initial.isSnapshot)
+                    #expect(initial.messages.map(\.id) == ["message-1"])
+                    #expect(initial.deletedMessageIDs.isEmpty)
 
                     try await writer.write { database in
                         try database.execute(
@@ -249,10 +254,12 @@ struct ServerTests {
                         )
                     }
                     let changed = try decode(
-                        [Message].self,
+                        MessageSyncEvent.self,
                         from: try #require(await iterator.next())
                     )
-                    #expect(changed.map(\.id) == ["message-2"])
+                    #expect(!changed.isSnapshot)
+                    #expect(changed.messages.map(\.id) == ["message-2"])
+                    #expect(changed.deletedMessageIDs.isEmpty)
 
                     try await writer.write { database in
                         try database.execute(
@@ -264,11 +271,26 @@ struct ServerTests {
                         )
                     }
                     let updated = try decode(
-                        [Message].self,
+                        MessageSyncEvent.self,
                         from: try #require(await iterator.next())
                     )
-                    #expect(updated.map(\.id) == ["message-1"])
-                    #expect(updated.first?.content == "Updated.")
+                    #expect(!updated.isSnapshot)
+                    #expect(updated.messages.map(\.id) == ["message-1"])
+                    #expect(updated.messages.first?.content == "Updated.")
+                    #expect(updated.deletedMessageIDs.isEmpty)
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: "DELETE FROM session_messages WHERE id = 'message-2'"
+                        )
+                    }
+                    let deleted = try decode(
+                        MessageSyncEvent.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(!deleted.isSnapshot)
+                    #expect(deleted.messages.isEmpty)
+                    #expect(deleted.deletedMessageIDs == ["message-2"])
                 }
 
                 #if canImport(AppKit)
@@ -283,7 +305,7 @@ struct ServerTests {
         }
     }
 
-    @Test("Managed settings override the user default model")
+    @Test("Managed settings override user model settings")
     func managedSettingsOverrideUserDefaultModel() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -294,6 +316,10 @@ struct ServerTests {
         try """
             [models]
             default = "codex:gpt-5.4"
+            default_fast_mode = true
+
+            [models.codex]
+            default_thinking_level = "xhigh"
             """
             .write(to: userSettingsURL, atomically: true, encoding: .utf8)
 
@@ -301,6 +327,9 @@ struct ServerTests {
         try """
             [models]
             default = "codex:gpt-5.6-luna"
+
+            [models.codex]
+            default_thinking_level = "low"
             """
             .write(to: managedSettingsURL, atomically: true, encoding: .utf8)
 
@@ -314,11 +343,14 @@ struct ServerTests {
         try await application.test(.live) { client in
             try await client.execute(uri: "/settings", method: .get) { response in
                 #expect(response.status == .ok)
-                let settings = try JSONDecoder.conductor.decode(
-                    [String: String].self,
-                    from: Data(response.body.readableBytesView)
+                let settings = try #require(
+                    JSONSerialization.jsonObject(
+                        with: Data(response.body.readableBytesView)
+                    ) as? [String: Any]
                 )
-                #expect(settings == ["defaultModel": "gpt-5.6-luna"])
+                #expect(settings["defaultModel"] as? String == "gpt-5.6-luna")
+                #expect(settings["defaultFastMode"] as? Bool == true)
+                #expect(settings["defaultReasoningEffort"] as? String == "low")
             }
         }
     }
@@ -343,6 +375,8 @@ struct ServerTests {
                 "/workspaces",
                 "/workspaces/workspace-1/sessions",
                 "/workspaces/workspace-1/sessions/session-1/messages",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1/edit",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/resume",
                 "/workspaces/workspace-1/sessions/session-1/stop",
             ] {
                 try await client.execute(
@@ -356,6 +390,22 @@ struct ServerTests {
 
             try await client.execute(
                 uri: "/workspaces/workspace-1",
+                method: .patch,
+                headers: [.origin: "https://malicious.example"]
+            ) { response in
+                #expect(response.status == .forbidden)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/workspace-1/sessions/session-1/messages/queue",
+                method: .patch,
+                headers: [.origin: "https://malicious.example"]
+            ) { response in
+                #expect(response.status == .forbidden)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1",
                 method: .patch,
                 headers: [.origin: "https://malicious.example"]
             ) { response in

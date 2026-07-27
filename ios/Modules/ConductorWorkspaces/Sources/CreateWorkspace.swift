@@ -20,8 +20,10 @@ public struct CreateWorkspace: Sendable {
     @ObservableState
     public struct State: Equatable {
         @Presents public var alert: AlertState<Action.Alert>?
-        public var agentType = Session.AgentType.codex
+        public var agentType = Session.AgentType.claude
+        public var hasUserSelectedFastMode = false
         public var hasUserSelectedModel = false
+        public var hasUserSelectedReasoningEffort = false
         public var isCreateAPIInFlight = false
         public var isFastModeEnabled = false
         public let repositories: [Repository]
@@ -29,9 +31,13 @@ public struct CreateWorkspace: Sendable {
         @Shared(.createWorkspacePrompt)
         public var prompt
 
+        @Shared(.mobileModelSettingsOverride)
+        var mobileModelSettingsOverride
+
         public var selectedRepositoryID: Repository.ID
-        public var selectedModel = Session.Model.gpt_5_6_sol
-        public var selectedReasoningEffort: Session.ReasoningEffort? = Session.ReasoningEffort.none
+        public var selectedModel = DesktopClient.ModelSettings.conductorDefaults.defaultModel
+        public var selectedReasoningEffort: Session.ReasoningEffort? =
+            DesktopClient.ModelSettings.conductorDefaults.defaultReasoningEffort
         var workspaceID: Workspace.ID?
 
         var availableReasoningEfforts: [Session.ReasoningEffort] {
@@ -62,6 +68,15 @@ public struct CreateWorkspace: Sendable {
                 .first { $0.id == selectedRepositoryIDFilter }?
                 .id
                 ?? repositories[0].id
+            let modelSettings =
+                mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
+            if let agentType = modelSettings.defaultModel.agentType {
+                self.agentType = agentType
+                self.selectedModel = modelSettings.defaultModel
+                self.selectedReasoningEffort = modelSettings.defaultReasoningEffort
+                self.isFastModeEnabled = modelSettings.isFastModeEnabled
+                self.reconcileSelectedReasoningEffort()
+            }
         }
     }
 
@@ -76,7 +91,7 @@ public struct CreateWorkspace: Sendable {
             selectedModel: Session.Model,
             selectedReasoningEffort: Session.ReasoningEffort?
         )
-        case defaultModelFetched(Session.Model)
+        case modelSettingsFetched(DesktopClient.ModelSettings)
         case reasoningEffortSelected(Session.ReasoningEffort)
         case delegate(Delegate)
 
@@ -100,10 +115,10 @@ public struct CreateWorkspace: Sendable {
             switch action {
             case .task:
                 return .run { send in
-                    guard let model = try? await desktopClient.fetchDefaultModel() else {
+                    guard let settings = try? await desktopClient.fetchModelSettings() else {
                         return
                     }
-                    await send(.defaultModelFetched(model))
+                    await send(.modelSettingsFetched(settings))
                 }
 
             case .createButtonTapped:
@@ -144,6 +159,7 @@ public struct CreateWorkspace: Sendable {
                                 message: prompt,
                                 model: model,
                                 isFastModeEnabled: isFastModeEnabled,
+                                mode: .steer,
                                 reasoningEffort: reasoningEffort
                             )
                         }
@@ -176,7 +192,12 @@ public struct CreateWorkspace: Sendable {
                 guard state.availableReasoningEfforts.contains(reasoningEffort) else {
                     return .none
                 }
+                state.hasUserSelectedReasoningEffort = true
                 state.selectedReasoningEffort = reasoningEffort
+                return .none
+
+            case .binding(\.isFastModeEnabled):
+                state.hasUserSelectedFastMode = true
                 return .none
 
             case let .createWorkspaceFailed(message):
@@ -209,16 +230,23 @@ public struct CreateWorkspace: Sendable {
                     )
                 )
 
-            case let .defaultModelFetched(model):
-                guard !state.hasUserSelectedModel else {
-                    return .none
+            case let .modelSettingsFetched(settings):
+                let settings = state.mobileModelSettingsOverride ?? settings
+                if !state.hasUserSelectedModel {
+                    let model = settings.defaultModel
+                    if Session.Model.models(for: .claude).contains(model) {
+                        state.agentType = .claude
+                        state.selectedModel = model
+                    } else if Session.Model.models(for: .codex).contains(model) {
+                        state.agentType = .codex
+                        state.selectedModel = model
+                    }
                 }
-                if Session.Model.models(for: .claude).contains(model) {
-                    state.agentType = .claude
-                    state.selectedModel = model
-                } else if Session.Model.models(for: .codex).contains(model) {
-                    state.agentType = .codex
-                    state.selectedModel = model
+                if !state.hasUserSelectedFastMode {
+                    state.isFastModeEnabled = settings.isFastModeEnabled
+                }
+                if !state.hasUserSelectedReasoningEffort {
+                    state.selectedReasoningEffort = settings.defaultReasoningEffort
                 }
                 state.reconcileSelectedReasoningEffort()
                 return .none

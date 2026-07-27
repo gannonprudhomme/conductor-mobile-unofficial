@@ -62,18 +62,11 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-    entitlements:
-      path: ConductorMobile/ConductorMobile.entitlements
-      properties:
-        keychain-access-groups:
-          - $(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
     dependencies:
       - package: ConductorShared
         product: ConductorFoundation
       - package: ConductorModules
         product: ConductorMobileData
-      - package: ConductorModules
-        product: ConductorCloud
       - package: ConductorModules
         product: ConductorDesign
       - package: ConductorModules
@@ -119,20 +112,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorMobileDataTests
         PRODUCT_NAME: $(TARGET_NAME)
-  ConductorCloudTests:
-    type: bundle.unit-test
-    platform: iOS
-    deploymentTarget: "26.0"
-    sources:
-      - path: Modules/ConductorCloud/Tests
-    dependencies:
-      - package: ConductorModules
-        product: ConductorCloud
-    settings:
-      base:
-        GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorCloudTests
-        PRODUCT_NAME: $(TARGET_NAME)
   ConductorDesignTests:
     type: bundle.unit-test
     platform: iOS
@@ -154,8 +133,6 @@ targets:
     sources:
       - path: Modules/ConductorWorkspaces/Tests
     dependencies:
-      - package: ConductorModules
-        product: ConductorCloud
       - package: ConductorModules
         product: ConductorWorkspaces
     settings:
@@ -199,8 +176,6 @@ targets:
       - path: Modules/ConductorSettings/Tests
     dependencies:
       - package: ConductorModules
-        product: ConductorCloud
-      - package: ConductorModules
         product: ConductorSettings
     settings:
       base:
@@ -220,7 +195,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.UITests
         PRODUCT_NAME: $(TARGET_NAME)
-        TEST_TARGET_NAME: ConductorMobile
 schemes:
   ConductorMobile:
     build:
@@ -247,13 +221,6 @@ schemes:
     test:
       targets:
         - ConductorMobileDataTests
-  ConductorCloudTests:
-    build:
-      targets:
-        ConductorCloudTests: test
-    test:
-      targets:
-        - ConductorCloudTests
   ConductorDesignTests:
     build:
       targets:
@@ -285,6 +252,7 @@ schemes:
   ConductorMobileUITests:
     build:
       targets:
+        ConductorMobile: run
         ConductorMobileUITests: test
     test:
       targets:

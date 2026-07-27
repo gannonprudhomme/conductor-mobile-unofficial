@@ -6,11 +6,11 @@
 //
 
 import ComposableArchitecture
-import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
+import SharedConductorData
 import Sharing
 import SwiftUI
 
@@ -20,26 +20,23 @@ public struct ConductorSettings: Sendable {
     public struct State: Equatable {
         @Presents public var alert: AlertState<Action.Alert>?
 
-        @Shared(.cloudCredentialConfigured)
-        public var isCloudCredentialConfigured
-
-        @Shared(.cloudAccountID)
-        public var cloudAccountID
-
         @Shared(.desktopDisplayConfiguration)
         public var storedDisplayConfiguration
 
         @Shared(.desktopServerAddress)
         public var storedServerAddress
 
+        @Shared(.mobileModelSettingsOverride)
+        public var mobileModelSettingsOverride
+
         var connectionTestSource: ConnectionTestSource?
-        var cloudOperation: CloudOperation?
-        public var cloudAPIKey = ""
+        public var conductorModelSettings: DesktopClient.ModelSettings?
         public var deviceIcon: DesktopClient.DeviceIcon
         public var displayName: String
+        public var draftModelSettings: DesktopClient.ModelSettings?
         public var initialServerAddress: String
-        var isCloudConnectionTested = false
-        var testedCloudAccountID: String?
+        var initialModelSettings: DesktopClient.ModelSettings?
+        public var isLoadingModelSettings = false
 
         /// The server address we actually submitted & tested this session (i.e. lifetime of this view)
         ///
@@ -49,36 +46,78 @@ public struct ConductorSettings: Sendable {
         public init() {
             @Shared(.desktopDisplayConfiguration) var storedDisplayConfiguration
             @Shared(.desktopServerAddress) var storedServerAddress
+            @Shared(.mobileModelSettingsOverride) var mobileModelSettingsOverride
+            let initialModelSettings =
+                mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
+            self.conductorModelSettings = .conductorDefaults
             self.deviceIcon = storedDisplayConfiguration?.icon ?? .laptop
             self.displayName = storedDisplayConfiguration?.name ?? ""
+            self.draftModelSettings = initialModelSettings
             self.initialServerAddress = storedServerAddress ?? ""
+            self.initialModelSettings = initialModelSettings
         }
 
         var isConnectionTestInFlight: Bool {
             connectionTestSource != nil
         }
 
-        var isCloudOperationInFlight: Bool {
-            cloudOperation != nil
+        var availableReasoningEfforts: [Session.ReasoningEffort] {
+            guard let model = modelSettings?.defaultModel,
+                  let agentType = model.agentType else {
+                return []
+            }
+            return Session.availableReasoningEfforts(
+                agentType: agentType,
+                model: model
+            )
         }
 
         var hasChanges: Bool {
-            !normalizedCloudAPIKey.isEmpty
-                || initialServerAddress != (storedServerAddress ?? "")
+            initialServerAddress != (storedServerAddress ?? "")
                 || displayName != (storedDisplayConfiguration?.name ?? "")
                 || deviceIcon != (storedDisplayConfiguration?.icon ?? .laptop)
+                || draftModelSettings != initialModelSettings
+        }
+
+        var hasDraftMobileModelSettingsOverride: Bool {
+            isDefaultModelOverridden
+                || isDefaultThinkingOverridden
+                || isFastModeOverridden
+        }
+
+        var isDefaultModelOverridden: Bool {
+            guard let draftModelSettings,
+                  let conductorModelSettings else {
+                return false
+            }
+            return draftModelSettings.defaultModel != conductorModelSettings.defaultModel
+        }
+
+        var isDefaultThinkingOverridden: Bool {
+            guard let draftModelSettings,
+                  let conductorModelSettings else {
+                return false
+            }
+            return draftModelSettings.defaultReasoningEffort
+                != conductorModelSettings.defaultReasoningEffort
+        }
+
+        var isFastModeOverridden: Bool {
+            guard let draftModelSettings,
+                  let conductorModelSettings else {
+                return false
+            }
+            return draftModelSettings.isFastModeEnabled
+                != conductorModelSettings.isFastModeEnabled
         }
 
         var isSaveButtonDisabled: Bool {
-            isConnectionTestInFlight || normalizedServerAddress.isEmpty
+            isConnectionTestInFlight
+                || normalizedServerAddress.isEmpty
         }
 
         public var isServerAddressMissing: Bool {
             storedServerAddress == nil
-        }
-
-        public var requiresConnectionConfiguration: Bool {
-            isServerAddressMissing && !isCloudCredentialConfigured
         }
 
         var isServerAddressConnected: Bool {
@@ -86,20 +125,8 @@ public struct ConductorSettings: Sendable {
         }
 
         var isTestButtonDisabled: Bool {
-            isConnectionTestInFlight || normalizedServerAddress.isEmpty
-        }
-
-        var isCloudTestButtonDisabled: Bool {
-            isCloudOperationInFlight
-                || (normalizedCloudAPIKey.isEmpty && !isCloudCredentialConfigured)
-        }
-
-        var isCloudSaveButtonDisabled: Bool {
-            isCloudOperationInFlight || normalizedCloudAPIKey.isEmpty
-        }
-
-        var normalizedCloudAPIKey: String {
-            cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            isConnectionTestInFlight
+                || normalizedServerAddress.isEmpty
         }
 
         var normalizedServerAddress: String {
@@ -110,49 +137,56 @@ public struct ConductorSettings: Sendable {
             displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        public enum ConnectionTestSource: Equatable, Sendable {
-            case saveButtonTapped
-            case testButtonTapped
+        public var modelSettings: DesktopClient.ModelSettings? {
+            draftModelSettings
         }
 
-        public enum CloudOperation: Equatable, Sendable {
-            case deleting
-            case saving
-            case testing
+        func reconciledReasoningEffort(
+            for model: Session.Model,
+            preferredEffort: Session.ReasoningEffort
+        ) -> Session.ReasoningEffort {
+            guard let agentType = model.agentType else {
+                return model.defaultReasoningEffort
+            }
+            let efforts = Session.availableReasoningEfforts(
+                agentType: agentType,
+                model: model
+            )
+            if efforts.contains(preferredEffort) {
+                return preferredEffort
+            }
+            if efforts.contains(model.defaultReasoningEffort) {
+                return model.defaultReasoningEffort
+            }
+            return efforts.first ?? model.defaultReasoningEffort
+        }
+
+        enum ConnectionTestSource: Equatable {
+            case saveButtonTapped
+            case testButtonTapped
         }
     }
 
     public enum Action: BindableAction {
+        case task
         case alert(PresentationAction<Alert>)
         case binding(BindingAction<State>)
-        case cloudConnectionTestResult(
-            operation: State.CloudOperation,
-            result: Result<CloudIdentity, any Error>
-        )
-        case cloudCredentialAvailabilityLoaded(Result<Bool, any Error>)
-        case cloudCredentialDeleteResult(Result<Void, any Error>)
-        case cloudSaveResult(
-            accountID: String,
-            result: Result<Void, any Error>
-        )
-        case connectCloudButtonTapped
-        case deleteCloudCredentialButtonTapped
         case connectionTestResult(
             serverAddress: String,
             result: Result<Void, any Error>
         )
+        case fastModeToggled(Bool)
+        case modelSelected(Session.Model)
+        case modelSettingsResponse(Result<DesktopClient.ModelSettings, any Error>)
+        case reasoningEffortSelected(Session.ReasoningEffort)
+        case resetModelSettingsButtonTapped
         case saveButtonTapped
-        case task
-        case testCloudConnectionButtonTapped
         case testButtonTapped
 
         public enum Alert: Equatable { }
     }
 
     @Dependency(\.desktopClient) var desktopClient
-    @Dependency(\.cloudAPIClient) var cloudAPIClient
-    @Dependency(\.cloudCredentialClient) var cloudCredentialClient
-    @Dependency(\.cloudWorkspacePersistenceClient) var cloudWorkspacePersistenceClient
     @Dependency(\.dismiss) var dismiss
 
     public init() { }
@@ -163,20 +197,15 @@ public struct ConductorSettings: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
-                guard state.isCloudCredentialConfigured else {
+                guard !state.isServerAddressMissing else {
                     return .none
                 }
+                state.isLoadingModelSettings = true
                 return .run { send in
                     await send(
-                        .cloudCredentialAvailabilityLoaded(
-                            await Result {
-                                let isConfigured = try await cloudCredentialClient
-                                    .loadAPIKey() != nil
-                                if !isConfigured {
-                                    try await cloudWorkspacePersistenceClient
-                                        .clearCachedCatalog()
-                                }
-                                return isConfigured
+                        .modelSettingsResponse(
+                            Result {
+                                try await desktopClient.fetchModelSettings()
                             }
                         )
                     )
@@ -204,96 +233,6 @@ public struct ConductorSettings: Sendable {
 
                 return testConnection(state: &state, source: .testButtonTapped)
 
-            case .testCloudConnectionButtonTapped:
-                guard !state.isCloudTestButtonDisabled else {
-                    return .none
-                }
-                return testCloudConnection(state: &state, operation: .testing)
-
-            case .connectCloudButtonTapped:
-                guard !state.isCloudSaveButtonDisabled else {
-                    return .none
-                }
-                return testCloudConnection(state: &state, operation: .saving)
-
-            case .binding(\.cloudAPIKey):
-                state.isCloudConnectionTested = false
-                state.testedCloudAccountID = nil
-                return .none
-
-            case let .cloudConnectionTestResult(operation, result):
-                state.cloudOperation = nil
-                switch result {
-                case let .failure(error):
-                    state.alert = .failedToConnectToCloud(error: error)
-                    return .none
-
-                case let .success(identity):
-                    state.isCloudConnectionTested = true
-                    state.testedCloudAccountID = identity.cacheID
-                    return operation == .saving
-                        ? saveCloud(state: &state)
-                        : .none
-                }
-
-            case let .cloudCredentialAvailabilityLoaded(result):
-                switch result {
-                case let .failure(error):
-                    state.alert = .failedToUpdateCloudCredential(error: error)
-
-                case let .success(isConfigured):
-                    state.$isCloudCredentialConfigured.withLock { $0 = isConfigured }
-                    if !isConfigured {
-                        state.$cloudAccountID.withLock { $0 = nil }
-                    }
-                }
-                return .none
-
-            case .deleteCloudCredentialButtonTapped:
-                guard !state.isCloudOperationInFlight else {
-                    return .none
-                }
-                state.cloudOperation = .deleting
-                return .run { send in
-                    await send(
-                        .cloudCredentialDeleteResult(
-                            await Result {
-                                try await cloudCredentialClient.deleteAPIKey()
-                                try await cloudWorkspacePersistenceClient.clearCachedCatalog()
-                            }
-                        )
-                    )
-                }
-
-            case let .cloudCredentialDeleteResult(result):
-                state.cloudOperation = nil
-                switch result {
-                case let .failure(error):
-                    state.alert = .failedToUpdateCloudCredential(error: error)
-
-                case .success:
-                    state.$isCloudCredentialConfigured.withLock { $0 = false }
-                    state.$cloudAccountID.withLock { $0 = nil }
-                    state.cloudAPIKey = ""
-                    state.isCloudConnectionTested = false
-                    state.testedCloudAccountID = nil
-                }
-                return .none
-
-            case let .cloudSaveResult(accountID, result):
-                state.cloudOperation = nil
-                switch result {
-                case let .failure(error):
-                    state.alert = .failedToUpdateCloudCredential(error: error)
-                    return .none
-
-                case .success:
-                    state.$isCloudCredentialConfigured.withLock { $0 = true }
-                    state.$cloudAccountID.withLock { $0 = accountID }
-                    state.cloudAPIKey = ""
-                    return .none
-                }
-
             case let .connectionTestResult(serverAddress, result):
                 guard let source = state.connectionTestSource else {
                     return .none
@@ -310,6 +249,60 @@ public struct ConductorSettings: Sendable {
                     state.testedServerAddress = serverAddress
                     return source == .saveButtonTapped ? save(state: &state) : .none
                 }
+
+            case let .modelSettingsResponse(.success(settings)):
+                state.isLoadingModelSettings = false
+                let shouldApplyDesktopSettings =
+                    state.mobileModelSettingsOverride == nil
+                    && state.draftModelSettings == state.initialModelSettings
+                state.conductorModelSettings = settings
+                if shouldApplyDesktopSettings {
+                    state.draftModelSettings = settings
+                    state.initialModelSettings = settings
+                }
+                return .none
+
+            case .modelSettingsResponse(.failure):
+                state.isLoadingModelSettings = false
+                return .none
+
+            case let .modelSelected(model):
+                guard var settings = state.modelSettings,
+                      model.agentType != nil else {
+                    return .none
+                }
+                settings.defaultModel = model
+                settings.defaultReasoningEffort = state.reconciledReasoningEffort(
+                    for: model,
+                    preferredEffort: settings.defaultReasoningEffort
+                )
+                state.draftModelSettings = settings
+                return .none
+
+            case let .reasoningEffortSelected(reasoningEffort):
+                guard var settings = state.modelSettings,
+                      state.availableReasoningEfforts.contains(reasoningEffort) else {
+                    return .none
+                }
+                settings.defaultReasoningEffort = reasoningEffort
+                state.draftModelSettings = settings
+                return .none
+
+            case let .fastModeToggled(isFastModeEnabled):
+                guard var settings = state.modelSettings else {
+                    return .none
+                }
+                settings.isFastModeEnabled = isFastModeEnabled
+                state.draftModelSettings = settings
+                return .none
+
+            case .resetModelSettingsButtonTapped:
+                guard let conductorModelSettings = state.conductorModelSettings,
+                      state.hasDraftMobileModelSettingsOverride else {
+                    return .none
+                }
+                state.draftModelSettings = conductorModelSettings
+                return .none
 
             case .alert, .binding:
                 return .none
@@ -347,51 +340,6 @@ public struct ConductorSettings: Sendable {
         }
     }
 
-    private func testCloudConnection(
-        state: inout State,
-        operation: State.CloudOperation
-    ) -> Effect<Action> {
-        let cloudAPIKey = state.normalizedCloudAPIKey
-        state.alert = nil
-        state.cloudOperation = operation
-        state.cloudAPIKey = cloudAPIKey
-
-        return .run { send in
-            let result = await Result {
-                let apiKey: String
-                if cloudAPIKey.isEmpty {
-                    guard let storedAPIKey = try await cloudCredentialClient.loadAPIKey() else {
-                        throw CloudAPIClientError.missingCredential
-                    }
-                    apiKey = storedAPIKey
-                } else {
-                    apiKey = cloudAPIKey
-                }
-                return try await cloudAPIClient.getIdentity(apiKey: apiKey)
-            }
-            await send(.cloudConnectionTestResult(operation: operation, result: result))
-        }
-    }
-
-    private func saveCloud(state: inout State) -> Effect<Action> {
-        let cloudAPIKey = state.normalizedCloudAPIKey
-        guard let accountID = state.testedCloudAccountID else {
-            return .none
-        }
-        state.cloudOperation = .saving
-        return .run { send in
-            let result = await Result {
-                if !cloudAPIKey.isEmpty {
-                    try await cloudCredentialClient.saveAPIKey(apiKey: cloudAPIKey)
-                }
-                try await cloudWorkspacePersistenceClient.switchAccount(
-                    accountID: accountID
-                )
-            }
-            await send(.cloudSaveResult(accountID: accountID, result: result))
-        }
-    }
-
     private func save(state: inout State) -> Effect<Action> {
         state.$storedDisplayConfiguration.withLock {
             $0 = if state.displayName.isEmpty {
@@ -404,6 +352,13 @@ public struct ConductorSettings: Sendable {
             }
         }
         state.$storedServerAddress.withLock { $0 = state.initialServerAddress }
+        if let draftModelSettings = state.draftModelSettings {
+            state.$mobileModelSettingsOverride.withLock {
+                $0 = draftModelSettings == state.conductorModelSettings
+                    ? nil
+                    : draftModelSettings
+            }
+        }
         return .run { _ in
             await dismiss()
         }
@@ -418,29 +373,14 @@ extension AlertState where Action == ConductorSettings.Action.Alert {
             TextState(error.localizedDescription)
         }
     }
-
-    static func failedToConnectToCloud(error: any Error) -> Self {
-        AlertState {
-            TextState("Failed to connect to Conductor Cloud")
-        } message: {
-            TextState(error.localizedDescription)
-        }
-    }
-
-    static func failedToUpdateCloudCredential(error: any Error) -> Self {
-        AlertState {
-            TextState("Failed to update the Conductor API key")
-        } message: {
-            TextState(error.localizedDescription)
-        }
-    }
 }
 
 public struct ConductorSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var isCloudAPIKeyFocused: Bool
     @FocusState private var isDisplayNameFocused: Bool
     @FocusState private var isServerAddressFocused: Bool
+    @ScaledMetric(relativeTo: ThemeFontStyle.heading.textStyle)
+    private var modelsHeaderHeight = ThemeFontStyle.heading.size + 6
     @State private var isDiscardConfirmationPresented = false
     @Bindable var store: StoreOf<ConductorSettings>
 
@@ -460,7 +400,7 @@ public struct ConductorSettingsView: View {
                 testedServerAddress: store.testedServerAddress
             )
         )
-        .interactiveDismissDisabled(store.requiresConnectionConfiguration)
+        .interactiveDismissDisabled(store.isServerAddressMissing || store.hasChanges)
         .preferredColorScheme(.dark)
         .task {
             await store.send(.task).finish()
@@ -477,30 +417,80 @@ public struct ConductorSettingsView: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden, edges: .bottom)
             } header: {
-                Text("Local Mac") // font 2xl (24 px)
+                Text("Connection") // font 2xl (24 px)
                     .font(.theme(.heading).weight(.medium)) // need 500
                     .foregroundStyle(.theme(.textPrimary))
             }
 
             Section {
-                cloudConnectionRow
-                    .listRowBackground(Color.clear)
-
-                if store.isCloudCredentialConfigured {
-                    deleteCloudCredentialButton
-                        .listRowBackground(Color.clear)
+                ModelSettingRow(
+                    title: "Default model",
+                    subtitle: "Model for new chats",
+                    isLoading: store.isLoadingModelSettings && store.modelSettings == nil,
+                    isOverridden: store.isDefaultModelOverridden
+                ) {
+                    modelSettingsMenu
                 }
+                .listRowBackground(Color.clear)
+
+                ModelSettingRow(
+                    title: "Default thinking",
+                    subtitle: "Thinking level for new chats",
+                    isLoading: store.isLoadingModelSettings && store.modelSettings == nil,
+                    isOverridden: store.isDefaultThinkingOverridden
+                ) {
+                    thinkingSettingsMenu
+                }
+                .listRowBackground(Color.clear)
+
+                ModelSettingRow(
+                    title: "Default to fast mode",
+                    subtitle: "Start new chats in fast mode",
+                    isLoading: store.isLoadingModelSettings && store.modelSettings == nil,
+                    isOverridden: store.isFastModeOverridden
+                ) {
+                    if let modelSettings = store.modelSettings {
+                        Toggle(
+                            "Default to fast mode",
+                            isOn: Binding(
+                                get: { modelSettings.isFastModeEnabled },
+                                set: {
+                                    store.send(
+                                        .fastModeToggled($0),
+                                        animation: .default
+                                    )
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .tint(.theme(.accent))
+                    } else {
+                        Text("Unavailable")
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
+                }
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden, edges: .bottom)
             } header: {
-                Text("Conductor Cloud · Experimental")
-                    .font(.theme(.heading).weight(.medium))
-                    .foregroundStyle(.theme(.textPrimary))
+                HStack(spacing: 12) {
+                    Text("Models")
+                        .font(.theme(.heading).weight(.medium))
+                        .foregroundStyle(.theme(.textPrimary))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: modelsHeaderHeight, alignment: .leading)
+
+                    if store.hasDraftMobileModelSettingsOverride {
+                        resetModelSettingsButton
+                    }
+                }
             }
         }
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .themedNavigationTitle("Settings", alignment: .center)
         .toolbar {
-            if !store.requiresConnectionConfiguration {
+            if !store.isServerAddressMissing {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .close) {
                         if store.hasChanges {
@@ -533,89 +523,95 @@ public struct ConductorSettingsView: View {
                         store.send(.saveButtonTapped)
                     }
                     .disabled(store.isSaveButtonDisabled)
-                    .accessibilityLabel("Save settings")
                 }
             }
         }
         .listStyle(.inset)
         .animation(.default, value: store.isServerAddressConnected)
-    }
-
-    private var cloudConnectionRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text("API key")
-                        .font(.theme(.small).weight(.medium))
-                        .foregroundStyle(.theme(.textPrimary))
-
-                    if store.isCloudConnectionTested {
-                        LucideIcon(Lucide.circleCheck, style: .small)
-                            .foregroundStyle(.theme(.success))
-                            .accessibilityLabel("Connected")
-                    }
-                }
-
-                Text(
-                    store.isCloudCredentialConfigured
-                        ? "A key is saved securely in Keychain. Enter a replacement or test the saved key."
-                        : "Create a beta API key in Conductor Cloud, then test and save it here."
-                )
-                .font(.theme(.small))
-                .foregroundStyle(.theme(.textSecondary))
-            }
-            .padding(.leading, 2)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-
-            SecureField(
-                "Conductor API key",
-                text: $store.cloudAPIKey,
-                prompt: Text(
-                    store.isCloudCredentialConfigured
-                        ? "Saved in Keychain"
-                        : "API key"
-                )
-                .foregroundStyle(.theme(.textSecondary))
-            )
-            .textFieldStyle(
-                .conductor(
-                    text: $store.cloudAPIKey,
-                    isClearButtonVisible: isCloudAPIKeyFocused
-                )
-            )
-            .focused($isCloudAPIKeyFocused)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .textContentType(.password)
-            .accessibilityIdentifier("cloudAPIKeyField")
-            .submitLabel(.done)
-            .onSubmit {
-                store.send(.testCloudConnectionButtonTapped)
-            }
-            .disabled(store.isCloudOperationInFlight)
-
-            HStack(spacing: 8) {
-                testCloudConnectionButton
-
-                connectCloudButton
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .fixedSize(horizontal: false, vertical: true)
+        .animation(.default, value: store.hasDraftMobileModelSettingsOverride)
+        .sensoryFeedback(
+            .success,
+            trigger: store.hasDraftMobileModelSettingsOverride
+        ) { wasOverridden, isOverridden in
+            wasOverridden && !isOverridden
         }
     }
 
-    private var deleteCloudCredentialButton: some View {
-        Button(role: .destructive) {
-            store.send(.deleteCloudCredentialButtonTapped)
+    private var resetModelSettingsButton: some View {
+        Button {
+            store.send(
+                .resetModelSettingsButtonTapped,
+                animation: .default
+            )
         } label: {
             Label {
-                Text("Delete saved API key")
+                Text("Reset to desktop")
+                    .lineLimit(1)
             } icon: {
-                LucideIcon(Lucide.trash2, style: .small)
+                LucideIcon(Lucide.history, style: .small)
             }
-            .font(.theme(.body))
+            .labelStyle(.conductorSmall)
+            .padding(.horizontal, 12)
+            .frame(height: modelsHeaderHeight)
+            .font(.theme(.small))
+            .foregroundStyle(.theme(.textPrimary))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(.theme(.border))
+            }
         }
-        .disabled(store.isCloudOperationInFlight)
+        .buttonStyle(.spring)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var modelSettingsMenu: some View {
+        let selectedModel =
+            store.modelSettings?.defaultModel
+            ?? DesktopClient.ModelSettings.conductorDefaults.defaultModel
+
+        return ModelMenu(
+            agentType: selectedModel.agentType ?? .codex,
+            allowsAgentSwitching: true,
+            selectedModel: selectedModel,
+            onSelect: {
+                store.send(.modelSelected($0), animation: .default)
+            }
+        ) { model, _ in
+            ModelSettingMenuLabel(
+                value: store.modelSettings == nil ? nil : model.displayName
+            )
+        }
+        .disabled(store.modelSettings == nil)
+        .accessibilityLabel("Default model")
+        .accessibilityValue(
+            store.modelSettings?.defaultModel.displayName ?? "Unavailable"
+        )
+    }
+
+    private var thinkingSettingsMenu: some View {
+        ReasoningEffortMenu(
+            availableEfforts: store.availableReasoningEfforts,
+            selectedEffort: store.modelSettings?.defaultReasoningEffort,
+            isDisabled: store.availableReasoningEfforts.isEmpty,
+            onSelect: {
+                store.send(
+                    .reasoningEffortSelected($0),
+                    animation: .default
+                )
+            }
+        ) { effort in
+            ModelSettingMenuLabel(
+                value: store.availableReasoningEfforts.isEmpty
+                    ? nil
+                    : effort?.displayName
+            )
+        }
+        .accessibilityLabel("Default thinking")
+        .accessibilityValue(
+            store.availableReasoningEfforts.isEmpty
+                ? "Unavailable"
+                : store.modelSettings?.defaultReasoningEffort.displayName ?? "Unavailable"
+        )
     }
 
     private var connectionRow: some View {
@@ -733,7 +729,6 @@ public struct ConductorSettingsView: View {
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .textContentType(.URL)
-        .accessibilityIdentifier("serverAddressField")
         .keyboardType(.URL)
         .submitLabel(.done)
         .onSubmit {
@@ -766,62 +761,6 @@ public struct ConductorSettingsView: View {
         .buttonStyle(.conductorSecondary)
         .disabled(!isEnabled)
         .accessibilityLabel(isLoading ? "Testing connection" : "Test connection")
-    }
-
-    private var testCloudConnectionButton: some View {
-        let isLoading = store.cloudOperation == .testing
-        let isEnabled = !store.isCloudTestButtonDisabled
-
-        return Button {
-            store.send(.testCloudConnectionButtonTapped)
-        } label: {
-            Label {
-                Text("Test")
-            } icon: {
-                LucideIcon(Lucide.gauge, style: .small)
-            }
-            .opacity(isLoading ? 0 : 1)
-            .overlay {
-                if isLoading {
-                    ProgressView()
-                        .progressViewStyle(.network)
-                        .tint(.theme(.textPrimary))
-                }
-            }
-        }
-        .buttonStyle(.conductorSecondary)
-        .disabled(!isEnabled)
-        .accessibilityLabel(isLoading ? "Testing cloud connection" : "Test cloud connection")
-    }
-
-    private var connectCloudButton: some View {
-        let isLoading = store.cloudOperation == .saving
-        let isEnabled = !store.isCloudSaveButtonDisabled
-
-        return Button {
-            store.send(.connectCloudButtonTapped)
-        } label: {
-            Text(store.isCloudCredentialConfigured ? "Replace key" : "Save key")
-                .opacity(isLoading ? 0 : 1)
-                .overlay {
-                    if isLoading {
-                        ProgressView()
-                            .progressViewStyle(.network)
-                            .tint(.theme(.background))
-                    }
-                }
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(.theme(.foreground))
-        .foregroundStyle(.theme(.background))
-        .disabled(!isEnabled)
-        .accessibilityLabel(
-            isLoading
-                ? "Saving cloud API key"
-                : store.isCloudCredentialConfigured
-                    ? "Replace cloud API key"
-                    : "Save cloud API key"
-        )
     }
 
     // This modifier exists only because the compiler could not type-check all three feedbacks in `body`.
@@ -865,6 +804,77 @@ public struct ConductorSettingsView: View {
 
         private func shouldPlaySuccessFeedback(oldValue: String?, newValue: String?) -> Bool {
             newValue != nil && newValue != oldValue
+        }
+    }
+}
+
+private struct ModelSettingMenuLabel: View {
+    let value: String?
+
+    var body: some View {
+        Label {
+            Text(value ?? "Unavailable")
+                .lineLimit(1)
+                .contentTransition(.opacity)
+        } icon: {
+            LucideIcon(Lucide.chevronDown, style: .small)
+                .foregroundStyle(.theme(.textSecondary))
+        }
+        .labelStyle(.conductorSettingsMenu)
+    }
+}
+
+private struct ModelSettingRow<Accessory: View>: View {
+    let title: String
+    let subtitle: String
+    let isLoading: Bool
+    let isOverridden: Bool
+    let accessory: Accessory
+
+    init(
+        title: String,
+        subtitle: String,
+        isLoading: Bool,
+        isOverridden: Bool,
+        @ViewBuilder accessory: () -> Accessory
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.isLoading = isLoading
+        self.isOverridden = isOverridden
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.theme(.small).weight(.medium))
+                    .foregroundStyle(.theme(.textPrimary))
+
+                Text(subtitle)
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .leading) {
+                if isOverridden {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(.theme(.accent))
+                        .frame(width: 2)
+                        .offset(x: -8)
+                }
+            }
+
+            if isLoading {
+                ProgressView()
+                    .progressViewStyle(.network)
+                    .tint(.theme(.textPrimary))
+                    .accessibilityLabel("Loading \(title.lowercased())")
+            } else {
+                accessory
+                    .layoutPriority(1)
+            }
         }
     }
 }

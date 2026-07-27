@@ -6,7 +6,6 @@
 //
 
 import ComposableArchitecture
-import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Dependencies
@@ -14,29 +13,200 @@ import Dependencies
 import Foundation
 import Testing
 
-@Suite(.serialized)
 @MainActor
 struct ConductorSettingsTests {
-    @Test("A fresh launch does not access Keychain before Cloud is configured")
-    func freshLaunchDoesNotLoadCloudCredential() async {
-        let loadCount = LockIsolated(0)
+    @Test("Settings starts with Conductor defaults before connecting")
+    func conductorModelDefaults() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let state = ConductorSettings.State()
 
+            expectNoDifference(
+                state.modelSettings,
+                DesktopClient.ModelSettings.conductorDefaults
+            )
+            expectNoDifference(
+                state.conductorModelSettings,
+                DesktopClient.ModelSettings.conductorDefaults
+            )
+            #expect(!state.hasChanges)
+            #expect(!state.hasDraftMobileModelSettingsOverride)
+        }
+    }
+
+    @Test("Settings loads the desktop model defaults")
+    func modelSettings() async {
         await withDependencies {
             $0.defaultFileStorage = .inMemory
-            $0.cloudCredentialClient.loadAPIKey = {
-                loadCount.withValue { $0 += 1 }
-                Issue.record("A fresh launch should not access Keychain")
-                return nil
+        } operation: {
+            let state = ConductorSettings.State()
+            state.$storedServerAddress.withLock { $0 = "my-mac" }
+            let settings = DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .high,
+                isFastModeEnabled: true
+            )
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            } withDependencies: {
+                $0.desktopClient.fetchModelSettings = { settings }
             }
+
+            await store.send(.task) {
+                $0.isLoadingModelSettings = true
+            }
+            await store.receive(\.modelSettingsResponse.success) {
+                $0.isLoadingModelSettings = false
+                $0.conductorModelSettings = settings
+                $0.draftModelSettings = settings
+                $0.initialModelSettings = settings
+            }
+        }
+    }
+
+    @Test("Desktop defaults do not replace model edits made while loading")
+    func modelSettingsPreserveDraftEdits() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
         } operation: {
             let store = TestStore(initialState: ConductorSettings.State()) {
                 ConductorSettings()
             }
+            let desktopSettings = DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .low,
+                isFastModeEnabled: false
+            )
 
-            await store.send(.task)
+            await store.send(.modelSelected(.sonnet5_1M)) {
+                $0.draftModelSettings?.defaultModel = .sonnet5_1M
+            }
+            await store.send(.modelSettingsResponse(.success(desktopSettings))) {
+                $0.conductorModelSettings = desktopSettings
+            }
 
-            #expect(loadCount.value == 0)
-            #expect(store.state.alert == nil)
+            #expect(store.state.modelSettings?.defaultModel == .sonnet5_1M)
+            #expect(store.state.isDefaultModelOverridden)
+        }
+    }
+
+    @Test("Mobile model overrides stay drafted until Save")
+    func mobileModelSettingsOverride() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.dismiss = DismissEffect { }
+        } operation: {
+            let conductorSettings = DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .ultra,
+                isFastModeEnabled: false
+            )
+            var state = ConductorSettings.State()
+            state.initialServerAddress = "my-mac"
+            state.$storedServerAddress.withLock { $0 = "my-mac" }
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(.modelSettingsResponse(.success(conductorSettings))) {
+                $0.conductorModelSettings = conductorSettings
+                $0.draftModelSettings = conductorSettings
+                $0.initialModelSettings = conductorSettings
+            }
+            await store.send(.modelSelected(.fable5)) {
+                $0.draftModelSettings = DesktopClient.ModelSettings(
+                    defaultModel: .fable5,
+                    defaultReasoningEffort: .high,
+                    isFastModeEnabled: false
+                )
+            }
+            await store.send(.reasoningEffortSelected(.max)) {
+                $0.draftModelSettings?.defaultReasoningEffort = .max
+            }
+            await store.send(.fastModeToggled(true)) {
+                $0.draftModelSettings?.isFastModeEnabled = true
+            }
+
+            @Shared(.mobileModelSettingsOverride) var reloadedOverride
+            expectNoDifference(reloadedOverride, nil)
+            #expect(store.state.hasChanges)
+            #expect(store.state.isDefaultModelOverridden)
+            #expect(store.state.isDefaultThinkingOverridden)
+            #expect(store.state.isFastModeOverridden)
+
+            let expectedOverride = DesktopClient.ModelSettings(
+                defaultModel: .fable5,
+                defaultReasoningEffort: .max,
+                isFastModeEnabled: true
+            )
+            await store.send(.saveButtonTapped) {
+                $0.$mobileModelSettingsOverride.withLock { $0 = expectedOverride }
+            }
+            await store.finish()
+            expectNoDifference(reloadedOverride, expectedOverride)
+
+            let reopenedStore = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+            await reopenedStore.send(.modelSettingsResponse(.success(conductorSettings))) {
+                $0.conductorModelSettings = conductorSettings
+            }
+
+            await reopenedStore.send(.resetModelSettingsButtonTapped) {
+                $0.draftModelSettings = conductorSettings
+            }
+            expectNoDifference(reloadedOverride, expectedOverride)
+            #expect(reopenedStore.state.hasChanges)
+            #expect(!reopenedStore.state.hasDraftMobileModelSettingsOverride)
+
+            await reopenedStore.send(.saveButtonTapped) {
+                $0.$mobileModelSettingsOverride.withLock { $0 = nil }
+            }
+            await reopenedStore.finish()
+            expectNoDifference(reloadedOverride, nil)
+        }
+    }
+
+    @Test("Offline edits to an existing mobile override persist on Save")
+    func offlineMobileModelSettingsOverride() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.dismiss = DismissEffect { }
+        } operation: {
+            let savedOverride = DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .high,
+                isFastModeEnabled: false
+            )
+            @Shared(.desktopServerAddress) var storedServerAddress
+            $storedServerAddress.withLock { $0 = "my-mac" }
+            @Shared(.mobileModelSettingsOverride) var reloadedOverride
+            $reloadedOverride.withLock { $0 = savedOverride }
+
+            var state = ConductorSettings.State()
+            state.isLoadingModelSettings = true
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .modelSettingsResponse(.failure(ConnectionError.unreachable))
+            ) {
+                $0.isLoadingModelSettings = false
+            }
+            await store.send(.fastModeToggled(true)) {
+                $0.draftModelSettings?.isFastModeEnabled = true
+            }
+            expectNoDifference(reloadedOverride, savedOverride)
+
+            var editedOverride = savedOverride
+            editedOverride.isFastModeEnabled = true
+            await store.send(.saveButtonTapped) {
+                $0.$mobileModelSettingsOverride.withLock { $0 = editedOverride }
+            }
+            await store.finish()
+            expectNoDifference(reloadedOverride, editedOverride)
         }
     }
 
@@ -57,6 +227,35 @@ struct ConductorSettingsTests {
 
             state.displayName = ""
             state.deviceIcon = .desktop
+            #expect(state.hasChanges)
+
+            state.deviceIcon = .laptop
+            let conductorSettings = DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .high,
+                isFastModeEnabled: false
+            )
+            state.conductorModelSettings = conductorSettings
+            state.draftModelSettings = conductorSettings
+            state.initialModelSettings = conductorSettings
+            #expect(!state.hasChanges)
+            #expect(!state.hasDraftMobileModelSettingsOverride)
+
+            state.draftModelSettings?.defaultModel = .fable5
+            #expect(state.isDefaultModelOverridden)
+            #expect(!state.isDefaultThinkingOverridden)
+
+            state.draftModelSettings = conductorSettings
+            state.draftModelSettings?.defaultReasoningEffort = .ultra
+            #expect(!state.isDefaultModelOverridden)
+            #expect(state.isDefaultThinkingOverridden)
+
+            state.draftModelSettings = conductorSettings
+            state.draftModelSettings?.isFastModeEnabled = true
+            #expect(!state.isDefaultModelOverridden)
+            #expect(!state.isDefaultThinkingOverridden)
+            #expect(state.isFastModeOverridden)
+            #expect(state.hasDraftMobileModelSettingsOverride)
             #expect(state.hasChanges)
         }
     }
@@ -342,6 +541,19 @@ struct ConductorSettingsTests {
             ) {
                 $0.deviceIcon = .server
             }
+            let conductorSettings = DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .high,
+                isFastModeEnabled: false
+            )
+            await store.send(.modelSettingsResponse(.success(conductorSettings))) {
+                $0.conductorModelSettings = conductorSettings
+                $0.draftModelSettings = conductorSettings
+                $0.initialModelSettings = conductorSettings
+            }
+            await store.send(.fastModeToggled(true)) {
+                $0.draftModelSettings?.isFastModeEnabled = true
+            }
 
             expectNoDifference(
                 ConductorSettings.State().initialServerAddress,
@@ -351,287 +563,10 @@ struct ConductorSettingsTests {
                 ConductorSettings.State().storedDisplayConfiguration,
                 nil
             )
-        }
-    }
-
-    @Test("Cloud connection testing uses the draft key without saving it")
-    func testCloudConnection() async {
-        let testedKeys = LockIsolated<[String]>([])
-        let savedKeys = LockIsolated<[String]>([])
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudAPIClient.getIdentity = { apiKey in
-                testedKeys.withValue { $0.append(apiKey) }
-                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
-            }
-            $0.cloudCredentialClient.saveAPIKey = { apiKey in
-                savedKeys.withValue { $0.append(apiKey) }
-            }
-        } operation: {
-            let store = TestStore(initialState: ConductorSettings.State()) {
-                ConductorSettings()
-            }
-
-            await store.send(
-                .binding(.set(\.cloudAPIKey, "  synthetic-cloud-key  "))
-            ) {
-                $0.cloudAPIKey = "  synthetic-cloud-key  "
-            }
-            await store.send(.testCloudConnectionButtonTapped) {
-                $0.cloudAPIKey = "synthetic-cloud-key"
-                $0.cloudOperation = .testing
-            }
-            await store.receive(\.cloudConnectionTestResult) {
-                $0.cloudOperation = nil
-                $0.isCloudConnectionTested = true
-                $0.testedCloudAccountID = "synthetic-user::"
-            }
-
-            expectNoDifference(testedKeys.value, ["synthetic-cloud-key"])
-            #expect(savedKeys.value.isEmpty)
-            #expect(!store.state.isCloudCredentialConfigured)
-        }
-    }
-
-    @Test("An invalid replacement key does not overwrite the saved credential marker")
-    func invalidReplacementKey() async {
-        let savedKeys = LockIsolated<[String]>([])
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudAPIClient.getIdentity = { _ in
-                throw CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
-            }
-            $0.cloudCredentialClient.saveAPIKey = { apiKey in
-                savedKeys.withValue { $0.append(apiKey) }
-            }
-        } operation: {
-            let state = ConductorSettings.State()
-            state.$isCloudCredentialConfigured.withLock { $0 = true }
-            let store = TestStore(initialState: state) {
-                ConductorSettings()
-            }
-
-            await store.send(
-                .binding(.set(\.cloudAPIKey, "replacement-key"))
-            ) {
-                $0.cloudAPIKey = "replacement-key"
-            }
-            await store.send(.connectCloudButtonTapped) {
-                $0.cloudOperation = .saving
-            }
-            await store.receive(\.cloudConnectionTestResult) {
-                $0.cloudOperation = nil
-                $0.alert = .failedToConnectToCloud(
-                    error: CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
-                )
-            }
-
-            #expect(savedKeys.value.isEmpty)
-            #expect(store.state.isCloudCredentialConfigured)
-        }
-    }
-
-    @Test("A valid new API key is tested and saved to the credential boundary")
-    func saveNewCloudCredential() async {
-        let savedKeys = LockIsolated<[String]>([])
-        let (savePermission, savePermissionContinuation) = AsyncStream<Void>.makeStream()
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudAPIClient.getIdentity = { _ in
-                CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
-            }
-            $0.cloudCredentialClient.saveAPIKey = { apiKey in
-                savedKeys.withValue { $0.append(apiKey) }
-                for await _ in savePermission {
-                    break
-                }
-            }
-            $0.cloudWorkspacePersistenceClient.switchAccount = { _ in }
-        } operation: {
-            let state = ConductorSettings.State()
-            state.$isCloudCredentialConfigured.withLock { $0 = false }
-            state.$cloudAccountID.withLock { $0 = nil }
-            let store = TestStore(initialState: state) {
-                ConductorSettings()
-            }
-
-            await store.send(.binding(.set(\.cloudAPIKey, "new-key"))) {
-                $0.cloudAPIKey = "new-key"
-            }
-            await store.send(.connectCloudButtonTapped) {
-                $0.cloudOperation = .saving
-            }
-            await store.receive(\.cloudConnectionTestResult) {
-                $0.cloudOperation = .saving
-                $0.isCloudConnectionTested = true
-                $0.testedCloudAccountID = "synthetic-user::"
-            }
-            savePermissionContinuation.yield()
-            savePermissionContinuation.finish()
-            await store.receive(\.cloudSaveResult) {
-                $0.cloudOperation = nil
-                $0.$isCloudCredentialConfigured.withLock { $0 = true }
-                $0.$cloudAccountID.withLock { $0 = "synthetic-user::" }
-                $0.cloudAPIKey = ""
-            }
-
-            expectNoDifference(savedKeys.value, ["new-key"])
-            #expect(ConductorSettings.State().isCloudCredentialConfigured)
-        }
-    }
-
-    @Test("A valid API key is tested before it replaces the Keychain value")
-    func replaceCloudCredential() async {
-        let testedKeys = LockIsolated<[String]>([])
-        let savedKeys = LockIsolated<[String]>([])
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudAPIClient.getIdentity = { apiKey in
-                testedKeys.withValue { $0.append(apiKey) }
-                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
-            }
-            $0.cloudCredentialClient.saveAPIKey = { apiKey in
-                savedKeys.withValue { $0.append(apiKey) }
-            }
-            $0.cloudWorkspacePersistenceClient.switchAccount = { _ in }
-        } operation: {
-            let state = ConductorSettings.State()
-            state.$isCloudCredentialConfigured.withLock { $0 = true }
-            state.$cloudAccountID.withLock { $0 = "synthetic-user::" }
-            let store = TestStore(initialState: state) {
-                ConductorSettings()
-            }
-
-            await store.send(
-                .binding(.set(\.cloudAPIKey, "  replacement-key  "))
-            ) {
-                $0.cloudAPIKey = "  replacement-key  "
-            }
-            await store.send(.connectCloudButtonTapped) {
-                $0.cloudAPIKey = "replacement-key"
-                $0.cloudOperation = .saving
-            }
-            await store.receive(\.cloudConnectionTestResult) {
-                $0.isCloudConnectionTested = true
-                $0.testedCloudAccountID = "synthetic-user::"
-                $0.cloudOperation = .saving
-            }
-            await store.receive(\.cloudSaveResult) {
-                $0.cloudOperation = nil
-                $0.$cloudAccountID.withLock { $0 = "synthetic-user::" }
-                $0.cloudAPIKey = ""
-            }
-
-            expectNoDifference(testedKeys.value, ["replacement-key"])
-            expectNoDifference(savedKeys.value, ["replacement-key"])
-            #expect(store.state.isCloudCredentialConfigured)
-        }
-    }
-
-    @Test("A missing Keychain item clears a stale configured marker")
-    func missingCloudCredential() async {
-        let cacheClearCount = LockIsolated(0)
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudCredentialClient.loadAPIKey = {
+            expectNoDifference(
+                ConductorSettings.State().mobileModelSettingsOverride,
                 nil
-            }
-            $0.cloudWorkspacePersistenceClient.clearCachedCatalog = {
-                cacheClearCount.withValue { $0 += 1 }
-            }
-        } operation: {
-            let state = ConductorSettings.State()
-            state.$isCloudCredentialConfigured.withLock { $0 = true }
-            state.$cloudAccountID.withLock { $0 = "stale-account" }
-            let store = TestStore(initialState: state) {
-                ConductorSettings()
-            }
-
-            await store.send(.task)
-            await store.receive(\.cloudCredentialAvailabilityLoaded) {
-                $0.$isCloudCredentialConfigured.withLock { $0 = false }
-                $0.$cloudAccountID.withLock { $0 = nil }
-            }
-            #expect(cacheClearCount.value == 1)
-        }
-    }
-
-    @Test("Deleting a cloud credential leaves local pairing configured")
-    func deleteCloudCredential() async {
-        let deleteCount = LockIsolated(0)
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudCredentialClient.deleteAPIKey = {
-                deleteCount.withValue { $0 += 1 }
-            }
-            $0.cloudWorkspacePersistenceClient.clearCachedCatalog = {}
-        } operation: {
-            let state = ConductorSettings.State()
-            state.$isCloudCredentialConfigured.withLock { $0 = true }
-            state.$storedServerAddress.withLock { $0 = "paired-mac" }
-            let store = TestStore(initialState: state) {
-                ConductorSettings()
-            }
-
-            await store.send(.deleteCloudCredentialButtonTapped) {
-                $0.cloudOperation = .deleting
-            }
-            await store.receive(\.cloudCredentialDeleteResult) {
-                $0.cloudOperation = nil
-                $0.$isCloudCredentialConfigured.withLock { $0 = false }
-                $0.$cloudAccountID.withLock { $0 = nil }
-            }
-
-            #expect(deleteCount.value == 1)
-            expectNoDifference(store.state.storedServerAddress, "paired-mac")
-        }
-    }
-
-    @Test("Local pairing saves without validating an unsaved cloud draft")
-    func localPairingIsIndependent() async {
-        let cloudTestCount = LockIsolated(0)
-        let isDismissed = LockIsolated(false)
-
-        await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.cloudAPIClient.getIdentity = { _ in
-                cloudTestCount.withValue { $0 += 1 }
-                throw CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
-            }
-            $0.desktopClient.checkConnection = { _ in }
-            $0.dismiss = DismissEffect {
-                isDismissed.setValue(true)
-            }
-        } operation: {
-            let store = TestStore(initialState: ConductorSettings.State()) {
-                ConductorSettings()
-            }
-
-            await store.send(.binding(.set(\.initialServerAddress, "paired-mac"))) {
-                $0.initialServerAddress = "paired-mac"
-            }
-            await store.send(.binding(.set(\.cloudAPIKey, "invalid-draft"))) {
-                $0.cloudAPIKey = "invalid-draft"
-            }
-            await store.send(.saveButtonTapped) {
-                $0.connectionTestSource = .saveButtonTapped
-            }
-            await store.receive(\.connectionTestResult) {
-                $0.connectionTestSource = nil
-                $0.testedServerAddress = "paired-mac"
-                $0.$storedServerAddress.withLock { $0 = "paired-mac" }
-            }
-            await store.finish()
-
-            #expect(cloudTestCount.value == 0)
-            #expect(isDismissed.value)
-            #expect(!store.state.isCloudCredentialConfigured)
+            )
         }
     }
 }

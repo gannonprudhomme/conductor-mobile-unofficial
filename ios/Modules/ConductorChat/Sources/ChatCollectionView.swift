@@ -25,6 +25,9 @@ struct ChatCollectionView: UIViewRepresentable {
     /// Retrieved from GeometryProxy
     let safeAreaInsets: EdgeInsets
 
+    /// Duration shared with the SwiftUI bottom bar when an animated transaction changes its inset.
+    let contentInsetAnimationDuration: TimeInterval
+
     /// Sends summary disclosure taps back to the SwiftUI/TCA feature that owns expansion state.
     let turnSummaryTapped: @MainActor (DisplayedChatRow.TurnSummary.ID) -> Void
 
@@ -72,7 +75,13 @@ struct ChatCollectionView: UIViewRepresentable {
             bottom: safeAreaInsets.bottom,
             right: safeAreaInsets.trailing
         )
-        context.coordinator.updateContentInset(contentInset, in: collectionView)
+        context.coordinator.updateContentInset(
+            contentInset,
+            animationDuration: context.transaction.animation == nil
+                ? nil
+                : contentInsetAnimationDuration,
+            in: collectionView
+        )
         context.coordinator.render(
             rows: rows,
             scrollToBottomRequest: scrollToBottomRequest,
@@ -415,6 +424,12 @@ extension ChatCollectionView {
         /// Suppresses delegate feedback while an immediate coordinator-owned offset is changing.
         private var isApplyingCoordinatorOffset = false
 
+        /// Suppresses scroll-policy changes while the bottom bar and content inset animate together.
+        private var isAnimatingContentInset = false
+
+        /// Rejects completions from superseded bottom-bar animations.
+        private var contentInsetAnimationGeneration = 0
+
         /// Records correction work that could not run during a snapshot or user interaction.
         private(set) var needsScrollCorrection = false
 
@@ -536,6 +551,8 @@ extension ChatCollectionView {
             scrollPolicy = ScrollPolicy()
             scrollToBottomRequest = 0
             isApplyingCoordinatorOffset = false
+            isAnimatingContentInset = false
+            contentInsetAnimationGeneration &+= 1
             shouldAnimateNextBottomCorrection = false
             initialScrollItemID = nil
             viewportAnchor = nil
@@ -707,9 +724,10 @@ extension ChatCollectionView {
             reconcileScrollPosition(in: collectionView)
         }
 
-        /// Applies SwiftUI-owned safe-area insets and ensures the resulting correction is nonanimated.
+        /// Applies SwiftUI-owned safe-area insets and keeps bottom-pinned content above the bar.
         func updateContentInset(
             _ contentInset: UIEdgeInsets,
+            animationDuration: TimeInterval?,
             in collectionView: UICollectionView
         ) {
             guard collectionView.contentInset != contentInset else {
@@ -717,9 +735,73 @@ extension ChatCollectionView {
             }
 
             stopNativeScrollAnimation(in: collectionView)
-            performCoordinatorOffsetChange {
-                collectionView.contentInset = contentInset
-                collectionView.verticalScrollIndicatorInsets = contentInset
+            let shouldMaintainBottom = scrollPolicy.hasDisplayedContent
+                && (
+                    scrollPolicy.isFollowingBottom
+                        || ChatCollectionView.isBottomPinned(
+                            contentHeight: collectionView.contentSize.height,
+                            boundsHeight: collectionView.bounds.height,
+                            contentOffsetY: collectionView.contentOffset.y,
+                            adjustedContentInset: collectionView.adjustedContentInset
+                        )
+                )
+                && !isInteracting(with: collectionView)
+            if shouldMaintainBottom {
+                scrollPolicy.isFollowingBottom = true
+                viewportAnchor = nil
+            }
+
+            let update = { [weak self, weak collectionView] in
+                guard let self, let collectionView else {
+                    return
+                }
+
+                performCoordinatorOffsetChange {
+                    collectionView.contentInset = contentInset
+                    collectionView.verticalScrollIndicatorInsets = contentInset
+                    guard shouldMaintainBottom else {
+                        return
+                    }
+
+                    collectionView.contentOffset.y = ChatCollectionView.bottomOffsetY(
+                        contentHeight: collectionView.contentSize.height,
+                        boundsHeight: collectionView.bounds.height,
+                        adjustedContentInset: collectionView.adjustedContentInset
+                    )
+                }
+            }
+
+            guard let animationDuration,
+                  animationDuration > 0,
+                  !UIAccessibility.isReduceMotionEnabled,
+                  !isInteracting(with: collectionView) else {
+                contentInsetAnimationGeneration &+= 1
+                isAnimatingContentInset = false
+                update()
+                if isInteracting(with: collectionView) {
+                    needsScrollCorrection = true
+                }
+                return
+            }
+
+            contentInsetAnimationGeneration &+= 1
+            let generation = contentInsetAnimationGeneration
+            isAnimatingContentInset = true
+            UIView.animate(
+                withDuration: animationDuration,
+                delay: 0,
+                options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseInOut]
+            ) {
+                update()
+            } completion: { [weak self, weak collectionView] _ in
+                guard let self,
+                      let collectionView,
+                      generation == contentInsetAnimationGeneration else {
+                    return
+                }
+
+                isAnimatingContentInset = false
+                reconcileScrollPosition(in: collectionView)
             }
         }
 
@@ -804,6 +886,7 @@ extension ChatCollectionView {
             // delegate callbacks that must not be interpreted as the user leaving the bottom.
             guard initialScrollItemID == nil,
                   !isApplyingCoordinatorOffset,
+                  !isAnimatingContentInset,
                   !needsScrollToBottom,
                   !scrollView.isScrollAnimating else {
                 return
@@ -901,6 +984,7 @@ extension ChatCollectionView {
             shouldLayoutIfNeeded: Bool = false
         ) {
             guard !snapshotApplicationState.isPending,
+                  !isAnimatingContentInset,
                   !isInteracting(with: collectionView) else {
                 needsScrollCorrection = true
                 return

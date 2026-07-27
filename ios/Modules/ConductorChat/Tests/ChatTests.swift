@@ -60,6 +60,87 @@ struct ChatTests {
         }
     }
 
+    @Test("A constrained chat keeps one complete queued row above a growing composer")
+    func constrainedQueueLayout() async throws {
+        let session = try makeSession(status: "working")
+        let queuedMessages = (1...8).map { index in
+            Message(
+                id: "queued-\(index)",
+                sessionID: session.id,
+                role: .user,
+                content: "Queued message \(index)",
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
+                queueOrder: index
+            )
+        }
+
+        try await withDependencies {
+            $0.defaultInMemoryStorage = InMemoryStorage()
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Message.insert { queuedMessages }.execute(database)
+            }
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+
+            var state = Chat.State(session: session)
+            try await state.queuedMessages.$messages.load()
+            state.queuedMessages.isExpanded = true
+            state.isLoadingMessages = false
+            state.isMessageSnapshotEmpty = true
+            state.$messageDraft.withLock {
+                $0 = (1...8)
+                    .map { "Composer line \($0)" }
+                    .joined(separator: "\n")
+            }
+            let store = Store(initialState: state) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.fetchModelSettings = {
+                    .init(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.desktopClient.observeMessages = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
+            }
+            let queuedRowFrame = LockIsolated<CGRect?>(nil)
+            let hostingController = UIHostingController(
+                rootView: ChatView(
+                    store: store,
+                    directoryName: "repo",
+                    firstQueuedRowFrameChanged: { frame in
+                        queuedRowFrame.withValue { $0 = frame }
+                    }
+                )
+            )
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 320))
+            window.rootViewController = hostingController
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while queuedRowFrame.value == nil, clock.now < deadline {
+                hostingController.view.layoutIfNeeded()
+                await Task.yield()
+            }
+
+            let rowFrame = try #require(queuedRowFrame.value)
+
+            #expect(rowFrame.height >= 43)
+            #expect(rowFrame.minY >= window.frame.minY)
+            #expect(rowFrame.maxY <= window.frame.maxY)
+        }
+    }
+
     @Test("Connection status follows the shared desktop status")
     func connectionStatus() throws {
         try withDependencies {
@@ -170,11 +251,11 @@ struct ChatTests {
         } operation: {
             let clock = TestClock()
             let (firstStream, firstContinuation) = AsyncThrowingStream<
-                [Message],
+                MessageSyncEvent,
                 any Error
             >.makeStream()
             let (secondStream, secondContinuation) = AsyncThrowingStream<
-                [Message],
+                MessageSyncEvent,
                 any Error
             >.makeStream()
             let connectionCount = LockIsolated(0)
@@ -218,7 +299,7 @@ struct ChatTests {
             #expect(try #require(store.state.rows).isEmpty)
             #expect(connectionCount.value == 1)
 
-            firstContinuation.yield([])
+            firstContinuation.yield(.snapshot([]))
             await store.receive(\.initialMessagesResponse) {
                 $0.isLoadingMessages = false
             }
@@ -235,7 +316,7 @@ struct ChatTests {
         }
     }
 
-    @Test("Task ingests initial and changed message batches")
+    @Test("Task applies message snapshots, changes, and deletions")
     func taskIngestsMessageBatches() async throws {
         let database = try appDatabase()
         let session = try makeSession()
@@ -257,19 +338,37 @@ struct ChatTests {
         mutableLateMessage.turnID = "turn-1"
         let lateMessage = mutableLateMessage
 
-        try await database.write { db in
-            try Message.upsert { [earlyMessage, lateMessage] }.execute(db)
-        }
-        let baselineChangeCount = try await database.write { $0.totalChangesCount }
-
         var mutableUpdatedEarlyMessage = earlyMessage
         mutableUpdatedEarlyMessage.content = "Updated early message"
         let updatedEarlyMessage = mutableUpdatedEarlyMessage
         var mutableUpdatedLateMessage = lateMessage
         mutableUpdatedLateMessage.content = "Updated late message"
         let updatedLateMessage = mutableUpdatedLateMessage
+        let staleQueuedMessage = Message(
+            id: "stale-queued",
+            sessionID: session.id,
+            role: .user,
+            content: "Already deleted on desktop",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_803),
+            queueOrder: 1
+        )
+        let queuedMessage = Message(
+            id: "queued",
+            sessionID: session.id,
+            role: .user,
+            content: "Still queued",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_804),
+            queueOrder: 2
+        )
+        try await database.write { db in
+            try Message.upsert {
+                [earlyMessage, lateMessage, staleQueuedMessage, queuedMessage]
+            }
+            .execute(db)
+        }
+        let baselineChangeCount = try await database.write { $0.totalChangesCount }
         let (stream, continuation) = AsyncThrowingStream<
-            [Message],
+            MessageSyncEvent,
             any Error
         >.makeStream()
         let store = TestStore(initialState: Chat.State(session: session)) {
@@ -296,11 +395,16 @@ struct ChatTests {
             ]
         )
 
-        continuation.yield([lateMessage, updatedEarlyMessage])
-        await store.receive(\.initialMessagesResponse) {
-            $0.isLoadingMessages = false
+        continuation.yield(
+            .snapshot([lateMessage, updatedEarlyMessage, queuedMessage])
+        )
+        store.exhaustivity = .off
+        await store.receive(\.initialMessagesResponse)
+        if store.state.messages.first(where: { $0.id == earlyMessage.id })?.content
+            != updatedEarlyMessage.content {
+            await store.receive(\.messagesUpdated)
         }
-        await store.receive(\.messagesUpdated)
+        #expect(!store.state.isLoadingMessages)
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
@@ -310,7 +414,12 @@ struct ChatTests {
                 .init(id: "late", content: "Message late"),
             ]
         )
-        continuation.yield([updatedLateMessage])
+        continuation.yield(
+            .changes(
+                upserting: [updatedLateMessage],
+                deleting: [queuedMessage.id]
+            )
+        )
         await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
@@ -330,7 +439,7 @@ struct ChatTests {
         expectNoDifference(storedMessages, [updatedEarlyMessage, updatedLateMessage])
         #expect(
             try await database.write { $0.totalChangesCount }
-                == baselineChangeCount + 3
+                == baselineChangeCount + 6
         )
 
         await task.cancel()
@@ -399,6 +508,10 @@ struct ChatTests {
             createdAt: Date(timeIntervalSince1970: 0),
             turnID: "turn-1"
         )
+        let (stream, continuation) = AsyncThrowingStream<
+            MessageSyncEvent,
+            any Error
+        >.makeStream()
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -411,6 +524,8 @@ struct ChatTests {
             let messages = state.messages
             let store = TestStore(initialState: state) {
                 Chat()
+            } withDependencies: {
+                $0.desktopClient.observeMessages = { _, _ in stream }
             }
 
             await store.send(.messagesUpdated(messages))
@@ -418,19 +533,23 @@ struct ChatTests {
             #expect(store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
 
-            await store.send(
-                .initialMessagesResponse(
-                    sessionID: session.id,
-                    messages: []
-                )
-            ) {
-                $0.isLoadingMessages = false
-                $0.isMessageSnapshotEmpty = true
+            let task = await store.send(.task)
+            store.exhaustivity = .off
+            continuation.yield(.snapshot([]))
+            await store.receive(\.initialMessagesResponse)
+            if !store.state.messages.isEmpty {
+                await store.receive(\.messagesUpdated)
             }
-            expectNoDifference(store.state.messages, [message])
+
+            expectNoDifference(store.state.messages, [])
+            #expect(!store.state.isLoadingMessages)
+            #expect(store.state.isMessageSnapshotEmpty)
             #expect(try #require(store.state.turns).isEmpty)
             #expect(try #require(store.state.rows).isEmpty)
             #expect(store.state.shouldShowEmptyChat)
+
+            await task.cancel()
+            continuation.finish()
         }
     }
 
@@ -466,6 +585,49 @@ struct ChatTests {
             #expect(store.state.turns?.isEmpty == true)
             #expect(store.state.rows?.isEmpty == true)
             #expect(!store.state.shouldShowEmptyChat)
+            await store.finish()
+        }
+    }
+
+    @Test("An initial queued-only response remains visible without creating a turn")
+    func queuedOnlyInitialResponse() async throws {
+        let session = try makeSession()
+        let message = Message(
+            id: "queued",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests next",
+            createdAt: Date(timeIntervalSince1970: 0),
+            queueOrder: 1
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Message.insert { message }.execute(database)
+            }
+        } operation: {
+            var state = Chat.State(session: session)
+            try await state.queuedMessages.$messages.load()
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(
+                .initialMessagesResponse(
+                    sessionID: session.id,
+                    messages: [message]
+                )
+            ) {
+                $0.isLoadingMessages = false
+                $0.isMessageSnapshotEmpty = true
+            }
+
+            #expect(store.state.isMessageSnapshotEmpty)
+            #expect(store.state.turns?.isEmpty == true)
+            #expect(store.state.rows?.isEmpty == true)
+            #expect(!store.state.shouldShowEmptyChat)
+            await store.finish()
         }
     }
 
@@ -511,28 +673,133 @@ struct ChatTests {
                 startedAt: message.createdAt,
                 messages: [.init(id: message.id, content: "Run the tests.")]
             )
+            await store.finish()
         }
     }
 
-    @Test("Fetched default model applies only before a compatible user selection")
-    func defaultModel() async throws {
+    @Test("Fetched model settings apply only before compatible user selections")
+    func modelSettings() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
-            let session = Session.preview(model: .gpt5_5)
+            let session = Session.preview(
+                model: .gpt5_5,
+                codexThinkingLevel: nil,
+                isFastModeEnabled: nil
+            )
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
-            await store.send(.defaultModelFetched(.gpt_5_6_sol)) {
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: true
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = true
                 $0.selectedModel = .gpt_5_6_sol
+                $0.selectedReasoningEffort = .low
             }
             await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
-            await store.send(.defaultModelFetched(.gpt5_4))
-            await store.send(.defaultModelFetched(.fable5))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt5_4,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = false
+            }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .fable5,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: true
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = true
+            }
+        }
+    }
+
+    @Test("Mobile model settings override Conductor defaults")
+    func mobileModelSettingsOverride() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: .gpt5_5,
+                codexThinkingLevel: nil,
+                isFastModeEnabled: nil
+            )
+            let state = Chat.State(session: session)
+            state.$mobileModelSettingsOverride.withLock {
+                $0 = DesktopClient.ModelSettings(
+                    defaultModel: .gpt_5_6_terra,
+                    defaultReasoningEffort: .ultra,
+                    isFastModeEnabled: true
+                )
+            }
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = true
+                $0.selectedModel = .gpt_5_6_terra
+                $0.selectedReasoningEffort = .ultra
+            }
+        }
+    }
+
+    @Test("Persisted empty-session choices are not replaced by fetched defaults")
+    func persistedEmptySessionSettings() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                lastUserMessageAt: nil,
+                model: .gpt_5_6_sol,
+                codexThinkingLevel: .high,
+                isFastModeEnabled: true
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
+            expectNoDifference(store.state.selectedReasoningEffort, .high)
+            #expect(store.state.isFastModeEnabled)
         }
     }
 
@@ -552,7 +819,15 @@ struct ChatTests {
             }
 
             #expect(store.state.hasUserSelectedModel)
-            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
             #expect(store.state.selectedModel == .gpt_5_6_terra)
         }
     }
@@ -575,7 +850,15 @@ struct ChatTests {
             await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
                 $0.selectedModel = .gpt5_5
             }
-            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
         }
     }
 
@@ -594,7 +877,15 @@ struct ChatTests {
                 $0.hasObservedSessionModelChange = true
                 $0.selectedModel = .gpt_5_6_sol
             }
-            await store.send(.defaultModelFetched(.gpt5_4))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt5_4,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
             await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
@@ -623,12 +914,20 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled, reasoningEffort in
+                $0.desktopClient.sendMessage = {
+                    workspaceID,
+                    sessionID,
+                    message,
+                    model,
+                    isFastModeEnabled,
+                    mode,
+                    reasoningEffort in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(mode == .steer)
                     #expect(reasoningEffort == .high)
                     return sentMessage
                 }
@@ -639,7 +938,7 @@ struct ChatTests {
                 $0.hasUserSelectedModel = true
             }
             store.state.$messageDraft.withLock { $0 = "  Please run the tests.  " }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -659,6 +958,44 @@ struct ChatTests {
         }
     }
 
+    @Test("Queueing sends the queued mode and clears the draft")
+    func messageQueueSucceeds() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(status: .working)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = {
+                    workspaceID,
+                    sessionID,
+                    message,
+                    _,
+                    _,
+                    mode,
+                    _ in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    #expect(message == "Run these after the current task.")
+                    #expect(mode == .queue)
+                    return nil
+                }
+            }
+
+            store.state.$messageDraft.withLock { $0 = "Run these after the current task." }
+            await store.send(.sendButtonTapped(.queue)) {
+                $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.$messageDraft.withLock { $0 = "" }
+                $0.isMessageSendInFlight = false
+            }
+        }
+    }
+
     @Test("A legacy send response still completes successfully")
     func legacyMessageSendSucceeds() async throws {
         try await withDependencies {
@@ -669,11 +1006,11 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in nil }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in nil }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -695,7 +1032,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in
                     for await response in responses {
                         return response
                     }
@@ -704,7 +1041,7 @@ struct ChatTests {
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -750,11 +1087,11 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -792,13 +1129,13 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
             try database.close()
 
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -825,12 +1162,12 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in
                     throw TestError()
                 }
             }
 
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -850,23 +1187,41 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled, _ in
+                $0.desktopClient.sendMessage = {
+                    workspaceID,
+                    sessionID,
+                    message,
+                    model,
+                    isFastModeEnabled,
+                    mode,
+                    _ in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Use the next setting.")
                     #expect(model == session.model)
+                    #expect(mode == .steer)
                     isRecordedFastModeEnabled.withValue { $0 = isFastModeEnabled }
                     return nil
                 }
             }
 
             await store.send(.fastModeButtonTapped) {
+                $0.hasUserSelectedFastMode = true
                 $0.isFastModeEnabled = false
             }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: .medium,
+                        isFastModeEnabled: true
+                    )
+                )
+            )
             #expect(isRecordedFastModeEnabled.value == nil)
 
             store.state.$messageDraft.withLock { $0 = "Use the next setting." }
-            await store.send(.sendButtonTapped) {
+            await store.send(.sendButtonTapped(.steer)) {
                 $0.isMessageSendInFlight = true
                 $0.scrollToBottomRequest = 1
             }
@@ -889,8 +1244,18 @@ struct ChatTests {
             }
 
             await store.send(.sessionFastModeChanged(false)) {
+                $0.hasObservedSessionFastModeChange = true
                 $0.isFastModeEnabled = false
             }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: .medium,
+                        isFastModeEnabled: true
+                    )
+                )
+            )
             await store.send(.sessionFastModeChanged(true)) {
                 $0.isFastModeEnabled = true
             }
@@ -911,6 +1276,7 @@ struct ChatTests {
             }
 
             await store.send(.reasoningEffortSelected(.medium)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .medium
             }
             await store.send(.reasoningEffortSelected(.ultracode))
@@ -935,6 +1301,7 @@ struct ChatTests {
             }
 
             await store.send(.reasoningEffortSelected(.low)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .low
             }
             await store.send(.reasoningEffortSelected(.ultra))
@@ -956,6 +1323,7 @@ struct ChatTests {
             }
 
             await store.send(.reasoningEffortSelected(.ultracode)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .ultracode
             }
         }
@@ -995,6 +1363,7 @@ struct ChatTests {
             }
 
             await store.send(.sessionReasoningEffortChanged(.max)) {
+                $0.hasObservedSessionReasoningEffortChange = true
                 $0.selectedReasoningEffort = .max
             }
         }

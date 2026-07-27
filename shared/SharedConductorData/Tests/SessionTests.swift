@@ -15,6 +15,7 @@ struct SessionTests {
         #expect(
             Session.Model.claudeModels.map(\.rawValue) == [
                 "fable-5",
+                "opus-5",
                 "opus-4-8-1m",
                 "opus-4-7-1m",
                 "opus-4-6-1m",
@@ -60,7 +61,8 @@ struct SessionTests {
                   "claude_effort_level": null,
                   "unread_count": 0,
                   "freshly_compacted": 0,
-                  "context_token_count": 1234
+                  "context_token_count": 1234,
+                  "queue_paused_at": "2026-07-18T08:00:00Z"
                 }
                 """.utf8
             )
@@ -70,6 +72,7 @@ struct SessionTests {
         #expect(session.agentType == .codex)
         #expect(session.isHidden)
         #expect(session.isFastModeEnabled == true)
+        #expect(session.queuePausedAt == "2026-07-18T08:00:00Z")
         #expect(session.reasoningEffort?.rawValue == "future-effort")
     }
 
@@ -110,6 +113,10 @@ struct SessionTests {
         )
         #expect(
             claudeSession.availableReasoningEfforts(for: .fable5)
+                == [.low, .medium, .high, .extraHigh, .max, .ultracode]
+        )
+        #expect(
+            claudeSession.availableReasoningEfforts(for: .opus5)
                 == [.low, .medium, .high, .extraHigh, .max, .ultracode]
         )
         #expect(!claudeSession.availableReasoningEfforts(for: .fable5).contains(.ultra))
