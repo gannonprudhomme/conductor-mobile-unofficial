@@ -514,25 +514,129 @@ struct ChatTests {
         }
     }
 
-    @Test("Fetched default model applies only before a compatible user selection")
-    func defaultModel() async throws {
+    @Test("Fetched model settings apply only before compatible user selections")
+    func modelSettings() async throws {
         try await withDependencies {
+            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
-            let session = Session.preview(model: .gpt5_5)
+            let session = Session.preview(
+                model: .gpt5_5,
+                codexThinkingLevel: nil,
+                isFastModeEnabled: nil
+            )
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
-            await store.send(.defaultModelFetched(.gpt_5_6_sol)) {
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: true
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = true
                 $0.selectedModel = .gpt_5_6_sol
+                $0.selectedReasoningEffort = .low
             }
             await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
-            await store.send(.defaultModelFetched(.gpt5_4))
-            await store.send(.defaultModelFetched(.fable5))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt5_4,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = false
+            }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .fable5,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: true
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = true
+            }
+        }
+    }
+
+    @Test("Mobile model settings override Conductor defaults")
+    func mobileModelSettingsOverride() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: .gpt5_5,
+                codexThinkingLevel: nil,
+                isFastModeEnabled: nil
+            )
+            let state = Chat.State(session: session)
+            state.$mobileModelSettingsOverride.withLock {
+                $0 = DesktopClient.ModelSettings(
+                    defaultModel: .gpt_5_6_terra,
+                    defaultReasoningEffort: .ultra,
+                    isFastModeEnabled: true
+                )
+            }
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            ) {
+                $0.isFastModeEnabled = true
+                $0.selectedModel = .gpt_5_6_terra
+                $0.selectedReasoningEffort = .ultra
+            }
+        }
+    }
+
+    @Test("Persisted empty-session choices are not replaced by fetched defaults")
+    func persistedEmptySessionSettings() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                lastUserMessageAt: nil,
+                model: .gpt_5_6_sol,
+                codexThinkingLevel: .high,
+                isFastModeEnabled: true
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: .low,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
+            expectNoDifference(store.state.selectedReasoningEffort, .high)
+            #expect(store.state.isFastModeEnabled)
         }
     }
 
@@ -552,7 +656,15 @@ struct ChatTests {
             }
 
             #expect(store.state.hasUserSelectedModel)
-            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
             #expect(store.state.selectedModel == .gpt_5_6_terra)
         }
     }
@@ -575,7 +687,15 @@ struct ChatTests {
             await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
                 $0.selectedModel = .gpt5_5
             }
-            await store.send(.defaultModelFetched(.gpt_5_6_sol))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
         }
     }
 
@@ -594,7 +714,15 @@ struct ChatTests {
                 $0.hasObservedSessionModelChange = true
                 $0.selectedModel = .gpt_5_6_sol
             }
-            await store.send(.defaultModelFetched(.gpt5_4))
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt5_4,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                )
+            )
             await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
@@ -861,8 +989,18 @@ struct ChatTests {
             }
 
             await store.send(.fastModeButtonTapped) {
+                $0.hasUserSelectedFastMode = true
                 $0.isFastModeEnabled = false
             }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: .medium,
+                        isFastModeEnabled: true
+                    )
+                )
+            )
             #expect(isRecordedFastModeEnabled.value == nil)
 
             store.state.$messageDraft.withLock { $0 = "Use the next setting." }
@@ -889,8 +1027,18 @@ struct ChatTests {
             }
 
             await store.send(.sessionFastModeChanged(false)) {
+                $0.hasObservedSessionFastModeChange = true
                 $0.isFastModeEnabled = false
             }
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: .medium,
+                        isFastModeEnabled: true
+                    )
+                )
+            )
             await store.send(.sessionFastModeChanged(true)) {
                 $0.isFastModeEnabled = true
             }
@@ -911,6 +1059,7 @@ struct ChatTests {
             }
 
             await store.send(.reasoningEffortSelected(.medium)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .medium
             }
             await store.send(.reasoningEffortSelected(.ultracode))
@@ -935,6 +1084,7 @@ struct ChatTests {
             }
 
             await store.send(.reasoningEffortSelected(.low)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .low
             }
             await store.send(.reasoningEffortSelected(.ultra))
@@ -956,6 +1106,7 @@ struct ChatTests {
             }
 
             await store.send(.reasoningEffortSelected(.ultracode)) {
+                $0.hasUserSelectedReasoningEffort = true
                 $0.selectedReasoningEffort = .ultracode
             }
         }
@@ -995,6 +1146,7 @@ struct ChatTests {
             }
 
             await store.send(.sessionReasoningEffortChanged(.max)) {
+                $0.hasObservedSessionReasoningEffortChange = true
                 $0.selectedReasoningEffort = .max
             }
         }

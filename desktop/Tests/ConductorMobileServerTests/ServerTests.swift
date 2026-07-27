@@ -109,11 +109,14 @@ struct ServerTests {
                     method: .get
                 ) { response in
                     #expect(response.status == .ok)
-                    let settings = try? JSONDecoder.conductor.decode(
-                        [String: String].self,
-                        from: Data(response.body.readableBytesView)
+                    let settings = try #require(
+                        JSONSerialization.jsonObject(
+                            with: Data(response.body.readableBytesView)
+                        ) as? [String: Any]
                     )
-                    #expect(settings == ["defaultModel": "gpt-5.6-sol"])
+                    #expect(settings["defaultModel"] as? String == "gpt-5.6-sol")
+                    #expect(settings["defaultFastMode"] as? Bool == false)
+                    #expect(settings["defaultReasoningEffort"] as? String == "high")
                 }
 
                 for uri in [
@@ -283,7 +286,7 @@ struct ServerTests {
         }
     }
 
-    @Test("Managed settings override the user default model")
+    @Test("Managed settings override user model settings")
     func managedSettingsOverrideUserDefaultModel() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -294,6 +297,10 @@ struct ServerTests {
         try """
             [models]
             default = "codex:gpt-5.4"
+            default_fast_mode = true
+
+            [models.codex]
+            default_thinking_level = "xhigh"
             """
             .write(to: userSettingsURL, atomically: true, encoding: .utf8)
 
@@ -301,6 +308,9 @@ struct ServerTests {
         try """
             [models]
             default = "codex:gpt-5.6-luna"
+
+            [models.codex]
+            default_thinking_level = "low"
             """
             .write(to: managedSettingsURL, atomically: true, encoding: .utf8)
 
@@ -314,11 +324,14 @@ struct ServerTests {
         try await application.test(.live) { client in
             try await client.execute(uri: "/settings", method: .get) { response in
                 #expect(response.status == .ok)
-                let settings = try JSONDecoder.conductor.decode(
-                    [String: String].self,
-                    from: Data(response.body.readableBytesView)
+                let settings = try #require(
+                    JSONSerialization.jsonObject(
+                        with: Data(response.body.readableBytesView)
+                    ) as? [String: Any]
                 )
-                #expect(settings == ["defaultModel": "gpt-5.6-luna"])
+                #expect(settings["defaultModel"] as? String == "gpt-5.6-luna")
+                #expect(settings["defaultFastMode"] as? Bool == true)
+                #expect(settings["defaultReasoningEffort"] as? String == "low")
             }
         }
     }

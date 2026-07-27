@@ -15,6 +15,18 @@ import Testing
 
 @Suite(.serialized)
 struct DesktopClientTests {
+    @Test("Conductor model defaults are available before connecting")
+    func conductorModelDefaults() {
+        expectNoDifference(
+            DesktopClient.ModelSettings.conductorDefaults,
+            DesktopClient.ModelSettings(
+                defaultModel: .opus5,
+                defaultReasoningEffort: .high,
+                isFastModeEnabled: false
+            )
+        )
+    }
+
     @Test("Connection failures are distinguished from server and application errors")
     func connectionFailures() {
         let connectionErrors = [
@@ -124,8 +136,8 @@ struct DesktopClientTests {
         }
     }
 
-    @Test("Default model is fetched from the desktop settings endpoint")
-    func defaultModel() async throws {
+    @Test("Model defaults are fetched from the desktop settings endpoint")
+    func modelSettings() async throws {
         let requestedPath = LockIsolated<String?>(nil)
         DesktopClientURLProtocol.handler.setValue { request in
             requestedPath.setValue(request.url?.path)
@@ -136,7 +148,9 @@ struct DesktopClientTests {
                     httpVersion: nil,
                     headerFields: nil
                 )!,
-                Data(#"{"defaultModel":"gpt-5.6-sol"}"#.utf8)
+                Data(
+                    #"{"defaultModel":"gpt-5.6-sol","defaultFastMode":true,"defaultReasoningEffort":"high"}"#.utf8
+                )
             )
         }
         defer { DesktopClientURLProtocol.handler.setValue(nil) }
@@ -146,16 +160,23 @@ struct DesktopClientTests {
         let urlSession = URLSession(configuration: configuration)
         defer { urlSession.invalidateAndCancel() }
 
-        let model = try await withDependencies {
+        let settings = try await withDependencies {
             $0.defaultFileStorage = .inMemory
             $0.urlSession = urlSession
         } operation: {
             @Shared(.desktopServerAddress) var desktopServerAddress
             $desktopServerAddress.withLock { $0 = "my-mac" }
-            return try await DesktopClient.liveValue.fetchDefaultModel()
+            return try await DesktopClient.liveValue.fetchModelSettings()
         }
 
-        expectNoDifference(model, .gpt_5_6_sol)
+        expectNoDifference(
+            settings,
+            DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .high,
+                isFastModeEnabled: true
+            )
+        )
         expectNoDifference(requestedPath.value, "/settings")
     }
 

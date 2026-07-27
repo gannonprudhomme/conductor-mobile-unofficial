@@ -97,6 +97,110 @@ public struct ModelAndFastModeControls: View {
     }
 }
 
+public struct ModelMenu<SourceLabel: View>: View {
+    let agentType: Session.AgentType
+    let allowsAgentSwitching: Bool
+    let selectedModel: Session.Model
+    let onSelect: @MainActor (Session.Model) -> Void
+    let label: (Session.Model, Session.AgentType) -> SourceLabel
+
+    public init(
+        agentType: Session.AgentType,
+        allowsAgentSwitching: Bool = false,
+        selectedModel: Session.Model,
+        onSelect: @escaping @MainActor (Session.Model) -> Void,
+        @ViewBuilder label: @escaping (Session.Model, Session.AgentType) -> SourceLabel
+    ) {
+        self.agentType = agentType
+        self.allowsAgentSwitching = allowsAgentSwitching
+        self.selectedModel = selectedModel
+        self.onSelect = onSelect
+        self.label = label
+    }
+
+    public var body: some View {
+        Menu {
+            modelSection(
+                agentType: .claude,
+                models: models(for: .claude),
+                title: "Claude Code"
+            )
+
+            modelSection(
+                agentType: .codex,
+                models: models(for: .codex),
+                title: "Codex"
+            )
+        } label: {
+            label(
+                selectedModel,
+                selectedModel.agentType ?? agentType
+            )
+        }
+        .menuOrder(.fixed)
+        .accessibilityLabel("Model")
+        .accessibilityValue(selectedModel.displayName)
+    }
+
+    private func models(for sectionAgentType: Session.AgentType) -> [Session.Model] {
+        var models = Session.Model.models(for: sectionAgentType)
+        if sectionAgentType == agentType, !models.contains(selectedModel) {
+            models.insert(selectedModel, at: 0)
+        }
+        return models
+    }
+
+    private func allowsSelection(for sectionAgentType: Session.AgentType) -> Bool {
+        allowsAgentSwitching || sectionAgentType == agentType
+    }
+
+    @ViewBuilder
+    private func modelSection(
+        agentType sectionAgentType: Session.AgentType,
+        models: [Session.Model],
+        title: String
+    ) -> some View {
+        Section {
+            Picker(
+                title,
+                selection: Binding(
+                    get: { selectedModel },
+                    set: { onSelect($0) }
+                )
+            ) {
+                ForEach(models, id: \.self) { model in
+                    modelLabel(model.displayName, agentType: sectionAgentType)
+                        .tag(model)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.inline)
+            .disabled(!allowsSelection(for: sectionAgentType))
+        } header: {
+            modelLabel(title, agentType: sectionAgentType)
+                .foregroundStyle(.theme(.textSecondary))
+        }
+    }
+
+    private func modelLabel(
+        _ title: String,
+        agentType: Session.AgentType
+    ) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            AgentIcon(
+                agentType: agentType,
+                size: ThemeFontStyle.small.size,
+                relativeTo: ThemeFontStyle.small.textStyle
+            )
+        }
+        .labelStyle(.conductorExtraSmall)
+        .foregroundStyle(.theme(.textPrimary))
+        .font(.theme(.small))
+    }
+}
+
 public struct ModelPicker: Equatable, View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
@@ -124,67 +228,18 @@ public struct ModelPicker: Equatable, View {
     }
 
     public var body: some View {
-        Menu {
-            modelSection(
-                agentType: .claude,
-                models: models(for: .claude),
-                title: "Claude Code"
-            )
-
-            modelSection(
-                agentType: .codex,
-                models: models(for: .codex),
-                title: "Codex"
-            )
-        } label: {
-            modelLabel(
-                selectedModel,
-                agentType: selectedModel.agentType ?? agentType
-            )
+        ModelMenu(
+            agentType: agentType,
+            allowsAgentSwitching: allowsAgentSwitching,
+            selectedModel: selectedModel,
+            onSelect: onSelect
+        ) { model, agentType in
+            modelLabel(model, agentType: agentType)
         }
-        .menuOrder(.fixed)
-        .accessibilityLabel("Model")
-        .accessibilityValue(selectedModel.displayName)
-    }
-
-    private func models(for sectionAgentType: Session.AgentType) -> [Session.Model] {
-        var models = Session.Model.models(for: sectionAgentType)
-        if sectionAgentType == agentType, !models.contains(selectedModel) {
-            models.insert(selectedModel, at: 0)
-        }
-        return models
     }
 
     func allowsSelection(for sectionAgentType: Session.AgentType) -> Bool {
         allowsAgentSwitching || sectionAgentType == agentType
-    }
-
-    @ViewBuilder
-    private func modelSection(
-        agentType sectionAgentType: Session.AgentType,
-        models: [Session.Model],
-        title: String
-    ) -> some View {
-        Section {
-            Picker(
-                title,
-                selection: Binding(
-                    get: { selectedModel },
-                    set: { onSelect($0) }
-                )
-            ) {
-                ForEach(models, id: \.self) { model in
-                    modelLabel(model, agentType: sectionAgentType)
-                        .tag(model)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.inline)
-            .disabled(!allowsSelection(for: sectionAgentType))
-        } header: {
-            modelLabel(title, agentType: sectionAgentType)
-                .foregroundStyle(.theme(.textSecondary))
-        }
     }
 
     private func modelLabel(

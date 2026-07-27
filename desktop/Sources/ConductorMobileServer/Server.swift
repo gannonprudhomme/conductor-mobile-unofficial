@@ -74,15 +74,15 @@ public enum Server {
         }
 
         router.get("/settings") { request, context in
-            let defaultModel = try defaultModel(
+            let settings = try modelSettings(
                 userSettingsURL: userSettingsURL,
                 managedSettingsURL: managedSettingsURL
             )
-            guard let defaultModel else {
+            guard let settings else {
                 throw HTTPError(.notFound)
             }
             return try JSONEncoder.conductor.encode(
-                SettingsResponse(defaultModel: defaultModel),
+                settings,
                 from: request,
                 context: context
             )
@@ -486,44 +486,112 @@ public enum Server {
         request.headers[.origin] == allowedOrigin
     }
 
-    private static func defaultModel(
+    private static func modelSettings(
         userSettingsURL: URL,
         managedSettingsURL: URL
-    ) throws -> String? {
-        try defaultModel(from: managedSettingsURL)
-            ?? defaultModel(from: userSettingsURL)
+    ) throws -> SettingsResponse? {
+        let userSettings = try modelSettings(from: userSettingsURL)
+        let managedSettings = try modelSettings(from: managedSettingsURL)
+        let defaultModelSettings = managedSettings.defaultModel == nil
+            ? userSettings
+            : managedSettings
+        guard let defaultModel = defaultModelSettings.defaultModel else {
+            return nil
+        }
+        let defaultAgentType = defaultModelSettings.defaultAgentType
+            ?? Session.Model(rawValue: defaultModel).agentType?.rawValue
+        let configuredReasoningEffort: String? = switch defaultAgentType {
+        case Session.AgentType.claude.rawValue:
+            managedSettings.defaultClaudeReasoningEffort
+                ?? userSettings.defaultClaudeReasoningEffort
+        case Session.AgentType.codex.rawValue:
+            managedSettings.defaultCodexReasoningEffort
+                ?? userSettings.defaultCodexReasoningEffort
+        default:
+            nil
+        }
+        return SettingsResponse(
+            defaultModel: defaultModel,
+            defaultFastMode: managedSettings.defaultFastMode
+                ?? userSettings.defaultFastMode
+                ?? false,
+            defaultReasoningEffort: configuredReasoningEffort
+                ?? Session.Model(rawValue: defaultModel).defaultReasoningEffort.rawValue
+        )
     }
 
-    private static func defaultModel(from settingsURL: URL) throws -> String? {
+    private static func modelSettings(from settingsURL: URL) throws -> ParsedModelSettings {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else {
-            return nil
+            return ParsedModelSettings()
         }
 
         let settings = try String(contentsOf: settingsURL, encoding: .utf8)
-        var isModelsSection = false
+        var section: ModelSettingsSection?
+        var parsedSettings = ParsedModelSettings()
 
         for line in settings.components(separatedBy: .newlines) {
             let line = line.trimmingCharacters(in: .whitespaces)
-            if line == "[models]" {
-                isModelsSection = true
+            if let parsedSection = ModelSettingsSection(rawValue: line) {
+                section = parsedSection
                 continue
             }
             if line.hasPrefix("[") {
-                isModelsSection = false
+                section = nil
                 continue
             }
-            guard isModelsSection,
-                  let match = line.firstMatch(of: /^default\s*=\s*"([^"]+)"/)
-            else {
-                continue
+            switch section {
+            case .models:
+                if let match = line.firstMatch(of: /^default\s*=\s*"([^"]+)"/) {
+                    let components = match.1.split(separator: ":", maxSplits: 1)
+                    parsedSettings.defaultAgentType = components.count == 2
+                        ? String(components[0])
+                        : nil
+                    parsedSettings.defaultModel = components.last.map(String.init)
+                } else if let match = line.firstMatch(
+                    of: /^default_fast_mode\s*=\s*(true|false)/
+                ) {
+                    parsedSettings.defaultFastMode = match.1 == "true"
+                }
+
+            case .claude:
+                if let match = line.firstMatch(
+                    of: /^default_(?:thinking|effort)_level\s*=\s*"([^"]+)"/
+                ) {
+                    parsedSettings.defaultClaudeReasoningEffort = String(match.1)
+                }
+
+            case .codex:
+                if let match = line.firstMatch(
+                    of: /^default_(?:thinking|effort)_level\s*=\s*"([^"]+)"/
+                ) {
+                    parsedSettings.defaultCodexReasoningEffort = String(match.1)
+                }
+
+            case nil:
+                break
             }
-            return match.1.split(separator: ":", maxSplits: 1).last.map(String.init)
         }
-        return nil
+        return parsedSettings
+    }
+
+    private enum ModelSettingsSection: String {
+        case models = "[models]"
+        case claude = "[models.claude]"
+        case codex = "[models.codex]"
+    }
+
+    private struct ParsedModelSettings {
+        var defaultAgentType: String?
+        var defaultClaudeReasoningEffort: String?
+        var defaultCodexReasoningEffort: String?
+        var defaultModel: String?
+        var defaultFastMode: Bool?
     }
 
     private struct SettingsResponse: Encodable {
         let defaultModel: String
+        let defaultFastMode: Bool
+        let defaultReasoningEffort: String
     }
 
     struct RequestContext: Hummingbird.RequestContext, WebSocketRequestContext {

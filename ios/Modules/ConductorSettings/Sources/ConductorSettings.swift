@@ -10,6 +10,7 @@ import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
+import SharedConductorData
 import Sharing
 import SwiftUI
 
@@ -25,10 +26,17 @@ public struct ConductorSettings: Sendable {
         @Shared(.desktopServerAddress)
         public var storedServerAddress
 
+        @Shared(.mobileModelSettingsOverride)
+        public var mobileModelSettingsOverride
+
         var connectionTestSource: ConnectionTestSource?
+        public var conductorModelSettings: DesktopClient.ModelSettings?
         public var deviceIcon: DesktopClient.DeviceIcon
         public var displayName: String
+        public var draftModelSettings: DesktopClient.ModelSettings?
         public var initialServerAddress: String
+        var initialModelSettings: DesktopClient.ModelSettings?
+        public var isLoadingModelSettings = false
 
         /// The server address we actually submitted & tested this session (i.e. lifetime of this view)
         ///
@@ -38,19 +46,69 @@ public struct ConductorSettings: Sendable {
         public init() {
             @Shared(.desktopDisplayConfiguration) var storedDisplayConfiguration
             @Shared(.desktopServerAddress) var storedServerAddress
+            @Shared(.mobileModelSettingsOverride) var mobileModelSettingsOverride
+            let initialModelSettings =
+                mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
+            self.conductorModelSettings = .conductorDefaults
             self.deviceIcon = storedDisplayConfiguration?.icon ?? .laptop
             self.displayName = storedDisplayConfiguration?.name ?? ""
+            self.draftModelSettings = initialModelSettings
             self.initialServerAddress = storedServerAddress ?? ""
+            self.initialModelSettings = initialModelSettings
         }
 
         var isConnectionTestInFlight: Bool {
             connectionTestSource != nil
         }
 
+        var availableReasoningEfforts: [Session.ReasoningEffort] {
+            guard let model = modelSettings?.defaultModel,
+                  let agentType = model.agentType else {
+                return []
+            }
+            return Session.availableReasoningEfforts(
+                agentType: agentType,
+                model: model
+            )
+        }
+
         var hasChanges: Bool {
             initialServerAddress != (storedServerAddress ?? "")
                 || displayName != (storedDisplayConfiguration?.name ?? "")
                 || deviceIcon != (storedDisplayConfiguration?.icon ?? .laptop)
+                || draftModelSettings != initialModelSettings
+        }
+
+        var hasDraftMobileModelSettingsOverride: Bool {
+            isDefaultModelOverridden
+                || isDefaultThinkingOverridden
+                || isFastModeOverridden
+        }
+
+        var isDefaultModelOverridden: Bool {
+            guard let draftModelSettings,
+                  let conductorModelSettings else {
+                return false
+            }
+            return draftModelSettings.defaultModel != conductorModelSettings.defaultModel
+        }
+
+        var isDefaultThinkingOverridden: Bool {
+            guard let draftModelSettings,
+                  let conductorModelSettings else {
+                return false
+            }
+            return draftModelSettings.defaultReasoningEffort
+                != conductorModelSettings.defaultReasoningEffort
+        }
+
+        var isFastModeOverridden: Bool {
+            guard let draftModelSettings,
+                  let conductorModelSettings else {
+                return false
+            }
+            return draftModelSettings.isFastModeEnabled
+                != conductorModelSettings.isFastModeEnabled
         }
 
         var isSaveButtonDisabled: Bool {
@@ -79,6 +137,30 @@ public struct ConductorSettings: Sendable {
             displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        public var modelSettings: DesktopClient.ModelSettings? {
+            draftModelSettings
+        }
+
+        func reconciledReasoningEffort(
+            for model: Session.Model,
+            preferredEffort: Session.ReasoningEffort
+        ) -> Session.ReasoningEffort {
+            guard let agentType = model.agentType else {
+                return model.defaultReasoningEffort
+            }
+            let efforts = Session.availableReasoningEfforts(
+                agentType: agentType,
+                model: model
+            )
+            if efforts.contains(preferredEffort) {
+                return preferredEffort
+            }
+            if efforts.contains(model.defaultReasoningEffort) {
+                return model.defaultReasoningEffort
+            }
+            return efforts.first ?? model.defaultReasoningEffort
+        }
+
         enum ConnectionTestSource: Equatable {
             case saveButtonTapped
             case testButtonTapped
@@ -86,12 +168,18 @@ public struct ConductorSettings: Sendable {
     }
 
     public enum Action: BindableAction {
+        case task
         case alert(PresentationAction<Alert>)
         case binding(BindingAction<State>)
         case connectionTestResult(
             serverAddress: String,
             result: Result<Void, any Error>
         )
+        case fastModeToggled(Bool)
+        case modelSelected(Session.Model)
+        case modelSettingsResponse(Result<DesktopClient.ModelSettings, any Error>)
+        case reasoningEffortSelected(Session.ReasoningEffort)
+        case resetModelSettingsButtonTapped
         case saveButtonTapped
         case testButtonTapped
 
@@ -108,6 +196,21 @@ public struct ConductorSettings: Sendable {
 
         Reduce { state, action in
             switch action {
+            case .task:
+                guard !state.isServerAddressMissing else {
+                    return .none
+                }
+                state.isLoadingModelSettings = true
+                return .run { send in
+                    await send(
+                        .modelSettingsResponse(
+                            Result {
+                                try await desktopClient.fetchModelSettings()
+                            }
+                        )
+                    )
+                }
+
             case .saveButtonTapped:
                 guard !state.isSaveButtonDisabled else {
                     return .none
@@ -146,6 +249,60 @@ public struct ConductorSettings: Sendable {
                     state.testedServerAddress = serverAddress
                     return source == .saveButtonTapped ? save(state: &state) : .none
                 }
+
+            case let .modelSettingsResponse(.success(settings)):
+                state.isLoadingModelSettings = false
+                let shouldApplyDesktopSettings =
+                    state.mobileModelSettingsOverride == nil
+                    && state.draftModelSettings == state.initialModelSettings
+                state.conductorModelSettings = settings
+                if shouldApplyDesktopSettings {
+                    state.draftModelSettings = settings
+                    state.initialModelSettings = settings
+                }
+                return .none
+
+            case .modelSettingsResponse(.failure):
+                state.isLoadingModelSettings = false
+                return .none
+
+            case let .modelSelected(model):
+                guard var settings = state.modelSettings,
+                      model.agentType != nil else {
+                    return .none
+                }
+                settings.defaultModel = model
+                settings.defaultReasoningEffort = state.reconciledReasoningEffort(
+                    for: model,
+                    preferredEffort: settings.defaultReasoningEffort
+                )
+                state.draftModelSettings = settings
+                return .none
+
+            case let .reasoningEffortSelected(reasoningEffort):
+                guard var settings = state.modelSettings,
+                      state.availableReasoningEfforts.contains(reasoningEffort) else {
+                    return .none
+                }
+                settings.defaultReasoningEffort = reasoningEffort
+                state.draftModelSettings = settings
+                return .none
+
+            case let .fastModeToggled(isFastModeEnabled):
+                guard var settings = state.modelSettings else {
+                    return .none
+                }
+                settings.isFastModeEnabled = isFastModeEnabled
+                state.draftModelSettings = settings
+                return .none
+
+            case .resetModelSettingsButtonTapped:
+                guard let conductorModelSettings = state.conductorModelSettings,
+                      state.hasDraftMobileModelSettingsOverride else {
+                    return .none
+                }
+                state.draftModelSettings = conductorModelSettings
+                return .none
 
             case .alert, .binding:
                 return .none
@@ -195,6 +352,13 @@ public struct ConductorSettings: Sendable {
             }
         }
         state.$storedServerAddress.withLock { $0 = state.initialServerAddress }
+        if let draftModelSettings = state.draftModelSettings {
+            state.$mobileModelSettingsOverride.withLock {
+                $0 = draftModelSettings == state.conductorModelSettings
+                    ? nil
+                    : draftModelSettings
+            }
+        }
         return .run { _ in
             await dismiss()
         }
@@ -215,6 +379,8 @@ public struct ConductorSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isDisplayNameFocused: Bool
     @FocusState private var isServerAddressFocused: Bool
+    @ScaledMetric(relativeTo: ThemeFontStyle.heading.textStyle)
+    private var modelsHeaderHeight = ThemeFontStyle.heading.size + 6
     @State private var isDiscardConfirmationPresented = false
     @Bindable var store: StoreOf<ConductorSettings>
 
@@ -234,8 +400,11 @@ public struct ConductorSettingsView: View {
                 testedServerAddress: store.testedServerAddress
             )
         )
-        .interactiveDismissDisabled(store.isServerAddressMissing)
+        .interactiveDismissDisabled(store.isServerAddressMissing || store.hasChanges)
         .preferredColorScheme(.dark)
+        .task {
+            await store.send(.task).finish()
+        }
     }
 
     private var settings: some View {
@@ -251,6 +420,70 @@ public struct ConductorSettingsView: View {
                 Text("Connection") // font 2xl (24 px)
                     .font(.theme(.heading).weight(.medium)) // need 500
                     .foregroundStyle(.theme(.textPrimary))
+            }
+
+            Section {
+                ModelSettingRow(
+                    title: "Default model",
+                    subtitle: "Model for new chats",
+                    isLoading: store.isLoadingModelSettings && store.modelSettings == nil,
+                    isOverridden: store.isDefaultModelOverridden
+                ) {
+                    modelSettingsMenu
+                }
+                .listRowBackground(Color.clear)
+
+                ModelSettingRow(
+                    title: "Default thinking",
+                    subtitle: "Thinking level for new chats",
+                    isLoading: store.isLoadingModelSettings && store.modelSettings == nil,
+                    isOverridden: store.isDefaultThinkingOverridden
+                ) {
+                    thinkingSettingsMenu
+                }
+                .listRowBackground(Color.clear)
+
+                ModelSettingRow(
+                    title: "Default to fast mode",
+                    subtitle: "Start new chats in fast mode",
+                    isLoading: store.isLoadingModelSettings && store.modelSettings == nil,
+                    isOverridden: store.isFastModeOverridden
+                ) {
+                    if let modelSettings = store.modelSettings {
+                        Toggle(
+                            "Default to fast mode",
+                            isOn: Binding(
+                                get: { modelSettings.isFastModeEnabled },
+                                set: {
+                                    store.send(
+                                        .fastModeToggled($0),
+                                        animation: .default
+                                    )
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .tint(.theme(.accent))
+                    } else {
+                        Text("Unavailable")
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
+                }
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden, edges: .bottom)
+            } header: {
+                HStack(spacing: 12) {
+                    Text("Models")
+                        .font(.theme(.heading).weight(.medium))
+                        .foregroundStyle(.theme(.textPrimary))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: modelsHeaderHeight, alignment: .leading)
+
+                    if store.hasDraftMobileModelSettingsOverride {
+                        resetModelSettingsButton
+                    }
+                }
             }
         }
         .scrollContentBackground(.hidden)
@@ -295,6 +528,90 @@ public struct ConductorSettingsView: View {
         }
         .listStyle(.inset)
         .animation(.default, value: store.isServerAddressConnected)
+        .animation(.default, value: store.hasDraftMobileModelSettingsOverride)
+        .sensoryFeedback(
+            .success,
+            trigger: store.hasDraftMobileModelSettingsOverride
+        ) { wasOverridden, isOverridden in
+            wasOverridden && !isOverridden
+        }
+    }
+
+    private var resetModelSettingsButton: some View {
+        Button {
+            store.send(
+                .resetModelSettingsButtonTapped,
+                animation: .default
+            )
+        } label: {
+            Label {
+                Text("Reset to desktop")
+                    .lineLimit(1)
+            } icon: {
+                LucideIcon(Lucide.history, style: .small)
+            }
+            .labelStyle(.conductorSmall)
+            .padding(.horizontal, 12)
+            .frame(height: modelsHeaderHeight)
+            .font(.theme(.small))
+            .foregroundStyle(.theme(.textPrimary))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(.theme(.border))
+            }
+        }
+        .buttonStyle(.spring)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var modelSettingsMenu: some View {
+        let selectedModel =
+            store.modelSettings?.defaultModel
+            ?? DesktopClient.ModelSettings.conductorDefaults.defaultModel
+
+        return ModelMenu(
+            agentType: selectedModel.agentType ?? .codex,
+            allowsAgentSwitching: true,
+            selectedModel: selectedModel,
+            onSelect: {
+                store.send(.modelSelected($0), animation: .default)
+            }
+        ) { model, _ in
+            ModelSettingMenuLabel(
+                value: store.modelSettings == nil ? nil : model.displayName
+            )
+        }
+        .disabled(store.modelSettings == nil)
+        .accessibilityLabel("Default model")
+        .accessibilityValue(
+            store.modelSettings?.defaultModel.displayName ?? "Unavailable"
+        )
+    }
+
+    private var thinkingSettingsMenu: some View {
+        ReasoningEffortMenu(
+            availableEfforts: store.availableReasoningEfforts,
+            selectedEffort: store.modelSettings?.defaultReasoningEffort,
+            isDisabled: store.availableReasoningEfforts.isEmpty,
+            onSelect: {
+                store.send(
+                    .reasoningEffortSelected($0),
+                    animation: .default
+                )
+            }
+        ) { effort in
+            ModelSettingMenuLabel(
+                value: store.availableReasoningEfforts.isEmpty
+                    ? nil
+                    : effort?.displayName
+            )
+        }
+        .accessibilityLabel("Default thinking")
+        .accessibilityValue(
+            store.availableReasoningEfforts.isEmpty
+                ? "Unavailable"
+                : store.modelSettings?.defaultReasoningEffort.displayName ?? "Unavailable"
+        )
     }
 
     private var connectionRow: some View {
@@ -487,6 +804,77 @@ public struct ConductorSettingsView: View {
 
         private func shouldPlaySuccessFeedback(oldValue: String?, newValue: String?) -> Bool {
             newValue != nil && newValue != oldValue
+        }
+    }
+}
+
+private struct ModelSettingMenuLabel: View {
+    let value: String?
+
+    var body: some View {
+        Label {
+            Text(value ?? "Unavailable")
+                .lineLimit(1)
+                .contentTransition(.opacity)
+        } icon: {
+            LucideIcon(Lucide.chevronDown, style: .small)
+                .foregroundStyle(.theme(.textSecondary))
+        }
+        .labelStyle(.conductorSettingsMenu)
+    }
+}
+
+private struct ModelSettingRow<Accessory: View>: View {
+    let title: String
+    let subtitle: String
+    let isLoading: Bool
+    let isOverridden: Bool
+    let accessory: Accessory
+
+    init(
+        title: String,
+        subtitle: String,
+        isLoading: Bool,
+        isOverridden: Bool,
+        @ViewBuilder accessory: () -> Accessory
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.isLoading = isLoading
+        self.isOverridden = isOverridden
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.theme(.small).weight(.medium))
+                    .foregroundStyle(.theme(.textPrimary))
+
+                Text(subtitle)
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .leading) {
+                if isOverridden {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(.theme(.accent))
+                        .frame(width: 2)
+                        .offset(x: -8)
+                }
+            }
+
+            if isLoading {
+                ProgressView()
+                    .progressViewStyle(.network)
+                    .tint(.theme(.textPrimary))
+                    .accessibilityLabel("Loading \(title.lowercased())")
+            } else {
+                accessory
+                    .layoutPriority(1)
+            }
         }
     }
 }

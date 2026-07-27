@@ -24,7 +24,7 @@ public struct DesktopClient: Sendable {
         _ model: Session.Model,
         _ isFastModeEnabled: Bool
     ) async throws -> CreatedWorkspace
-    public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
+    public var fetchModelSettings: @Sendable () async throws -> ModelSettings = {
         throw CancellationError()
     }
     public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
@@ -75,6 +75,28 @@ public struct DesktopClient: Sendable {
         public init(name: String, icon: DeviceIcon) {
             self.name = name
             self.icon = icon
+        }
+    }
+
+    public struct ModelSettings: Codable, Equatable, Sendable {
+        public static let conductorDefaults = Self(
+            defaultModel: .opus5,
+            defaultReasoningEffort: .high,
+            isFastModeEnabled: false
+        )
+
+        public var defaultModel: Session.Model
+        public var defaultReasoningEffort: Session.ReasoningEffort
+        public var isFastModeEnabled: Bool
+
+        public init(
+            defaultModel: Session.Model,
+            defaultReasoningEffort: Session.ReasoningEffort,
+            isFastModeEnabled: Bool
+        ) {
+            self.defaultModel = defaultModel
+            self.defaultReasoningEffort = defaultReasoningEffort
+            self.isFastModeEnabled = isFastModeEnabled
         }
     }
 }
@@ -203,9 +225,16 @@ extension DesktopClient: DependencyKey {
                 throw DesktopClientError.invalidResponse
             }
             return createdWorkspace
-        } fetchDefaultModel: {
+        } fetchModelSettings: {
             let settings = try await get(SettingsResponse.self, from: settingsURL())
-            return Session.Model(rawValue: settings.defaultModel)
+            let defaultModel = Session.Model(rawValue: settings.defaultModel)
+            return ModelSettings(
+                defaultModel: defaultModel,
+                defaultReasoningEffort: settings.defaultReasoningEffort.map {
+                    Session.ReasoningEffort(rawValue: $0)
+                } ?? defaultModel.defaultReasoningEffort,
+                isFastModeEnabled: settings.defaultFastMode ?? false
+            )
         } observeMessages: { workspaceID, sessionID in
             // Messages are the only unbounded observation: frames after the initial snapshot
             // contain incremental changes, so dropping one could permanently miss an update.
@@ -365,6 +394,8 @@ extension DesktopClient: DependencyKey {
 
     private struct SettingsResponse: Decodable {
         let defaultModel: String
+        let defaultFastMode: Bool?
+        let defaultReasoningEffort: String?
     }
 
     private static func settingsURL() throws -> URL {
@@ -596,6 +627,19 @@ where Self == FileStorageKey<DesktopClient.DisplayConfiguration?>.Default {
             .fileStorage(
                 .applicationSupportDirectory
                     .appending(component: "desktop-display-configuration.json")
+            ),
+            default: nil,
+        ]
+    }
+}
+
+public extension SharedKey
+where Self == FileStorageKey<DesktopClient.ModelSettings?>.Default {
+    static var mobileModelSettingsOverride: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "mobile-model-settings-override.json")
             ),
             default: nil,
         ]

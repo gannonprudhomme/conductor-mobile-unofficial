@@ -39,6 +39,29 @@ public extension LabelStyle where Self == ConductorExtraSmallLabelStyle {
     static var conductorExtraSmall: Self { Self() }
 }
 
+public struct ConductorSettingsMenuLabelStyle: LabelStyle {
+    fileprivate init() { }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.title
+
+            configuration.icon
+        }
+        .padding(EdgeInsets(vertical: 8, horizontal: 12))
+        .font(.theme(.small))
+        .foregroundStyle(.theme(.textPrimary))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.theme(.border))
+        }
+    }
+}
+
+public extension LabelStyle where Self == ConductorSettingsMenuLabelStyle {
+    static var conductorSettingsMenu: Self { Self() }
+}
+
 public struct ConductorStandardLabelStyle: LabelStyle {
     fileprivate init() { }
 

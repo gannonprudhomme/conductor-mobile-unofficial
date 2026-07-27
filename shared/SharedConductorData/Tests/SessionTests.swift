@@ -15,6 +15,7 @@ struct SessionTests {
         #expect(
             Session.Model.claudeModels.map(\.rawValue) == [
                 "fable-5",
+                "opus-5",
                 "opus-4-8-1m",
                 "opus-4-7-1m",
                 "opus-4-6-1m",
@@ -110,6 +111,10 @@ struct SessionTests {
         )
         #expect(
             claudeSession.availableReasoningEfforts(for: .fable5)
+                == [.low, .medium, .high, .extraHigh, .max, .ultracode]
+        )
+        #expect(
+            claudeSession.availableReasoningEfforts(for: .opus5)
                 == [.low, .medium, .high, .extraHigh, .max, .ultracode]
         )
         #expect(!claudeSession.availableReasoningEfforts(for: .fable5).contains(.ultra))

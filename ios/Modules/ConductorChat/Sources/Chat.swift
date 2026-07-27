@@ -27,6 +27,9 @@ public struct Chat: Sendable {
         @Shared(.desktopConnectionStatus)
         var connectionStatus
 
+        @Shared(.mobileModelSettingsOverride)
+        var mobileModelSettingsOverride
+
         @Shared var messageDraft: String
 
         @FetchAll var messages: [Message]
@@ -36,8 +39,12 @@ public struct Chat: Sendable {
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
         var isStopInFlight = false
+        var hasObservedSessionFastModeChange = false
         var hasObservedSessionModelChange = false
+        var hasObservedSessionReasoningEffortChange = false
+        var hasUserSelectedFastMode = false
         var hasUserSelectedModel = false
+        var hasUserSelectedReasoningEffort = false
         var scrollToBottomRequest = 0
         var shouldFocusMessageField = false
 
@@ -110,6 +117,7 @@ public struct Chat: Sendable {
                     }
             )
             self.hasUserSelectedModel = selectedModel != nil
+            self.hasUserSelectedReasoningEffort = selectedReasoningEffort != nil
             self.selectedModel = selectedModel ?? session.model
             self.selectedReasoningEffort = selectedReasoningEffort ?? session.reasoningEffort
             self.shouldFocusMessageField = shouldFocusMessageField
@@ -133,14 +141,20 @@ public struct Chat: Sendable {
             lhs.messages == rhs.messages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
+                && lhs.mobileModelSettingsOverride == rhs.mobileModelSettingsOverride
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
+                && lhs.hasObservedSessionFastModeChange == rhs.hasObservedSessionFastModeChange
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
+                && lhs.hasObservedSessionReasoningEffortChange
+                    == rhs.hasObservedSessionReasoningEffortChange
+                && lhs.hasUserSelectedFastMode == rhs.hasUserSelectedFastMode
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
+                && lhs.hasUserSelectedReasoningEffort == rhs.hasUserSelectedReasoningEffort
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
                 && lhs.shouldFocusMessageField == rhs.shouldFocusMessageField
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
@@ -157,7 +171,7 @@ public struct Chat: Sendable {
     public enum Action: BindableAction {
         case binding(BindingAction<State>)
         case task
-        case defaultModelFetched(Session.Model)
+        case modelSettingsFetched(DesktopClient.ModelSettings)
         case fastModeButtonTapped
         case initialMessagesResponse(
             sessionID: Session.ID,
@@ -202,10 +216,10 @@ public struct Chat: Sendable {
             case .task:
                 return .merge(
                     .run { send in
-                        guard let model = try? await desktopClient.fetchDefaultModel() else {
+                        guard let settings = try? await desktopClient.fetchModelSettings() else {
                             return
                         }
-                        await send(.defaultModelFetched(model))
+                        await send(.modelSettingsFetched(settings))
                     },
                     observeMessages(state),
                     .publisher {
@@ -216,15 +230,28 @@ public struct Chat: Sendable {
                     }
                 )
 
-            case let .defaultModelFetched(model):
-                guard !state.hasObservedSessionModelChange,
-                      !state.hasUserSelectedModel,
-                      Session.Model.models(for: state.session.agentType).contains(model)
-                else {
-                    return .none
+            case let .modelSettingsFetched(settings):
+                let settings = state.mobileModelSettingsOverride ?? settings
+                if !state.hasObservedSessionModelChange,
+                   !state.hasUserSelectedModel,
+                   Session.Model.models(for: state.session.agentType)
+                    .contains(settings.defaultModel) {
+                    state.selectedModel = settings.defaultModel
+                    state.reconcileSelectedReasoningEffort()
                 }
-                state.selectedModel = model
-                state.reconcileSelectedReasoningEffort()
+                if state.session.lastUserMessageAt == nil,
+                   state.session.isFastModeEnabled == nil,
+                   !state.hasObservedSessionFastModeChange,
+                   !state.hasUserSelectedFastMode {
+                    state.isFastModeEnabled = settings.isFastModeEnabled
+                }
+                if state.session.lastUserMessageAt == nil,
+                   state.session.reasoningEffort == nil,
+                   !state.hasObservedSessionReasoningEffortChange,
+                   !state.hasUserSelectedReasoningEffort {
+                    state.selectedReasoningEffort = settings.defaultReasoningEffort
+                    state.reconcileSelectedReasoningEffort()
+                }
                 return .none
 
             case .binding(\.selectedModel):
@@ -284,10 +311,12 @@ public struct Chat: Sendable {
                 return .none
 
             case let .sessionFastModeChanged(isFastModeEnabled):
+                state.hasObservedSessionFastModeChange = true
                 state.isFastModeEnabled = isFastModeEnabled
                 return .none
 
             case .fastModeButtonTapped:
+                state.hasUserSelectedFastMode = true
                 state.isFastModeEnabled.toggle()
                 return .none
 
@@ -295,10 +324,12 @@ public struct Chat: Sendable {
                 guard state.availableReasoningEfforts.contains(reasoningEffort) else {
                     return .none
                 }
+                state.hasUserSelectedReasoningEffort = true
                 state.selectedReasoningEffort = reasoningEffort
                 return .none
 
             case let .sessionReasoningEffortChanged(reasoningEffort):
+                state.hasObservedSessionReasoningEffortChange = true
                 state.selectedReasoningEffort = reasoningEffort
                 state.reconcileSelectedReasoningEffort()
                 return .none
