@@ -59,7 +59,8 @@ public struct Main: Sendable {
                             WorkspaceChat.State(
                                 workspaceWithRepository: creation.workspace,
                                 selectedModel: creation.selectedModel,
-                                shouldFocusMessageField: true
+                                shouldFocusMessageField: true,
+                                creationPromptFailureMessage: creation.promptFailureMessage
                             )
                         )
                     )

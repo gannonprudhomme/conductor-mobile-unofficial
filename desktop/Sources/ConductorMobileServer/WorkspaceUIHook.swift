@@ -44,7 +44,7 @@ public struct WorkspaceUIHook: Sendable {
         _ workspaceID: Workspace.ID,
         _ content: String,
         _ mode: MessageMode
-    ) async throws -> MessageReceipt
+    ) async throws -> Message.ID
     var stopSession: @Sendable (
         _ requestID: UUID,
         _ sessionID: Session.ID,
@@ -85,10 +85,6 @@ public struct WorkspaceUIHook: Sendable {
         case sent
     }
 
-    struct MessageReceipt: Equatable, Sendable {
-        let messageID: String
-    }
-
     struct CommandResult: Decodable, Sendable {
         let requestID: UUID
         let error: String?
@@ -104,13 +100,11 @@ public struct WorkspaceUIHook: Sendable {
             let type: ResultType
             let messageID: String?
             let reason: String?
-            let state: String?
 
             private enum CodingKeys: String, CodingKey {
                 case type
                 case messageID = "messageId"
                 case reason
-                case state
             }
         }
 
@@ -212,25 +206,6 @@ extension DependencyValues {
     public var workspaceUIHook: WorkspaceUIHook {
         get { self[WorkspaceUIHook.self] }
         set { self[WorkspaceUIHook.self] = newValue }
-    }
-}
-
-extension WorkspaceUIHook {
-    func sendMessage(
-        requestID: UUID,
-        sessionID: Session.ID,
-        workspaceID: Workspace.ID,
-        content: String,
-        mode: MessageMode
-    ) async throws -> MessageReceipt {
-        try await sendMessage(
-            requestID,
-            requestID,
-            sessionID,
-            workspaceID,
-            content,
-            mode
-        )
     }
 }
 
@@ -340,7 +315,8 @@ private actor WorkspaceUIHookState {
             return false
         }
 
-        guard command.deadline.map({ clock.now < $0 }) ?? true else {
+        let isBeforeDeadline = command.deadline.map { clock.now < $0 } ?? true
+        guard isBeforeDeadline else {
             pendingCommands[result.requestID] = nil
             command.continuation.finish(
                 throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
@@ -354,15 +330,14 @@ private actor WorkspaceUIHookState {
             switch result.type {
             case .accepted:
                 guard let messageID = result.messageID,
-                      !messageID.isEmpty,
-                      result.state == "sent" else {
+                      !messageID.isEmpty else {
                     command.continuation.finish(
                         throwing: WorkspaceUIHook.CommandDispatchError.deliveryUnknown
                     )
                     return true
                 }
                 command.continuation.yield(
-                    .message(.init(messageID: messageID))
+                    .message(messageID)
                 )
                 command.continuation.finish()
             case .rejected:
@@ -394,7 +369,7 @@ private actor WorkspaceUIHookState {
         workspaceID: Workspace.ID,
         content: String,
         mode: WorkspaceUIHook.MessageMode
-    ) async throws -> WorkspaceUIHook.MessageReceipt {
+    ) async throws -> Message.ID {
         let event = try Self.messageEvent(
             requestID: requestID,
             attemptID: attemptID,
@@ -421,11 +396,14 @@ private actor WorkspaceUIHookState {
 
         do {
             for try await result in results {
-                guard case .message(let receipt) = result else {
+                guard case .message(let messageID) = result else {
                     throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
                 }
-                return receipt
+                return messageID
             }
+            try Task.checkCancellation()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
         }
@@ -655,7 +633,7 @@ private actor WorkspaceUIHookState {
 
     private enum PendingResult: Sendable {
         case completed
-        case message(WorkspaceUIHook.MessageReceipt)
+        case message(Message.ID)
     }
 
     private enum StopEvent: Sendable {

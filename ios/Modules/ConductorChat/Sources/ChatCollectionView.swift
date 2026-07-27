@@ -347,7 +347,8 @@ extension ChatCollectionView {
         summaryFrame: CGRect,
         visibleRowFrames: [CGRect]
     ) -> Bool {
-        guard !visibleRowFrames.contains(where: { $0.contains(location) }) else {
+        let didTapVisibleRow = visibleRowFrames.contains { $0.contains(location) }
+        guard !didTapVisibleRow else {
             return false
         }
 
@@ -491,14 +492,12 @@ extension ChatCollectionView {
                 cell.accessibilityIdentifier = "chat.row.\(row.id)"
                 cell.contentConfiguration = UIHostingConfiguration {
                     ChatRowView(
-                        row: row.content,
-                        retryMessage: { [weak self] bubbleID in
-                            self?.retryMessage(bubbleID)
-                        },
-                        turnSummaryTapped: { [weak self] summaryID in
-                            self?.turnSummaryTapped(summaryID)
-                        }
-                    )
+                        row: row.content
+                    ) { [weak self] bubbleID in
+                        self?.retryMessage(bubbleID)
+                    } turnSummaryTapped: { [weak self] summaryID in
+                        self?.turnSummaryTapped(summaryID)
+                    }
                         .padding(.horizontal, ChatRowLayout.horizontalPadding)
                         .padding(.top, row.topPadding)
                         .padding(.bottom, row.bottomPadding)
@@ -606,7 +605,7 @@ extension ChatCollectionView {
                 shouldConsumeScrollToBottomRequest = true
             }
 
-            // Classify offset animation before mutating retained rows. Diffable structural animation
+            // Classify offset animation before replacing rendered rows. Diffable structural animation
             // is calculated later and intentionally remains independent from this choice.
             let hasDisclosureChange = ChatCollectionView.hasTurnSummaryDisclosureChange(
                 from: previousRows,
@@ -703,12 +702,14 @@ extension ChatCollectionView {
                 }
 
                 // Initial placement and anchor restoration need current self-sized attributes before
-                // calculating offsets. Ordinary bottom follow can use the completed snapshot layout.
+                // calculating offsets. Animated bottom follow also resolves self-sizing first so its
+                // destination cannot change underneath the native scroll animation.
                 reconcileScrollPosition(
                     in: collectionView,
                     shouldLayoutIfNeeded: initialScrollItemID != nil
                         || shouldRestoreViewport
                         || needsScrollToBottom
+                        || shouldAnimateBottom
                 )
             }
         }

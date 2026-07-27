@@ -50,6 +50,7 @@ struct WorkspaceUIHookTests {
         await #expect(throws: WorkspaceUIHook.CommandDispatchError.listenerUnavailable) {
             try await uiHook.sendMessage(
                 requestID: unavailableRequestID,
+                attemptID: UUID(),
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
@@ -60,9 +61,11 @@ struct WorkspaceUIHookTests {
         let connection = await uiHook.connect()
         var events = connection.events.makeAsyncIterator()
         let sentRequestID = UUID()
+        let sentAttemptID = UUID()
         let send = Task {
             try await uiHook.sendMessage(
                 requestID: sentRequestID,
+                attemptID: sentAttemptID,
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
@@ -75,18 +78,20 @@ struct WorkspaceUIHookTests {
         #expect(command.workspaceID == "workspace-1")
         #expect(command.sendMessage.content == "Run the tests.")
         #expect(command.sendMessage.mode == "sent")
-        #expect(command.sendMessage.attemptID == sentRequestID)
+        #expect(command.sendMessage.attemptID == sentAttemptID)
         #expect(
             await uiHook.didCompleteCommand(
                 result: acceptedMessageResult(requestID: command.requestID)
             )
         )
-        #expect(try await send.value.messageID == "message-id")
+        #expect(try await send.value == "message-id")
 
         let rejectedRequestID = UUID()
+        let rejectedAttemptID = UUID()
         let rejectedSend = Task {
             try await uiHook.sendMessage(
                 requestID: rejectedRequestID,
+                attemptID: rejectedAttemptID,
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Fail.",
@@ -101,8 +106,7 @@ struct WorkspaceUIHookTests {
                     result: .init(
                         type: .rejected,
                         messageID: nil,
-                        reason: "Nope.",
-                        state: nil
+                        reason: "Nope."
                     )
                 )
             )
@@ -118,11 +122,14 @@ struct WorkspaceUIHookTests {
         let connection = await uiHook.connect()
         var events = connection.events.makeAsyncIterator()
         let firstRequestID = UUID()
+        let firstAttemptID = UUID()
         let secondRequestID = UUID()
+        let secondAttemptID = UUID()
 
         let first = Task {
             try await uiHook.sendMessage(
                 requestID: firstRequestID,
+                attemptID: firstAttemptID,
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "First",
@@ -132,6 +139,7 @@ struct WorkspaceUIHookTests {
         let second = Task {
             try await uiHook.sendMessage(
                 requestID: secondRequestID,
+                attemptID: secondAttemptID,
                 sessionID: "session-2",
                 workspaceID: "workspace-1",
                 content: "Second",
@@ -154,8 +162,8 @@ struct WorkspaceUIHookTests {
                 result: acceptedMessageResult(requestID: firstRequestID)
             )
         )
-        #expect(try await first.value.messageID == "message-id")
-        #expect(try await second.value.messageID == "message-id")
+        #expect(try await first.value == "message-id")
+        #expect(try await second.value == "message-id")
     }
 
     @Test("Canceling a message command removes its pending callback")
@@ -167,6 +175,7 @@ struct WorkspaceUIHookTests {
         let send = Task {
             try await uiHook.sendMessage(
                 requestID: requestID,
+                attemptID: UUID(),
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Slow",
@@ -176,7 +185,7 @@ struct WorkspaceUIHookTests {
         _ = await events.next()
 
         send.cancel()
-        await #expect(throws: WorkspaceUIHook.CommandDispatchError.deliveryUnknown) {
+        await #expect(throws: CancellationError.self) {
             try await send.value
         }
         #expect(
@@ -198,6 +207,7 @@ struct WorkspaceUIHookTests {
         let send = Task {
             try await uiHook.sendMessage(
                 requestID: requestID,
+                attemptID: UUID(),
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Slow",
@@ -668,8 +678,7 @@ private func acceptedMessageResult(
         result: .init(
             type: .accepted,
             messageID: messageID,
-            reason: nil,
-            state: "sent"
+            reason: nil
         )
     )
 }

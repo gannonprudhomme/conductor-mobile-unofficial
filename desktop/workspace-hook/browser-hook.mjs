@@ -156,7 +156,7 @@ function resolveConductorServices(serviceModule) {
   );
   const messageProcessingController = uniqueService(
     serviceModule,
-    ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
+    ["enqueueMessage", "sendMessageImmediately", "sendToAgent", "cancelSession"],
     "MessageProcessingController",
   );
   return { gitService, messageProcessingController, sessionService, workspaceService };
@@ -421,24 +421,34 @@ async function executeCommand(
             if (typeof command.value.attemptId !== "string" || !command.value.attemptId) {
               throw new Error("The message attempt ID is invalid.");
             }
-            const result = await messageProcessingController.sendMessageImmediately({
+            let messageId;
+            const sendToAgent = messageProcessingController.sendToAgent
+              .bind(messageProcessingController);
+            await messageProcessingController.sendMessageImmediately.call({
+              sendToAgent: async (messageSession, message, _turnId, options) => {
+                if (typeof message?.id !== "string" || !message.id) {
+                  throw new Error("Conductor created an invalid message ID.");
+                }
+                messageId = message.id;
+                await sendToAgent(
+                  messageSession,
+                  message,
+                  command.value.attemptId,
+                  options,
+                );
+              },
+            }, {
               session,
               message: command.value.content,
               workspaceId: command.workspaceId,
               includeAttachments: false,
-              turnId: command.value.attemptId,
             });
-            if (
-              typeof result?.messageId !== "string"
-              || !result.messageId
-              || result.state !== "sent"
-            ) {
+            if (typeof messageId !== "string" || !messageId) {
               throw new Error("Conductor returned an invalid message receipt.");
             }
             return {
               type: "accepted",
-              messageId: result.messageId,
-              state: result.state,
+              messageId,
             };
           case "queued":
             await messageProcessingController.enqueueMessage({

@@ -16,12 +16,17 @@ import Testing
 
 @Suite(.serialized)
 struct MessageOutboxTests {
-    @Test("The v1 envelope persists only durable message identity and attempt state")
+    @Test("The v1 envelope persists durable message identity, order, and attempt state")
     func envelopeRoundTrip() throws {
         let outbox = MessageOutbox(
             workspaces: [
                 "workspace-1": [
-                    "session-1": [outboxBubble()],
+                    "session-1": [
+                        outboxBubble(
+                            precedingBubbleID: UUID(0),
+                            precedingTurnID: "turn-0"
+                        ),
+                    ],
                 ],
             ]
         )
@@ -33,8 +38,62 @@ struct MessageOutboxTests {
         )
         #expect(object["version"] as? Int == 1)
         #expect(Set(object.keys) == ["version", "workspaces"])
-        #expect(!String(decoding: data, as: UTF8.self).contains("timestamp"))
+        #expect(String(decoding: data, as: UTF8.self).contains("createdAt"))
         #expect(!String(decoding: data, as: UTF8.self).contains("diagnostic"))
+    }
+
+    @Test("A v1 bubble saved before causal anchors were added still decodes")
+    func legacyBubbleWithoutPrecedingTurnID() throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(
+                    MessageOutbox(
+                        workspaces: [
+                            "workspace-1": [
+                                "session-1": [
+                                    outboxBubble(precedingTurnID: "turn-1"),
+                                ],
+                            ],
+                        ]
+                    )
+                )
+            ) as? [String: Any]
+        )
+        var workspaces = try #require(object["workspaces"] as? [String: Any])
+        var sessions = try #require(workspaces["workspace-1"] as? [String: Any])
+        var bubbles = try #require(sessions["session-1"] as? [[String: Any]])
+        bubbles[0]["precedingTurnID"] = nil
+        sessions["session-1"] = bubbles
+        workspaces["workspace-1"] = sessions
+        object["workspaces"] = workspaces
+
+        let decoded = try JSONDecoder().decode(
+            MessageOutbox.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded["workspace-1", "session-1"].first?.precedingTurnID == nil)
+    }
+
+    @Test("Retry requires every attempt to be rejected or unknown")
+    func retryEligibility() {
+        var bubble = outboxBubble()
+        bubble.attempts = [
+            .init(attemptID: UUID(2), state: .rejected),
+            .init(attemptID: UUID(3), state: .unknown),
+        ]
+        #expect(bubble.canRetry)
+
+        bubble.attempts.append(
+            .init(attemptID: UUID(4), state: .accepted(messageID: "message-1"))
+        )
+        #expect(!bubble.canRetry)
+
+        bubble.attempts = [
+            .init(attemptID: UUID(5), state: .unknown),
+            .init(attemptID: UUID(6), state: .sending),
+        ]
+        #expect(!bubble.canRetry)
     }
 
     @Test("Corrupt and unsupported envelopes fail without changing their bytes", arguments: [
@@ -145,12 +204,18 @@ private let messageOutboxURL = URL.applicationSupportDirectory
 
 private func outboxBubble(
     bubbleID: UUID = UUID(1),
-    attemptID: UUID = UUID(2)
+    attemptID: UUID = UUID(2),
+    precedingBubbleID: UUID? = nil,
+    precedingTurnID: String? = nil
 ) -> MessageOutbox.Bubble {
     MessageOutbox.Bubble(
         bubbleID: bubbleID,
         content: "Run the tests.",
+        createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+        isFastModeEnabled: true,
         model: .gpt_5_6_terra,
+        precedingBubbleID: precedingBubbleID,
+        precedingTurnID: precedingTurnID,
         attempts: [
             .init(attemptID: attemptID, state: .sending),
         ]
@@ -162,15 +227,13 @@ private extension FileStorage {
         fileSystem: LockIsolated<[URL: Data]>,
         scheduler: S
     ) -> Self where S.SchedulerTimeType == DispatchQueue.SchedulerTimeType {
-        .inMemory(
-            fileSystem: fileSystem,
-            async: { scheduler.schedule($0.perform) },
-            asyncAfter: {
-                scheduler.schedule(
-                    after: scheduler.now.advanced(by: .init($0)),
-                    $1.perform
-                )
-            }
-        )
+        .inMemory(fileSystem: fileSystem) {
+            scheduler.schedule($0.perform)
+        } asyncAfter: {
+            scheduler.schedule(
+                after: scheduler.now.advanced(by: .init($0)),
+                $1.perform
+            )
+        }
     }
 }

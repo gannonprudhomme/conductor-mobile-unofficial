@@ -19,7 +19,7 @@ enum MessageRoute {
         database: any DatabaseWriter
     ) async throws -> Response {
         let sendMessageRequest = try await request.decode(
-            as: SendMessageRequest.self,
+            as: MessageSendRequest.self,
             context: context
         )
         guard !sendMessageRequest.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -28,9 +28,9 @@ enum MessageRoute {
         let attemptID = sendMessageRequest.attemptID
         let workspaceID = try context.parameters.require("workspaceID")
         let sessionID = try context.parameters.require("sessionID")
+        @Dependency(\.continuousClock) var clock
         @Dependency(\.uuid) var uuid
         @Dependency(\.workspaceUIHook) var workspaceUIHook
-        let clock = ContinuousClock()
         let uiHook = workspaceUIHook
 
         let session: Session?
@@ -43,17 +43,19 @@ enum MessageRoute {
                     }
                     .fetchOne(database)
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .rejected("Could not load message send context: \(error)")
+                result: .rejected(reason: "Could not load message send context: \(error)")
             )
         }
 
         guard let session else {
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .rejected("Session not found.")
+                result: .rejected(reason: "Session not found.")
             )
         }
         let requestedModel = Session.Model(rawValue: sendMessageRequest.model)
@@ -65,14 +67,12 @@ enum MessageRoute {
                   let agentType = requestedModel.agentType {
             requestedAgentType = agentType
         } else {
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .rejected("Model is not available for this session's agent.")
+                result: .rejected(reason: "Model is not available for this session's agent.")
             )
         }
         let isFastModeEnabled = sendMessageRequest.isFastModeEnabled
-            ?? session.isFastModeEnabled
-            ?? false
 
         do {
             if requestedAgentType != session.agentType {
@@ -97,10 +97,10 @@ enum MessageRoute {
                     }
                 }
                 guard didUpdate else {
-                    return response(
+                    return try response(
                         attemptID: attemptID,
                         result: .rejected(
-                            "Conductor is not connected to change the session agent."
+                            reason: "Conductor is not connected to change the session agent."
                         )
                     )
                 }
@@ -124,23 +124,27 @@ enum MessageRoute {
                     }
                 }
                 guard didUpdate else {
-                    return response(
+                    return try response(
                         attemptID: attemptID,
                         result: .rejected(
-                            "Conductor is not connected to change the session model."
+                            reason: "Conductor is not connected to change the session model."
                         )
                     )
                 }
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as WorkspaceUIHook.DispatchError {
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .rejected(modelUpdateFailureReason(for: error))
+                result: .rejected(
+                    reason: updateFailureReason(for: error, subject: "the session model")
+                )
             )
         } catch {
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .rejected("Could not update the session model: \(error)")
+                result: .rejected(reason: "Could not update the session model: \(error)")
             )
         }
 
@@ -173,22 +177,26 @@ enum MessageRoute {
                         )
                     }
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as WorkspaceUIHook.DispatchError {
-                return response(
+                return try response(
                     attemptID: attemptID,
-                    result: .rejected(fastModeUpdateFailureReason(for: error))
+                    result: .rejected(
+                        reason: updateFailureReason(for: error, subject: "Fast Mode")
+                    )
                 )
             } catch {
-                return response(
+                return try response(
                     attemptID: attemptID,
-                    result: .rejected("Could not update Fast Mode: \(error)")
+                    result: .rejected(reason: "Could not update Fast Mode: \(error)")
                 )
             }
         }
 
         let requestID = uuid()
         do {
-            let receipt = try await uiHook.sendMessage(
+            let messageID = try await uiHook.sendMessage(
                 requestID: requestID,
                 attemptID: attemptID,
                 sessionID: sessionID,
@@ -196,25 +204,27 @@ enum MessageRoute {
                 content: sendMessageRequest.message,
                 mode: .sent
             )
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .accepted(messageID: receipt.messageID)
+                result: .accepted(messageID: messageID)
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as WorkspaceUIHook.CommandDispatchError {
-            let result: DeliveryResult = switch error {
+            let result: MessageDeliveryResult = switch error {
             case .listenerUnavailable:
-                .rejected("Conductor's workspace UI hook is unavailable.")
+                .rejected(reason: "Conductor's workspace UI hook is unavailable.")
             case .commandFailed, .deliveryUnknown, .persistenceTimedOut:
-                .unknown("Delivery could not be determined.")
+                .unknown(reason: "Delivery could not be determined.")
             }
-            return response(
+            return try response(
                 attemptID: attemptID,
                 result: result
             )
         } catch {
-            return response(
+            return try response(
                 attemptID: attemptID,
-                result: .rejected("Message was not enqueued.")
+                result: .rejected(reason: "Message was not enqueued.")
             )
         }
     }
@@ -246,12 +256,13 @@ enum MessageRoute {
         throw CancellationError()
     }
 
-    private static func modelUpdateFailureReason(
-        for error: WorkspaceUIHook.DispatchError
+    private static func updateFailureReason(
+        for error: WorkspaceUIHook.DispatchError,
+        subject: String
     ) -> String {
         switch error {
         case .deliveryUnknown:
-            "Could not determine whether the session model was delivered."
+            "Could not determine whether \(subject) was delivered."
         case .listenerUnavailable:
             "Conductor's workspace UI hook is unavailable."
         case .mutationInFlight:
@@ -259,87 +270,12 @@ enum MessageRoute {
         }
     }
 
-    private static func fastModeUpdateFailureReason(
-        for error: WorkspaceUIHook.DispatchError
-    ) -> String {
-        switch error {
-        case .deliveryUnknown:
-            "Could not determine whether Fast Mode was delivered."
-        case .listenerUnavailable:
-            "Conductor's workspace UI hook is unavailable."
-        case .mutationInFlight:
-            "Another Conductor UI change is still in progress."
-        }
-    }
-
-    private struct SendMessageRequest: Decodable {
-        let attemptID: UUID
-        let message: String
-        let model: String
-        let isFastModeEnabled: Bool?
-
-        private enum CodingKeys: String, CodingKey {
-            case attemptID = "attemptId"
-            case message
-            case model
-            case isFastModeEnabled = "fast_mode"
-        }
-    }
-
-    private enum DeliveryResult {
-        case accepted(messageID: String)
-        case rejected(String)
-        case unknown(String)
-    }
-
-    private struct SendMessageResponse: Encodable {
-        let attemptID: UUID
-        let result: Result
-
-        enum Result: Encodable {
-            case accepted(messageID: String)
-            case rejected(reason: String)
-            case unknown(reason: String)
-
-            private enum CodingKeys: String, CodingKey {
-                case messageID = "messageId"
-                case reason
-                case type
-            }
-
-            func encode(to encoder: any Encoder) throws {
-                var container = encoder.container(keyedBy: CodingKeys.self)
-                switch self {
-                case .accepted(let messageID):
-                    try container.encode("accepted", forKey: .type)
-                    try container.encode(messageID, forKey: .messageID)
-                case .rejected(let reason):
-                    try container.encode("rejected", forKey: .type)
-                    try container.encode(reason, forKey: .reason)
-                case .unknown(let reason):
-                    try container.encode("unknown", forKey: .type)
-                    try container.encode(reason, forKey: .reason)
-                }
-            }
-        }
-
-        private enum CodingKeys: String, CodingKey {
-            case attemptID = "attemptId"
-            case result
-        }
-    }
-
-    private static func response(attemptID: UUID, result: DeliveryResult) -> Response {
-        let result: SendMessageResponse.Result = switch result {
-        case .accepted(let messageID):
-            .accepted(messageID: messageID)
-        case .rejected(let reason):
-            .rejected(reason: reason)
-        case .unknown(let reason):
-            .unknown(reason: reason)
-        }
-        let data = try! JSONEncoder().encode(
-            SendMessageResponse(attemptID: attemptID, result: result)
+    private static func response(
+        attemptID: UUID,
+        result: MessageDeliveryResult
+    ) throws -> Response {
+        let data = try JSONEncoder().encode(
+            MessageSendResponse(attemptID: attemptID, result: result)
         )
         return Response(
             status: .ok,

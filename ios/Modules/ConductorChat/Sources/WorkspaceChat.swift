@@ -13,6 +13,7 @@ import ConductorMobileData
 import Foundation
 import LucideIcons
 import Logging
+import Sharing
 import SQLiteData
 import SwiftUI
 
@@ -43,6 +44,7 @@ public struct WorkspaceChat: Sendable {
         var sessionIDAwaitingObservation: Session.ID?
         var bubbleIDAwaitingRetryConfirmation: UUID?
         var hasNormalizedRestoredOutbox = false
+        var canonicalMessageIDsBySession: [Session.ID: Set<Message.ID>] = [:]
         var messageIDToBubbleID: [Message.ID: UUID] = [:]
 
         @FetchAll public var activeSessions: [Session]
@@ -53,7 +55,8 @@ public struct WorkspaceChat: Sendable {
             workspaceWithRepository: WorkspaceWithRepository,
             outbox: Shared<MessageOutbox> = Shared(.messageOutbox),
             selectedModel: Session.Model? = nil,
-            shouldFocusMessageField: Bool = false
+            shouldFocusMessageField: Bool = false,
+            creationPromptFailureMessage: String? = nil
         ) {
             self._outbox = outbox
             let workspace = workspaceWithRepository.workspace
@@ -91,6 +94,11 @@ public struct WorkspaceChat: Sendable {
                     outbox: self.$outbox,
                     selectedModel: selectedModel,
                     shouldFocusMessageField: shouldFocusMessageField
+                )
+            }
+            if let creationPromptFailureMessage {
+                self.destination = .alert(
+                    .creationPromptFailed(message: creationPromptFailureMessage)
                 )
             }
         }
@@ -133,6 +141,7 @@ public struct WorkspaceChat: Sendable {
         case renameBranchButtonTapped
         case renameBranchResponse(Result<Void, any Error>)
         case renameBranchSubmitted
+        case stagedSendSuperseded(SendAddress)
         case stagedSendSaveFailed(SendAddress, isInitial: Bool, message: String)
         case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
@@ -189,11 +198,12 @@ public struct WorkspaceChat: Sendable {
             case let .activeSessionIDChanged(activeSessionID):
                 // The workspace and session snapshots are persisted independently. Do not let a
                 // workspace update clear or replace the chat while SQLite is still catching up.
+                let activeSession = state.activeSessions.first {
+                    $0.id == activeSessionID
+                }
                 guard !state.hasUserSelectedSession,
                       let activeSessionID,
-                      let activeSession = state.activeSessions.first(where: {
-                          $0.id == activeSessionID
-                      }),
+                      let activeSession,
                       state.chat?.sessionID != activeSessionID else {
                     return .none
                 }
@@ -335,7 +345,10 @@ public struct WorkspaceChat: Sendable {
                     )
                     refreshCurrentChat(state: &state)
                 }
-                if sessions.contains(where: { $0.id == state.sessionIDAwaitingObservation }) {
+                let didObserveAwaitedSession = sessions.contains {
+                    $0.id == state.sessionIDAwaitingObservation
+                }
+                if didObserveAwaitedSession {
                     state.sessionIDAwaitingObservation = nil
                 }
                 state.chat = Self.selectedChat(
@@ -384,10 +397,18 @@ public struct WorkspaceChat: Sendable {
                     bubbleID: uuid(),
                     attemptID: uuid()
                 )
+                let precedingBubbleID = state.outbox[
+                    address.workspaceID,
+                    address.sessionID
+                ].last?.bubbleID
                 let bubble = MessageOutbox.Bubble(
                     bubbleID: address.bubbleID,
                     content: content,
+                    createdAt: now,
+                    isFastModeEnabled: chat.isFastModeEnabled,
                     model: chat.selectedModel,
+                    precedingBubbleID: precedingBubbleID,
+                    precedingTurnID: chat.turns?.last?.id,
                     attempts: [
                         .init(attemptID: address.attemptID, state: .sending),
                     ]
@@ -397,7 +418,11 @@ public struct WorkspaceChat: Sendable {
                     bubbles.append(bubble)
                     outbox[address.workspaceID, address.sessionID] = bubbles
                 }
-                state.chat?.updateRows(sessionStatus: chat.session.status)
+                let outboxSnapshot = state.outbox
+                state.chat?.updateRows(
+                    sessionStatus: chat.session.status,
+                    outbox: outboxSnapshot
+                )
                 state.chat?.scrollToBottomRequest &+= 1
                 return performStagedSend(
                     address: address,
@@ -409,15 +434,18 @@ public struct WorkspaceChat: Sendable {
                 )
 
             case let .chat(.retryButtonTapped(bubbleID)):
-                guard let chat = state.chat,
-                      let bubble = state.outbox[chat.session.workspaceID, chat.session.id]
-                        .first(where: { $0.bubbleID == bubbleID }) else {
+                guard let chat = state.chat else {
                     return .none
                 }
-                guard !bubble.attempts.contains(where: { $0.state == .sending }) else {
+                let bubble = state.outbox[chat.session.workspaceID, chat.session.id]
+                    .first { $0.bubbleID == bubbleID }
+                guard let bubble,
+                      bubble.canRetry,
+                      !chat.isMessageSendInFlight else {
                     return .none
                 }
-                if bubble.attempts.contains(where: { $0.state == .unknown }) {
+                let hasUnknownAttempt = bubble.attempts.contains { $0.state == .unknown }
+                if hasUnknownAttempt {
                     state.bubbleIDAwaitingRetryConfirmation = bubbleID
                     state.destination = .alert(.confirmUnknownRetry)
                     return .none
@@ -443,25 +471,77 @@ public struct WorkspaceChat: Sendable {
                     state.destination = .alert(.outboxUnavailable(message: message))
                     return .none
                 }
+                var didRemoveAttempt = false
                 state.$outbox.withLock { outbox in
                     var bubbles = outbox[address.workspaceID, address.sessionID]
-                    guard let bubbleIndex = bubbles.firstIndex(where: {
+                    let bubbleIndex = bubbles.firstIndex {
                         $0.bubbleID == address.bubbleID
-                    }) else {
+                    }
+                    guard let bubbleIndex else {
                         return
                     }
                     if isInitial {
                         bubbles.remove(at: bubbleIndex)
+                        didRemoveAttempt = true
                     } else {
+                        let previousAttemptCount = bubbles[bubbleIndex].attempts.count
                         bubbles[bubbleIndex].attempts.removeAll {
                             $0.attemptID == address.attemptID && $0.state == .sending
                         }
+                        didRemoveAttempt =
+                            bubbles[bubbleIndex].attempts.count < previousAttemptCount
                     }
                     outbox[address.workspaceID, address.sessionID] = bubbles
                 }
+                if didRemoveAttempt, state.chat?.sessionID == address.sessionID {
+                    _ = reconcileCanonicalMessages(
+                        Array(state.chat?.messages ?? []),
+                        state: &state,
+                        refreshingRows: true
+                    )
+                }
+                return .send(.outboxSaveFailed(message))
+
+            case let .stagedSendSuperseded(address):
+                guard state.$outbox.loadError == nil else {
+                    state.destination = .alert(
+                        .outboxUnavailable(message: "The message outbox could not be loaded.")
+                    )
+                    return .none
+                }
+                var didRemoveAttempt = false
+                state.$outbox.withLock { outbox in
+                    var bubbles = outbox[address.workspaceID, address.sessionID]
+                    let bubbleIndex = bubbles.firstIndex {
+                        $0.bubbleID == address.bubbleID
+                    }
+                    guard let bubbleIndex else {
+                        return
+                    }
+                    let hasAcceptedAttempt = bubbles[bubbleIndex].attempts.contains {
+                        $0.attemptID != address.attemptID && $0.state.isAccepted
+                    }
+                    let attemptIndex = bubbles[bubbleIndex].attempts.firstIndex {
+                        $0.attemptID == address.attemptID && $0.state == .sending
+                    }
+                    guard hasAcceptedAttempt, let attemptIndex else {
+                        return
+                    }
+                    bubbles[bubbleIndex].attempts.remove(at: attemptIndex)
+                    outbox[address.workspaceID, address.sessionID] = bubbles
+                    didRemoveAttempt = true
+                }
+                guard didRemoveAttempt else {
+                    return .none
+                }
+                if state.chat?.sessionID == address.sessionID {
+                    _ = reconcileCanonicalMessages(
+                        Array(state.chat?.messages ?? []),
+                        state: &state
+                    )
+                }
                 refreshCurrentChat(state: &state)
-                state.destination = .alert(.outboxSaveFailed(message: message))
-                return .none
+                return saveOutbox(state.$outbox)
 
             case let .messageSendResponse(address, result):
                 guard state.$outbox.loadError == nil else {
@@ -473,12 +553,16 @@ public struct WorkspaceChat: Sendable {
                 var didTransition = false
                 state.$outbox.withLock { outbox in
                     var bubbles = outbox[address.workspaceID, address.sessionID]
-                    guard let bubbleIndex = bubbles.firstIndex(where: {
+                    let bubbleIndex = bubbles.firstIndex {
                         $0.bubbleID == address.bubbleID
-                    }),
-                    let attemptIndex = bubbles[bubbleIndex].attempts.firstIndex(where: {
+                    }
+                    guard let bubbleIndex else {
+                        return
+                    }
+                    let attemptIndex = bubbles[bubbleIndex].attempts.firstIndex {
                         $0.attemptID == address.attemptID && $0.state == .sending
-                    }) else {
+                    }
+                    guard let attemptIndex else {
                         return
                     }
                     bubbles[bubbleIndex].attempts[attemptIndex].state = switch result {
@@ -505,24 +589,22 @@ public struct WorkspaceChat: Sendable {
                 return saveOutbox(state.$outbox)
 
             case let .chat(.messagesUpdated(messages)):
-                let didRemoveBubble = reconcileCanonicalMessages(messages, state: &state)
-                let aliases = state.messageIDToBubbleID
-                state.chat?.messageIDToBubbleID = aliases
-                return didRemoveBubble ? saveOutbox(state.$outbox) : .none
+                retainCanonicalMessageIDs(messages, state: &state)
+                let didMutateOutbox = reconcileCanonicalMessages(messages, state: &state)
+                return didMutateOutbox ? saveOutbox(state.$outbox) : .none
 
             case let .chat(.initialMessagesResponse(sessionID, messages)):
                 guard state.chat?.sessionID == sessionID else {
                     return .none
                 }
-                let didRemoveBubble = reconcileCanonicalMessages(messages, state: &state)
-                let aliases = state.messageIDToBubbleID
-                state.chat?.messageIDToBubbleID = aliases
+                retainCanonicalMessageIDs(messages, state: &state)
+                let didMutateOutbox = reconcileCanonicalMessages(messages, state: &state)
                 return .merge(
                     markWorkspaceReadIfNeeded(
                         state,
                         selectedSession: state.chat?.session
                     ),
-                    didRemoveBubble ? saveOutbox(state.$outbox) : .none
+                    didMutateOutbox ? saveOutbox(state.$outbox) : .none
                 )
 
             case let .outboxSaveFailed(message):
@@ -750,7 +832,6 @@ public struct WorkspaceChat: Sendable {
         }
 
         let workspaceID = state.workspace.id
-        var didNormalize = false
         state.$outbox.withLock { outbox in
             guard var sessions = outbox.workspaces[workspaceID] else {
                 return
@@ -763,19 +844,14 @@ public struct WorkspaceChat: Sendable {
                     for attemptIndex in bubbles[bubbleIndex].attempts.indices
                     where bubbles[bubbleIndex].attempts[attemptIndex].state == .sending {
                         bubbles[bubbleIndex].attempts[attemptIndex].state = .unknown
-                        didNormalize = true
                     }
                 }
                 sessions[sessionID] = bubbles
             }
             outbox.workspaces[workspaceID] = sessions
         }
-        guard didNormalize else {
-            refreshCurrentChat(state: &state)
-            // An explicit first save turns missing or empty storage into a valid v1 envelope.
-            return saveOutbox(state.$outbox)
-        }
         refreshCurrentChat(state: &state)
+        // An explicit first save turns missing or empty storage into a valid v1 envelope.
         return saveOutbox(state.$outbox)
     }
 
@@ -783,7 +859,9 @@ public struct WorkspaceChat: Sendable {
         bubbleID: UUID,
         state: inout State
     ) -> Effect<Action> {
-        guard canStageSend(state: &state), let chat = state.chat else {
+        guard canStageSend(state: &state),
+              let chat = state.chat,
+              !chat.isMessageSendInFlight else {
             return .none
         }
         let workspaceID = chat.session.workspaceID
@@ -792,12 +870,13 @@ public struct WorkspaceChat: Sendable {
         var stagedBubble: MessageOutbox.Bubble?
         state.$outbox.withLock { outbox in
             var bubbles = outbox[workspaceID, sessionID]
-            guard let bubbleIndex = bubbles.firstIndex(where: {
+            let bubbleIndex = bubbles.firstIndex {
                 $0.bubbleID == bubbleID
-            }),
-            !bubbles[bubbleIndex].attempts.contains(where: {
-                $0.state == .sending || $0.state.isAccepted
-            }) else {
+            }
+            guard let bubbleIndex else {
+                return
+            }
+            guard bubbles[bubbleIndex].canRetry else {
                 return
             }
             bubbles[bubbleIndex].attempts.append(
@@ -854,11 +933,15 @@ public struct WorkspaceChat: Sendable {
             }
 
             let shouldSend = outbox.withLock { outbox in
-                guard let persistedBubble = outbox[address.workspaceID, address.sessionID]
-                    .first(where: { $0.bubbleID == address.bubbleID }),
-                    !persistedBubble.attempts.contains(where: {
-                        $0.attemptID != address.attemptID && $0.state.isAccepted
-                    }) else {
+                let persistedBubble = outbox[address.workspaceID, address.sessionID]
+                    .first { $0.bubbleID == address.bubbleID }
+                guard let persistedBubble else {
+                    return false
+                }
+                let hasAcceptedAttempt = persistedBubble.attempts.contains {
+                    $0.attemptID != address.attemptID && $0.state.isAccepted
+                }
+                guard !hasAcceptedAttempt else {
                     return false
                 }
                 return persistedBubble.attempts.contains {
@@ -866,6 +949,7 @@ public struct WorkspaceChat: Sendable {
                 }
             }
             guard shouldSend else {
+                await send(.stagedSendSuperseded(address))
                 return
             }
 
@@ -881,6 +965,7 @@ public struct WorkspaceChat: Sendable {
                 sessionID: address.sessionID,
                 message: bubble.content,
                 model: bubble.model,
+                isFastModeEnabled: bubble.isFastModeEnabled,
                 attemptID: address.attemptID
             )
             await send(.messageSendResponse(address, result))
@@ -908,7 +993,8 @@ public struct WorkspaceChat: Sendable {
 
     private func reconcileCanonicalMessages(
         _ messages: [Message],
-        state: inout State
+        state: inout State,
+        refreshingRows: Bool = false
     ) -> Bool {
         guard state.$outbox.loadError == nil, let chat = state.chat else {
             return false
@@ -916,52 +1002,121 @@ public struct WorkspaceChat: Sendable {
         let workspaceID = chat.session.workspaceID
         let sessionID = chat.session.id
         var aliases = state.messageIDToBubbleID
-        var didRemoveBubble = false
+        var didMutateOutbox = false
+        var hasRemainingBubbles = false
+        var outboxSnapshot = state.outbox
 
         state.$outbox.withLock { outbox in
             var bubbles = outbox[workspaceID, sessionID]
             var claimedBubbleIDs = Set(aliases.values)
-            for message in messages where message.role == .user && aliases[message.id] == nil {
-                let acceptedMatch = bubbles.first { bubble in
-                    !claimedBubbleIDs.contains(bubble.bubbleID)
-                        && bubble.attempts.contains { attempt in
-                            attempt.state.acceptedMessageID == message.id
-                        }
+            let userMessages = messages.filter { $0.role == .user }
+            let canonicalMessageIDs = state.canonicalMessageIDsBySession[
+                sessionID,
+                default: []
+            ].union(userMessages.map(\.id))
+
+            // Only durable receipt and attempt IDs can transition or alias an outbox bubble.
+            for message in userMessages {
+                let acceptedBubbleIndex = bubbles.firstIndex { bubble in
+                    bubble.attempts.contains { attempt in
+                        attempt.state.acceptedMessageID == message.id
+                    }
                 }
-                let turnMatch = bubbles.first { bubble in
-                    !claimedBubbleIDs.contains(bubble.bubbleID)
-                        && bubble.attempts.contains { attempt in
-                            message.turnID.flatMap(UUID.init(uuidString:)) == attempt.attemptID
+                var attemptBubbleIndex: Int?
+                if let turnID = message.turnID.flatMap(UUID.init(uuidString:)) {
+                    for bubbleIndex in bubbles.indices {
+                        let attemptIndex = bubbles[bubbleIndex].attempts.firstIndex {
+                            $0.attemptID == turnID
                         }
+                        guard let attemptIndex else {
+                            continue
+                        }
+                        let acceptedState = MessageOutbox.Attempt.State.accepted(
+                            messageID: message.id
+                        )
+                        if bubbles[bubbleIndex].attempts[attemptIndex].state != acceptedState {
+                            bubbles[bubbleIndex].attempts[attemptIndex].state = acceptedState
+                            didMutateOutbox = true
+                        }
+                        attemptBubbleIndex = bubbleIndex
+                        break
+                    }
                 }
-                guard let bubble = acceptedMatch ?? turnMatch else {
+
+                guard aliases[message.id] == nil,
+                      let matchedBubbleIndex = acceptedBubbleIndex ?? attemptBubbleIndex,
+                      !claimedBubbleIDs.contains(bubbles[matchedBubbleIndex].bubbleID) else {
                     continue
                 }
+                let bubble = bubbles[matchedBubbleIndex]
                 aliases[message.id] = bubble.bubbleID
                 claimedBubbleIDs.insert(bubble.bubbleID)
             }
 
             let aliasedBubbleIDs = Set(aliases.values)
             bubbles.removeAll { bubble in
+                let acceptedMessageIDs = Set(
+                    bubble.attempts.compactMap(\.state.acceptedMessageID)
+                )
                 let shouldRemove = aliasedBubbleIDs.contains(bubble.bubbleID)
-                    && !bubble.attempts.contains(where: { $0.state == .sending })
-                didRemoveBubble = didRemoveBubble || shouldRemove
+                    && !bubble.attempts.contains {
+                        $0.state == .sending || $0.state == .unknown
+                    }
+                    && acceptedMessageIDs.isSubset(of: canonicalMessageIDs)
+                didMutateOutbox = didMutateOutbox || shouldRemove
                 return shouldRemove
             }
             outbox[workspaceID, sessionID] = bubbles
+            hasRemainingBubbles = !bubbles.isEmpty
+            outboxSnapshot = outbox
         }
 
-        // Install aliases before the child reducer rebuilds rows from this message snapshot.
+        if !hasRemainingBubbles {
+            state.canonicalMessageIDsBySession[sessionID] = nil
+        }
+        let didChangeAliases = state.messageIDToBubbleID != aliases
         state.messageIDToBubbleID = aliases
         state.chat?.messageIDToBubbleID = aliases
-        return didRemoveBubble
+        if didChangeAliases {
+            let previousTurns = state.chat?.turns ?? []
+            state.chat?.turns = Turn.parse(
+                messages: messages,
+                reusing: previousTurns,
+                messageIDToBubbleID: aliases
+            )
+        }
+        if refreshingRows || didChangeAliases || didMutateOutbox,
+           let status = state.chat?.session.status {
+            state.chat?.updateRows(
+                sessionStatus: status,
+                outbox: outboxSnapshot
+            )
+        }
+        return didMutateOutbox
+    }
+
+    private func retainCanonicalMessageIDs(
+        _ messages: [Message],
+        state: inout State
+    ) {
+        guard let chat = state.chat,
+              !state.outbox[chat.session.workspaceID, chat.session.id].isEmpty else {
+            return
+        }
+        state.canonicalMessageIDsBySession[chat.session.id] = Set(
+            messages.lazy.filter { $0.role == .user }.map(\.id)
+        )
     }
 
     private func refreshCurrentChat(state: inout State) {
         let aliases = state.messageIDToBubbleID
         state.chat?.messageIDToBubbleID = aliases
         if let status = state.chat?.session.status {
-            state.chat?.updateRows(sessionStatus: status)
+            let outboxSnapshot = state.outbox
+            state.chat?.updateRows(
+                sessionStatus: status,
+                outbox: outboxSnapshot
+            )
         }
     }
 
@@ -979,12 +1134,15 @@ public struct WorkspaceChat: Sendable {
         messageIDToBubbleID: [Message.ID: UUID]
     ) -> Chat.State? {
         let activeSessions = sessions.filter { !$0.isHidden } // Archived sessions are displayed separately and cannot remain selected in the chat.
+        let includesCurrentChat = currentChat.map { currentChat in
+            activeSessions.contains { $0.id == currentChat.sessionID }
+        } ?? false
         if let sessionIDAwaitingObservation,
            currentChat?.sessionID == sessionIDAwaitingObservation {
             return currentChat
         } else if hasUserSelectedSession,
            let currentChat,
-            activeSessions.contains(where: { $0.id == currentChat.sessionID }) {
+           includesCurrentChat {
             // Preserve a reconciled or explicit selection instead of resetting it on every snapshot.
             return currentChat
         } else {
@@ -1088,6 +1246,14 @@ private extension MessageOutbox.Attempt.State {
 }
 
 extension AlertState where Action == WorkspaceChat.Destination.Alert {
+    static func creationPromptFailed(message: String) -> Self {
+        AlertState {
+            TextState("Workspace created without sending message")
+        } message: {
+            TextState(message)
+        }
+    }
+
     static var confirmUnknownRetry: Self {
         AlertState {
             TextState("Retry message?")
@@ -1301,7 +1467,7 @@ public struct WorkspaceChatView: View {
         }
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .sensoryFeedback(.error, trigger: store.destination) { _, destination in
-            destination?.alert != nil
+            destination?.alert.map { $0 != .confirmUnknownRetry } ?? false
         }
         .sheet(
             item: $store.scope(

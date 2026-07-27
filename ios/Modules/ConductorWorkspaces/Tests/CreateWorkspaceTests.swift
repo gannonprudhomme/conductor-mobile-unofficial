@@ -10,7 +10,7 @@ import ConductorMobileData
 import CustomDump
 import Foundation
 import SharedConductorData
-import Sharing
+@_spi(Internals) import Sharing
 import SQLiteData
 import SwiftUI
 @testable import ConductorWorkspaces
@@ -66,7 +66,7 @@ struct CreateWorkspaceTests {
             repositoryID: repository.id
         )
         let database = try appDatabase()
-        await withDependencies {
+        try await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
             var state = CreateWorkspace.State(repositories: [repository])
@@ -77,6 +77,7 @@ struct CreateWorkspaceTests {
                 CreateWorkspace()
             } withDependencies: {
                 $0.defaultDatabase = database
+                $0.date.now = Date(timeIntervalSince1970: 1_783_558_800)
                 $0.uuid = .incrementing
                 $0.desktopClient.createWorkspace = {
                     requestedWorkspaceID,
@@ -96,22 +97,24 @@ struct CreateWorkspaceTests {
                     sessionID,
                     message,
                     model,
+                    isFastModeEnabled,
                     attemptID in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
-                    #expect(attemptID == UUID(1))
+                    #expect(isFastModeEnabled)
+                    #expect(attemptID == UUID(2))
                     return .accepted(messageID: "message")
                 }
             }
+            store.exhaustivity = .off(showSkippedAssertions: false)
 
             await store.send(.createButtonTapped) {
                 $0.isCreateAPIInFlight = true
                 $0.workspaceID = workspaceID
             }
             await store.receive(\.createWorkspaceSucceeded) {
-                $0.$prompt.withLock { $0 = "" }
                 $0.isCreateAPIInFlight = false
             }
             await store.receive(
@@ -126,7 +129,189 @@ struct CreateWorkspaceTests {
                     )
                 )
             )
+            #expect(store.state.prompt.isEmpty)
+            let bubble = try #require(
+                store.state.outbox[workspace.id, session.id].first
+            )
+            #expect(bubble.bubbleID == UUID(1))
+            #expect(bubble.createdAt == Date(timeIntervalSince1970: 1_783_558_800))
+            #expect(bubble.attempts == [
+                .init(attemptID: UUID(2), state: .accepted(messageID: "message")),
+            ])
         }
+    }
+
+    @Test("Unknown prompt delivery enters the workspace with its durable bubble")
+    func unknownPromptDelivery() async throws {
+        let repository = Repository.preview()
+        let workspaceID = UUID(0).uuidString.lowercased()
+        let session = Session.preview(id: "session", workspaceID: workspaceID)
+        let workspace = Workspace.preview(
+            id: workspaceID,
+            activeSessionID: session.id,
+            repositoryID: repository.id
+        )
+        let database = try appDatabase()
+        let saveRecorder = LockIsolated<[MessageOutbox]>([])
+        let outboxKey = RecordingOutboxKey(savedValues: saveRecorder)
+        @Shared(outboxKey) var outbox = MessageOutbox()
+
+        let state = CreateWorkspace.State(
+            repositories: [repository],
+            outbox: $outbox
+        )
+        state.$prompt.withLock { $0 = "Run the tests." }
+        let store = TestStore(initialState: state) {
+            CreateWorkspace()
+        } withDependencies: {
+            $0.defaultDatabase = database
+            $0.date.now = Date(timeIntervalSince1970: 1_783_558_800)
+            $0.uuid = .incrementing
+            $0.desktopClient.createWorkspace = { _, _, _, _, _ in
+                CreatedWorkspace(workspace: workspace, session: session)
+            }
+            $0.desktopClient.sendMessage = {
+                _, _, _, _, _, attemptID in
+                let stagedBubble = saveRecorder.value
+                    .first?[workspace.id, session.id]
+                    .first
+                #expect(stagedBubble?.bubbleID == UUID(1))
+                #expect(stagedBubble?.attempts == [
+                    .init(attemptID: attemptID, state: .sending),
+                ])
+                return .unknown(reason: "Delivery could not be determined.")
+            }
+        }
+        store.exhaustivity = .off(showSkippedAssertions: false)
+
+        await store.send(.createButtonTapped) {
+            $0.isCreateAPIInFlight = true
+            $0.workspaceID = workspaceID
+        }
+        await store.receive(\.createWorkspaceSucceeded) {
+            $0.isCreateAPIInFlight = false
+        }
+        await store.receive(
+            \.delegate,
+            .workspaceCreated(
+                WorkspaceCreationResult(
+                    selectedModel: .gpt_5_6_sol,
+                    workspace: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: repository
+                    )
+                )
+            )
+        )
+
+        #expect(store.state.alert == nil)
+        #expect(store.state.prompt.isEmpty)
+        #expect(store.state.outbox[workspace.id, session.id].first?.attempts == [
+            .init(attemptID: UUID(2), state: .unknown),
+        ])
+        #expect(saveRecorder.value.count == 2)
+    }
+
+    @Test("A prompt save failure still enters the created workspace")
+    func promptSaveFailureIsPartialCreation() async throws {
+        let repository = Repository.preview()
+        let workspaceID = UUID(0).uuidString.lowercased()
+        let session = Session.preview(id: "session", workspaceID: workspaceID)
+        let workspace = Workspace.preview(
+            id: workspaceID,
+            activeSessionID: session.id,
+            repositoryID: repository.id
+        )
+        let database = try appDatabase()
+        let outboxKey = RecordingOutboxKey(
+            savedValues: LockIsolated([]),
+            shouldFail: true
+        )
+        @Shared(outboxKey) var outbox = MessageOutbox()
+        let requestCount = LockIsolated(0)
+
+        let state = CreateWorkspace.State(
+            repositories: [repository],
+            outbox: $outbox
+        )
+        state.$prompt.withLock { $0 = "Run the tests." }
+        let store = TestStore(initialState: state) {
+            CreateWorkspace()
+        } withDependencies: {
+            $0.defaultDatabase = database
+            $0.date.now = Date(timeIntervalSince1970: 1_783_558_800)
+            $0.uuid = .incrementing
+            $0.desktopClient.createWorkspace = { _, _, _, _, _ in
+                CreatedWorkspace(workspace: workspace, session: session)
+            }
+            $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                requestCount.withValue { $0 += 1 }
+                return .accepted(messageID: "unexpected")
+            }
+        }
+        store.exhaustivity = .off(showSkippedAssertions: false)
+
+        await store.send(.createButtonTapped)
+        await store.receive(\.createWorkspaceSucceeded) {
+            $0.isCreateAPIInFlight = false
+        }
+        await store.receive(
+            \.delegate,
+            .workspaceCreated(
+                WorkspaceCreationResult(
+                    promptFailureMessage: TestError().localizedDescription,
+                    selectedModel: .gpt_5_6_sol,
+                    workspace: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: repository
+                    )
+                )
+            )
+        )
+
+        #expect(requestCount.value == 0)
+        #expect(store.state.prompt == "Run the tests.")
+        #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+        #expect(store.state.$outbox.saveError != nil)
+        let persistedWorkspace = try await database.read { database in
+            try Workspace.find(workspace.id).fetchOne(database)
+        }
+        #expect(persistedWorkspace == workspace)
+    }
+
+    @Test("A known outbox failure prevents workspace creation with a prompt")
+    func knownPromptOutboxFailurePreflightsCreation() async {
+        let repository = Repository.preview()
+        let outboxKey = RecordingOutboxKey(
+            savedValues: LockIsolated([]),
+            shouldFail: true
+        )
+        @Shared(outboxKey) var outbox = MessageOutbox()
+        try? await $outbox.save()
+        let requestCount = LockIsolated(0)
+        let state = CreateWorkspace.State(
+            repositories: [repository],
+            outbox: $outbox
+        )
+        state.$prompt.withLock { $0 = "Run the tests." }
+        let store = TestStore(initialState: state) {
+            CreateWorkspace()
+        } withDependencies: {
+            $0.uuid = .incrementing
+            $0.desktopClient.createWorkspace = { _, _, _, _, _ in
+                requestCount.withValue { $0 += 1 }
+                throw TestError()
+            }
+        }
+
+        await store.send(.createButtonTapped) {
+            $0.alert = .failedToSavePrompt(
+                message: TestError().localizedDescription
+            )
+        }
+
+        #expect(requestCount.value == 0)
+        #expect(store.state.workspaceID == nil)
     }
 
     @Test("Create shows an alert when creation fails")
@@ -263,5 +448,43 @@ private func firstTextView(in view: UIView) -> UITextView? {
 private struct TestError: LocalizedError {
     var errorDescription: String? {
         "Something went wrong."
+    }
+}
+
+private struct RecordingOutboxKey: SharedKey {
+    let id = UUID()
+    let savedValues: LockIsolated<[MessageOutbox]>
+    var shouldFail = false
+
+    func load(
+        context: LoadContext<MessageOutbox>,
+        continuation: LoadContinuation<MessageOutbox>
+    ) {
+        continuation.resumeReturningInitialValue()
+    }
+
+    func subscribe(
+        context: LoadContext<MessageOutbox>,
+        subscriber: SharedSubscriber<MessageOutbox>
+    ) -> SharedSubscription {
+        SharedSubscription { }
+    }
+
+    func save(
+        _ value: MessageOutbox,
+        context: SaveContext,
+        continuation: SaveContinuation
+    ) {
+        if shouldFail {
+            continuation.resume(throwing: TestError())
+            return
+        }
+        switch context {
+        case .didSet:
+            break
+        case .userInitiated:
+            savedValues.withValue { $0.append(value) }
+        }
+        continuation.resume()
     }
 }

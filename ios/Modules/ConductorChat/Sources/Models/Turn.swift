@@ -458,6 +458,7 @@ enum DisplayedChatRow: Equatable, Identifiable {
     struct OptimisticMessage: Equatable, Identifiable {
         let id: UUID
         let content: String
+        let canRetry: Bool
         let status: Status
 
         enum Status: Equatable {
@@ -492,14 +493,6 @@ enum DisplayedChatRow: Equatable, Identifiable {
                 }
             }
 
-            var canRetry: Bool {
-                switch self {
-                case .rejected, .unknown:
-                    true
-                case .accepted, .sending:
-                    false
-                }
-            }
         }
     }
 

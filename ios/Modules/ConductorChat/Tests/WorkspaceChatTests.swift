@@ -808,12 +808,15 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_558_800)
                 $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, _ in
+                $0.desktopClient.sendMessage = {
+                    workspaceID, sessionID, message, model, isFastModeEnabled, _ in
                     #expect(workspaceID == workspace.id)
                     #expect(sessionID == activeSession.id)
                     #expect(message == "Run the tests.")
                     #expect(model == activeSession.model)
+                    #expect(!isFastModeEnabled)
                     for await _ in responses {
                         return .unknown(reason: "Delivery could not be determined.")
                     }
@@ -1361,7 +1364,8 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
+                $0.date.now = Date(timeIntervalSince1970: 1_783_558_800)
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
                     requestCount.withValue { $0 += 1 }
                     return .accepted(messageID: "unexpected")
                 }
@@ -1402,19 +1406,27 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, message, model, attemptID in
-                    request.setValue(.init(message: message, model: model, attemptID: attemptID))
+                $0.date.now = Date(timeIntervalSince1970: 1_783_558_800)
+                $0.desktopClient.sendMessage = {
+                    _, _, message, model, isFastModeEnabled, attemptID in
+                    request.setValue(
+                        .init(
+                            message: message,
+                            model: model,
+                            isFastModeEnabled: isFastModeEnabled,
+                            attemptID: attemptID
+                        )
+                    )
                     return .accepted(messageID: "message-1")
                 }
                 $0.uuid = .incrementing
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
             store.state.chat?.$messageDraft.withLock { $0 = "  Run the tests.  " }
+            await store.send(.chat(.fastModeButtonTapped))
 
             await store.send(.chat(.sendButtonTapped))
-            while !saveGate.isWaiting {
-                await Task.yield()
-            }
+            try await saveGate.waitUntilSuspended()
             store.state.chat?.$messageDraft.withLock { $0 = "Only run unit tests." }
             saveGate.succeed()
             await store.finish()
@@ -1422,9 +1434,87 @@ struct WorkspaceChatTests {
             #expect(store.state.chat?.messageDraft == "Only run unit tests.")
             #expect(request.value?.message == "Run the tests.")
             #expect(request.value?.model == session.model)
+            #expect(request.value?.isFastModeEnabled == true)
             #expect(
                 store.state.outbox[workspace.id, session.id]
                     .first?.attempts.first?.state == .accepted(messageID: "message-1")
+            )
+        }
+    }
+
+    @Test("A partial snapshot preserves the order of two outbound messages")
+    func partialCanonicalizationPreservesOutboundOrder() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let initialMessage = Message(
+            id: "message-0",
+            sessionID: session.id,
+            role: .user,
+            content: "Initial message",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_600),
+            turnID: "turn-0"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil)
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_558_700)
+                $0.desktopClient.sendMessage = {
+                    _, _, message, _, _, _ in
+                    .accepted(messageID: message == "Message A" ? "message-a" : "message-b")
+                }
+                $0.uuid = .incrementing
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.messagesUpdated([initialMessage])))
+
+            store.state.chat?.$messageDraft.withLock { $0 = "Message A" }
+            await store.send(.chat(.sendButtonTapped))
+            await store.finish()
+            let firstBubble = try #require(
+                store.state.outbox[workspace.id, session.id].first
+            )
+            let firstAttemptID = try #require(firstBubble.attempts.first?.attemptID)
+
+            store.state.chat?.$messageDraft.withLock { $0 = "Message B" }
+            await store.send(.chat(.sendButtonTapped))
+            await store.finish()
+            let secondBubble = try #require(
+                store.state.outbox[workspace.id, session.id].last
+            )
+            #expect(secondBubble.precedingBubbleID == firstBubble.bubbleID)
+            #expect(secondBubble.precedingTurnID == initialMessage.turnID)
+
+            let canonicalFirstMessage = Message(
+                id: "message-a",
+                sessionID: session.id,
+                role: .user,
+                content: firstBubble.content,
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: firstAttemptID.uuidString
+            )
+            await store.send(
+                .chat(.messagesUpdated([initialMessage, canonicalFirstMessage]))
+            )
+            await store.finish()
+
+            #expect(
+                store.state.chat?.rows?.map(\.id) == [
+                    "human:\(initialMessage.id)",
+                    "human:\(firstBubble.bubbleID.uuidString)",
+                    "human:\(secondBubble.bubbleID.uuidString)",
+                ]
             )
         }
     }
@@ -1440,6 +1530,8 @@ struct WorkspaceChatTests {
             .init(
                 bubbleID: bubbleID,
                 content: "Persisted content",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: true,
                 model: .gpt_5_6_terra,
                 attempts: [.init(attemptID: originalAttemptID, state: .rejected)]
             ),
@@ -1464,8 +1556,16 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, message, model, attemptID in
-                    request.setValue(.init(message: message, model: model, attemptID: attemptID))
+                $0.desktopClient.sendMessage = {
+                    _, _, message, model, isFastModeEnabled, attemptID in
+                    request.setValue(
+                        .init(
+                            message: message,
+                            model: model,
+                            isFastModeEnabled: isFastModeEnabled,
+                            attemptID: attemptID
+                        )
+                    )
                     return .rejected(reason: "Not enqueued.")
                 }
                 $0.uuid = .incrementing
@@ -1478,11 +1578,255 @@ struct WorkspaceChatTests {
 
             #expect(request.value?.message == "Persisted content")
             #expect(request.value?.model == .gpt_5_6_terra)
+            #expect(request.value?.isFastModeEnabled == true)
             #expect(request.value?.attemptID != originalAttemptID)
             #expect(store.state.chat?.messageDraft == "Unrelated draft")
             #expect(
                 store.state.outbox[workspace.id, session.id]
                     .first?.attempts.map(\.state) == [.rejected, .rejected]
+            )
+        }
+    }
+
+    @Test("Retry presentation and reducer use the same session-wide eligibility")
+    func retryEligibility() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let mixedBubbleID = UUID(60)
+        let retryableBubbleID = UUID(63)
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: mixedBubbleID,
+                content: "Accepted with uncertainty",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [
+                    .init(
+                        attemptID: UUID(61),
+                        state: .accepted(messageID: "message-1")
+                    ),
+                    .init(attemptID: UUID(62), state: .unknown),
+                ]
+            ),
+            .init(
+                bubbleID: retryableBubbleID,
+                content: "Not sent",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [
+                    .init(attemptID: UUID(64), state: .rejected),
+                ]
+            ),
+            .init(
+                bubbleID: UUID(65),
+                content: "Sending",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_900),
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [
+                    .init(attemptID: UUID(66), state: .sending),
+                ]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("retry-eligibility-outbox-\(UUID())")
+        )
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                outbox: outbox
+            )
+            state.chat?.updateRows(sessionStatus: session.status)
+            let store = TestStore(
+                initialState: state
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .accepted(messageID: "unexpected")
+                }
+            }
+
+            let rows = try #require(store.state.chat?.rows)
+            let mixedMessage = try #require(
+                rows.compactMap { row -> DisplayedChatRow.OptimisticMessage? in
+                    guard case .optimisticMessage(let message) = row.content,
+                          message.id == mixedBubbleID else {
+                        return nil
+                    }
+                    return message
+                }.first
+            )
+            let rejectedMessage = try #require(
+                rows.compactMap { row -> DisplayedChatRow.OptimisticMessage? in
+                    guard case .optimisticMessage(let message) = row.content,
+                          message.id == retryableBubbleID else {
+                        return nil
+                    }
+                    return message
+                }.first
+            )
+            #expect(mixedMessage.status == .unknown)
+            #expect(!mixedMessage.canRetry)
+            #expect(!rejectedMessage.canRetry)
+
+            await store.send(.chat(.retryButtonTapped(mixedBubbleID)))
+            await store.send(.chat(.retryButtonTapped(retryableBubbleID)))
+
+            #expect(store.state.destination == nil)
+            #expect(requestCount.value == 0)
+        }
+    }
+
+    @Test("Canonical delivery cancels a retry while its outbox save is suspended")
+    func canonicalDeliveryDuringRetrySave() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(12)
+        let originalAttemptID = UUID(13)
+        let message = Message(
+            id: "message-1",
+            sessionID: session.id,
+            role: .user,
+            content: "Persisted content",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: originalAttemptID.uuidString
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Persisted content",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: true,
+                model: .gpt_5_6_terra,
+                attempts: [.init(attemptID: originalAttemptID, state: .unknown)]
+            ),
+        ]
+        let saveGate = OutboxSaveGate()
+        @Shared(SuspendingOutboxKey(gate: saveGate)) var outbox = initialOutbox
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: $outbox
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .accepted(messageID: "unexpected")
+                }
+                $0.uuid = .incrementing
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.retryButtonTapped(bubbleID)))
+            await store.send(.destination(.presented(.alert(.confirmUnknownRetry))))
+            try await saveGate.waitUntilSuspended()
+
+            await store.send(.chat(.messagesUpdated([message])))
+            #expect(
+                store.state.outbox[workspace.id, session.id]
+                    .first?.attempts.first?.state == .accepted(messageID: message.id)
+            )
+            saveGate.succeed()
+            await store.finish()
+
+            #expect(requestCount.value == 0)
+            #expect(store.state.messageIDToBubbleID[message.id] == bubbleID)
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+        }
+    }
+
+    @Test("A retry save failure releases a canonical message's syncing state")
+    func canonicalDeliveryDuringFailedRetrySave() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(70)
+        let originalAttemptID = UUID(71)
+        let message = Message(
+            id: "message-1",
+            sessionID: session.id,
+            role: .user,
+            content: "Persisted content",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: originalAttemptID.uuidString
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Persisted content",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: true,
+                model: .gpt_5_6_terra,
+                attempts: [.init(attemptID: originalAttemptID, state: .unknown)]
+            ),
+        ]
+        let saveGate = OutboxSaveGate()
+        @Shared(SuspendingOutboxKey(gate: saveGate)) var outbox = initialOutbox
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+            $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                requestCount.withValue { $0 += 1 }
+                return .accepted(messageID: "unexpected")
+            }
+            $0.uuid = .incrementing
+        } operation: {
+            let store = Store(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: $outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            store.send(.chat(.retryButtonTapped(bubbleID)))
+            let sendTask = store.send(
+                .destination(.presented(.alert(.confirmUnknownRetry)))
+            )
+            try await saveGate.waitUntilSuspended()
+
+            store.send(.chat(.messagesUpdated([message])))
+            saveGate.fail()
+            await sendTask.finish()
+
+            #expect(requestCount.value == 0)
+            #expect(store.state.messageIDToBubbleID[message.id] == bubbleID)
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+            #expect(store.state.chat?.outbox[workspace.id, session.id].isEmpty == true)
+            let row = try #require(store.state.chat?.rows?.first)
+            #expect(
+                row.content == .humanMessage(
+                    .init(id: bubbleID.uuidString, content: "Persisted content")
+                )
             )
         }
     }
@@ -1497,6 +1841,8 @@ struct WorkspaceChatTests {
             .init(
                 bubbleID: UUID(20),
                 content: "Sending",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: false,
                 model: activeSession.model,
                 attempts: [.init(attemptID: UUID(21), state: .sending)]
             ),
@@ -1563,6 +1909,8 @@ struct WorkspaceChatTests {
             .init(
                 bubbleID: bubbleID,
                 content: "Run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: false,
                 model: session.model,
                 attempts: [
                     .init(attemptID: acceptedAttemptID, state: .accepted(messageID: message.id)),
@@ -1613,11 +1961,461 @@ struct WorkspaceChatTests {
             #expect(store.state.outbox[workspace.id, session.id].isEmpty)
         }
     }
+
+    @Test("Canonical messages retain and surface an unknown retry")
+    func canonicalMessageRetainsUnknownRetry() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(33)
+        let acceptedAttemptID = UUID(34)
+        let retryAttemptID = UUID(35)
+        let message = Message(
+            id: "message-unknown-retry",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: acceptedAttemptID.uuidString
+        )
+        let retryCanonicalMessage = Message(
+            id: "message-duplicate",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_900),
+            turnID: retryAttemptID.uuidString
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [
+                    .init(attemptID: acceptedAttemptID, state: .accepted(messageID: message.id)),
+                    .init(attemptID: retryAttemptID, state: .sending),
+                ]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("canonical-unknown-retry-outbox-\(UUID())")
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+                try Message.upsert { message }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.messagesUpdated([message])))
+            await store.send(
+                .messageSendResponse(
+                    .init(
+                        workspaceID: workspace.id,
+                        sessionID: session.id,
+                        bubbleID: bubbleID,
+                        attemptID: retryAttemptID
+                    ),
+                    .unknown(reason: "Timed out.")
+                )
+            )
+            await store.finish()
+
+            let bubble = try #require(
+                store.state.outbox[workspace.id, session.id].first
+            )
+            #expect(bubble.bubbleID == bubbleID)
+            #expect(
+                bubble.attempts == [
+                    .init(
+                        attemptID: acceptedAttemptID,
+                        state: .accepted(messageID: message.id)
+                    ),
+                    .init(attemptID: retryAttemptID, state: .unknown),
+                ]
+            )
+            #expect(store.state.messageIDToBubbleID[message.id] == bubbleID)
+            let row = try #require(store.state.chat?.rows?.first)
+            guard case .optimisticMessage(let optimisticMessage) = row.content else {
+                Issue.record("Expected the canonical row to surface delivery uncertainty")
+                return
+            }
+            #expect(optimisticMessage.id == bubbleID)
+            #expect(optimisticMessage.status == .unknown)
+
+            await store.send(
+                .chat(.messagesUpdated([message, retryCanonicalMessage]))
+            )
+            await store.finish()
+
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+            #expect(store.state.messageIDToBubbleID[message.id] == bubbleID)
+            #expect(store.state.messageIDToBubbleID[retryCanonicalMessage.id] == nil)
+        }
+    }
+
+    @Test("An accepted retry remains durable until its canonical row arrives")
+    func acceptedRetryWaitsForCanonicalMessage() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(50)
+        let acceptedAttemptID = UUID(51)
+        let retryAttemptID = UUID(52)
+        let acceptedMessage = Message(
+            id: "accepted-message",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: acceptedAttemptID.uuidString
+        )
+        let retryMessage = Message(
+            id: "retry-message",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_900),
+            turnID: retryAttemptID.uuidString
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Run the tests.",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [
+                    .init(
+                        attemptID: acceptedAttemptID,
+                        state: .accepted(messageID: acceptedMessage.id)
+                    ),
+                    .init(attemptID: retryAttemptID, state: .sending),
+                ]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("accepted-retry-outbox-\(UUID())")
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.messagesUpdated([acceptedMessage])))
+            await store.send(
+                .messageSendResponse(
+                    .init(
+                        workspaceID: workspace.id,
+                        sessionID: session.id,
+                        bubbleID: bubbleID,
+                        attemptID: retryAttemptID
+                    ),
+                    .accepted(messageID: retryMessage.id)
+                )
+            )
+            await store.finish()
+
+            let bubble = try #require(
+                store.state.outbox[workspace.id, session.id].first
+            )
+            #expect(
+                bubble.attempts == [
+                    .init(
+                        attemptID: acceptedAttemptID,
+                        state: .accepted(messageID: acceptedMessage.id)
+                    ),
+                    .init(
+                        attemptID: retryAttemptID,
+                        state: .accepted(messageID: retryMessage.id)
+                    ),
+                ]
+            )
+            let row = try #require(store.state.chat?.rows?.first)
+            guard case .optimisticMessage(let optimisticMessage) = row.content else {
+                Issue.record("Expected the canonical row to retain syncing state")
+                return
+            }
+            #expect(optimisticMessage.status == .accepted)
+            #expect(!optimisticMessage.canRetry)
+
+            await store.send(
+                .chat(.messagesUpdated([acceptedMessage, retryMessage]))
+            )
+            await store.finish()
+
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+        }
+    }
+
+    @Test("Exact attempt IDs win over an older identical provisional message")
+    func exactAttemptIDWinsOverOlderIdenticalMessage() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(36)
+        let attemptID = UUID(37)
+        let bubbleCreatedAt = Date(timeIntervalSince1970: 1_783_558_700)
+        let olderMessage = Message(
+            id: "older-message",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: bubbleCreatedAt.addingTimeInterval(1),
+            turnID: "older-message"
+        )
+        let currentMessage = Message(
+            id: "current-message",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: bubbleCreatedAt.addingTimeInterval(2),
+            turnID: attemptID.uuidString
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Run the tests.",
+                createdAt: bubbleCreatedAt,
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [.init(attemptID: attemptID, state: .sending)]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("exact-attempt-order-outbox-\(UUID())")
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(
+                .chat(.messagesUpdated([olderMessage, currentMessage]))
+            )
+            await store.finish()
+
+            #expect(store.state.messageIDToBubbleID[olderMessage.id] == nil)
+            #expect(store.state.messageIDToBubbleID[currentMessage.id] == bubbleID)
+            #expect(store.state.outbox[workspace.id, session.id].isEmpty)
+        }
+    }
+
+    @Test("Same-content messages without durable IDs do not claim a bubble")
+    func sameContentMessageDoesNotClaimBubble() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let bubbleID = UUID(38)
+        let bubbleCreatedAt = Date(timeIntervalSince1970: 1_783_558_800)
+        let message = Message(
+            id: "historical-message",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: bubbleCreatedAt.addingTimeInterval(-1),
+            turnID: "historical-message"
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [
+            .init(
+                bubbleID: bubbleID,
+                content: "Run the tests.",
+                createdAt: bubbleCreatedAt,
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [.init(attemptID: UUID(39), state: .sending)]
+            ),
+        ]
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("stale-provisional-outbox-\(UUID())")
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(store.state.messageIDToBubbleID[message.id] == nil)
+            #expect(store.state.outbox[workspace.id, session.id].count == 1)
+        }
+    }
+
+    @Test("An independent same-content message cannot cancel a send before its POST")
+    func sameContentMessageDuringOutboxSaveDoesNotCancelSend() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let message = Message(
+            id: "message-1",
+            sessionID: session.id,
+            role: .user,
+            content: "Run the tests.",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: "message-1"
+        )
+        let saveGate = OutboxSaveGate()
+        @Shared(SuspendingOutboxKey(gate: saveGate)) var outbox = MessageOutbox()
+        let requestCount = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: $outbox
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.date.now = Date(timeIntervalSince1970: 1_783_558_700)
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .accepted(messageID: "current-message")
+                }
+                $0.uuid = .incrementing
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+            store.state.chat?.$messageDraft.withLock { $0 = "Run the tests." }
+
+            await store.send(.chat(.sendButtonTapped))
+            try await saveGate.waitUntilSuspended()
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(store.state.messageIDToBubbleID[message.id] == nil)
+            #expect(
+                store.state.outbox[workspace.id, session.id]
+                    .first?.attempts.first?.state == .sending
+            )
+
+            saveGate.succeed()
+            await store.finish()
+
+            #expect(requestCount.value == 1)
+            #expect(
+                store.state.outbox[workspace.id, session.id]
+                    .first?.attempts.first?.state
+                    == .accepted(messageID: "current-message")
+            )
+        }
+    }
+
+    @Test("A provisional canonical message does not guess between matching sending bubbles")
+    func ambiguousProvisionalCanonicalMessageDoesNotClaimBubble() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let message = Message(
+            id: "message-1",
+            sessionID: session.id,
+            role: .user,
+            content: "Same content",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: "message-1"
+        )
+        var initialOutbox = MessageOutbox()
+        initialOutbox[workspace.id, session.id] = [UUID(42), UUID(44)].enumerated().map {
+            offset,
+            bubbleID in
+            MessageOutbox.Bubble(
+                bubbleID: bubbleID,
+                content: "Same content",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700 + Double(offset)),
+                isFastModeEnabled: false,
+                model: session.model,
+                attempts: [
+                    .init(attemptID: UUID(43 + offset * 2), state: .sending),
+                ]
+            )
+        }
+        let outbox = Shared(
+            wrappedValue: initialOutbox,
+            .inMemory("ambiguous-provisional-outbox-\(UUID())")
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(workspace: workspace, repository: nil),
+                    outbox: outbox
+                )
+            ) {
+                WorkspaceChat()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(store.state.messageIDToBubbleID[message.id] == nil)
+            #expect(store.state.outbox[workspace.id, session.id].count == 2)
+        }
+    }
 }
 
 private struct RecordedSend: Equatable, Sendable {
     let message: String
     let model: Session.Model
+    let isFastModeEnabled: Bool
     let attemptID: UUID
 }
 
@@ -1682,8 +2480,14 @@ private struct SuspendingOutboxKey: SharedKey {
 private final class OutboxSaveGate: @unchecked Sendable {
     private let continuation = LockIsolated<SaveContinuation?>(nil)
     private let hasSuspended = LockIsolated(false)
+    private let suspensions: AsyncStream<Void>
+    private let suspensionContinuation: AsyncStream<Void>.Continuation
 
-    var isWaiting: Bool { continuation.value != nil }
+    init() {
+        (suspensions, suspensionContinuation) = AsyncStream.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+    }
 
     func suspendFirst(_ continuation: SaveContinuation) {
         let shouldSuspend = hasSuspended.withValue { hasSuspended in
@@ -1692,8 +2496,28 @@ private final class OutboxSaveGate: @unchecked Sendable {
         }
         if shouldSuspend {
             self.continuation.setValue(continuation)
+            suspensionContinuation.yield()
         } else {
             continuation.resume()
+        }
+    }
+
+    func waitUntilSuspended() async throws {
+        let suspensions = suspensions
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await _ in suspensions {
+                    return
+                }
+                throw OutboxTestError.saveDidNotSuspend
+            }
+            group.addTask {
+                try await ContinuousClock().sleep(for: .seconds(1))
+                throw OutboxTestError.saveDidNotSuspend
+            }
+
+            _ = try await group.next()
+            group.cancelAll()
         }
     }
 
@@ -1703,10 +2527,18 @@ private final class OutboxSaveGate: @unchecked Sendable {
             $0 = nil
         }
     }
+
+    func fail() {
+        continuation.withValue {
+            $0?.resume(throwing: OutboxTestError.saveFailed)
+            $0 = nil
+        }
+    }
 }
 
 private enum OutboxTestError: Error {
     case saveFailed
+    case saveDidNotSuspend
 }
 
 private func makeSession(

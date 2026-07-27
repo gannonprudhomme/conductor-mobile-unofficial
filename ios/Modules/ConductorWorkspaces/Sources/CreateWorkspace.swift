@@ -9,6 +9,7 @@ import ComposableArchitecture
 import ConductorDesign
 import ConductorMobileData
 import LucideIcons
+import Logging
 import SharedConductorData
 import Sharing
 import SQLiteData
@@ -26,6 +27,8 @@ public struct CreateWorkspace: Sendable {
         public var isFastModeEnabled = false
         public let repositories: [Repository]
 
+        @Shared var outbox: MessageOutbox
+
         @Shared(.createWorkspacePrompt)
         public var prompt
 
@@ -35,9 +38,11 @@ public struct CreateWorkspace: Sendable {
 
         public init(
             repositories: [Repository],
-            selectedRepositoryIDFilter: Repository.ID? = nil
+            selectedRepositoryIDFilter: Repository.ID? = nil,
+            outbox: Shared<MessageOutbox> = Shared(.messageOutbox)
         ) {
             precondition(!repositories.isEmpty, "CreateWorkspace requires a repository")
+            self._outbox = outbox
             self.repositories = repositories
             self.selectedRepositoryID = repositories
                 .first { $0.id == selectedRepositoryIDFilter }?
@@ -52,7 +57,11 @@ public struct CreateWorkspace: Sendable {
         case binding(BindingAction<State>)
         case createButtonTapped
         case createWorkspaceFailed(String)
-        case createWorkspaceSucceeded(CreatedWorkspace, selectedModel: Session.Model)
+        case createWorkspaceSucceeded(
+            CreatedWorkspace,
+            selectedModel: Session.Model,
+            promptFailureMessage: String?
+        )
         case defaultModelFetched(Session.Model)
         case delegate(Delegate)
 
@@ -64,6 +73,7 @@ public struct CreateWorkspace: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.uuid) var uuid
 
@@ -87,6 +97,16 @@ public struct CreateWorkspace: Sendable {
                     return .none
                 }
                 let workspaceID = state.workspaceID ?? uuid().uuidString.lowercased()
+                let rawPrompt = state.prompt
+                let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prompt.isEmpty,
+                   let error = state.$outbox.loadError ?? state.$outbox.saveError {
+                    state.alert = .failedToSavePrompt(message: error.localizedDescription)
+                    return .none
+                }
+                let promptBubbleID = prompt.isEmpty ? nil : uuid()
+                let promptAttemptID = prompt.isEmpty ? nil : uuid()
+                let promptCreatedAt = prompt.isEmpty ? nil : now
                 state.isCreateAPIInFlight = true
                 state.workspaceID = workspaceID
                 return .run {
@@ -94,12 +114,19 @@ public struct CreateWorkspace: Sendable {
                         agentType = state.agentType,
                         isFastModeEnabled = state.isFastModeEnabled,
                         model = state.selectedModel,
-                        prompt = state.prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                        outbox = state.$outbox,
+                        prompt,
+                        promptAttemptID,
+                        promptBubbleID,
+                        promptCreatedAt,
+                        promptDraft = state.$prompt,
+                        rawPrompt,
                         repositoryID = state.selectedRepositoryID,
                         workspaceID,
                     ] send in
+                    let createdWorkspace: CreatedWorkspace
                     do {
-                        let createdWorkspace = try await desktopClient.createWorkspace(
+                        createdWorkspace = try await desktopClient.createWorkspace(
                             workspaceID: workspaceID,
                             repositoryID: repositoryID,
                             agentType: agentType,
@@ -110,30 +137,43 @@ public struct CreateWorkspace: Sendable {
                             try Workspace.upsert { createdWorkspace.workspace }.execute(database)
                             try Session.upsert { createdWorkspace.session }.execute(database)
                         }
-                        if !prompt.isEmpty {
-                            let result = await desktopClient.sendMessage(
-                                workspaceID: createdWorkspace.workspace.id,
-                                sessionID: createdWorkspace.session.id,
-                                message: prompt,
-                                model: model,
-                                attemptID: uuid()
-                            )
-                            switch result {
-                            case .accepted:
-                                break
-                            case let .rejected(reason), let .unknown(reason):
-                                throw PromptDeliveryError(reason: reason)
-                            }
-                        }
-                        await send(
-                            .createWorkspaceSucceeded(
-                                createdWorkspace,
-                                selectedModel: model
-                            )
-                        )
                     } catch {
                         await send(.createWorkspaceFailed(error.localizedDescription))
+                        return
                     }
+
+                    var promptFailureMessage: String?
+                    if let promptBubbleID, let promptAttemptID, let promptCreatedAt {
+                        do {
+                            try await sendPrompt(
+                                rawPrompt: rawPrompt,
+                                content: prompt,
+                                bubbleID: promptBubbleID,
+                                attemptID: promptAttemptID,
+                                createdAt: promptCreatedAt,
+                                createdWorkspace: createdWorkspace,
+                                model: model,
+                                isFastModeEnabled: isFastModeEnabled,
+                                promptDraft: promptDraft,
+                                outbox: outbox
+                            )
+                        } catch {
+                            promptFailureMessage = error.localizedDescription
+                        }
+                    } else {
+                        promptDraft.withLock { promptDraft in
+                            if promptDraft == rawPrompt {
+                                promptDraft = ""
+                            }
+                        }
+                    }
+                    await send(
+                        .createWorkspaceSucceeded(
+                            createdWorkspace,
+                            selectedModel: model,
+                            promptFailureMessage: promptFailureMessage
+                        )
+                    )
                 }
 
             case .binding(\.selectedModel):
@@ -148,9 +188,12 @@ public struct CreateWorkspace: Sendable {
                 state.isCreateAPIInFlight = false
                 return .none
 
-            case let .createWorkspaceSucceeded(createdWorkspace, selectedModel):
+            case let .createWorkspaceSucceeded(
+                createdWorkspace,
+                selectedModel,
+                promptFailureMessage
+            ):
                 state.isCreateAPIInFlight = false
-                state.$prompt.withLock { $0 = "" }
                 let repository = state.repositories.first {
                     $0.id == createdWorkspace.workspace.repositoryID
                 }
@@ -158,6 +201,7 @@ public struct CreateWorkspace: Sendable {
                     .delegate(
                         .workspaceCreated(
                             WorkspaceCreationResult(
+                                promptFailureMessage: promptFailureMessage,
                                 selectedModel: selectedModel,
                                 workspace: WorkspaceWithRepository(
                                     workspace: createdWorkspace.workspace,
@@ -187,28 +231,132 @@ public struct CreateWorkspace: Sendable {
         }
         .ifLet(\.$alert, action: \.alert)
     }
-}
 
-private struct PromptDeliveryError: LocalizedError {
-    let reason: String
+    private func sendPrompt(
+        rawPrompt: String,
+        content: String,
+        bubbleID: UUID,
+        attemptID: UUID,
+        createdAt: Date,
+        createdWorkspace: CreatedWorkspace,
+        model: Session.Model,
+        isFastModeEnabled: Bool,
+        promptDraft: Shared<String>,
+        outbox: Shared<MessageOutbox>
+    ) async throws {
+        if let error = outbox.loadError {
+            throw error
+        }
+        let workspaceID = createdWorkspace.workspace.id
+        let sessionID = createdWorkspace.session.id
+        let bubble = MessageOutbox.Bubble(
+            bubbleID: bubbleID,
+            content: content,
+            createdAt: createdAt,
+            isFastModeEnabled: isFastModeEnabled,
+            model: model,
+            attempts: [
+                .init(attemptID: attemptID, state: .sending),
+            ]
+        )
+        outbox.withLock { outbox in
+            var bubbles = outbox[workspaceID, sessionID]
+            bubbles.append(bubble)
+            outbox[workspaceID, sessionID] = bubbles
+        }
+        do {
+            try await outbox.save()
+        } catch {
+            outbox.withLock { outbox in
+                var bubbles = outbox[workspaceID, sessionID]
+                bubbles.removeAll { $0.bubbleID == bubbleID }
+                outbox[workspaceID, sessionID] = bubbles
+            }
+            throw error
+        }
 
-    var errorDescription: String? { reason }
+        let shouldSend = outbox.withLock { outbox in
+            outbox[workspaceID, sessionID].contains { bubble in
+                bubble.bubbleID == bubbleID
+                    && bubble.attempts.contains {
+                        $0.attemptID == attemptID && $0.state == .sending
+                    }
+            }
+        }
+        guard shouldSend else {
+            return
+        }
+        promptDraft.withLock { promptDraft in
+            if promptDraft == rawPrompt {
+                promptDraft = ""
+            }
+        }
+        let result = await desktopClient.sendMessage(
+            workspaceID: workspaceID,
+            sessionID: sessionID,
+            message: content,
+            model: model,
+            isFastModeEnabled: isFastModeEnabled,
+            attemptID: attemptID
+        )
+        outbox.withLock { outbox in
+            var bubbles = outbox[workspaceID, sessionID]
+            let bubbleIndex = bubbles.firstIndex {
+                $0.bubbleID == bubbleID
+            }
+            guard let bubbleIndex else {
+                return
+            }
+            let attemptIndex = bubbles[bubbleIndex].attempts.firstIndex {
+                $0.attemptID == attemptID && $0.state == .sending
+            }
+            guard let attemptIndex else {
+                return
+            }
+            bubbles[bubbleIndex].attempts[attemptIndex].state = switch result {
+            case .accepted(let messageID):
+                .accepted(messageID: messageID)
+            case .rejected:
+                .rejected
+            case .unknown:
+                .unknown
+            }
+            outbox[workspaceID, sessionID] = bubbles
+        }
+        do {
+            try await outbox.save()
+        } catch {
+            // The stronger evidence remains in shared memory and blocks sends until a save works.
+            Logger.workspace.error("Failed to save creation prompt delivery: \(error)")
+        }
+    }
 }
 
 public struct WorkspaceCreationResult: Equatable, Sendable {
+    public let promptFailureMessage: String?
     public let selectedModel: Session.Model
     public let workspace: WorkspaceWithRepository
 
     public init(
+        promptFailureMessage: String? = nil,
         selectedModel: Session.Model,
         workspace: WorkspaceWithRepository
     ) {
+        self.promptFailureMessage = promptFailureMessage
         self.selectedModel = selectedModel
         self.workspace = workspace
     }
 }
 
 extension AlertState where Action == CreateWorkspace.Action.Alert {
+    static func failedToSavePrompt(message: String) -> Self {
+        AlertState {
+            TextState("Message outbox unavailable")
+        } message: {
+            TextState(message)
+        }
+    }
+
     static func failedToCreateWorkspace(message: String) -> Self {
         AlertState {
             TextState("Failed to create workspace")

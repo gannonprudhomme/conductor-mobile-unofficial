@@ -41,7 +41,7 @@ struct MessageRouteTests {
                     content: content,
                     mode: mode
                 )
-                return WorkspaceUIHook.MessageReceipt(messageID: messageID)
+                return messageID
             }
         } operation: {
             let response = try await postMessage(
@@ -49,7 +49,12 @@ struct MessageRouteTests {
                 database: database
             )
             #expect(response.status == .ok)
-            #expect(response.receipt == .accepted(attemptID: attemptID, messageID: messageID))
+            #expect(
+                response.receipt == MessageSendResponse(
+                    attemptID: attemptID,
+                    result: .accepted(messageID: messageID)
+                )
+            )
         }
 
         let recorded = await recorder.message
@@ -85,7 +90,7 @@ struct MessageRouteTests {
                     content: content,
                     mode: mode
                 )
-                return WorkspaceUIHook.MessageReceipt(messageID: "message-id")
+                return "message-id"
             }
         } operation: {
             let response = try await postMessage(
@@ -97,11 +102,121 @@ struct MessageRouteTests {
         #expect(await recorder.message?.mode == .sent)
     }
 
+    @Test("Fast Mode is synchronized before sending")
+    func fastModeSynchronization() async throws {
+        let attemptID = UUID(47)
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.dispatch = { command, _, waitUntilChangeAvailableInDatabase in
+                #expect(
+                    command == .sessionFastMode(
+                        sessionID: "session-1",
+                        isEnabled: true
+                    )
+                )
+                try await database.write { database in
+                    try Session
+                        .find("session-1")
+                        .update { $0.isFastModeEnabled = #bind(true) }
+                        .execute(database)
+                }
+                try await waitUntilChangeAvailableInDatabase()
+                await recorder.recordFastModeUpdate()
+                return .hook
+            }
+            $0.workspaceUIHook.sendMessage = {
+                requestID,
+                receivedAttemptID,
+                sessionID,
+                workspaceID,
+                content,
+                mode in
+                let session = try await database.read { database in
+                    try Session.find(sessionID).fetchOne(database)
+                }
+                #expect(session?.isFastModeEnabled == true)
+                await recorder.record(
+                    requestID: requestID,
+                    attemptID: receivedAttemptID,
+                    sessionID: sessionID,
+                    workspaceID: workspaceID,
+                    content: content,
+                    mode: mode
+                )
+                return "message-id"
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: attemptID, isFastModeEnabled: true),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
+        }
+        #expect(await recorder.didUpdateFastMode)
+        #expect(await recorder.didSend)
+    }
+
+    @Test("Unchanged Fast Mode skips synchronization")
+    func unchangedFastMode() async throws {
+        let database = try await messageRouteDatabase()
+        try await withDependencies {
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.dispatch = { _, _, _ in
+                Issue.record("Fast Mode should not be synchronized when unchanged.")
+                return .hook
+            }
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
+                "message-id"
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(48)),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
+        }
+    }
+
+    @Test("Fast Mode delivery failure rejects without sending")
+    func fastModeDeliveryFailure() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.dispatch = { _, _, _ in
+                throw WorkspaceUIHook.DispatchError.deliveryUnknown
+            }
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
+                await recorder.markSent()
+                return "unexpected"
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(49), isFastModeEnabled: true),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(
+                response.receipt?.result == .rejected(
+                    reason: "Could not determine whether Fast Mode was delivered."
+                )
+            )
+        }
+        #expect(await recorder.didSend == false)
+    }
+
     @Test("A missing UI hook listener is rejected")
     func listenerUnavailable() async throws {
         try await expectResult(
             from: WorkspaceUIHook.CommandDispatchError.listenerUnavailable,
-            expectedType: .rejected
+            expectedResult: .rejected(
+                reason: "Conductor's workspace UI hook is unavailable."
+            )
         )
     }
 
@@ -111,12 +226,18 @@ struct MessageRouteTests {
         .persistenceTimedOut,
     ])
     func postEnqueueFailure(error: WorkspaceUIHook.CommandDispatchError) async throws {
-        try await expectResult(from: error, expectedType: .unknown)
+        try await expectResult(
+            from: error,
+            expectedResult: .unknown(reason: "Delivery could not be determined.")
+        )
     }
 
     @Test("A pre-enqueue encoding failure is rejected")
     func preEnqueueFailure() async throws {
-        try await expectResult(from: TestError.encoding, expectedType: .rejected)
+        try await expectResult(
+            from: TestError.encoding,
+            expectedResult: .rejected(reason: "Message was not enqueued.")
+        )
     }
 
     @Test("Model update failure is rejected before sending")
@@ -127,7 +248,7 @@ struct MessageRouteTests {
             $0.workspaceUIHook.updateSessionModel = { _, _, _ in false }
             $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
                 await recorder.markSent()
-                return WorkspaceUIHook.MessageReceipt(messageID: "unexpected")
+                return "unexpected"
             }
         } operation: {
             let response = try await postMessage(
@@ -135,14 +256,19 @@ struct MessageRouteTests {
                 database: database
             )
             #expect(response.status == .ok)
-            #expect(response.receipt?.type == .rejected)
+            #expect(
+                response.receipt?.result == .rejected(
+                    reason: "Conductor is not connected to change the session model."
+                )
+            )
         }
         #expect(await recorder.didSend == false)
     }
 
     @Test("Malformed and blank requests remain untyped 400 responses", arguments: [
         #"{"message":"Run tests"}"#,
-        #"{"attemptId":"00000000-0000-0000-0000-000000000045","message":"  \n ","model":"gpt-5.5"}"#,
+        #"{"attemptId":"00000000-0000-0000-0000-000000000045","message":"Run tests","model":"gpt-5.5"}"#,
+        #"{"attemptId":"00000000-0000-0000-0000-000000000045","message":"  \n ","model":"gpt-5.5","fast_mode":false}"#,
     ])
     func badRequest(body: String) async throws {
         let database = try await messageRouteDatabase()
@@ -156,7 +282,7 @@ struct MessageRouteTests {
 
     private func expectResult(
         from error: any Error & Sendable,
-        expectedType: RouteReceipt.ResultType
+        expectedResult: MessageDeliveryResult
     ) async throws {
         let database = try await messageRouteDatabase()
         try await withDependencies {
@@ -168,26 +294,30 @@ struct MessageRouteTests {
                 database: database
             )
             #expect(response.status == .ok)
-            #expect(response.receipt?.type == expectedType)
-            #expect(response.receipt?.attemptID == UUID(46))
-            #expect(response.receipt?.reason?.isEmpty == false)
+            #expect(
+                response.receipt == MessageSendResponse(
+                    attemptID: UUID(46),
+                    result: expectedResult
+                )
+            )
         }
     }
 }
 
 private func requestBody(
     attemptID: UUID,
-    model: String = "gpt-5.5"
+    model: String = "gpt-5.5",
+    isFastModeEnabled: Bool = false
 ) -> String {
-    #"{"attemptId":"\#(attemptID.uuidString)","message":"  Run the tests.  ","model":"\#(model)"}"#
+    #"{"attemptId":"\#(attemptID.uuidString)","message":"  Run the tests.  ","model":"\#(model)","fast_mode":\#(isFastModeEnabled)}"#
 }
 
 private func postMessage(
     body: String,
     database: DatabaseQueue
-) async throws -> (status: HTTPResponse.Status, receipt: RouteReceipt?) {
+) async throws -> (status: HTTPResponse.Status, receipt: MessageSendResponse?) {
     let application = Server.makeApplication(database: database)
-    let result = LockIsolated<(HTTPResponse.Status, RouteReceipt?)?>(nil)
+    let result = LockIsolated<(HTTPResponse.Status, MessageSendResponse?)?>(nil)
     try await application.test(.router) { client in
         try await client.execute(
             uri: "/workspaces/workspace-1/sessions/session-1/messages",
@@ -199,51 +329,12 @@ private func postMessage(
             result.withValue {
                 $0 = (
                     response.status,
-                    try? JSONDecoder().decode(RouteReceipt.self, from: data)
+                    try? JSONDecoder().decode(MessageSendResponse.self, from: data)
                 )
             }
         }
     }
     return try #require(result.value)
-}
-
-private struct RouteReceipt: Decodable, Equatable {
-    let attemptID: UUID
-    let result: Result
-
-    var type: ResultType { result.type }
-    var messageID: String? { result.messageID }
-    var reason: String? { result.reason }
-
-    static func accepted(attemptID: UUID, messageID: String) -> Self {
-        Self(
-            attemptID: attemptID,
-            result: Result(type: .accepted, messageID: messageID, reason: nil)
-        )
-    }
-
-    struct Result: Decodable, Equatable {
-        let type: ResultType
-        let messageID: String?
-        let reason: String?
-
-        private enum CodingKeys: String, CodingKey {
-            case type
-            case messageID = "messageId"
-            case reason
-        }
-    }
-
-    enum ResultType: String, Decodable, Equatable {
-        case accepted
-        case rejected
-        case unknown
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case attemptID = "attemptId"
-        case result
-    }
 }
 
 private func messageRouteDatabase(
@@ -283,6 +374,7 @@ private func messageRouteDatabase(
 private actor MessageRouteRecorder {
     private(set) var message: RecordedMessage?
     private(set) var didSend = false
+    private(set) var didUpdateFastMode = false
 
     func record(
         requestID: UUID,
@@ -305,6 +397,10 @@ private actor MessageRouteRecorder {
 
     func markSent() {
         didSend = true
+    }
+
+    func recordFastModeUpdate() {
+        didUpdateFastMode = true
     }
 
     struct RecordedMessage: Equatable {

@@ -24,6 +24,7 @@ struct WorkspaceUIHookRouteTests {
         let send = Task {
             try await uiHook.sendMessage(
                 requestID: requestID,
+                attemptID: UUID(),
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
@@ -91,7 +92,7 @@ struct WorkspaceUIHookRouteTests {
             }
         }
 
-        #expect(try await send.value.messageID == "message-id")
+        #expect(try await send.value == "message-id")
     }
 
     @Test("Hook script admits only Conductor or narrow originless script loads")

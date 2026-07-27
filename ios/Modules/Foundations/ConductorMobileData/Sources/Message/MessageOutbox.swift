@@ -32,32 +32,51 @@ public struct MessageOutbox: Codable, Equatable, Sendable {
         }
     }
 
-    public struct Bubble: Codable, Equatable, Identifiable, Sendable {
+    public struct Bubble: Codable, Equatable, Sendable {
         public let bubbleID: UUID
         public let content: String
+        public let createdAt: Date
+        public let isFastModeEnabled: Bool
         public let model: Session.Model
+        public let precedingBubbleID: UUID?
+        public let precedingTurnID: String?
         public var attempts: [Attempt]
-
-        public var id: UUID { bubbleID }
 
         public init(
             bubbleID: UUID,
             content: String,
+            createdAt: Date,
+            isFastModeEnabled: Bool,
             model: Session.Model,
+            precedingBubbleID: UUID? = nil,
+            precedingTurnID: String? = nil,
             attempts: [Attempt]
         ) {
             self.bubbleID = bubbleID
             self.content = content
+            self.createdAt = createdAt
+            self.isFastModeEnabled = isFastModeEnabled
             self.model = model
+            self.precedingBubbleID = precedingBubbleID
+            self.precedingTurnID = precedingTurnID
             self.attempts = attempts
+        }
+
+        public var canRetry: Bool {
+            !attempts.contains { attempt in
+                switch attempt.state {
+                case .accepted, .sending:
+                    true
+                case .rejected, .unknown:
+                    false
+                }
+            }
         }
     }
 
-    public struct Attempt: Codable, Equatable, Identifiable, Sendable {
+    public struct Attempt: Codable, Equatable, Sendable {
         public let attemptID: UUID
         public var state: State
-
-        public var id: UUID { attemptID }
 
         public init(attemptID: UUID, state: State) {
             self.attemptID = attemptID
@@ -159,13 +178,16 @@ public struct MessageOutbox: Codable, Equatable, Sendable {
         for sessions in workspaces.values {
             for bubbles in sessions.values {
                 for bubble in bubbles {
+                    let hasUniqueAttemptIDs = bubble.attempts.allSatisfy {
+                        attemptIDs.insert($0.attemptID).inserted
+                    }
                     guard !bubble.content.trimmingCharacters(
                         in: .whitespacesAndNewlines
                     ).isEmpty,
                     !bubble.model.rawValue.isEmpty,
                     !bubble.attempts.isEmpty,
                     bubbleIDs.insert(bubble.bubbleID).inserted,
-                    bubble.attempts.allSatisfy({ attemptIDs.insert($0.attemptID).inserted }) else {
+                    hasUniqueAttemptIDs else {
                         throw DecodingError.dataCorrupted(
                             .init(
                                 codingPath: [],

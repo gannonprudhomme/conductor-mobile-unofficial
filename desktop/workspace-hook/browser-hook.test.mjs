@@ -394,9 +394,17 @@ isolatedTest("message commands call the explicit controller modes and report res
     calls.push(["sessions", input]);
     return [session];
   };
-  shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
+  shell.messageProcessingController.sendMessageImmediately = async function (...arguments_) {
     calls.push(["sent", arguments_]);
-    return { messageId: "message-1", state: "sent" };
+    await this.sendToAgent(
+      session,
+      { id: "message-1", content: arguments_[0].message },
+      "generated-turn",
+      { deliveryMode: "default" },
+    );
+  };
+  shell.messageProcessingController.sendToAgent = async (...arguments_) => {
+    calls.push(["agent", arguments_]);
   };
   shell.messageProcessingController.enqueueMessage = async (...arguments_) => {
     calls.push(["queued", arguments_]);
@@ -423,15 +431,22 @@ isolatedTest("message commands call the explicit controller modes and report res
       message: "Run the tests.",
       workspaceId: "workspace-1",
       includeAttachments: false,
-      turnId: "request-1-attempt",
     }],
+  ]);
+  assert.deepEqual(calls[2], [
+    "agent",
+    [
+      session,
+      { id: "message-1", content: "Run the tests." },
+      "request-1-attempt",
+      { deliveryMode: "default" },
+    ],
   ]);
   assert.deepEqual(environment.commandResults[0], {
     requestId: "request-1",
     result: {
       type: "accepted",
       messageId: "message-1",
-      state: "sent",
     },
   });
 
@@ -442,11 +457,11 @@ isolatedTest("message commands call the explicit controller modes and report res
   }));
   await waitUntil(() => environment.commandResults.length === 2);
   await waitUntil(() => environment.errors.length === 1);
-  assert.deepEqual(calls[2], [
+  assert.deepEqual(calls[3], [
     "sessions",
     { workspaceId: "workspace-1", hidden: false },
   ]);
-  assert.deepEqual(calls[3], [
+  assert.deepEqual(calls[4], [
     "queued",
     [{
       session,
@@ -466,10 +481,7 @@ isolatedTest("message commands call the explicit controller modes and report res
 isolatedTest("invalid browser success is reported as rejected", async () => {
   const shell = emptyWorkspaceShell();
   shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
-  shell.messageProcessingController.sendMessageImmediately = async () => ({
-    messageId: "",
-    state: "sent",
-  });
+  shell.messageProcessingController.sendMessageImmediately = async () => {};
   const environment = installHookGlobals({ shell });
   await prepareHook();
 
@@ -489,13 +501,73 @@ isolatedTest("invalid browser success is reported as rejected", async () => {
   });
 });
 
+isolatedTest("concurrent sends retain their own attempt and canonical message IDs", async () => {
+  const sendGate = deferred();
+  const startedMessages = [];
+  const deliveredMessages = [];
+  const shell = emptyWorkspaceShell();
+  const session = { id: "session-1" };
+  shell.sessionService.getSessionsForWorkspace = async () => [session];
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
+    startedMessages.push(input.message);
+    await sendGate.promise;
+    await this.sendToAgent(
+      session,
+      { id: `message-${input.message}`, content: input.message },
+      `generated-${input.message}`,
+    );
+  };
+  shell.messageProcessingController.sendToAgent = async (
+    _session,
+    message,
+    turnId,
+  ) => {
+    deliveredMessages.push([message.id, turnId]);
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(messageCommand({
+    requestId: "request-1",
+    content: "one",
+    mode: "sent",
+  }));
+  source.onmessage(messageCommand({
+    requestId: "request-2",
+    content: "two",
+    mode: "sent",
+  }));
+  await waitUntil(() => startedMessages.length === 2);
+  sendGate.resolve();
+  await waitUntil(() => environment.commandResults.length === 2);
+
+  assert.deepEqual(deliveredMessages.sort(), [
+    ["message-one", "request-1-attempt"],
+    ["message-two", "request-2-attempt"],
+  ]);
+  assert.deepEqual(
+    environment.commandResults
+      .map((result) => [result.requestId, result.result.messageId])
+      .sort(),
+    [
+      ["request-1", "message-one"],
+      ["request-2", "message-two"],
+    ],
+  );
+});
+
 isolatedTest("command result reporting retries without executing twice", async () => {
   const calls = [];
   const shell = emptyWorkspaceShell();
   shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
-  shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
+  shell.messageProcessingController.sendMessageImmediately = async function (...arguments_) {
     calls.push(arguments_);
-    return { messageId: "message-1", state: "sent" };
+    await this.sendToAgent(
+      { id: "session-1" },
+      { id: "message-1" },
+      "generated-turn",
+    );
   };
   const environment = installHookGlobals({ shell });
   environment.commandResultFailures = 1;
@@ -545,9 +617,15 @@ isolatedTest("message sends bypass a blocked workspace command", async () => {
     await pinGate.promise;
   };
   shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
-  shell.messageProcessingController.sendMessageImmediately = async () => {
+  shell.messageProcessingController.sendMessageImmediately = async function () {
+    await this.sendToAgent(
+      { id: "session-1" },
+      { id: "message-1" },
+      "generated-turn",
+    );
+  };
+  shell.messageProcessingController.sendToAgent = async () => {
     calls.push("message");
-    return { messageId: "message-1", state: "sent" };
   };
   const environment = installHookGlobals({ shell });
   await prepareHook();
@@ -749,6 +827,7 @@ function emptyWorkspaceShell() {
     async cancelSession() {},
     async enqueueMessage() {},
     async sendMessageImmediately() {},
+    async sendToAgent() {},
   };
   return { gitService, messageProcessingController, workspaceService, sessionService };
 }

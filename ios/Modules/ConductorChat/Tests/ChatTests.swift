@@ -108,6 +108,8 @@ struct ChatTests {
                     .init(
                         bubbleID: UUID(),
                         content: "Sending",
+                        createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                        isFastModeEnabled: false,
                         model: emptySnapshot.selectedModel,
                         attempts: [.init(attemptID: UUID(), state: .sending)]
                     )
@@ -133,6 +135,73 @@ struct ChatTests {
 
             #expect(Chat.State(session: firstSession).messageDraft == "First draft")
             #expect(Chat.State(session: secondSession).messageDraft.isEmpty)
+        }
+    }
+
+    @Test("Unresolved messages retain their causal position between canonical turns")
+    func optimisticMessagesUsePrecedingTurn() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let bubbleID = UUID()
+            var outbox = MessageOutbox()
+            outbox[session.workspaceID, session.id] = [
+                .init(
+                    bubbleID: bubbleID,
+                    content: "Message A",
+                    createdAt: Date(timeIntervalSince1970: 3_000),
+                    isFastModeEnabled: false,
+                    model: session.model,
+                    precedingTurnID: "turn-a",
+                    attempts: [
+                        .init(attemptID: UUID(), state: .unknown),
+                    ]
+                ),
+            ]
+            var state = Chat.State(
+                session: session,
+                outbox: Shared(
+                    wrappedValue: outbox,
+                    .inMemory("ordered-outbox-\(UUID())")
+                )
+            )
+            state.turns = [
+                Turn(
+                    id: "turn-a",
+                    startedAt: Date(timeIntervalSince1970: 2_000),
+                    rows: [
+                        .humanMessageRow(
+                            .init(id: "message-a", content: "Message A")
+                        ),
+                    ]
+                ),
+                Turn(
+                    id: "turn-b",
+                    startedAt: Date(timeIntervalSince1970: 1_000),
+                    rows: [
+                        .humanMessageRow(
+                            .init(id: "message-b", content: "Message B")
+                        ),
+                    ]
+                ),
+            ]
+
+            state.updateRows(sessionStatus: .idle)
+
+            let rows = try #require(state.rows)
+            #expect(rows.map(\.topPadding) == [24, 24, 24])
+            expectNoDifference(
+                rows.map(DisplayedRowProjection.init),
+                [
+                    .human(id: "message-a", content: "Message A"),
+                    .human(
+                        id: "human:\(bubbleID.uuidString)",
+                        content: "Message A"
+                    ),
+                    .human(id: "message-b", content: "Message B"),
+                ]
+            )
         }
     }
 

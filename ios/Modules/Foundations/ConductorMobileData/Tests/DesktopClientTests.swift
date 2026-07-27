@@ -170,6 +170,7 @@ struct DesktopClientTests {
                     sessionID: "session-1",
                     message: "Run the tests.",
                     model: .gpt_5_6_terra,
+                    isFastModeEnabled: true,
                     attemptID: UUID(1)
                 ) == .rejected(reason: "The message request could not be created: Enter a valid desktop server address.")
             )
@@ -283,6 +284,7 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
+                isFastModeEnabled: true,
                 attemptID: attemptID
             )
         }
@@ -299,8 +301,9 @@ struct DesktopClientTests {
         )
         #expect(object["message"] as? String == "Run the tests.")
         #expect(object["model"] as? String == "gpt-5.6-terra")
+        #expect(object["fast_mode"] as? Bool == true)
         #expect(object["attemptId"] as? String == attemptID.uuidString)
-        #expect(object.count == 3)
+        #expect(object.count == 4)
         #expect(request.timeoutInterval == 10)
     }
 
@@ -371,6 +374,7 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
+                isFastModeEnabled: false,
                 attemptID: UUID(48)
             )
         }
@@ -398,6 +402,7 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
+                isFastModeEnabled: false,
                 attemptID: UUID(48)
             )
         }

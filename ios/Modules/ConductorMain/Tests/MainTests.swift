@@ -109,11 +109,12 @@ struct MainTests {
         }
     }
 
-    @Test("Workspace creation pushes its chat")
+    @Test("Workspace creation pushes its chat and surfaces a prompt warning")
     func workspaceCreationPushesChat() async throws {
         let workspace = Workspace.preview(activeSessionID: "active")
         let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
         let creation = WorkspaceCreationResult(
+            promptFailureMessage: "The message could not be saved.",
             selectedModel: .gpt_5_6_terra,
             workspace: item
         )
@@ -131,7 +132,8 @@ struct MainTests {
                         WorkspaceChat.State(
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
-                            shouldFocusMessageField: true
+                            shouldFocusMessageField: true,
+                            creationPromptFailureMessage: "The message could not be saved."
                         )
                     )
                 )

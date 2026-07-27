@@ -12,11 +12,13 @@ import SwiftUI
 struct HumanMessageRowView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    private let canRetry: Bool
     private let content: String
     private let retry: (@MainActor () -> Void)?
     private let status: DisplayedChatRow.OptimisticMessage.Status?
 
     init(row: Turn.Row.HumanMessageRow) {
+        self.canRetry = false
         self.content = row.content
         self.retry = nil
         self.status = nil
@@ -26,6 +28,7 @@ struct HumanMessageRowView: View {
         optimisticMessage: DisplayedChatRow.OptimisticMessage,
         retry: @escaping @MainActor () -> Void
     ) {
+        self.canRetry = optimisticMessage.canRetry
         self.content = optimisticMessage.content
         self.retry = retry
         self.status = optimisticMessage.status
@@ -36,18 +39,11 @@ struct HumanMessageRowView: View {
             messageBubble
 
             if let status {
-                HStack(spacing: 8) {
-                    Text(status.label)
-                        .font(.theme(.small))
-                        .foregroundStyle(.theme(.textSecondary))
-
-                    if status.canRetry, let retry {
-                        Button("Retry message", action: retry)
-                            .font(.theme(.small))
-                            .foregroundStyle(.theme(.textPrimary))
-                            .buttonStyle(.plain)
-                    }
-                }
+                StatusView(
+                    canRetry: canRetry,
+                    retry: retry,
+                    status: status
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -86,6 +82,33 @@ struct HumanMessageRowView: View {
                 }
                 .preferredColorScheme(.dark)
             }
+    }
+
+    private struct StatusView: View {
+        let canRetry: Bool
+        let retry: (@MainActor () -> Void)?
+        let status: DisplayedChatRow.OptimisticMessage.Status
+
+        var body: some View {
+            HStack(spacing: 8) {
+                Text(status.label)
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
+
+                if canRetry, let retry {
+                    Button {
+                        retry()
+                    } label: {
+                        Text("Retry message")
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textPrimary))
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     /// Displays stored file-reference markup (`@⟦label⟧(encodedPath)`) as only
@@ -159,6 +182,42 @@ struct HumanMessageRowView: View {
                     content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
                 )
             )
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Sending",
+                    canRetry: false,
+                    status: .sending
+                )
+            ) {}
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Syncing",
+                    canRetry: false,
+                    status: .accepted
+                )
+            ) {}
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Rejected",
+                    canRetry: true,
+                    status: .rejected
+                )
+            ) {}
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Unknown",
+                    canRetry: true,
+                    status: .unknown
+                )
+            ) {}
         }
         .padding()
     }

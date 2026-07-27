@@ -82,29 +82,144 @@ public struct Chat: Sendable {
             }
         }
 
-        mutating func updateRows(sessionStatus: Session.Status) {
-            var rows = (turns ?? []).flattenedChatRows(
-                activeTurnID: sessionStatus == .working ? turns?.last?.id : nil,
-                expandedSummaryIDs: expandedSummaryIDs
+        mutating func updateRows(
+            sessionStatus: Session.Status,
+            outbox: MessageOutbox? = nil
+        ) {
+            let outbox = outbox ?? self.outbox
+            let turns = turns ?? []
+            let activeTurnID = sessionStatus == .working ? turns.last?.id : nil
+            let sessionBubbles = outbox[session.workspaceID, session.id]
+            let bubblesByID = Dictionary(
+                uniqueKeysWithValues: sessionBubbles.map { ($0.bubbleID, $0) }
             )
-            let optimisticRows = optimisticBubbles.map { bubble in
+            let aliasedBubbleIDs = Set(messageIDToBubbleID.values)
+            let optimisticBubbles = sessionBubbles.filter {
+                !aliasedBubbleIDs.contains($0.bubbleID)
+            }
+            let isMessageSendInFlight = sessionBubbles.contains { bubble in
+                bubble.attempts.contains { $0.state == .sending }
+            }
+            var rows: [DisplayedChatRowWithPadding] = []
+
+            func optimisticRow(_ bubble: MessageOutbox.Bubble) -> DisplayedChatRowWithPadding {
                 DisplayedChatRowWithPadding(
                     content: .optimisticMessage(
                         .init(
                             id: bubble.bubbleID,
                             content: bubble.content,
+                            canRetry: bubble.canRetry && !isMessageSendInFlight,
                             status: bubble.presentationStatus
                         )
                     ),
-                    topPadding: 12,
+                    // An optimistic message already begins a new turn, so match the canonical
+                    // first-row spacing before confirmation changes its presentation case.
+                    topPadding: 24,
                     bottomPadding: 12
                 )
             }
-            if case .turnInProgress = rows.last?.content {
-                rows.insert(contentsOf: optimisticRows, at: rows.index(before: rows.endIndex))
-            } else {
-                rows.append(contentsOf: optimisticRows)
+
+            func rowWithDeliveryStatus(
+                _ row: DisplayedChatRowWithPadding
+            ) -> DisplayedChatRowWithPadding {
+                guard case .humanMessage(let message) = row.content,
+                      let bubbleID = UUID(uuidString: message.id),
+                      aliasedBubbleIDs.contains(bubbleID),
+                      let bubble = bubblesByID[bubbleID] else {
+                    return row
+                }
+                return DisplayedChatRowWithPadding(
+                    content: .optimisticMessage(
+                        .init(
+                            id: bubbleID,
+                            content: message.content,
+                            canRetry: bubble.canRetry && !isMessageSendInFlight,
+                            status: bubble.presentationStatus
+                        )
+                    ),
+                    topPadding: row.topPadding,
+                    bottomPadding: row.bottomPadding
+                )
             }
+
+            var canonicalInsertionIndexByBubbleID: [UUID: Int] = [:]
+            for turnIndex in turns.indices {
+                for row in turns[turnIndex].rows {
+                    guard case .humanMessageRow(let message) = row,
+                          let bubbleID = UUID(uuidString: message.id),
+                          aliasedBubbleIDs.contains(bubbleID) else {
+                        continue
+                    }
+                    canonicalInsertionIndexByBubbleID[bubbleID] = turns.index(after: turnIndex)
+                }
+            }
+
+            func turnInsertionIndex(for bubble: MessageOutbox.Bubble) -> Int {
+                guard let precedingTurnID = bubble.precedingTurnID else {
+                    return turns.startIndex
+                }
+                let precedingTurnIndex = turns.firstIndex {
+                    $0.id == precedingTurnID
+                }
+                guard let precedingTurnIndex else {
+                    return turns.endIndex
+                }
+                return turns.index(after: precedingTurnIndex)
+            }
+
+            func insertionIndex(
+                for bubble: MessageOutbox.Bubble,
+                visitedBubbleIDs: Set<UUID> = []
+            ) -> Int {
+                let canonicalFloor = turnInsertionIndex(for: bubble)
+                guard let precedingBubbleID = bubble.precedingBubbleID,
+                      !visitedBubbleIDs.contains(precedingBubbleID) else {
+                    return canonicalFloor
+                }
+                if let canonicalInsertionIndex = canonicalInsertionIndexByBubbleID[
+                    precedingBubbleID
+                ] {
+                    return max(canonicalFloor, canonicalInsertionIndex)
+                }
+                guard let precedingBubble = bubblesByID[precedingBubbleID] else {
+                    return canonicalFloor
+                }
+                return max(
+                    canonicalFloor,
+                    insertionIndex(
+                        for: precedingBubble,
+                        visitedBubbleIDs: visitedBubbleIDs.union([bubble.bubbleID])
+                    )
+                )
+            }
+
+            let bubblesByInsertionIndex = Dictionary(grouping: optimisticBubbles) {
+                insertionIndex(for: $0)
+            }
+            for insertionIndex in turns.startIndex...turns.endIndex {
+                let optimisticRows = bubblesByInsertionIndex[insertionIndex, default: []]
+                    .map(optimisticRow)
+                if case .turnInProgress = rows.last?.content {
+                    rows.insert(
+                        contentsOf: optimisticRows,
+                        at: rows.index(before: rows.endIndex)
+                    )
+                } else {
+                    rows.append(contentsOf: optimisticRows)
+                }
+                guard insertionIndex < turns.endIndex else {
+                    continue
+                }
+                rows.append(
+                    contentsOf: [turns[insertionIndex]]
+                        .flattenedChatRows(
+                            activeTurnID: activeTurnID,
+                            expandedSummaryIDs: expandedSummaryIDs
+                        )
+                        .map(rowWithDeliveryStatus)
+                )
+            }
+
             self.rows = rows
         }
 
@@ -282,9 +397,6 @@ public struct Chat: Sendable {
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
 
-            case .sendButtonTapped:
-                return .none
-
             case .stopButtonTapped:
                 guard state.session.status == .working, !state.isStopInFlight else {
                     return .none
@@ -323,7 +435,7 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case .loadMessagesFailed, .retryButtonTapped:
+            case .loadMessagesFailed, .retryButtonTapped, .sendButtonTapped:
                 return .none
 
             case .binding:
@@ -393,17 +505,29 @@ public struct Chat: Sendable {
 
 private extension MessageOutbox.Bubble {
     var presentationStatus: DisplayedChatRow.OptimisticMessage.Status {
-        if attempts.contains(where: { $0.state == .sending }) {
+        if hasSendingAttempt {
             .sending
-        } else if attempts.contains(where: {
-            if case .accepted = $0.state { true } else { false }
-        }) {
-            .accepted
-        } else if attempts.contains(where: { $0.state == .unknown }) {
+        } else if hasUnknownAttempt {
             .unknown
+        } else if hasAcceptedAttempt {
+            .accepted
         } else {
             .rejected
         }
+    }
+
+    private var hasAcceptedAttempt: Bool {
+        attempts.contains {
+            if case .accepted = $0.state { true } else { false }
+        }
+    }
+
+    private var hasSendingAttempt: Bool {
+        attempts.contains { $0.state == .sending }
+    }
+
+    private var hasUnknownAttempt: Bool {
+        attempts.contains { $0.state == .unknown }
     }
 }
 
@@ -504,14 +628,12 @@ struct ChatView: View {
             ChatCollectionView(
                 rows: store.rows ?? [],
                 scrollToBottomRequest: store.scrollToBottomRequest,
-                safeAreaInsets: proxy.safeAreaInsets,
-                turnSummaryTapped: {
-                    store.send(.turnSummaryTapped($0), animation: .default)
-                },
-                retryMessage: {
-                    store.send(.retryButtonTapped($0))
-                }
-            )
+                safeAreaInsets: proxy.safeAreaInsets
+            ) {
+                store.send(.turnSummaryTapped($0), animation: .default)
+            } retryMessage: {
+                store.send(.retryButtonTapped($0))
+            }
             // Draw beneath every bar and the keyboard; the proxy insets keep rows unobscured.
             .ignoresSafeArea(edges: [.top, .bottom])
         }

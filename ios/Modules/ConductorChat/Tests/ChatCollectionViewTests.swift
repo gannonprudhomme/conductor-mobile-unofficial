@@ -198,6 +198,35 @@ struct ChatCollectionViewTests {
         )
     }
 
+    @Test("Canonical confirmation releases optimistic status height")
+    func confirmationReleasesStatusHeight() {
+        let bubbleID = UUID()
+        let optimisticMessage = displayedRow(
+            .optimisticMessage(
+                .init(
+                    id: bubbleID,
+                    content: "Test",
+                    canRetry: true,
+                    status: .unknown
+                )
+            )
+        )
+        let canonicalMessage = displayedRow(
+            .humanMessage(
+                .init(id: bubbleID.uuidString, content: "Test")
+            )
+        )
+
+        let optimisticHeight = renderedContentHeight(after: [[optimisticMessage]])
+        let settledHeight = renderedContentHeight(
+            after: [[optimisticMessage], [canonicalMessage]]
+        )
+        let ordinaryCanonicalHeight = renderedContentHeight(after: [[canonicalMessage]])
+
+        #expect(optimisticHeight > settledHeight)
+        #expect(abs(settledHeight - ordinaryCanonicalHeight) < 0.5)
+    }
+
     @Test("Only message growth and working-row insertion animate bottom follow")
     func bottomFollowAnimationPolicy() {
         let message = displayedRow(
@@ -523,6 +552,37 @@ struct ChatCollectionViewTests {
     }
 }
 
+@MainActor
+private func renderedContentHeight(
+    after snapshots: [[DisplayedChatRowWithPadding]]
+) -> CGFloat {
+    let collectionView = TestCollectionView(isSelfSizing: true)
+    let viewController = UIViewController()
+    viewController.view = collectionView
+    let window = UIWindow(frame: collectionView.frame)
+    window.rootViewController = viewController
+    window.isHidden = false
+    let coordinator = ChatCollectionView.Coordinator()
+    coordinator.connect(to: collectionView)
+    defer {
+        coordinator.disconnect()
+        window.isHidden = true
+    }
+
+    for rows in snapshots {
+        coordinator.render(
+            rows: rows,
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            retryMessage: { _ in },
+            in: collectionView
+        )
+        window.layoutIfNeeded()
+        collectionView.layoutIfNeeded()
+    }
+    return collectionView.contentSize.height
+}
+
 private func displayedRow(
     _ content: DisplayedChatRow
 ) -> DisplayedChatRowWithPadding {
@@ -545,10 +605,12 @@ private final class TestCollectionView: UICollectionView {
     override var isDecelerating: Bool { isDeceleratingForTests }
     override var isScrollAnimating: Bool { isScrollAnimatingForTests }
 
-    init() {
+    init(isSelfSizing: Bool = false) {
         super.init(
             frame: CGRect(x: 0, y: 0, width: 390, height: 844),
-            collectionViewLayout: UICollectionViewFlowLayout()
+            collectionViewLayout: isSelfSizing
+                ? Self.makeSelfSizingLayout()
+                : UICollectionViewFlowLayout()
         )
     }
 
@@ -560,6 +622,22 @@ private final class TestCollectionView: UICollectionView {
     override func stopScrollingAndZooming() {
         stopScrollingCount += 1
         isScrollAnimatingForTests = false
+    }
+
+    private static func makeSelfSizingLayout() -> UICollectionViewLayout {
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1),
+            heightDimension: .estimated(44)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let group = NSCollectionLayoutGroup.vertical(
+            layoutSize: itemSize,
+            subitems: [item]
+        )
+        let section = NSCollectionLayoutSection(group: group)
+        section.interGroupSpacing = ChatRowLayout.stackSpacing
+        section.contentInsets.bottom = ChatRowLayout.stackSpacing + 1
+        return UICollectionViewCompositionalLayout(section: section)
     }
 }
 
