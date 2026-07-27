@@ -19,8 +19,26 @@ public extension Date {
 
     static func conductorDate(from string: String) -> Date? {
         (try? Date(string, strategy: .iso8601))
+            ?? conductorCloudDate(from: string)
             ?? DateFormatter.conductorSQLiteFractional.date(from: string)
             ?? DateFormatter.conductorSQLite.date(from: string)
+    }
+
+    private static func conductorCloudDate(from string: String) -> Date? {
+        guard let separatorIndex = string.firstIndex(of: " ") else {
+            return nil
+        }
+
+        var normalized = string
+        normalized.replaceSubrange(separatorIndex...separatorIndex, with: "T")
+
+        if let offsetIndex = normalized.lastIndex(where: { $0 == "+" || $0 == "-" }),
+           normalized.distance(from: offsetIndex, to: normalized.endIndex) == 3,
+           normalized[normalized.index(after: offsetIndex)...].allSatisfy(\.isNumber) {
+            normalized.append(":00")
+        }
+
+        return try? Date(normalized, strategy: .iso8601)
     }
 }
 
