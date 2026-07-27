@@ -76,6 +76,37 @@ struct SessionTests {
         #expect(session.reasoningEffort?.rawValue == "future-effort")
     }
 
+    @Test("Session decoding accepts a null title")
+    func nullTitleDecoding() throws {
+        let session = try JSONDecoder().decode(
+            Session.self,
+            from: Data(
+                """
+                {
+                  "id": "session-1",
+                  "workspace_id": "workspace-1",
+                  "title": null,
+                  "agent_type": "codex",
+                  "is_hidden": false,
+                  "created_at": "2026-07-09 00:00:00",
+                  "updated_at": "2026-07-09 01:00:00",
+                  "last_user_message_at": null,
+                  "status": "idle",
+                  "model": "gpt-5.6-sol",
+                  "codex_thinking_level": null,
+                  "fast_mode": false,
+                  "claude_effort_level": null,
+                  "unread_count": 0,
+                  "freshly_compacted": 0,
+                  "context_token_count": 0
+                }
+                """.utf8
+            )
+        )
+
+        #expect(session.title == nil)
+    }
+
     @Test("Reasoning efforts match each model configuration")
     func reasoningEfforts() {
         #expect(

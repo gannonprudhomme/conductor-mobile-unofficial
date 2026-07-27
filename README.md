@@ -82,15 +82,18 @@ show the authenticated account's cloud workspaces in the existing workspace
 list. The key is stored in the device Keychain; only non-secret configuration
 and account identifiers are stored in app support.
 
-Cloud projects, workspaces, and lifecycle status are fetched from the fixed
-production API and cached in the mobile SQLite database. Cloud and desktop
-observations merge into one canonical workspace row: Cloud metadata supplies
-lifecycle state, while a paired desktop supplies richer working and
-pull-request state. Cached rows remain visible after relaunch and during
-offline refresh failures. API-only rows are display-only; a row becomes
-navigable when the desktop companion observes the same workspace ID. Local
-pairing continues to operate without a cloud credential, and a saved Cloud
-credential is enough to browse the catalog without pairing a Mac.
+Cloud projects, workspaces, and coarse status are fetched from the fixed
+production API and cached in the mobile SQLite database. Because the
+[Cloud API](https://www.conductor.build/docs/api#endpoints) provides offset
+pagination rather than an incremental change feed, the app constructs
+deduplicated polling snapshots. Cloud and desktop observations merge into one
+canonical workspace row: Cloud supplies its coarse workspace state, while a
+paired desktop supplies richer working and pull-request state. Cached rows
+remain visible after relaunch and during offline refresh failures. API-only
+rows are display-only; a row becomes navigable when the desktop companion
+observes the same workspace ID. Local pairing continues to operate without a
+cloud credential, and a saved Cloud credential is enough to browse the
+workspace list without pairing a Mac.
 
 Opening cloud workspaces, cloud chat, polling transcripts, sending or stopping
 agents, and creating cloud workspaces or sessions are deliberately deferred.

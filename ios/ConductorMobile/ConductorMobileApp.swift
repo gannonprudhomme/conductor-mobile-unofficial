@@ -6,7 +6,6 @@
 //
 
 import ComposableArchitecture
-import ConductorCloud
 import ConductorDesign
 import ConductorFoundation
 import ConductorMain
@@ -14,7 +13,6 @@ import ConductorMobileData
 import Dependencies
 import Foundation
 import Logging
-import Sharing
 import SwiftUI
 
 @main
@@ -26,8 +24,14 @@ struct ConductorMobileApp: App {
     init() {
         LoggingSystem.bootstrap(LoggingOSLog.init)
 
+        #if DEBUG
+        let uiTestScenario = ProcessInfo.processInfo.environment[
+            "CONDUCTOR_UI_TEST_FIXTURE"
+        ].flatMap(CloudUITestScenario.init(rawValue:))
+        #endif
         try! prepareDependencies {
             try $0.bootstrapDatabase()
+<<<<<<< Updated upstream
 
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-workspace-chat-ui-test") {
@@ -35,18 +39,13 @@ struct ConductorMobileApp: App {
             }
             #endif
         }
+=======
+>>>>>>> Stashed changes
 
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["CONDUCTOR_UI_TEST_FIXTURE"]
-            == "cloud-connect-and-browse" {
-            @Shared(.cloudCredentialConfigured)
-            var isCloudCredentialConfigured
-            @Shared(.cloudAccountID) var cloudAccountID
-            $isCloudCredentialConfigured.withLock { $0 = true }
-            $cloudAccountID.withLock { $0 = "fixture-account" }
-            prepareCloudConnectAndBrowseUITestFixture()
+            #if DEBUG
+            try uiTestScenario?.install(in: &$0)
+            #endif
         }
-        #endif
     }
 
     var body: some Scene {

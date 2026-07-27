@@ -7,8 +7,12 @@
 
 import ComposableArchitecture
 import ConductorChat
+import ConductorCloud
+import ConductorMobileData
 import ConductorSettings
 import ConductorWorkspaces
+import Sharing
+import SQLiteData
 import SwiftUI
 
 @Reducer
@@ -20,6 +24,9 @@ public struct Main: Sendable {
 
     @ObservableState
     public struct State: Equatable {
+        @Shared(.cloudConfiguration)
+        public var cloudConfiguration
+
         public var path = StackState<Path.State>()
         @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
@@ -32,10 +39,16 @@ public struct Main: Sendable {
     }
 
     public enum Action {
+        case cloudCacheCleanupResult(Result<Void, any Error>)
+        case cloudCredentialReconciliationResult(Result<String?, any Error>)
         case path(StackActionOf<Path>)
         case settings(PresentationAction<ConductorSettings.Action>)
+        case task
         case workspaces(Workspaces.Action)
     }
+
+    @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+    @Dependency(\.defaultDatabase) var database
 
     public init() {
     }
@@ -47,6 +60,58 @@ public struct Main: Sendable {
             }
             Reduce { state, action in
                 switch action {
+                case .task:
+                    guard state.cloudConfiguration != nil else {
+                        return .send(.workspaces(.task))
+                    }
+                    return .run { [cloudCredentialClient] send in
+                        await send(
+                            .cloudCredentialReconciliationResult(
+                                await Result {
+                                    try await cloudCredentialClient.loadAPIKey()
+                                }
+                            )
+                        )
+                    }
+
+                case let .cloudCredentialReconciliationResult(result):
+                    switch result {
+                    case .failure:
+                        // A Keychain read error is not proof that the credential is absent.
+                        return .send(.workspaces(.task))
+
+                    case .success(.some):
+                        return .send(.workspaces(.task))
+
+                    case .success(nil):
+                        state.$cloudConfiguration.withLock { $0 = nil }
+                        let settings = ConductorSettings.State()
+                        if settings.requiresConnectionConfiguration {
+                            state.settings = settings
+                        }
+                        return .merge(
+                            .send(.workspaces(.task)),
+                            .run { [database] send in
+                                await send(
+                                    .cloudCacheCleanupResult(
+                                        await Result {
+                                            try await database.write { db in
+                                                try CloudWorkspaceMetadata
+                                                    .clearCachedRows(in: db)
+                                            }
+                                        }
+                                    )
+                                )
+                            }
+                        )
+                    }
+
+                case let .cloudCacheCleanupResult(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .cloudCacheCleanupResult(.success):
+                    return .none
+
                 // We handle the displaying of Settings in here so we can keep ConductorSettings + ConductorWorkspaces decoupled
                 // akin to how modules are decoupled for push navigation
                 case .workspaces(.settingsButtonTapped):
@@ -124,7 +189,7 @@ public struct MainView: View {
         .task {
             // MainView stays mounted while destinations are pushed, keeping the workspace socket
             // alive while the root WorkspacesView is off-screen.
-            await store.send(.workspaces(.task)).finish()
+            await store.send(.task).finish()
         }
         .sensoryFeedback(.error, trigger: store.workspaces.connectionStatus) {
             $0 == .connected && $1 == .disconnected

@@ -64,7 +64,7 @@ func createTestConductorSchema(in database: Database) throws {
             CREATE TABLE sessions (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
-              title TEXT NOT NULL,
+              title TEXT,
               agent_type TEXT NOT NULL,
               is_hidden INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,

@@ -20,6 +20,7 @@ enum WorkspaceRowAction {
 }
 
 struct WorkspaceRow: View {
+<<<<<<< Updated upstream
     let item: WorkspaceWithRepository
     let showsRepositoryIcon: Bool
     let action: @MainActor (WorkspaceRowAction) -> Void
@@ -27,6 +28,127 @@ struct WorkspaceRow: View {
     @ScaledMetric(relativeTo: .body) private var iconSize = 20
 
     var body: some View {
+=======
+    private let item: WorkspaceWithRepository?
+    private let title: String
+    private let phaseSeed: String
+    private let accessibilityIdentifier: String
+    private let isCloudHosted: Bool
+    private let isUnread: Bool
+    private let isWorking: Bool
+    private let pullRequestStatus: MobileWorkspaceState.PullRequestStatus?
+    private let repository: Repository?
+    private let showsRepositoryIcon: Bool
+    private let action: (@MainActor (WorkspaceRowAction) -> Void)?
+
+    @ScaledMetric(relativeTo: .body) private var iconSize = 20
+
+    init(
+        item: WorkspaceWithRepository,
+        showsRepositoryIcon: Bool,
+        action: (@MainActor (WorkspaceRowAction) -> Void)?
+    ) {
+        self.item = item
+        self.title = item.workspace.displayName
+        self.phaseSeed = item.workspace.id
+        self.accessibilityIdentifier = "workspace-row.\(item.workspace.id)"
+        self.isCloudHosted = item.cloudMetadata != nil
+            || item.workspace.hostingServerURL
+                == Workspace.conductorCloudHostingServerURL
+        self.isUnread = (item.workspace.unread ?? 0) > 0
+        self.isWorking = item.isWorking
+        self.pullRequestStatus = item.pullRequestStatus
+        self.repository = item.repository
+        self.showsRepositoryIcon = showsRepositoryIcon
+        self.action = action
+    }
+
+    var body: some View {
+        if let action {
+            Button {
+                action(.open)
+            } label: {
+                rowLabel
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(accessibilityIdentifier)
+            .contextMenu {
+                contextMenu(action: action)
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button {
+                    action(.toggleUnread)
+                } label: {
+                    Label(
+                        isUnread ? "Mark as read" : "Mark as unread",
+                        systemImage: isUnread ? "envelope.open" : "envelope"
+                    )
+                }
+                .tint(.theme(.planBorder))
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button(role: .destructive) {
+                    action(.archive)
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+            }
+        } else {
+            rowLabel
+                .accessibilityIdentifier(accessibilityIdentifier)
+                .accessibilityHint("Cloud workspace details are not available in this version.")
+        }
+    }
+
+    private var rowLabel: some View {
+        Label {
+            HStack(spacing: 5) {
+                Text(title)
+                    .lineLimit(1)
+
+                if isCloudHosted {
+                    CloudWorkspaceIcon(size: 16)
+                        .accessibilityLabel("Cloud workspace")
+                }
+            }
+            .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
+            .fontWeight(isUnread ? .semibold : .regular)
+        } icon: {
+            if showsRepositoryIcon {
+                RepositoryIcon(repository: repository, size: 20, relativeTo: .body)
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+
+            if isWorking {
+                ProgressView()
+                    .progressViewStyle(.conductor(phaseSeed: phaseSeed))
+                    .tint(.theme(.textSecondary))
+                    .frame(width: iconSize, height: iconSize)
+                    .accessibilityLabel("Working")
+            } else if let pullRequestStatus {
+                PullRequestStatusIcon(
+                    status: pullRequestStatus,
+                    size: 20,
+                    relativeTo: .body
+                )
+                .accessibilityLabel(pullRequestStatus.accessibilityLabel)
+            } else {
+                LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+        }
+        .labelStyle(.conductorStandard)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(.theme(.textPrimary))
+        .font(.theme(.body))
+        .contentShape(.rect)
+    }
+
+    @ViewBuilder
+    private func contextMenu(
+        action: @escaping @MainActor (WorkspaceRowAction) -> Void
+    ) -> some View {
+>>>>>>> Stashed changes
         Button {
             action(.open)
         } label: {
@@ -172,8 +294,29 @@ struct WorkspaceRow: View {
         item.workspace.pinnedAt != nil
     }
 
+<<<<<<< Updated upstream
     private var isUnread: Bool {
         (item.workspace.unread ?? 0) > 0
+=======
+private extension MobileWorkspaceState.PullRequestStatus {
+    var accessibilityLabel: String {
+        switch self {
+        case .draft:
+            "Draft pull request"
+
+        case .failingChecks:
+            "Pull request checks failing"
+
+        case .readyToMerge:
+            "Pull request ready to merge"
+
+        case .mergeConflict:
+            "Pull request has merge conflicts"
+
+        case .merged:
+            "Pull request merged"
+        }
+>>>>>>> Stashed changes
     }
 }
 

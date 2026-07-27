@@ -57,6 +57,26 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Local-only starts only desktop observation")
+    func localOnlyObservation() async throws {
+        try await assertObservationSources(local: true, cloud: false)
+    }
+
+    @Test("Cloud-only starts only Cloud observation")
+    func cloudOnlyObservation() async throws {
+        try await assertObservationSources(local: false, cloud: true)
+    }
+
+    @Test("Combined configuration starts both observations")
+    func combinedObservation() async throws {
+        try await assertObservationSources(local: true, cloud: true)
+    }
+
+    @Test("Missing configuration starts neither observation")
+    func missingConfigurationObservation() async throws {
+        try await assertObservationSources(local: false, cloud: false)
+    }
+
     @Test("Workspace display options persist between state instances")
     func displayOptionsPersist() async throws {
         try await withDependencies {
@@ -177,9 +197,6 @@ struct WorkspacesTests {
             let metadata = CloudWorkspaceMetadata(
                 workspaceID: workspace.id,
                 accountID: "account",
-                cloudProjectID: "project",
-                deepLink: "conductor://workspace/cloud-workspace",
-                lifecycleStep: "preparing",
                 lastSeenGeneration: "generation"
             )
             try await database.write { db in
@@ -191,7 +208,6 @@ struct WorkspacesTests {
             let state = Workspaces.State()
             let item = try #require(state.sections.flatMap(\.items).first)
             #expect(state.sections.flatMap(\.items).count == 1)
-            #expect(state.hasCloudWorkspaces)
             #expect(item.cloudMetadata == metadata)
             #expect(item.isWorking)
             #expect(item.pullRequestStatus == .draft)
@@ -214,8 +230,6 @@ struct WorkspacesTests {
             let metadata = CloudWorkspaceMetadata(
                 workspaceID: workspace.id,
                 accountID: "account",
-                cloudProjectID: "project",
-                deepLink: "conductor://workspace/cloud-only",
                 lastSeenGeneration: "generation"
             )
             try await database.write { db in
@@ -223,22 +237,157 @@ struct WorkspacesTests {
                 try CloudWorkspaceMetadata.insert { metadata }.execute(db)
             }
             var state = Workspaces.State()
-            state.cloudCatalog.$isCloudCredentialConfigured.withLock { $0 = true }
-            state.cloudCatalog.hasLoaded = true
+            state.$cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            state.cloudObservationStatus = .connected
             let store = TestStore(initialState: state) {
                 Workspaces()
             }
 
             let offlineError = URLError(.notConnectedToInternet)
-            await store.send(
-                .cloudCatalog(.response(.failure(offlineError)))
-            ) {
-                $0.cloudCatalog.failure = .offline(offlineError.localizedDescription)
+            let failure = Workspaces.CloudFailure.offline(
+                offlineError.localizedDescription
+            )
+            await store.send(.cloudObservationFailed(failure)) {
+                $0.cloudObservationStatus = .failed
+                $0.hasPresentedCloudFailureAlert = true
+                $0.destination = .alert(.cloudObservationFailed(failure))
             }
             let item = try #require(store.state.sections.flatMap(\.items).first)
             #expect(item.id == workspace.id)
             #expect(item.isCloudOnly)
             #expect(item.workspace.state == nil)
+        }
+    }
+
+    @Test("Cloud reachability failures use concise alert copy")
+    func cloudReachabilityAlertCopy() {
+        let offlineFailure = Workspaces.CloudFailure.offline(
+            "The Internet connection appears to be offline."
+        )
+        let serverFailure = Workspaces.CloudFailure.other(
+            "The server returned an invalid response."
+        )
+
+        #expect(offlineFailure.title == "Unable to reach Cloud")
+        #expect(
+            offlineFailure.message
+                == "The Internet connection appears to be offline."
+        )
+        #expect(serverFailure.title == "Unable to reach Cloud")
+        #expect(
+            serverFailure.message
+                == "The server returned an invalid response."
+        )
+    }
+
+    @Test("Cancelled Cloud observations reconnect without presenting an alert")
+    func cancelledCloudObservationReconnectsSilently() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+
+            let clock = TestClock()
+            let (firstStream, firstContinuation) = AsyncThrowingStream<
+                CloudWorkspaceSnapshot,
+                any Error
+            >.makeStream()
+            let (secondStream, secondContinuation) = AsyncThrowingStream<
+                CloudWorkspaceSnapshot,
+                any Error
+            >.makeStream()
+            let connectionCount = LockIsolated(0)
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.cloudAPIClient.observeWorkspaces = {
+                    let count = connectionCount.withValue {
+                        $0 += 1
+                        return $0
+                    }
+                    return count == 1 ? firstStream : secondStream
+                }
+                $0.continuousClock = clock
+            }
+
+            let task = await store.send(.task)
+            for _ in 0..<1_000 {
+                guard connectionCount.value == 0 else {
+                    break
+                }
+                await Task.yield()
+            }
+            #expect(connectionCount.value == 1)
+
+            firstContinuation.finish(
+                throwing: URLError(.cancelled)
+            )
+            await clock.advance(by: .seconds(1))
+            for _ in 0..<1_000 {
+                guard connectionCount.value == 1 else {
+                    break
+                }
+                await Task.yield()
+            }
+            #expect(connectionCount.value == 2)
+            #expect(store.state.destination == nil)
+
+            secondContinuation.yield(
+                CloudWorkspaceSnapshot(
+                    accountID: "account",
+                    projects: [],
+                    statuses: [:],
+                    workspaces: []
+                )
+            )
+            await store.receive(\.cloudSnapshotReceived) {
+                $0.cloudObservationStatus = .connected
+            }
+            #expect(!store.state.hasPresentedCloudFailureAlert)
+
+            await task.cancel()
+        }
+    }
+
+    @Test("Only the first failure in a Cloud outage presents an alert")
+    func cloudFailurePresentsOneAlert() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            }
+            let firstFailure = Workspaces.CloudFailure.offline(
+                "The network is offline."
+            )
+            let laterFailure = Workspaces.CloudFailure.other(
+                "The server is unavailable."
+            )
+
+            await store.send(.cloudObservationFailed(firstFailure)) {
+                $0.cloudObservationStatus = .failed
+                $0.hasPresentedCloudFailureAlert = true
+                $0.destination = .alert(
+                    .cloudObservationFailed(firstFailure)
+                )
+            }
+            await store.send(.cloudObservationFailed(laterFailure))
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(.cloudObservationFailed(laterFailure))
+            #expect(store.state.destination == nil)
         }
     }
 
@@ -270,7 +419,7 @@ struct WorkspacesTests {
                 WorkspaceListSnapshot,
                 any Error
             >.makeStream()
-            let initialState = Workspaces.State()
+            let initialState = locallyConfiguredState()
             let grouping = initialState.$grouping
             let projectSections = Workspaces.State.sections(
                 groupedBy: .project,
@@ -328,7 +477,7 @@ struct WorkspacesTests {
                 WorkspaceListSnapshot,
                 any Error
             >.makeStream()
-            let initialState = Workspaces.State()
+            let initialState = locallyConfiguredState()
             let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
@@ -437,8 +586,6 @@ struct WorkspacesTests {
                         CloudWorkspaceMetadata(
                             workspaceID: workspace.id,
                             accountID: "account",
-                            cloudProjectID: "project",
-                            deepLink: "conductor://workspace/cloud-workspace",
                             lastSeenGeneration: "generation"
                         )
                     }
@@ -459,6 +606,7 @@ struct WorkspacesTests {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
+            @Dependency(\.defaultDatabase) var database
             let clock = TestClock()
             let repository = Repository.preview()
             let workspace = Workspace.preview(
@@ -534,6 +682,7 @@ struct WorkspacesTests {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
+            @Dependency(\.defaultDatabase) var database
             let clock = TestClock()
             let repository = Repository.preview(id: "repository", name: "Conductor")
             let workspace = Workspace.preview(
@@ -590,7 +739,8 @@ struct WorkspacesTests {
 
                 secondConnectionCancelled.setValue(true)
             }
-            let store = TestStore(initialState: Workspaces.State()) {
+            let initialState = locallyConfiguredState()
+            let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
                 $0.continuousClock = clock
@@ -602,34 +752,40 @@ struct WorkspacesTests {
                     return count == 1 ? firstStream : secondStream
                 }
             }
+            store.exhaustivity = .off(showSkippedAssertions: false)
 
             let task = await store.send(.task)
 
             firstContinuation.yield(firstSnapshot)
-            await store.receive(\.workspacesChanged) {
-                $0.sections = Workspaces.State.sections(
-                    groupedBy: .status,
-                    workspaces: [firstExpectedWorkspace]
-                )
-            }
-            await store.receive(\.initialWorkspacesResponse) {
-                $0.isLoadingWorkspaces = false
+            try await waitForWorkspacesCondition("the first snapshot") {
+                try await database.read { db in
+                    try WorkspaceWithRepository
+                        .all(workspaceID: workspace.id)
+                        .fetchOne(db) == firstExpectedWorkspace
+                }
             }
             #expect(connectionCount.value == 1)
 
             firstContinuation.finish(throwing: URLError(.networkConnectionLost))
-            await store.receive(\.loadWorkspacesFailed)
-            #expect(connectionCount.value == 1)
-
-            await clock.advance(by: .seconds(1))
-            secondContinuation.yield(secondSnapshot)
-            await store.receive(\.workspacesChanged) {
-                $0.sections = Workspaces.State.sections(
-                    groupedBy: .status,
-                    workspaces: [secondExpectedWorkspace]
-                )
+            for _ in 0..<10 where connectionCount.value < 2 {
+                await clock.advance(by: .seconds(1))
+                await Task.yield()
             }
             #expect(connectionCount.value == 2)
+            secondContinuation.yield(secondSnapshot)
+            try await waitForWorkspacesCondition("the reconnected snapshot") {
+                try await database.read { db in
+                    try WorkspaceWithRepository
+                        .all(workspaceID: workspace.id)
+                        .fetchOne(db) == secondExpectedWorkspace
+                }
+            }
+            let persistedWorkspace = try await database.read { db in
+                try WorkspaceWithRepository
+                    .all(workspaceID: workspace.id)
+                    .fetchOne(db)
+            }
+            expectNoDifference(persistedWorkspace, secondExpectedWorkspace)
 
             await task.cancel()
             #expect(secondConnectionCancelled.value)
@@ -648,8 +804,6 @@ struct WorkspacesTests {
         let cloudMetadata = CloudWorkspaceMetadata(
             workspaceID: workspace.id,
             accountID: "account",
-            cloudProjectID: "project",
-            deepLink: "conductor://workspace/workspace",
             lastSeenGeneration: "generation"
         )
         try await database.write { db in
@@ -667,13 +821,23 @@ struct WorkspacesTests {
             WorkspaceListSnapshot,
             any Error
         >.makeStream()
+        let (cloudStream, cloudContinuation) = AsyncThrowingStream<
+            CloudWorkspaceSnapshot,
+            any Error
+        >.makeStream()
         try await withDependencies {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
         } operation: {
-            let store = TestStore(initialState: Workspaces.State()) {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            let initialState = locallyConfiguredState()
+            let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
+                $0.cloudAPIClient.observeWorkspaces = { cloudStream }
                 $0.continuousClock = TestClock()
                 $0.desktopClient.observeWorkspaces = { stream }
                 $0.desktopClient.ping = {}
@@ -701,6 +865,7 @@ struct WorkspacesTests {
             #expect(unwrappedItem.isCloudOnly)
             #expect(!unwrappedItem.isWorking)
             await task.cancel()
+            cloudContinuation.finish()
         }
     }
 
@@ -716,7 +881,8 @@ struct WorkspacesTests {
                 WorkspaceListSnapshot,
                 any Error
             >.makeStream()
-            let store = TestStore(initialState: Workspaces.State()) {
+            let initialState = locallyConfiguredState()
+            let store = TestStore(initialState: initialState) {
                 Workspaces()
             } withDependencies: {
                 $0.continuousClock = clock
@@ -1012,6 +1178,97 @@ struct WorkspacesTests {
             }
         }
     }
+}
+
+@MainActor
+private func waitForWorkspacesCondition(
+    _ description: String,
+    _ condition: @escaping () async throws -> Bool
+) async rethrows {
+    for _ in 0..<10_000 {
+        guard !(try await condition()) else {
+            return
+        }
+        await Task.yield()
+    }
+    Issue.record("Timed out waiting for \(description).")
+}
+
+@MainActor
+private func assertObservationSources(
+    local: Bool,
+    cloud: Bool
+) async throws {
+    try await withDependencies {
+        $0.defaultFileStorage = .inMemory
+        try $0.bootstrapDatabase()
+    } operation: {
+        @Shared(.cloudConfiguration) var cloudConfiguration
+        @Shared(.desktopServerAddress) var desktopServerAddress
+        $cloudConfiguration.withLock {
+            $0 = cloud ? CloudConfiguration(accountID: "account") : nil
+        }
+        $desktopServerAddress.withLock {
+            $0 = local ? "paired-desktop" : nil
+        }
+
+        let localObservationCount = LockIsolated(0)
+        let cloudObservationCount = LockIsolated(0)
+        let (localStream, localContinuation) = AsyncThrowingStream<
+            WorkspaceListSnapshot,
+            any Error
+        >.makeStream()
+        let (cloudStream, cloudContinuation) = AsyncThrowingStream<
+            CloudWorkspaceSnapshot,
+            any Error
+        >.makeStream()
+        let clock = TestClock()
+        let state = Workspaces.State()
+        #expect(state.hasLocalConfiguration == local)
+        #expect(state.isLoadingWorkspaces == local)
+        #expect(
+            state.cloudObservationStatus
+                == (cloud ? .loading : .disconnected)
+        )
+
+        let store = TestStore(initialState: state) {
+            Workspaces()
+        } withDependencies: {
+            $0.cloudAPIClient.observeWorkspaces = {
+                cloudObservationCount.withValue { $0 += 1 }
+                return cloudStream
+            }
+            $0.continuousClock = clock
+            $0.desktopClient.observeWorkspaces = {
+                localObservationCount.withValue { $0 += 1 }
+                return localStream
+            }
+            $0.desktopClient.ping = {}
+        }
+
+        let task = await store.send(.task)
+        for _ in 0..<1_000 {
+            guard localObservationCount.value != (local ? 1 : 0)
+                    || cloudObservationCount.value != (cloud ? 1 : 0)
+            else {
+                break
+            }
+            await Task.yield()
+        }
+        #expect(localObservationCount.value == (local ? 1 : 0))
+        #expect(cloudObservationCount.value == (cloud ? 1 : 0))
+
+        await task.cancel()
+        localContinuation.finish()
+        cloudContinuation.finish()
+    }
+}
+
+@MainActor
+private func locallyConfiguredState() -> Workspaces.State {
+    @Shared(.desktopServerAddress) var desktopServerAddress
+    $desktopServerAddress.withLock { $0 = "paired-desktop" }
+    return Workspaces.State()
 }
 
 private func workspace(

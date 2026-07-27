@@ -480,7 +480,7 @@ public struct Chat: Sendable {
                 workspaceID = state.session.workspaceID,
             ] send in
             var isAwaitingInitialResponse = initiallyIsLoadingMessages
-            await WebSocketHelpers.observe {
+            await StreamObservation.observe {
                 desktopClient.observeMessages(
                     workspaceID: workspaceID,
                     sessionID: sessionID

@@ -801,7 +801,7 @@ public struct WorkspaceChat: Sendable {
 
     private func observeSessions(workspaceID: String) -> Effect<Action> {
         .run { send in
-            await WebSocketHelpers.observe {
+            await StreamObservation.observe {
                 desktopClient.observeSessions(workspaceID: workspaceID)
             } onValue: { sessions in
                 await send(.loadSessionsResponse(.success(sessions)))

@@ -29,7 +29,6 @@ public struct CloudCredentialError: Error, Equatable, LocalizedError, Sendable {
             ?? "Keychain returned status \(status)."
     }
 }
-
 extension CloudCredentialClient: DependencyKey {
     public static var liveValue: Self {
         Self {
@@ -109,4 +108,3 @@ private enum KeychainStore {
         ]
     }
 }
-
