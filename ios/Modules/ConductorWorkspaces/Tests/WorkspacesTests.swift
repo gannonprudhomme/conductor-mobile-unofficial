@@ -6,16 +6,18 @@
 //
 
 import ComposableArchitecture
-import SharedConductorData
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Dependencies
 import Foundation
+import SharedConductorData
 import Sharing
 import SQLiteData
 @testable import ConductorWorkspaces
 import Testing
 
+@Suite(.serialized)
 @MainActor
 struct WorkspacesTests {
     @Test("Connection display follows the shared desktop settings")
@@ -143,6 +145,101 @@ struct WorkspacesTests {
             },
             ["First", "Second", "missing-repo"]
         )
+    }
+
+    @Test("Canonical cloud rows retain desktop activity and pull request enrichment")
+    func canonicalCloudRowsRetainDesktopEnrichment() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            let repository = Repository.preview(
+                id: "repository",
+                name: "Conductor",
+                remoteURL: "https://github.com/example/conductor.git"
+            )
+            let workspace = Workspace.preview(
+                id: "cloud-workspace",
+                derivedStatus: Workspace.Status.inProgress.rawValue,
+                hostingServerURL: "https://api.conductor.build",
+                repositoryID: repository.id
+            )
+            let mobileState = MobileWorkspaceState(
+                workspaceID: workspace.id,
+                isWorking: true,
+                pullRequest: PullRequestSnapshot(
+                    url: "https://github.com/example/conductor/pull/1",
+                    isDraft: true,
+                    isMerged: false
+                )
+            )
+            let metadata = CloudWorkspaceMetadata(
+                workspaceID: workspace.id,
+                accountID: "account",
+                cloudProjectID: "project",
+                deepLink: "conductor://workspace/cloud-workspace",
+                lifecycleStep: "preparing",
+                lastSeenGeneration: "generation"
+            )
+            try await database.write { db in
+                try Repository.insert { repository }.execute(db)
+                try Workspace.insert { workspace }.execute(db)
+                try MobileWorkspaceState.insert { mobileState }.execute(db)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(db)
+            }
+            let state = Workspaces.State()
+            let item = try #require(state.sections.flatMap(\.items).first)
+            #expect(state.sections.flatMap(\.items).count == 1)
+            #expect(state.hasCloudWorkspaces)
+            #expect(item.cloudMetadata == metadata)
+            #expect(item.isWorking)
+            #expect(item.pullRequestStatus == .draft)
+            #expect(!item.isCloudOnly)
+        }
+    }
+
+    @Test("Cached cloud-only rows remain visible during an offline refresh")
+    func cachedCloudOnlyRowsRemainVisibleOffline() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            let workspace = Workspace.preview(
+                id: "cloud-only",
+                hostingServerURL: "https://api.conductor.build",
+                state: nil
+            )
+            let metadata = CloudWorkspaceMetadata(
+                workspaceID: workspace.id,
+                accountID: "account",
+                cloudProjectID: "project",
+                deepLink: "conductor://workspace/cloud-only",
+                lastSeenGeneration: "generation"
+            )
+            try await database.write { db in
+                try Workspace.insert { workspace }.execute(db)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(db)
+            }
+            var state = Workspaces.State()
+            state.cloudCatalog.$isCloudCredentialConfigured.withLock { $0 = true }
+            state.cloudCatalog.hasLoaded = true
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            let offlineError = URLError(.notConnectedToInternet)
+            await store.send(
+                .cloudCatalog(.response(.failure(offlineError)))
+            ) {
+                $0.cloudCatalog.failure = .offline(offlineError.localizedDescription)
+            }
+            let item = try #require(store.state.sections.flatMap(\.items).first)
+            #expect(item.id == workspace.id)
+            #expect(item.isCloudOnly)
+            #expect(item.workspace.state == nil)
+        }
     }
 
     @Test("Grouping changes update sections through the reducer")
@@ -317,6 +414,42 @@ struct WorkspacesTests {
             }
 
             await store.send(.createButtonTapped)
+        }
+    }
+
+    @Test("Cloud-only repositories cannot create a local workspace")
+    func createButtonExcludesCloudOnlyRepositories() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            let repository = Repository.preview(id: "cloud-repository")
+            let workspace = Workspace.preview(
+                id: "cloud-workspace",
+                repositoryID: repository.id
+            )
+            try await database.write { db in
+                try Repository.insert { repository }.execute(db)
+                try Workspace.insert { workspace }.execute(db)
+                try CloudWorkspaceMetadata
+                    .insert {
+                        CloudWorkspaceMetadata(
+                            workspaceID: workspace.id,
+                            accountID: "account",
+                            cloudProjectID: "project",
+                            deepLink: "conductor://workspace/cloud-workspace",
+                            lastSeenGeneration: "generation"
+                        )
+                    }
+                    .execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            }
+
+            await store.send(.createButtonTapped)
+            #expect(store.state.destination == nil)
         }
     }
 
@@ -500,6 +633,74 @@ struct WorkspacesTests {
 
             await task.cancel()
             #expect(secondConnectionCancelled.value)
+        }
+    }
+
+    @Test("A workspace becomes Cloud-only when desktop observation stops owning it")
+    func desktopObservationReconcilesProvenance() async throws {
+        let database = try appDatabase()
+        let repository = Repository.preview(id: "repository", name: "Conductor")
+        let workspace = Workspace.preview(
+            id: "workspace",
+            derivedStatus: Workspace.Status.inProgress.rawValue,
+            repositoryID: repository.id
+        )
+        let cloudMetadata = CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            cloudProjectID: "project",
+            deepLink: "conductor://workspace/workspace",
+            lastSeenGeneration: "generation"
+        )
+        try await database.write { db in
+            try Repository.insert { repository }.execute(db)
+            try Workspace.insert { workspace }.execute(db)
+            try MobileWorkspaceState
+                .insert {
+                    MobileWorkspaceState(workspaceID: workspace.id, isWorking: true)
+                }
+                .execute(db)
+            try CloudWorkspaceMetadata.insert { cloudMetadata }.execute(db)
+        }
+
+        let (stream, continuation) = AsyncThrowingStream<
+            WorkspaceListSnapshot,
+            any Error
+        >.makeStream()
+        try await withDependencies {
+            $0.defaultDatabase = database
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.continuousClock = TestClock()
+                $0.desktopClient.observeWorkspaces = { stream }
+                $0.desktopClient.ping = {}
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let task = await store.send(.task)
+            continuation.yield(
+                WorkspaceListSnapshot(repositories: [], workspaces: [])
+            )
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(2))
+            while try await database.read({
+                try MobileWorkspaceState.find(workspace.id).fetchOne($0) != nil
+            }), clock.now < deadline {
+                await Task.yield()
+            }
+            let item = try await database.read {
+                try WorkspaceWithRepository
+                    .all(workspaceID: workspace.id)
+                    .fetchOne($0)
+            }
+
+            let unwrappedItem = try #require(item)
+            #expect(unwrappedItem.isCloudOnly)
+            #expect(!unwrappedItem.isWorking)
+            await task.cancel()
         }
     }
 

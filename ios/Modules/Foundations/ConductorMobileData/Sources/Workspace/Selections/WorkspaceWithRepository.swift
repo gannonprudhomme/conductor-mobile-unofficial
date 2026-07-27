@@ -23,21 +23,35 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
     }
 
     public var workspace: Workspace
+    public var cloudMetadata: CloudWorkspaceMetadata?
     public var mobileState: MobileWorkspaceState?
     public var repository: Repository?
 
     public init(
         workspace: Workspace,
         repository: Repository?,
-        mobileState: MobileWorkspaceState? = nil
+        mobileState: MobileWorkspaceState? = nil,
+        cloudMetadata: CloudWorkspaceMetadata? = nil
     ) {
         self.workspace = workspace
+        self.cloudMetadata = cloudMetadata
         self.mobileState = mobileState
         self.repository = repository
     }
 
     public var id: Workspace.ID { workspace.id }
+    public var isCloudOnly: Bool {
+        cloudMetadata != nil && mobileState == nil
+    }
     public var isWorking: Bool { mobileState?.isWorking ?? false }
+    public var status: Workspace.Status {
+        if cloudMetadata != nil,
+           workspace.manualStatus?.nilIfEmpty == nil,
+           workspace.derivedStatus?.nilIfEmpty == nil {
+            return .inProgress
+        }
+        return workspace.status
+    }
     public var pullRequestStatus: MobileWorkspaceState.PullRequestStatus? {
         mobileState?.pullRequestStatus
     }
@@ -61,12 +75,13 @@ extension WorkspaceWithRepository {
     ) -> some SelectStatement<
         Self,
         Workspace,
-        (MobileWorkspaceState?, Repository?)
+        (MobileWorkspaceState?, Repository?, CloudWorkspaceMetadata?)
     > {
         var query = Workspace
             .where {
-                $0.state.neq(Workspace.State.archiving)
-                    && $0.state.neq(Workspace.State.archived)
+                let state = #sql("coalesce(\($0.state), '')", as: String.self)
+                return state.neq(Workspace.State.archiving.rawValue)
+                    && state.neq(Workspace.State.archived.rawValue)
             }
 
         if let repositoryID {
@@ -84,9 +99,16 @@ extension WorkspaceWithRepository {
             .leftJoin(Repository.all) { workspace, _, repository in
                 workspace.repositoryID.eq(repository.id)
             }
+            .leftJoin(CloudWorkspaceMetadata.all) {
+                workspace,
+                _,
+                _,
+                cloudMetadata in
+                workspace.id.eq(cloudMetadata.workspaceID)
+            }
             // Keep every workspace row while ordering equal group keys contiguously. A SQL
             // GROUP BY would collapse the rows that each SwiftUI section needs to render.
-            .order { workspaces, _, repositories in
+            .order { workspaces, _, repositories, _ in
                 switch grouping {
                 case .status:
                     // Match Workspace.status: treat empty values as missing, prefer Conductor's
@@ -144,9 +166,10 @@ extension WorkspaceWithRepository {
                     }
                 }
             }
-            .select { workspace, mobileState, repository in
+            .select { workspace, mobileState, repository, cloudMetadata in
                 Columns(
                     workspace: workspace,
+                    cloudMetadata: cloudMetadata,
                     mobileState: mobileState,
                     repository: repository
                 )

@@ -10,6 +10,7 @@ if [[ -z "${TEST_DESTINATION:-}" ]]; then
 fi
 
 TEST_SCHEMES=(
+  ConductorCloudTests
   ConductorChatTests
   SharedConductorDataTests
   ConductorMobileDataTests

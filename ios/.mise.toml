@@ -12,6 +12,11 @@ description = "Run native iOS module tests on this worktree's simulator"
 depends = ["gen"]
 run = "scripts/test.sh"
 
+[tasks.ui-test]
+description = "Interact with Cloud browse UI on a dedicated simulator"
+depends = ["gen"]
+run = "bash scripts/ui-test.sh"
+
 [tasks.deploy]
 description = "Build, install, and launch the native iOS app"
 depends = ["gen"]

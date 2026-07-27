@@ -25,9 +25,9 @@ public struct Main: Sendable {
         public var workspaces = Workspaces.State()
 
         public init() {
-            // If we're missing the server address (aka on first launch), show the Settings screen immediately
+            // A fresh install needs at least one usable local or cloud connection.
             let settings = ConductorSettings.State()
-            self.settings = settings.isServerAddressMissing ? settings : nil
+            self.settings = settings.requiresConnectionConfiguration ? settings : nil
         }
     }
 
@@ -67,6 +67,9 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceTapped(item)):
+                    guard !item.isCloudOnly else {
+                        return .none
+                    }
                     state.path.append(
                         .workspaceChat(
                             WorkspaceChat.State(workspaceWithRepository: item)

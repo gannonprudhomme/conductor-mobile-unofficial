@@ -7,12 +7,13 @@
 
 import Combine
 import ComposableArchitecture
-import SharedConductorData
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
 import Logging
+import SharedConductorData
 import Sharing
 import SQLiteData
 import SwiftUI
@@ -22,6 +23,7 @@ public struct Workspaces: Sendable {
     @ObservableState
     public struct State: Equatable {
         @Presents public var destination: Destination.State?
+        public var cloudCatalog = CloudWorkspaceCatalog.State()
 
         @Shared(.desktopConnectionStatus)
         public var connectionStatus
@@ -64,6 +66,27 @@ public struct Workspaces: Sendable {
             sections.contains { !$0.items.isEmpty }
         }
 
+        var hasCloudWorkspaces: Bool {
+            workspaces.contains { $0.cloudMetadata != nil }
+        }
+
+        var repositoriesAvailableForWorkspaceCreation: [Repository] {
+            let cloudOnlyRepositoryIDs = Set(
+                workspaces.compactMap {
+                    $0.isCloudOnly ? $0.workspace.repositoryID : nil
+                }
+            )
+            let desktopRepositoryIDs = Set(
+                workspaces.compactMap {
+                    $0.mobileState == nil ? nil : $0.workspace.repositoryID
+                }
+            )
+            return repositories.filter {
+                !cloudOnlyRepositoryIDs.contains($0.id)
+                    || desktopRepositoryIDs.contains($0.id)
+            }
+        }
+
         public init() {
             _workspaces = FetchAll(
                 WorkspaceWithRepository.all(
@@ -73,7 +96,17 @@ public struct Workspaces: Sendable {
                 ),
                 animation: .default
             )
-            sections = Self.sections(groupedBy: grouping, workspaces: workspaces)
+            updateSections(from: workspaces)
+        }
+
+        mutating func updateSections(
+            from workspaces: [WorkspaceWithRepository],
+            groupedBy grouping: WorkspaceWithRepository.Grouping? = nil
+        ) {
+            sections = Self.sections(
+                groupedBy: grouping ?? self.grouping,
+                workspaces: workspaces
+            )
         }
 
         static func sections(
@@ -97,7 +130,7 @@ public struct Workspaces: Sendable {
 
                 groupedSections = unpinnedItems.reduce(into: initialSections) { sections, item in
                     let groupByType = WorkspaceSection.GroupByType.status(
-                        item.workspace.status
+                        item.status
                     )
                     if let index = sections.firstIndex(where: { $0.id == groupByType.id }) {
                         sections[index].items.append(item)
@@ -181,6 +214,7 @@ public struct Workspaces: Sendable {
     }
 
     public enum Action {
+        case cloudCatalog(CloudWorkspaceCatalog.Action)
         case createButtonTapped
         case createWorkspaceSheetDismissed
         case destination(PresentationAction<Destination.Action>)
@@ -213,14 +247,26 @@ public struct Workspaces: Sendable {
     }
 
     public var body: some ReducerOf<Self> {
+        Scope(state: \.cloudCatalog, action: \.cloudCatalog) {
+            CloudWorkspaceCatalog()
+        }
+
         Reduce { state, action in
             switch action {
             case .task:
+                let cloudCredentialConfiguration =
+                    state.cloudCatalog.$isCloudCredentialConfigured
                 let grouping = state.$grouping
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
                 return .merge(
+                    .publisher {
+                        cloudCredentialConfiguration.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map { _ in Action.cloudCatalog(.task) }
+                    },
                     .publisher {
                         grouping.publisher
                             .removeDuplicates()
@@ -233,35 +279,33 @@ public struct Workspaces: Sendable {
                             .dropFirst()
                             .map(Action.workspacesChanged)
                     },
+                    state.cloudCatalog.isCloudCredentialConfigured
+                        ? .send(.cloudCatalog(.task))
+                        : .none,
                     monitorConnection(),
                     observeWorkspaces(state)
                 )
 
             case let .groupingChanged(grouping):
-                state.sections = State.sections(
-                    groupedBy: grouping,
-                    workspaces: state.workspaces
-                )
+                state.updateSections(from: state.workspaces, groupedBy: grouping)
                 return reloadWorkspaces(state)
 
             case .createButtonTapped:
-                guard !state.repositories.isEmpty else {
+                let repositories = state.repositoriesAvailableForWorkspaceCreation
+                guard !repositories.isEmpty else {
                     return .none
                 }
 
                 state.destination = .createWorkspace(
                     CreateWorkspace.State(
-                        repositories: state.repositories,
+                        repositories: repositories,
                         selectedRepositoryIDFilter: state.selectedRepositoryID
                     )
                 )
                 return .none
 
             case .createWorkspaceSheetDismissed:
-                state.sections = State.sections(
-                    groupedBy: state.grouping,
-                    workspaces: state.deferredWorkspaces ?? state.workspaces
-                )
+                state.updateSections(from: state.deferredWorkspaces ?? state.workspaces)
                 state.deferredWorkspaces = nil
                 guard let creation = state.pendingWorkspaceCreation else {
                     return .none
@@ -309,10 +353,11 @@ public struct Workspaces: Sendable {
                     state.deferredWorkspaces = workspaces
                     return .none
                 }
-                state.sections = State.sections(
-                    groupedBy: state.grouping,
-                    workspaces: workspaces
-                )
+                state.updateSections(from: workspaces)
+                return .none
+
+            case .cloudCatalog(.response), .cloudCatalog(.task):
+                state.updateSections(from: state.workspaces)
                 return .none
 
             case let .workspaceArchiveButtonTapped(item):
@@ -434,7 +479,11 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .destination, .settingsButtonTapped, .workspaceCreated, .workspaceTapped:
+            case .cloudCatalog,
+                 .destination,
+                 .settingsButtonTapped,
+                 .workspaceCreated,
+                 .workspaceTapped:
                 return .none
             }
         }
@@ -500,6 +549,13 @@ public struct Workspaces: Sendable {
                 desktopClient.observeWorkspaces()
             } onValue: { snapshot in
                 try await database.write { db in
+                    let observedWorkspaceIDs = Set(
+                        snapshot.workspaces.map(\.workspace.id)
+                    )
+                    let staleMobileStates = try MobileWorkspaceState.all
+                        .fetchAll(db)
+                        .filter { !observedWorkspaceIDs.contains($0.workspaceID) }
+
                     try Repository
                         .upsert { snapshot.repositories }
                         .execute(db)
@@ -517,6 +573,13 @@ public struct Workspaces: Sendable {
                         }
                     }
                     .execute(db)
+
+                    for mobileState in staleMobileStates {
+                        try MobileWorkspaceState
+                            .find(mobileState.workspaceID)
+                            .delete()
+                            .execute(db)
+                    }
                 }
 
                 if isAwaitingInitialResponse {
@@ -613,6 +676,17 @@ public struct WorkspacesView: View {
                     }
                 }
             }
+
+            if store.cloudCatalog.isCloudCredentialConfigured,
+               store.cloudCatalog.isLoading
+                   || store.cloudCatalog.failure != nil
+                   || (store.cloudCatalog.hasLoaded && !store.hasCloudWorkspaces) {
+                CloudCatalogSection(
+                    catalog: store.scope(state: \.cloudCatalog, action: \.cloudCatalog),
+                    isFiltered: store.selectedRepositoryID != nil,
+                    hasCloudWorkspaces: store.hasCloudWorkspaces
+                )
+            }
         }
         .contentMargins(.top, 0)
         .listStyle(.plain)
@@ -623,14 +697,16 @@ public struct WorkspacesView: View {
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .overlay {
-            if store.isLoadingWorkspaces {
+            if store.isLoadingWorkspaces
+                && !store.cloudCatalog.isCloudCredentialConfigured {
                 ProgressView()
                     .progressViewStyle(.network)
                     .tint(.theme(.textSecondary))
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .background(.theme(.background))
-            } else if !store.hasVisibleWorkspaces {
+            } else if !store.hasVisibleWorkspaces
+                && !store.cloudCatalog.isCloudCredentialConfigured {
                 ContentUnavailableView(
                     "No Workspaces",
                     systemImage: "rectangle.stack",
@@ -680,7 +756,7 @@ public struct WorkspacesView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.theme(.foreground))
                 .foregroundStyle(.theme(.background))
-                .disabled(store.repositories.isEmpty)
+                .disabled(store.repositoriesAvailableForWorkspaceCreation.isEmpty)
                 .accessibilityHint("Creates a new Conductor workspace")
                 .sheet(
                     item: $store.scope(
@@ -698,9 +774,95 @@ public struct WorkspacesView: View {
             }
             .matchedTransitionSource(id: "new-workspace", in: namespace)
         }
+        .refreshable {
+            await store.send(.cloudCatalog(.refresh)).finish()
+        }
         .background(.theme(.background))
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .preferredColorScheme(.dark)
+    }
+
+    private struct CloudCatalogSection: View {
+        let catalog: StoreOf<CloudWorkspaceCatalog>
+        let isFiltered: Bool
+        let hasCloudWorkspaces: Bool
+
+        var body: some View {
+            Section {
+                if catalog.isLoading && !hasCloudWorkspaces {
+                    statusRow {
+                        ProgressView()
+                            .progressViewStyle(.network)
+
+                        Text("Loading cloud workspaces")
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
+                }
+
+                if let failure = catalog.failure {
+                    failureRow(failure)
+                }
+
+                if catalog.hasLoaded
+                    && !catalog.isLoading
+                    && catalog.failure == nil
+                    && !hasCloudWorkspaces {
+                    statusRow {
+                        CloudWorkspaceIcon(size: 16)
+                            .foregroundStyle(.theme(.textSecondary))
+
+                        Text(
+                            isFiltered
+                                ? "No cloud workspaces for this repository"
+                                : "No cloud workspaces"
+                        )
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
+                }
+
+            } header: {
+                Label {
+                    Text("Cloud")
+                        .font(.theme(.body))
+                        .fontWeight(.semibold)
+                } icon: {
+                    CloudWorkspaceIcon(size: 16)
+                }
+                .foregroundStyle(.theme(.textPrimary))
+                .textCase(nil)
+            }
+        }
+
+        private func failureRow(_ failure: CloudWorkspaceCatalog.Failure) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(failure.title)
+                    .font(.theme(.small).weight(.medium))
+                    .foregroundStyle(.theme(.textPrimary))
+
+                Text(failure.message)
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
+
+                Button("Retry") {
+                    catalog.send(.refresh)
+                }
+                .buttonStyle(.conductorSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+
+        private func statusRow(
+            @ViewBuilder content: () -> some View
+        ) -> some View {
+            HStack(spacing: 8) {
+                content()
+            }
+            .font(.theme(.small))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
     }
 
     private struct ConnectionStatusSubtitle: View {
@@ -897,11 +1059,21 @@ public struct WorkspacesView: View {
 
         var body: some View {
             ForEach(items) { item in
-                WorkspaceRow(
-                    item: item,
-                    showsRepositoryIcon: showsRepositoryIcon
-                ) { rowAction in
-                    action(item, rowAction)
+                Group {
+                    if item.isCloudOnly {
+                        WorkspaceRow(
+                            item: item,
+                            showsRepositoryIcon: showsRepositoryIcon,
+                            action: nil
+                        )
+                    } else {
+                        WorkspaceRow(
+                            item: item,
+                            showsRepositoryIcon: showsRepositoryIcon
+                        ) { rowAction in
+                            action(item, rowAction)
+                        }
+                    }
                 }
                 .padding(.leading, isIndented ? 12 : 0)
                 .listRowInsets(

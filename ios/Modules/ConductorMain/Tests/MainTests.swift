@@ -21,8 +21,8 @@ import UIKit
 
 @MainActor
 struct MainTests {
-    @Test("A fresh install requires the server address in Settings")
-    func freshInstallRequiresServerAddress() throws {
+    @Test("A fresh install requires a local or cloud connection in Settings")
+    func freshInstallRequiresConnection() throws {
         try withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
@@ -30,6 +30,20 @@ struct MainTests {
             let state = Main.State()
 
             #expect(state.settings?.isServerAddressMissing == true)
+        }
+    }
+
+    @Test("A configured Cloud credential allows a cloud-only relaunch")
+    func cloudCredentialAllowsRelaunch() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let settings = ConductorSettings.State()
+            settings.$isCloudCredentialConfigured.withLock { $0 = true }
+
+            #expect(!settings.requiresConnectionConfiguration)
+            #expect(Main.State().settings == nil)
         }
     }
 
@@ -74,6 +88,33 @@ struct MainTests {
                     )
                 )
             }
+        }
+    }
+
+    @Test("A Cloud-only workspace cannot navigate to unsupported chat")
+    func cloudOnlyWorkspaceDoesNotPushChat() async throws {
+        let workspace = Workspace.preview(id: "cloud-workspace")
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: .preview(),
+            cloudMetadata: CloudWorkspaceMetadata(
+                workspaceID: workspace.id,
+                accountID: "account",
+                cloudProjectID: "project",
+                deepLink: "conductor://workspace/cloud-workspace",
+                lastSeenGeneration: "generation"
+            )
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+
+            await store.send(.workspaces(.workspaceTapped(item)))
+            #expect(store.state.path.isEmpty)
         }
     }
 

@@ -191,6 +191,32 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Create cloud workspace metadata") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_workspace_metadata" (
+              "workspace_id" TEXT PRIMARY KEY
+                REFERENCES "workspaces" ("id") ON DELETE CASCADE,
+              "account_id" TEXT NOT NULL,
+              "cloud_project_id" TEXT NOT NULL,
+              "deep_link" TEXT NOT NULL,
+              "lifecycle_step" TEXT,
+              "lifecycle_error" TEXT,
+              "lifecycle_updated_at" TEXT,
+              "last_seen_generation" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_workspace_metadata_account_id"
+            ON "cloud_workspace_metadata" ("account_id");
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }

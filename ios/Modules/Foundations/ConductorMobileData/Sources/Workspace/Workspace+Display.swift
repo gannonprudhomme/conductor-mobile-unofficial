@@ -36,6 +36,10 @@ extension Workspace.Status {
 }
 
 extension Workspace {
+    public var isCloudHosted: Bool {
+        hostingServerURL?.isEmpty == false
+    }
+
     public var emptyChatDirectoryName: String {
         let workspaceNameDirectoryName = workspaceName?
             .split(whereSeparator: \.isWhitespace)

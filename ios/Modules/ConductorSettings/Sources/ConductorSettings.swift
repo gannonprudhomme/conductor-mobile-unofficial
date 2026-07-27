@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
@@ -19,6 +20,12 @@ public struct ConductorSettings: Sendable {
     public struct State: Equatable {
         @Presents public var alert: AlertState<Action.Alert>?
 
+        @Shared(.cloudCredentialConfigured)
+        public var isCloudCredentialConfigured
+
+        @Shared(.cloudAccountID)
+        public var cloudAccountID
+
         @Shared(.desktopDisplayConfiguration)
         public var storedDisplayConfiguration
 
@@ -26,9 +33,13 @@ public struct ConductorSettings: Sendable {
         public var storedServerAddress
 
         var connectionTestSource: ConnectionTestSource?
+        var cloudOperation: CloudOperation?
+        public var cloudAPIKey = ""
         public var deviceIcon: DesktopClient.DeviceIcon
         public var displayName: String
         public var initialServerAddress: String
+        var isCloudConnectionTested = false
+        var testedCloudAccountID: String?
 
         /// The server address we actually submitted & tested this session (i.e. lifetime of this view)
         ///
@@ -47,19 +58,27 @@ public struct ConductorSettings: Sendable {
             connectionTestSource != nil
         }
 
+        var isCloudOperationInFlight: Bool {
+            cloudOperation != nil
+        }
+
         var hasChanges: Bool {
-            initialServerAddress != (storedServerAddress ?? "")
+            !normalizedCloudAPIKey.isEmpty
+                || initialServerAddress != (storedServerAddress ?? "")
                 || displayName != (storedDisplayConfiguration?.name ?? "")
                 || deviceIcon != (storedDisplayConfiguration?.icon ?? .laptop)
         }
 
         var isSaveButtonDisabled: Bool {
-            isConnectionTestInFlight
-                || normalizedServerAddress.isEmpty
+            isConnectionTestInFlight || normalizedServerAddress.isEmpty
         }
 
         public var isServerAddressMissing: Bool {
             storedServerAddress == nil
+        }
+
+        public var requiresConnectionConfiguration: Bool {
+            isServerAddressMissing && !isCloudCredentialConfigured
         }
 
         var isServerAddressConnected: Bool {
@@ -67,8 +86,20 @@ public struct ConductorSettings: Sendable {
         }
 
         var isTestButtonDisabled: Bool {
-            isConnectionTestInFlight
-                || normalizedServerAddress.isEmpty
+            isConnectionTestInFlight || normalizedServerAddress.isEmpty
+        }
+
+        var isCloudTestButtonDisabled: Bool {
+            isCloudOperationInFlight
+                || (normalizedCloudAPIKey.isEmpty && !isCloudCredentialConfigured)
+        }
+
+        var isCloudSaveButtonDisabled: Bool {
+            isCloudOperationInFlight || normalizedCloudAPIKey.isEmpty
+        }
+
+        var normalizedCloudAPIKey: String {
+            cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         var normalizedServerAddress: String {
@@ -79,26 +110,49 @@ public struct ConductorSettings: Sendable {
             displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        enum ConnectionTestSource: Equatable {
+        public enum ConnectionTestSource: Equatable, Sendable {
             case saveButtonTapped
             case testButtonTapped
+        }
+
+        public enum CloudOperation: Equatable, Sendable {
+            case deleting
+            case saving
+            case testing
         }
     }
 
     public enum Action: BindableAction {
         case alert(PresentationAction<Alert>)
         case binding(BindingAction<State>)
+        case cloudConnectionTestResult(
+            operation: State.CloudOperation,
+            result: Result<CloudIdentity, any Error>
+        )
+        case cloudCredentialAvailabilityLoaded(Result<Bool, any Error>)
+        case cloudCredentialDeleteResult(Result<Void, any Error>)
+        case cloudSaveResult(
+            accountID: String,
+            result: Result<Void, any Error>
+        )
+        case connectCloudButtonTapped
+        case deleteCloudCredentialButtonTapped
         case connectionTestResult(
             serverAddress: String,
             result: Result<Void, any Error>
         )
         case saveButtonTapped
+        case task
+        case testCloudConnectionButtonTapped
         case testButtonTapped
 
         public enum Alert: Equatable { }
     }
 
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.cloudAPIClient) var cloudAPIClient
+    @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+    @Dependency(\.cloudWorkspacePersistenceClient) var cloudWorkspacePersistenceClient
     @Dependency(\.dismiss) var dismiss
 
     public init() { }
@@ -108,6 +162,26 @@ public struct ConductorSettings: Sendable {
 
         Reduce { state, action in
             switch action {
+            case .task:
+                guard state.isCloudCredentialConfigured else {
+                    return .none
+                }
+                return .run { send in
+                    await send(
+                        .cloudCredentialAvailabilityLoaded(
+                            await Result {
+                                let isConfigured = try await cloudCredentialClient
+                                    .loadAPIKey() != nil
+                                if !isConfigured {
+                                    try await cloudWorkspacePersistenceClient
+                                        .clearCachedCatalog()
+                                }
+                                return isConfigured
+                            }
+                        )
+                    )
+                }
+
             case .saveButtonTapped:
                 guard !state.isSaveButtonDisabled else {
                     return .none
@@ -129,6 +203,96 @@ public struct ConductorSettings: Sendable {
                 }
 
                 return testConnection(state: &state, source: .testButtonTapped)
+
+            case .testCloudConnectionButtonTapped:
+                guard !state.isCloudTestButtonDisabled else {
+                    return .none
+                }
+                return testCloudConnection(state: &state, operation: .testing)
+
+            case .connectCloudButtonTapped:
+                guard !state.isCloudSaveButtonDisabled else {
+                    return .none
+                }
+                return testCloudConnection(state: &state, operation: .saving)
+
+            case .binding(\.cloudAPIKey):
+                state.isCloudConnectionTested = false
+                state.testedCloudAccountID = nil
+                return .none
+
+            case let .cloudConnectionTestResult(operation, result):
+                state.cloudOperation = nil
+                switch result {
+                case let .failure(error):
+                    state.alert = .failedToConnectToCloud(error: error)
+                    return .none
+
+                case let .success(identity):
+                    state.isCloudConnectionTested = true
+                    state.testedCloudAccountID = identity.cacheID
+                    return operation == .saving
+                        ? saveCloud(state: &state)
+                        : .none
+                }
+
+            case let .cloudCredentialAvailabilityLoaded(result):
+                switch result {
+                case let .failure(error):
+                    state.alert = .failedToUpdateCloudCredential(error: error)
+
+                case let .success(isConfigured):
+                    state.$isCloudCredentialConfigured.withLock { $0 = isConfigured }
+                    if !isConfigured {
+                        state.$cloudAccountID.withLock { $0 = nil }
+                    }
+                }
+                return .none
+
+            case .deleteCloudCredentialButtonTapped:
+                guard !state.isCloudOperationInFlight else {
+                    return .none
+                }
+                state.cloudOperation = .deleting
+                return .run { send in
+                    await send(
+                        .cloudCredentialDeleteResult(
+                            await Result {
+                                try await cloudCredentialClient.deleteAPIKey()
+                                try await cloudWorkspacePersistenceClient.clearCachedCatalog()
+                            }
+                        )
+                    )
+                }
+
+            case let .cloudCredentialDeleteResult(result):
+                state.cloudOperation = nil
+                switch result {
+                case let .failure(error):
+                    state.alert = .failedToUpdateCloudCredential(error: error)
+
+                case .success:
+                    state.$isCloudCredentialConfigured.withLock { $0 = false }
+                    state.$cloudAccountID.withLock { $0 = nil }
+                    state.cloudAPIKey = ""
+                    state.isCloudConnectionTested = false
+                    state.testedCloudAccountID = nil
+                }
+                return .none
+
+            case let .cloudSaveResult(accountID, result):
+                state.cloudOperation = nil
+                switch result {
+                case let .failure(error):
+                    state.alert = .failedToUpdateCloudCredential(error: error)
+                    return .none
+
+                case .success:
+                    state.$isCloudCredentialConfigured.withLock { $0 = true }
+                    state.$cloudAccountID.withLock { $0 = accountID }
+                    state.cloudAPIKey = ""
+                    return .none
+                }
 
             case let .connectionTestResult(serverAddress, result):
                 guard let source = state.connectionTestSource else {
@@ -183,6 +347,51 @@ public struct ConductorSettings: Sendable {
         }
     }
 
+    private func testCloudConnection(
+        state: inout State,
+        operation: State.CloudOperation
+    ) -> Effect<Action> {
+        let cloudAPIKey = state.normalizedCloudAPIKey
+        state.alert = nil
+        state.cloudOperation = operation
+        state.cloudAPIKey = cloudAPIKey
+
+        return .run { send in
+            let result = await Result {
+                let apiKey: String
+                if cloudAPIKey.isEmpty {
+                    guard let storedAPIKey = try await cloudCredentialClient.loadAPIKey() else {
+                        throw CloudAPIClientError.missingCredential
+                    }
+                    apiKey = storedAPIKey
+                } else {
+                    apiKey = cloudAPIKey
+                }
+                return try await cloudAPIClient.getIdentity(apiKey: apiKey)
+            }
+            await send(.cloudConnectionTestResult(operation: operation, result: result))
+        }
+    }
+
+    private func saveCloud(state: inout State) -> Effect<Action> {
+        let cloudAPIKey = state.normalizedCloudAPIKey
+        guard let accountID = state.testedCloudAccountID else {
+            return .none
+        }
+        state.cloudOperation = .saving
+        return .run { send in
+            let result = await Result {
+                if !cloudAPIKey.isEmpty {
+                    try await cloudCredentialClient.saveAPIKey(apiKey: cloudAPIKey)
+                }
+                try await cloudWorkspacePersistenceClient.switchAccount(
+                    accountID: accountID
+                )
+            }
+            await send(.cloudSaveResult(accountID: accountID, result: result))
+        }
+    }
+
     private func save(state: inout State) -> Effect<Action> {
         state.$storedDisplayConfiguration.withLock {
             $0 = if state.displayName.isEmpty {
@@ -209,10 +418,27 @@ extension AlertState where Action == ConductorSettings.Action.Alert {
             TextState(error.localizedDescription)
         }
     }
+
+    static func failedToConnectToCloud(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to connect to Conductor Cloud")
+        } message: {
+            TextState(error.localizedDescription)
+        }
+    }
+
+    static func failedToUpdateCloudCredential(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to update the Conductor API key")
+        } message: {
+            TextState(error.localizedDescription)
+        }
+    }
 }
 
 public struct ConductorSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var isCloudAPIKeyFocused: Bool
     @FocusState private var isDisplayNameFocused: Bool
     @FocusState private var isServerAddressFocused: Bool
     @State private var isDiscardConfirmationPresented = false
@@ -234,8 +460,11 @@ public struct ConductorSettingsView: View {
                 testedServerAddress: store.testedServerAddress
             )
         )
-        .interactiveDismissDisabled(store.isServerAddressMissing)
+        .interactiveDismissDisabled(store.requiresConnectionConfiguration)
         .preferredColorScheme(.dark)
+        .task {
+            await store.send(.task).finish()
+        }
     }
 
     private var settings: some View {
@@ -248,8 +477,22 @@ public struct ConductorSettingsView: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden, edges: .bottom)
             } header: {
-                Text("Connection") // font 2xl (24 px)
+                Text("Local Mac") // font 2xl (24 px)
                     .font(.theme(.heading).weight(.medium)) // need 500
+                    .foregroundStyle(.theme(.textPrimary))
+            }
+
+            Section {
+                cloudConnectionRow
+                    .listRowBackground(Color.clear)
+
+                if store.isCloudCredentialConfigured {
+                    deleteCloudCredentialButton
+                        .listRowBackground(Color.clear)
+                }
+            } header: {
+                Text("Conductor Cloud · Experimental")
+                    .font(.theme(.heading).weight(.medium))
                     .foregroundStyle(.theme(.textPrimary))
             }
         }
@@ -257,7 +500,7 @@ public struct ConductorSettingsView: View {
         .background(.theme(.background))
         .themedNavigationTitle("Settings", alignment: .center)
         .toolbar {
-            if !store.isServerAddressMissing {
+            if !store.requiresConnectionConfiguration {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .close) {
                         if store.hasChanges {
@@ -290,11 +533,89 @@ public struct ConductorSettingsView: View {
                         store.send(.saveButtonTapped)
                     }
                     .disabled(store.isSaveButtonDisabled)
+                    .accessibilityLabel("Save settings")
                 }
             }
         }
         .listStyle(.inset)
         .animation(.default, value: store.isServerAddressConnected)
+    }
+
+    private var cloudConnectionRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("API key")
+                        .font(.theme(.small).weight(.medium))
+                        .foregroundStyle(.theme(.textPrimary))
+
+                    if store.isCloudConnectionTested {
+                        LucideIcon(Lucide.circleCheck, style: .small)
+                            .foregroundStyle(.theme(.success))
+                            .accessibilityLabel("Connected")
+                    }
+                }
+
+                Text(
+                    store.isCloudCredentialConfigured
+                        ? "A key is saved securely in Keychain. Enter a replacement or test the saved key."
+                        : "Create a beta API key in Conductor Cloud, then test and save it here."
+                )
+                .font(.theme(.small))
+                .foregroundStyle(.theme(.textSecondary))
+            }
+            .padding(.leading, 2)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            SecureField(
+                "Conductor API key",
+                text: $store.cloudAPIKey,
+                prompt: Text(
+                    store.isCloudCredentialConfigured
+                        ? "Saved in Keychain"
+                        : "API key"
+                )
+                .foregroundStyle(.theme(.textSecondary))
+            )
+            .textFieldStyle(
+                .conductor(
+                    text: $store.cloudAPIKey,
+                    isClearButtonVisible: isCloudAPIKeyFocused
+                )
+            )
+            .focused($isCloudAPIKeyFocused)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .textContentType(.password)
+            .accessibilityIdentifier("cloudAPIKeyField")
+            .submitLabel(.done)
+            .onSubmit {
+                store.send(.testCloudConnectionButtonTapped)
+            }
+            .disabled(store.isCloudOperationInFlight)
+
+            HStack(spacing: 8) {
+                testCloudConnectionButton
+
+                connectCloudButton
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var deleteCloudCredentialButton: some View {
+        Button(role: .destructive) {
+            store.send(.deleteCloudCredentialButtonTapped)
+        } label: {
+            Label {
+                Text("Delete saved API key")
+            } icon: {
+                LucideIcon(Lucide.trash2, style: .small)
+            }
+            .font(.theme(.body))
+        }
+        .disabled(store.isCloudOperationInFlight)
     }
 
     private var connectionRow: some View {
@@ -412,6 +733,7 @@ public struct ConductorSettingsView: View {
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .textContentType(.URL)
+        .accessibilityIdentifier("serverAddressField")
         .keyboardType(.URL)
         .submitLabel(.done)
         .onSubmit {
@@ -444,6 +766,62 @@ public struct ConductorSettingsView: View {
         .buttonStyle(.conductorSecondary)
         .disabled(!isEnabled)
         .accessibilityLabel(isLoading ? "Testing connection" : "Test connection")
+    }
+
+    private var testCloudConnectionButton: some View {
+        let isLoading = store.cloudOperation == .testing
+        let isEnabled = !store.isCloudTestButtonDisabled
+
+        return Button {
+            store.send(.testCloudConnectionButtonTapped)
+        } label: {
+            Label {
+                Text("Test")
+            } icon: {
+                LucideIcon(Lucide.gauge, style: .small)
+            }
+            .opacity(isLoading ? 0 : 1)
+            .overlay {
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(.network)
+                        .tint(.theme(.textPrimary))
+                }
+            }
+        }
+        .buttonStyle(.conductorSecondary)
+        .disabled(!isEnabled)
+        .accessibilityLabel(isLoading ? "Testing cloud connection" : "Test cloud connection")
+    }
+
+    private var connectCloudButton: some View {
+        let isLoading = store.cloudOperation == .saving
+        let isEnabled = !store.isCloudSaveButtonDisabled
+
+        return Button {
+            store.send(.connectCloudButtonTapped)
+        } label: {
+            Text(store.isCloudCredentialConfigured ? "Replace key" : "Save key")
+                .opacity(isLoading ? 0 : 1)
+                .overlay {
+                    if isLoading {
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.background))
+                    }
+                }
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.theme(.foreground))
+        .foregroundStyle(.theme(.background))
+        .disabled(!isEnabled)
+        .accessibilityLabel(
+            isLoading
+                ? "Saving cloud API key"
+                : store.isCloudCredentialConfigured
+                    ? "Replace cloud API key"
+                    : "Save cloud API key"
+        )
     }
 
     // This modifier exists only because the compiler could not type-check all three feedbacks in `body`.

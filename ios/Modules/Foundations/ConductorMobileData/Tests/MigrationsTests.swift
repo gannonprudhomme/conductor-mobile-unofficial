@@ -20,6 +20,9 @@ struct MigrationsTests {
         let mobileWorkspaceStates = try database.read { db in
             try MobileWorkspaceState.fetchCount(db)
         }
+        let cloudWorkspaceMetadata = try database.read { db in
+            try CloudWorkspaceMetadata.fetchCount(db)
+        }
         let sessions = try database.read { db in
             try Session.fetchCount(db)
         }
@@ -47,9 +50,16 @@ struct MigrationsTests {
                 sql: "SELECT name FROM pragma_table_info('sessions')"
             )
         }
+        let cloudWorkspaceMetadataColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('cloud_workspace_metadata')"
+            )
+        }
 
         #expect(workspaces == 0)
         #expect(mobileWorkspaceStates == 0)
+        #expect(cloudWorkspaceMetadata == 0)
         #expect(sessions == 0)
         #expect(repositories == 0)
         #expect(messages == 0)
@@ -62,5 +72,8 @@ struct MigrationsTests {
         #expect(sessionColumns.contains("fast_mode"))
         #expect(sessionColumns.contains("codex_thinking_level"))
         #expect(sessionColumns.contains("claude_effort_level"))
+        #expect(cloudWorkspaceMetadataColumns.contains("account_id"))
+        #expect(cloudWorkspaceMetadataColumns.contains("lifecycle_step"))
+        #expect(cloudWorkspaceMetadataColumns.contains("last_seen_generation"))
     }
 }
