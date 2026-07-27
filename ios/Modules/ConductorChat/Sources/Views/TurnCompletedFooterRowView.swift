@@ -14,7 +14,7 @@ struct TurnCompletedFooterRowView: View {
     @State private var copyCount = 0
     @State private var isShowingCopiedConfirmation = false
 
-    private let animation: Animation = .interactiveSpring(duration: 0.2, extraBounce: 0.2)
+    private let animation: Animation = .interactiveSpring(duration: 0.35, extraBounce: 0.2)
     private let transition: some Transition = BlurReplaceTransition(configuration: .downUp).combined(with: .scale)
 
     var body: some View {

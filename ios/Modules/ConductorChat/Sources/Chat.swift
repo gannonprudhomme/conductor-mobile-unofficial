@@ -24,8 +24,8 @@ public struct Chat: Sendable {
 
     @ObservableState
     public struct State: Equatable {
-//        @Shared(.desktopConnectionStatus)
-        var connectionStatus: DesktopClient.ConnectionStatus = .connecting
+        @Shared(.desktopConnectionStatus)
+        var connectionStatus//: DesktopClient.ConnectionStatus = .connecting
 
         @Shared var messageDraft: String
 
@@ -65,7 +65,7 @@ public struct Chat: Sendable {
         var allowsAgentSwitching: Bool {
             shouldShowEmptyChat && !isMessageSendInFlight
         }
-
+        
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
                 rows = nil
@@ -172,6 +172,7 @@ public struct Chat: Sendable {
             result: Result<Void, any Error>
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
+        case scrollDownButtonTapped
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -212,6 +213,10 @@ public struct Chat: Sendable {
 
             case .binding(\.selectedModel):
                 state.hasUserSelectedModel = true
+                return .none
+                
+            case .scrollDownButtonTapped:
+                state.scrollToBottomRequest += 1
                 return .none
 
             case .messagesUpdated(let messages):
@@ -500,9 +505,14 @@ struct ChatView: View {
     @State private var composerHeight: CGFloat = 0
     @State private var queuedMessagesWidth: CGFloat = 0
     @State private var reconnectingSize: CGSize = .zero
+    @State private var scrollDownButtonHeight: CGFloat = 0
     @ScaledMetric(relativeTo: ThemeFontStyle.body.textStyle)
     private var queuedMessageRowHeight: CGFloat = 44
     let directoryName: String
+    
+    var shouldShowScrollDownButton: Bool {
+        true
+    }
 
     var body: some View {
         let queuedMessagesStore = store.scope(
@@ -516,21 +526,6 @@ struct ChatView: View {
             } else {
                 // AnyLayout(ZStackLayout(alignment: .trailing))
                 AnyLayout(HStackLayout(spacing: 0))
-            }
-            
-            let reconnectingHorizontalOffset = if queuedMessagesStore.isExpanded
-                || queuedMessagesStore.displayedMessages.isEmpty {
-                CGFloat.zero
-            } else {
-                Self.reconnectingHorizontalOffset(
-                    containerWidth: proxy.size.width,
-                    reconnectingWidth: reconnectingSize.width,
-                    queueTrailingExtent: max(
-                        0,
-                        queuedMessagesWidth //- QueuedMessagesPresentation.horizontalPadding
-                    ),
-                    isDisplayingReconnecting: store.connectionStatus != .connected
-                )
             }
 
             collectionView(
@@ -558,8 +553,7 @@ struct ChatView: View {
             .overlay(alignment: .bottom) {
                 bottomOverlay(
                     statusLayout: statusLayout,
-                    queuedMessagesStore: queuedMessagesStore,
-                    reconnectingHorizontalOffset: reconnectingHorizontalOffset
+                    queuedMessagesStore: queuedMessagesStore
                 )
             }
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
@@ -581,33 +575,31 @@ struct ChatView: View {
 
     private func bottomOverlay(
         statusLayout: AnyLayout,
-        queuedMessagesStore: StoreOf<QueuedMessages>,
-        reconnectingHorizontalOffset: CGFloat
+        queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> some View {
         
         return VStack(spacing: 8) {
             statusLayout {
                 HStack(spacing: 0) {
-                    scrollDownButton
-                        .padding(.leading, QueuedMessagesPresentation.horizontalPadding)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-//                        .frame(maxWidth: .infinity, alignment: .leading)
-//                        .background { Color.green }
-                    
-                    Spacer()
-                    
-                    if store.connectionStatus != .connected {
-                        
-                        reconnecting
+                    if shouldShowScrollDownButton {
+                        scrollDownButton
+                            .padding(.leading, QueuedMessagesPresentation.horizontalPadding)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
-//                            .frame(maxWidth: .infinity, alignment: .center)
-//                            .background { Color.red }
                         
                         Spacer()
                     }
                     
+                    if store.connectionStatus != .connected {
+                        reconnecting
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        
+                        Spacer()
+                    }
+                    
+                    let isOnSeparateRowFromQueue = queuedMessagesStore.displayedMessages.isEmpty || (!queuedMessagesStore.displayedMessages.isEmpty && queuedMessagesStore.isExpanded)
+                    
                     // Dummy to ensure it's centered
-                    if !queuedMessagesStore.displayedMessages.isEmpty && queuedMessagesStore.isExpanded {
+                    if isOnSeparateRowFromQueue {
                         scrollDownButton // Just to ensure it's equal
                             .opacity(0)
                             .allowsHitTesting(false)
@@ -616,11 +608,6 @@ struct ChatView: View {
                     }
                 }
                 .layoutPriority(-1)
-//                .animation(.default, value: reconnectingHorizontalOffset)
-//                .background { Color.yellow}
-//                .frame(maxWidth: .infinity, alignment: .center)
-//                .padding(.trailing, reconnectingHorizontalOffset)
-//                .background { Color.blue }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
 
                 if !queuedMessagesStore.displayedMessages.isEmpty {
@@ -671,7 +658,7 @@ struct ChatView: View {
     
     private var scrollDownButton: some View {
         Button {
-            
+            store.send(.scrollDownButtonTapped)
         } label: {
             Label {
                 Text("Scroll down!")
@@ -688,9 +675,14 @@ struct ChatView: View {
                 .interactive(),
             in: .circle
         )
-        .overlay {
-            Circle()
-                .stroke(.theme(.border))
+//        .overlay {
+//            Circle()
+//                .stroke(.theme(.border))
+//        }
+        .onGeometryChange(for: CGFloat.self) { geometry in
+            geometry.size.height
+        } action: { height in
+            scrollDownButtonHeight = height
         }
     }
     
@@ -766,34 +758,6 @@ struct ChatView: View {
         }
     }
 
-    static func reconnectingHorizontalOffset(
-        containerWidth: CGFloat,
-        reconnectingWidth: CGFloat,
-        queueTrailingExtent: CGFloat,
-        isDisplayingReconnecting: Bool
-    ) -> CGFloat {
-        /*
-        guard !isDisplayingReconnecting else {
-            print("Returning: 0 (b/c not displaying reconnecting)")
-            return 0
-        }
-        */
-        
-        let centeredRightEdge = containerWidth / 2 + reconnectingWidth / 2
-        let queueLeadingEdge = containerWidth - queueTrailingExtent
-//        let ret = min(
-//            0,
-//            queueLeadingEdge - reconnectingQueueSpacing - centeredRightEdge
-//        )
-        
-        let ret = queueLeadingEdge
-        
-        print("Returning: \(ret)")
-        
-        // return ret
-        return ret
-    }
-
     private func composerText(
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> Binding<String> {
@@ -814,6 +778,7 @@ struct ChatView: View {
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> CGFloat {
         let spacing: CGFloat = 8
+        
         let queueHeight = if queuedMessagesStore.displayedMessages.isEmpty {
             CGFloat.zero
         } else {
@@ -828,12 +793,19 @@ struct ChatView: View {
         } else {
             reconnectingSize.height
         }
+        
+        let scrollButtonHeight: CGFloat = if shouldShowScrollDownButton {
+            self.scrollDownButtonHeight + 12
+        } else {
+            0
+        }
+        
         let statusHeight = if queuedMessagesStore.isExpanded,
                               queueHeight > 0,
                               connectionHeight > 0 {
             connectionHeight + spacing + queueHeight
         } else {
-            max(connectionHeight, queueHeight)
+            max(connectionHeight, queueHeight, scrollButtonHeight)
         }
 
         return safeAreaBottom
