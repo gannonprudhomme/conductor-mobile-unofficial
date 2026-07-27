@@ -159,6 +159,7 @@ public struct CreateWorkspace: Sendable {
                                 message: prompt,
                                 model: model,
                                 isFastModeEnabled: isFastModeEnabled,
+                                mode: .steer,
                                 reasoningEffort: reasoningEffort
                             )
                         }

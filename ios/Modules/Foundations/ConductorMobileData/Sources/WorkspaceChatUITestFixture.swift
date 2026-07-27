@@ -52,7 +52,7 @@ extension DependencyValues {
         var client = desktopClient
         client.observeMessages = { _, _ in
             AsyncThrowingStream { continuation in
-                continuation.yield([])
+                continuation.yield(.snapshot([]))
             }
         }
         client.observeSessions = { _ in

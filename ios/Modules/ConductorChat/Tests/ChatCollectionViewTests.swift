@@ -157,6 +157,35 @@ struct ChatCollectionViewTests {
         #expect(changeCount == 1)
     }
 
+    @Test("Increasing the bottom inset keeps bottom-pinned content unobscured")
+    func bottomInsetKeepsPinnedContentVisible() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        coordinator.render(
+            rows: [
+                displayedRow(
+                    .humanMessage(.init(id: "message", content: "Message"))
+                ),
+            ],
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        collectionView.contentSize = CGSize(width: 390, height: 1_000)
+        collectionView.contentOffset.y = 156
+
+        coordinator.updateContentInset(
+            UIEdgeInsets(top: 0, left: 0, bottom: 200, right: 0),
+            animationDuration: nil,
+            in: collectionView
+        )
+
+        #expect(collectionView.contentOffset.y == 356)
+    }
+
     @Test("Stable row IDs are reconfigured when their rendered content changes")
     func changedRowIDs() {
         let previous = DisplayedChatRowWithPadding(

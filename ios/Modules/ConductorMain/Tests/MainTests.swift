@@ -262,7 +262,7 @@ struct MainTests {
             any Error
         >.makeStream()
         let (messages, messagesContinuation) = AsyncThrowingStream<
-            [Message],
+            MessageSyncEvent,
             any Error
         >.makeStream()
         let workspaceConnectionCount = LockIsolated(0)

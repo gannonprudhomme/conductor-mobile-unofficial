@@ -108,12 +108,14 @@ struct CreateWorkspaceTests {
                     message,
                     model,
                     isFastModeEnabled,
+                    mode,
                     reasoningEffort in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(mode == .steer)
                     #expect(reasoningEffort == .ultra)
                     return sentMessage
                 }

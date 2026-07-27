@@ -234,10 +234,12 @@ struct ServerTests {
                 ) { inbound, _, _ in
                     var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
                     let initial = try decode(
-                        [Message].self,
+                        MessageSyncEvent.self,
                         from: try #require(await iterator.next())
                     )
-                    #expect(initial.map(\.id) == ["message-1"])
+                    #expect(initial.isSnapshot)
+                    #expect(initial.messages.map(\.id) == ["message-1"])
+                    #expect(initial.deletedMessageIDs.isEmpty)
 
                     try await writer.write { database in
                         try database.execute(
@@ -252,10 +254,12 @@ struct ServerTests {
                         )
                     }
                     let changed = try decode(
-                        [Message].self,
+                        MessageSyncEvent.self,
                         from: try #require(await iterator.next())
                     )
-                    #expect(changed.map(\.id) == ["message-2"])
+                    #expect(!changed.isSnapshot)
+                    #expect(changed.messages.map(\.id) == ["message-2"])
+                    #expect(changed.deletedMessageIDs.isEmpty)
 
                     try await writer.write { database in
                         try database.execute(
@@ -267,11 +271,26 @@ struct ServerTests {
                         )
                     }
                     let updated = try decode(
-                        [Message].self,
+                        MessageSyncEvent.self,
                         from: try #require(await iterator.next())
                     )
-                    #expect(updated.map(\.id) == ["message-1"])
-                    #expect(updated.first?.content == "Updated.")
+                    #expect(!updated.isSnapshot)
+                    #expect(updated.messages.map(\.id) == ["message-1"])
+                    #expect(updated.messages.first?.content == "Updated.")
+                    #expect(updated.deletedMessageIDs.isEmpty)
+
+                    try await writer.write { database in
+                        try database.execute(
+                            sql: "DELETE FROM session_messages WHERE id = 'message-2'"
+                        )
+                    }
+                    let deleted = try decode(
+                        MessageSyncEvent.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(!deleted.isSnapshot)
+                    #expect(deleted.messages.isEmpty)
+                    #expect(deleted.deletedMessageIDs == ["message-2"])
                 }
 
                 #if canImport(AppKit)
@@ -356,6 +375,8 @@ struct ServerTests {
                 "/workspaces",
                 "/workspaces/workspace-1/sessions",
                 "/workspaces/workspace-1/sessions/session-1/messages",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1/edit",
+                "/workspaces/workspace-1/sessions/session-1/messages/queue/resume",
                 "/workspaces/workspace-1/sessions/session-1/stop",
             ] {
                 try await client.execute(
@@ -369,6 +390,22 @@ struct ServerTests {
 
             try await client.execute(
                 uri: "/workspaces/workspace-1",
+                method: .patch,
+                headers: [.origin: "https://malicious.example"]
+            ) { response in
+                #expect(response.status == .forbidden)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/workspace-1/sessions/session-1/messages/queue",
+                method: .patch,
+                headers: [.origin: "https://malicious.example"]
+            ) { response in
+                #expect(response.status == .forbidden)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/workspace-1/sessions/session-1/messages/queue/message-1",
                 method: .patch,
                 headers: [.origin: "https://malicious.example"]
             ) { response in

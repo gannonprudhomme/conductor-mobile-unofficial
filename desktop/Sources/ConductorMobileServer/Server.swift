@@ -207,6 +207,93 @@ public enum Server {
             }
         }
 
+        router.patch(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.patch(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.post(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}/edit"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.beginEditing(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.post(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}/steer"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.steer(
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.patch(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.finishEditing(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.delete(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/{messageID}"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.delete(
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
+        router.post(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue/resume"
+        ) { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await QueueRoute.resume(
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
         // Apply the same browser boundary to commands. The native app sends no Origin, while
         // browser JavaScript does, so an arbitrary webpage cannot mutate a workspace or session.
         router.post("/workspaces/{workspaceID}/sessions/{sessionID}/messages") { request, context in
@@ -427,8 +514,8 @@ public enum Server {
 
     /// Runs for each accepted `/workspaces/{workspaceID}/sessions/{sessionID}/messages`
     /// WebSocket connection. It immediately sends the session's complete message history, then
-    /// reloads that history after each database invalidation and sends only messages that were
-    /// added or updated.
+    /// reloads that history after each database invalidation and sends messages that were added,
+    /// updated, or deleted.
     ///
     /// This is separate from `streamSnapshots` because message histories continually grow. Sending
     /// only incremental batches after the initial snapshot avoids repeatedly transferring and
@@ -449,7 +536,12 @@ public enum Server {
                 let encoder = JSONEncoder.conductor
                 var previousMessages = try await loadMessages()
                 try await outbound.writeTextMessage(
-                    String(decoding: try encoder.encode(previousMessages), as: UTF8.self)
+                    String(
+                        decoding: try encoder.encode(
+                            MessageSyncEvent.snapshot(previousMessages)
+                        ),
+                        as: UTF8.self
+                    )
                 )
 
                 for try await _ in changes {
@@ -457,17 +549,29 @@ public enum Server {
                     let previousMessagesByID = Dictionary(
                         uniqueKeysWithValues: previousMessages.map { ($0.id, $0) }
                     )
+                    let messageIDs = Set(messages.map(\.id))
                     let changedMessages = messages.filter {
                         previousMessagesByID[$0.id] != $0
                     }
+                    let deletedMessageIDs = previousMessagesByID.keys
+                        .filter { !messageIDs.contains($0) }
+                        .sorted()
                     previousMessages = messages
 
-                    guard !changedMessages.isEmpty else {
+                    guard !changedMessages.isEmpty || !deletedMessageIDs.isEmpty else {
                         continue
                     }
 
                     try await outbound.writeTextMessage(
-                        String(decoding: try encoder.encode(changedMessages), as: UTF8.self)
+                        String(
+                            decoding: try encoder.encode(
+                                MessageSyncEvent.changes(
+                                    upserting: changedMessages,
+                                    deleting: deletedMessageIDs
+                                )
+                            ),
+                            as: UTF8.self
+                        )
                     )
                 }
             }

@@ -31,6 +31,11 @@ public struct WorkspaceUIHook: Sendable {
         _ command: CreateWorkspaceCommand,
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> Bool = { _, _ in false }
+    var deleteQueuedMessage: @Sendable (
+        _ sessionID: String,
+        _ messageID: String,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
     var dispatch: @Sendable (
         _ command: UIHookCommand,
         _ fallback: (@Sendable () async throws -> Void)?,
@@ -55,6 +60,11 @@ public struct WorkspaceUIHook: Sendable {
         _ sessionID: Session.ID,
         _ waitUntilStopped: @escaping @Sendable () async throws -> Session?
     ) async throws -> Session
+    var steerQueuedMessage: @Sendable (
+        _ sessionID: String,
+        _ messageID: String,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
     var updateSessionAgentAndModel: @Sendable (
         _ sessionID: Session.ID,
         _ agentType: Session.AgentType,
@@ -66,6 +76,23 @@ public struct WorkspaceUIHook: Sendable {
         _ model: Session.Model,
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> Bool = { _, _, _ in false }
+    var reorderQueue: @Sendable (
+        _ sessionID: String,
+        _ messageIDs: [String],
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
+    var setQueuePaused: @Sendable (
+        _ sessionID: String,
+        _ isPaused: Bool,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
+    var editQueuedMessage: @Sendable (
+        _ sessionID: String,
+        _ messageID: String,
+        _ content: String,
+        _ shouldResumeQueue: Bool,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
 
     enum DispatchPath: Equatable, Sendable {
         case hook
@@ -85,7 +112,7 @@ public struct WorkspaceUIHook: Sendable {
         case persistenceTimedOut
     }
 
-    enum MessageMode: String, Encodable, Sendable {
+    enum MessageMode: String, Codable, Sendable {
         case queued
         case sent
     }
@@ -130,6 +157,16 @@ extension WorkspaceUIHook: DependencyKey {
                     waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
                 )
             },
+            deleteQueuedMessage: {
+                sessionID,
+                messageID,
+                waitUntilChangeAvailableInDatabase in
+                try await state.deleteQueuedMessage(
+                    sessionID: sessionID,
+                    messageID: messageID,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
             dispatch: { command, fallback, waitUntilChangeAvailableInDatabase in
                 try await state.dispatch(
                     command,
@@ -162,6 +199,16 @@ extension WorkspaceUIHook: DependencyKey {
                     waitUntilStopped: waitUntilStopped
                 )
             },
+            steerQueuedMessage: {
+                sessionID,
+                messageID,
+                waitUntilChangeAvailableInDatabase in
+                try await state.steerQueuedMessage(
+                    sessionID: sessionID,
+                    messageID: messageID,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
             updateSessionAgentAndModel: {
                 sessionID,
                 agentType,
@@ -178,6 +225,34 @@ extension WorkspaceUIHook: DependencyKey {
                 try await state.updateSessionModel(
                     sessionID: sessionID,
                     model: model,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
+            reorderQueue: { sessionID, messageIDs, waitUntilChangeAvailableInDatabase in
+                try await state.reorderQueue(
+                    sessionID: sessionID,
+                    messageIDs: messageIDs,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
+            setQueuePaused: { sessionID, isPaused, waitUntilChangeAvailableInDatabase in
+                try await state.setQueuePaused(
+                    sessionID: sessionID,
+                    isPaused: isPaused,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
+            editQueuedMessage: {
+                sessionID,
+                messageID,
+                content,
+                shouldResumeQueue,
+                waitUntilChangeAvailableInDatabase in
+                try await state.editQueuedMessage(
+                    sessionID: sessionID,
+                    messageID: messageID,
+                    content: content,
+                    shouldResumeQueue: shouldResumeQueue,
                     waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
                 )
             }
@@ -474,6 +549,127 @@ private actor WorkspaceUIHookState {
         return path == .hook
     }
 
+    func reorderQueue(
+        sessionID: String,
+        messageIDs: [String],
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        let requestID = UUID()
+        try await dispatchCommand(
+            requestID: requestID,
+            event: try QueueOrderCommand(
+                requestID: requestID,
+                sessionID: sessionID,
+                messageIDs: messageIDs
+            ).event,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    func deleteQueuedMessage(
+        sessionID: String,
+        messageID: String,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        let requestID = UUID()
+        try await dispatchCommand(
+            requestID: requestID,
+            event: try QueuedMessageDeleteCommand(
+                requestID: requestID,
+                sessionID: sessionID,
+                messageID: messageID
+            ).event,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    func setQueuePaused(
+        sessionID: String,
+        isPaused: Bool,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        let requestID = UUID()
+        try await dispatchCommand(
+            requestID: requestID,
+            event: try QueuePauseCommand(
+                requestID: requestID,
+                sessionID: sessionID,
+                isPaused: isPaused
+            ).event,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    func editQueuedMessage(
+        sessionID: String,
+        messageID: String,
+        content: String,
+        shouldResumeQueue: Bool,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        let requestID = UUID()
+        try await dispatchCommand(
+            requestID: requestID,
+            event: try QueuedMessageEditCommand(
+                requestID: requestID,
+                sessionID: sessionID,
+                edit: .init(
+                    messageID: messageID,
+                    content: content,
+                    shouldResumeQueue: shouldResumeQueue
+                )
+            ).event,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    func steerQueuedMessage(
+        sessionID: String,
+        messageID: String,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        let requestID = UUID()
+        try await dispatchCommand(
+            requestID: requestID,
+            event: try QueuedMessageSteerCommand(
+                requestID: requestID,
+                sessionID: sessionID,
+                messageID: messageID
+            ).event,
+            waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+        )
+    }
+
+    private func dispatchCommand(
+        requestID: UUID,
+        event: String,
+        waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
+    ) async throws {
+        guard !isMutationInFlight else {
+            throw WorkspaceUIHook.DispatchError.mutationInFlight
+        }
+        isMutationInFlight = true
+        defer { isMutationInFlight = false }
+
+        let (results, continuation) = try enqueueCommand(
+            requestID: requestID,
+            event: event
+        )
+        defer {
+            continuation.finish()
+            pendingCommands[requestID] = nil
+        }
+
+        for try await _ in results {
+            try await waitUntilChangeAvailableInDatabase()
+            return
+        }
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
+    }
+
     private func dispatch(
         event: String,
         fallback: (@Sendable () async throws -> Void)?,
@@ -655,6 +851,113 @@ struct CreateWorkspaceCommand: Codable, Equatable, Sendable {
         case workspaceID = "workspaceId"
         case agentType
         case model
+    }
+}
+
+private struct QueueOrderCommand: Encodable {
+    let requestID: UUID
+    let sessionID: String
+    let messageIDs: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case sessionID = "sessionId"
+        case messageIDs = "orderedIds"
+    }
+
+    var event: String {
+        get throws {
+            let data = try JSONEncoder().encode(self)
+            return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        }
+    }
+}
+
+private struct QueuePauseCommand: Encodable {
+    let requestID: UUID
+    let sessionID: String
+    let isPaused: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case sessionID = "sessionId"
+        case isPaused = "queuePaused"
+    }
+
+    var event: String {
+        get throws {
+            let data = try JSONEncoder().encode(self)
+            return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        }
+    }
+}
+
+private struct QueuedMessageEditCommand: Encodable {
+    let requestID: UUID
+    let sessionID: String
+    let edit: Edit
+
+    struct Edit: Encodable {
+        let messageID: String
+        let content: String
+        let shouldResumeQueue: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case messageID = "messageId"
+            case content
+            case shouldResumeQueue = "resumeQueue"
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case sessionID = "sessionId"
+        case edit = "queuedMessageEdit"
+    }
+
+    var event: String {
+        get throws {
+            let data = try JSONEncoder().encode(self)
+            return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        }
+    }
+}
+
+private struct QueuedMessageDeleteCommand: Encodable {
+    let requestID: UUID
+    let sessionID: String
+    let messageID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case sessionID = "sessionId"
+        case messageID = "deleteQueuedMessage"
+    }
+
+    var event: String {
+        get throws {
+            let data = try JSONEncoder().encode(self)
+            return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        }
+    }
+}
+
+private struct QueuedMessageSteerCommand: Encodable {
+    let requestID: UUID
+    let sessionID: String
+    let messageID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case sessionID = "sessionId"
+        case messageID = "steerQueuedMessage"
+    }
+
+    var event: String {
+        get throws {
+            let data = try JSONEncoder().encode(self)
+            return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        }
     }
 }
 

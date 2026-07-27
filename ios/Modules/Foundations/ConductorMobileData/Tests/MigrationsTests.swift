@@ -60,6 +60,7 @@ struct MigrationsTests {
         #expect(mobileWorkspaceStateColumns.contains("pull_request_merge_state_status"))
         #expect(mobileWorkspaceStateColumns.contains("pull_request_checks_status"))
         #expect(sessionColumns.contains("fast_mode"))
+        #expect(sessionColumns.contains("queue_paused_at"))
         #expect(sessionColumns.contains("codex_thinking_level"))
         #expect(sessionColumns.contains("claude_effort_level"))
     }

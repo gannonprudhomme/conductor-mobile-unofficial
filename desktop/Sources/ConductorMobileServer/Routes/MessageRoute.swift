@@ -201,7 +201,7 @@ enum MessageRoute {
                         sessionID: sessionID,
                         workspaceID: workspaceID,
                         content: sendMessageRequest.message,
-                        mode: .sent,
+                        mode: sendMessageRequest.mode ?? .sent,
                         reasoningEffort: reasoningEffort
                     )
                     return .accepted
@@ -296,12 +296,14 @@ enum MessageRoute {
         let message: String
         let model: String?
         let isFastModeEnabled: Bool?
+        let mode: WorkspaceUIHook.MessageMode?
         let reasoningEffort: Session.ReasoningEffort?
 
         private enum CodingKeys: String, CodingKey {
             case message
             case model
             case isFastModeEnabled = "fast_mode"
+            case mode
             case reasoningEffort = "reasoning_effort"
         }
     }

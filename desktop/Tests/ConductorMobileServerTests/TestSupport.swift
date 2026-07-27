@@ -77,7 +77,8 @@ func createTestConductorSchema(in database: Database) throws {
               claude_effort_level TEXT,
               unread_count INTEGER NOT NULL DEFAULT 0,
               freshly_compacted INTEGER NOT NULL DEFAULT 0,
-              context_token_count INTEGER NOT NULL DEFAULT 0
+              context_token_count INTEGER NOT NULL DEFAULT 0,
+              queue_paused_at TEXT
             );
 
             CREATE TABLE repos (

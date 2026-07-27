@@ -38,6 +38,10 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
     @Column("context_token_count")
     public var contextTokenCount: Int
 
+    // TODO: I don't think we need this at all? Idek what its for
+    @Column("queue_paused_at")
+    public var queuePausedAt: String?
+
     public init(
         id: String,
         workspaceID: String,
@@ -54,7 +58,8 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
         contextTokenCount: Int,
         codexThinkingLevel: ReasoningEffort? = nil,
         isFastModeEnabled: Bool? = nil,
-        claudeEffortLevel: ReasoningEffort? = nil
+        claudeEffortLevel: ReasoningEffort? = nil,
+        queuePausedAt: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -72,6 +77,7 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
         self.unreadCount = unreadCount
         self.freshlyCompacted = freshlyCompacted
         self.contextTokenCount = contextTokenCount
+        self.queuePausedAt = queuePausedAt
     }
 }
 
@@ -230,6 +236,7 @@ extension Session {
         case unreadCount = "unread_count"
         case freshlyCompacted = "freshly_compacted"
         case contextTokenCount = "context_token_count"
+        case queuePausedAt = "queue_paused_at"
     }
 }
 
