@@ -7,6 +7,8 @@
 
 import ComposableArchitecture
 import ConductorChat
+import ConductorCloud
+import ConductorMobileData
 import ConductorSettings
 import ConductorWorkspaces
 import SwiftUI
@@ -15,6 +17,7 @@ import SwiftUI
 public struct Main: Sendable {
     @Reducer
     public enum Path {
+        case cloudWorkspace(CloudWorkspaceFeature)
         case workspaceChat(WorkspaceChat)
     }
 
@@ -25,7 +28,7 @@ public struct Main: Sendable {
         public var workspaces = Workspaces.State()
 
         public init() {
-            // If we're missing the server address (aka on first launch), show the Settings screen immediately
+            // If we're missing the server address (aka on first launch), show Settings immediately.
             let settings = ConductorSettings.State()
             self.settings = settings.isServerAddressMissing ? settings : nil
         }
@@ -53,6 +56,30 @@ public struct Main: Sendable {
                     state.settings = ConductorSettings.State()
                     return .none
 
+                case let .workspaces(.cloudCatalog(.workspaceTapped(item))):
+                    state.path.append(
+                        .cloudWorkspace(
+                            CloudWorkspaceFeature.State(
+                                workspaceID: item.id,
+                                fallbackTitle: item.workspace.name
+                            )
+                        )
+                    )
+                    return .none
+
+                case let .workspaces(.cloudWorkspaceCreated(creation)):
+                    state.path.append(
+                        .cloudWorkspace(
+                            CloudWorkspaceFeature.State(
+                                workspaceID: creation.response.workspaceID,
+                                fallbackTitle: "Cloud workspace",
+                                initialSessionID: creation.response.sessionID,
+                                initialPrompt: creation.initialPrompt
+                            )
+                        )
+                    )
+                    return .none
+
                 case let .workspaces(.workspaceCreated(creation)):
                     state.path.append(
                         .workspaceChat(
@@ -66,11 +93,33 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceTapped(item)):
-                    state.path.append(
-                        .workspaceChat(
-                            WorkspaceChat.State(workspaceWithRepository: item)
+                    if let cloudItem = state.workspaces.cloudCatalog.workspaces.first(
+                        where: { $0.id == item.id }
+                    ) {
+                        state.path.append(
+                            .cloudWorkspace(
+                                CloudWorkspaceFeature.State(
+                                    workspaceID: cloudItem.id,
+                                    fallbackTitle: cloudItem.workspace.name
+                                )
+                            )
                         )
-                    )
+                    } else if item.workspace.isCloudHosted {
+                        state.path.append(
+                            .cloudWorkspace(
+                                CloudWorkspaceFeature.State(
+                                    workspaceID: item.id,
+                                    fallbackTitle: item.workspace.displayName
+                                )
+                            )
+                        )
+                    } else {
+                        state.path.append(
+                            .workspaceChat(
+                                WorkspaceChat.State(workspaceWithRepository: item)
+                            )
+                        )
+                    }
                     return .none
 
                 case let .path(
@@ -113,6 +162,9 @@ public struct MainView: View {
             }
         } destination: { store in
             switch store.case {
+            case let .cloudWorkspace(store):
+                CloudWorkspaceView(store: store)
+
             case let .workspaceChat(store):
                 WorkspaceChatView(store: store)
             }

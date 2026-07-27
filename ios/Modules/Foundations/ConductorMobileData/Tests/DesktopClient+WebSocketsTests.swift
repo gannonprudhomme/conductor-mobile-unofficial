@@ -9,6 +9,7 @@
 import CustomDump
 import Dependencies
 import Foundation
+import SharedConductorData
 import Sharing
 import Testing
 
@@ -151,6 +152,105 @@ struct DesktopClientWebSocketsTests {
             }
             expectNoDifference(connectionStatus, .disconnected)
         }
+    }
+
+    @Test("WebSocket observations wait for resume before sending their request")
+    func webSocketInitialRequest() async throws {
+        struct TestError: Error { }
+
+        let request = MessageSyncRequest(fingerprints: ["message-1": Data([0, 1])])
+        let events = LockIsolated<[String]>([])
+        let (openEvents, openEventsContinuation) = AsyncStream.makeStream(of: Void.self)
+        let receiveCount = LockIsolated(0)
+        let (resumeStarted, resumeStartedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let sentRequests = LockIsolated<[MessageSyncRequest]>([])
+        let stream = DesktopClient.webSocketStream(
+            [String].self,
+            sending: request,
+            using: DesktopClient.WebSocketTaskClient {
+            } receive: {
+                let count = receiveCount.withValue {
+                    $0 += 1
+                    return $0
+                }
+                guard count == 1 else {
+                    throw CancellationError()
+                }
+                events.withValue { $0.append("receive") }
+                return .string(#"["response"]"#)
+            } resume: {
+                events.withValue { $0.append("resume") }
+                resumeStartedContinuation.yield()
+                for await _ in openEvents {
+                    break
+                }
+                events.withValue { $0.append("open") }
+            } send: { message in
+                events.withValue { $0.append("send") }
+                let data = switch message {
+                case .data(let data):
+                    data
+
+                case .string(let string):
+                    Data(string.utf8)
+
+                @unknown default:
+                    throw TestError()
+                }
+                let decodedRequest = try JSONDecoder.conductor.decode(
+                    MessageSyncRequest.self,
+                    from: data
+                )
+                sentRequests.withValue {
+                    $0.append(decodedRequest)
+                }
+            }
+        )
+        let responseTask = Task {
+            var iterator = stream.makeAsyncIterator()
+            return try await iterator.next()
+        }
+        var resumeStartedIterator = resumeStarted.makeAsyncIterator()
+
+        _ = await resumeStartedIterator.next()
+        expectNoDifference(events.value, ["resume"])
+        expectNoDifference(sentRequests.value, [])
+
+        openEventsContinuation.yield()
+        openEventsContinuation.finish()
+
+        let response = try await responseTask.value
+        expectNoDifference(try #require(response), ["response"])
+        expectNoDifference(
+            Array(events.value.prefix(4)),
+            ["resume", "open", "send", "receive"]
+        )
+        expectNoDifference(sentRequests.value, [request])
+    }
+
+    @Test("A WebSocket request send failure terminates before receiving")
+    func webSocketInitialRequestFailure() async {
+        struct TestError: Error { }
+
+        let receiveCount = LockIsolated(0)
+        let stream = DesktopClient.webSocketStream(
+            [String].self,
+            sending: MessageSyncRequest(fingerprints: [:]),
+            using: DesktopClient.WebSocketTaskClient {
+            } receive: {
+                receiveCount.withValue { $0 += 1 }
+                return .string(#"["unexpected"]"#)
+            } resume: {
+            } send: { _ in
+                throw TestError()
+            }
+        )
+        var iterator = stream.makeAsyncIterator()
+
+        await #expect(throws: TestError.self) {
+            try await iterator.next()
+        }
+        expectNoDifference(receiveCount.value, 0)
     }
 
     @Test("WebSocket observations retain only the newest pending snapshot")

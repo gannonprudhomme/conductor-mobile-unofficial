@@ -49,7 +49,17 @@ struct IconRouteTests {
         try await database.write { database in
             try database.execute(
                 sql: """
-                    CREATE TABLE repos (id TEXT PRIMARY KEY, root_path TEXT);
+                    CREATE TABLE repos (
+                        id TEXT PRIMARY KEY,
+                        root_path TEXT,
+                        remote_url TEXT,
+                        default_branch TEXT,
+                        name TEXT
+                    );
+                    CREATE TABLE workspaces (
+                        id TEXT PRIMARY KEY,
+                        repository_id TEXT
+                    );
                     INSERT INTO repos (id, root_path) VALUES (?, ?);
                     """,
                 arguments: ["repository-1", rootURL.path]
@@ -153,6 +163,206 @@ struct IconRouteTests {
         }
     }
 
+    @Test("Repository icons use a cloud workspace's local mirror")
+    func remoteWorkspaceMirrorIcon() async throws {
+        let fileManager = FileManager.default
+        let mirrorRootURL = try fileManager.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: fileManager.temporaryDirectory,
+            create: true
+        )
+        defer { try? fileManager.removeItem(at: mirrorRootURL) }
+
+        let workspaceURL = mirrorRootURL
+            .appending(path: "mobile", directoryHint: .isDirectory)
+            .appending(path: "workspace-1", directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        try Data(
+            """
+            <svg width="2" height="2" xmlns="http://www.w3.org/2000/svg">
+              <rect width="2" height="2" fill="#00ff00"/>
+            </svg>
+            """.utf8
+        ).write(to: workspaceURL.appending(path: "favicon.svg"))
+
+        let database = try DatabaseQueue()
+        try await database.write { database in
+            try database.execute(
+                sql: """
+                    CREATE TABLE repos (
+                        id TEXT PRIMARY KEY,
+                        root_path TEXT,
+                        remote_url TEXT,
+                        default_branch TEXT,
+                        name TEXT
+                    );
+                    CREATE TABLE workspaces (
+                        id TEXT PRIMARY KEY,
+                        repository_id TEXT
+                    );
+                    INSERT INTO repos (id, root_path, name) VALUES (?, ?, ?);
+                    INSERT INTO workspaces (id, repository_id) VALUES (?, ?);
+                    """,
+                arguments: [
+                    "repository-1",
+                    "/missing/repository",
+                    "mobile",
+                    "workspace-1",
+                    "repository-1",
+                ]
+            )
+        }
+        let router = Router(context: Server.RequestContext.self)
+        router.get("/repositories/{repositoryID}/icon") { request, context in
+            try await IconRoute.response(
+                request: request,
+                context: context,
+                database: database,
+                remoteWorkspaceRoot: mirrorRootURL
+            )
+        }
+        let application = Application(router: router)
+
+        try await application.test(.router) { client in
+            let image = try await client.execute(
+                uri: "/repositories/repository-1/icon",
+                method: .get
+            ) { response in
+                #expect(response.status == .ok)
+                #expect(response.headers[.contentType] == "image/png")
+                return try decodedImage(
+                    Data(response.body.readableBytesView),
+                    sampling: [(0, 0), (1, 1)]
+                )
+            }
+            expectNoDifference(
+                image,
+                DecodedImage(
+                    width: 2,
+                    height: 2,
+                    pixels: [
+                        DecodedPixel(
+                            x: 0,
+                            y: 0,
+                            red: 0,
+                            green: 255,
+                            blue: 0,
+                            alpha: 255
+                        ),
+                        DecodedPixel(
+                            x: 1,
+                            y: 1,
+                            red: 0,
+                            green: 255,
+                            blue: 0,
+                            alpha: 255
+                        ),
+                    ]
+                )
+            )
+        }
+    }
+
+    @Test("Repository icons fall back to the remote root favicon")
+    func remoteRepositoryIcon() async throws {
+        let database = try DatabaseQueue()
+        try await database.write { database in
+            try database.execute(
+                sql: """
+                    CREATE TABLE repos (
+                        id TEXT PRIMARY KEY,
+                        root_path TEXT,
+                        remote_url TEXT,
+                        default_branch TEXT,
+                        name TEXT
+                    );
+                    CREATE TABLE workspaces (
+                        id TEXT PRIMARY KEY,
+                        repository_id TEXT
+                    );
+                    INSERT INTO repos (
+                        id,
+                        root_path,
+                        remote_url,
+                        default_branch
+                    ) VALUES (?, ?, ?, ?);
+                    """,
+                arguments: [
+                    "repository-1",
+                    "/missing/repository",
+                    "git@github.com:acme/mobile.git",
+                    "develop",
+                ]
+            )
+        }
+        let svgData = Data(
+            """
+            <svg width="2" height="2" xmlns="http://www.w3.org/2000/svg">
+              <rect width="2" height="2" fill="#ff0000"/>
+            </svg>
+            """.utf8
+        )
+        let router = Router(context: Server.RequestContext.self)
+        router.get("/repositories/{repositoryID}/icon") { request, context in
+            try await IconRoute.response(
+                request: request,
+                context: context,
+                database: database
+            ) { url in
+                #expect(
+                    url.absoluteString
+                        == "https://raw.githubusercontent.com/acme/mobile/develop/favicon.svg"
+                )
+                return IconRoute.RemoteFavicon(
+                    data: svgData,
+                    eTag: "\"remote-favicon\""
+                )
+            }
+        }
+        let application = Application(router: router)
+
+        try await application.test(.router) { client in
+            let image = try await client.execute(
+                uri: "/repositories/repository-1/icon",
+                method: .get
+            ) { response in
+                #expect(response.status == .ok)
+                #expect(response.headers[.contentType] == "image/png")
+                #expect(response.headers[.eTag] == "\"remote-favicon\"")
+                return try decodedImage(
+                    Data(response.body.readableBytesView),
+                    sampling: [(0, 0), (1, 1)]
+                )
+            }
+            expectNoDifference(
+                image,
+                DecodedImage(
+                    width: 2,
+                    height: 2,
+                    pixels: [
+                        DecodedPixel(
+                            x: 0,
+                            y: 0,
+                            red: 255,
+                            green: 0,
+                            blue: 0,
+                            alpha: 255
+                        ),
+                        DecodedPixel(
+                            x: 1,
+                            y: 1,
+                            red: 255,
+                            green: 0,
+                            blue: 0,
+                            alpha: 255
+                        ),
+                    ]
+                )
+            )
+        }
+    }
+
     @Test("Repository icons cannot escape the repository through a symbolic link")
     func symlinkEscape() async throws {
         let fileManager = FileManager.default
@@ -178,7 +388,17 @@ struct IconRouteTests {
         try await database.write { database in
             try database.execute(
                 sql: """
-                    CREATE TABLE repos (id TEXT PRIMARY KEY, root_path TEXT);
+                    CREATE TABLE repos (
+                        id TEXT PRIMARY KEY,
+                        root_path TEXT,
+                        remote_url TEXT,
+                        default_branch TEXT,
+                        name TEXT
+                    );
+                    CREATE TABLE workspaces (
+                        id TEXT PRIMARY KEY,
+                        repository_id TEXT
+                    );
                     INSERT INTO repos (id, root_path) VALUES (?, ?);
                     """,
                 arguments: ["repository-1", rootURL.path]
@@ -229,7 +449,17 @@ struct IconRouteTests {
         try await database.write { database in
             try database.execute(
                 sql: """
-                    CREATE TABLE repos (id TEXT PRIMARY KEY, root_path TEXT);
+                    CREATE TABLE repos (
+                        id TEXT PRIMARY KEY,
+                        root_path TEXT,
+                        remote_url TEXT,
+                        default_branch TEXT,
+                        name TEXT
+                    );
+                    CREATE TABLE workspaces (
+                        id TEXT PRIMARY KEY,
+                        repository_id TEXT
+                    );
                     INSERT INTO repos (id, root_path) VALUES (?, ?);
                     """,
                 arguments: ["repository-1", rootURL.path]

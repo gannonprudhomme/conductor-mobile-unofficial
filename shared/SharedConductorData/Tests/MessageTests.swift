@@ -11,6 +11,41 @@ import SQLiteData
 import Testing
 
 struct MessageTests {
+    @Test("Message sync fingerprints are stable and include every persisted field")
+    func syncFingerprint() throws {
+        let message = fingerprintMessage()
+        let fingerprint = try message.syncFingerprint()
+        let expectedFingerprint = try #require(
+            Data(
+                base64Encoded: "nTTlm7UOOQUx7OWctQHzTi2qjeL8SqvaGrPwbEFv4qo="
+            )
+        )
+
+        #expect(fingerprint == expectedFingerprint)
+
+        let variants = [
+            fingerprintMessage(id: "message-2"),
+            changing(message, \.sessionID, to: "session-2"),
+            changing(message, \.role, to: .assistant),
+            changing(message, \.content, to: "Updated"),
+            changing(message, \.createdAt, to: Date(timeIntervalSince1970: 2)),
+            changing(message, \.sentAt, to: Date(timeIntervalSince1970: 3)),
+            changing(message, \.fullMessage, to: "Updated full message"),
+            changing(message, \.cancelledAt, to: "2026-07-16T00:00:00Z"),
+            changing(message, \.model, to: "gpt-6"),
+            changing(message, \.sdkMessageID, to: "sdk-2"),
+            changing(message, \.lastAssistantMessageID, to: "assistant-2"),
+            changing(message, \.turnID, to: "turn-2"),
+            changing(message, \.isResumableMessage, to: 0),
+            changing(message, \.queueOrder, to: 2),
+            changing(message, \.senderID, to: "sender-2"),
+        ]
+
+        for variant in variants {
+            #expect(try variant.syncFingerprint() != fingerprint)
+        }
+    }
+
     @Test("Message decoding preserves unknown roles and nullable fields")
     func decoding() throws {
         let message = try JSONDecoder.conductor.decode(
@@ -91,4 +126,34 @@ struct MessageTests {
         #expect(messages[1].createdAt == Date(timeIntervalSince1970: 1_783_555_202))
         #expect(messages[1].sentAt == Date(timeIntervalSince1970: 1_783_555_203.125))
     }
+}
+
+private func fingerprintMessage(id: String = "message-1") -> Message {
+    Message(
+        id: id,
+        sessionID: "session-1",
+        role: .user,
+        content: "Hello",
+        createdAt: Date(timeIntervalSince1970: 0),
+        sentAt: Date(timeIntervalSince1970: 1),
+        fullMessage: "Full message",
+        cancelledAt: "",
+        model: "gpt-5",
+        sdkMessageID: "sdk-1",
+        lastAssistantMessageID: "assistant-1",
+        turnID: "turn-1",
+        isResumableMessage: 1,
+        queueOrder: 1,
+        senderID: "sender-1"
+    )
+}
+
+private func changing<Value>(
+    _ message: Message,
+    _ keyPath: WritableKeyPath<Message, Value>,
+    to value: Value
+) -> Message {
+    var message = message
+    message[keyPath: keyPath] = value
+    return message
 }

@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import CryptoKit
 import Foundation
 import SQLiteData
 
@@ -69,6 +70,14 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
         self.isResumableMessage = isResumableMessage
         self.queueOrder = queueOrder
         self.senderID = senderID
+    }
+}
+
+public extension Message {
+    func syncFingerprint() throws -> Data {
+        let encoder = JSONEncoder.conductor
+        encoder.outputFormatting = [.sortedKeys]
+        return Data(SHA256.hash(data: try encoder.encode(self)))
     }
 }
 

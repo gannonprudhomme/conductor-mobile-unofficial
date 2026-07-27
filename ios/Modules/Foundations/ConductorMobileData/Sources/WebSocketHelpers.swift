@@ -16,7 +16,7 @@ public enum WebSocketHelpers {
     /// The sleep is retry backoff between connections, not message polling. It prevents a stopped
     /// or unreachable desktop service from causing a tight reconnect loop.
     public static func observe<Value: Sendable>(
-        retrying makeStream: () -> AsyncThrowingStream<Value, any Error>,
+        retrying makeStream: () async throws -> AsyncThrowingStream<Value, any Error>,
         onValue: (Value) async throws -> Void,
         onFailure: (any Error) async -> Void
     ) async {
@@ -24,7 +24,7 @@ public enum WebSocketHelpers {
 
         while !Task.isCancelled {
             do {
-                for try await value in makeStream() {
+                for try await value in try await makeStream() {
                     try await onValue(value)
                 }
             } catch is CancellationError {

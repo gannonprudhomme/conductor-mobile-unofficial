@@ -14,6 +14,7 @@ import Sharing
 import SQLiteData
 import SwiftUI
 @testable import ConductorChat
+@testable import ConductorCloud
 import Testing
 import UIKit
 
@@ -170,13 +171,15 @@ struct ChatTests {
         } operation: {
             let clock = TestClock()
             let (firstStream, firstContinuation) = AsyncThrowingStream<
-                [Message],
+                MessageSyncResponse,
                 any Error
             >.makeStream()
             let (secondStream, secondContinuation) = AsyncThrowingStream<
-                [Message],
+                MessageSyncResponse,
                 any Error
             >.makeStream()
+            let (connections, connectionContinuation) = AsyncStream<Int>.makeStream()
+            var connectionIterator = connections.makeAsyncIterator()
             let connectionCount = LockIsolated(0)
             let session = try makeSession()
             let secondConnectionCancelled = LockIsolated(false)
@@ -191,14 +194,16 @@ struct ChatTests {
                 Chat()
             } withDependencies: {
                 $0.continuousClock = clock
-                $0.desktopClient.observeMessages = { workspaceID, sessionID in
+                $0.desktopClient.observeMessages = { workspaceID, sessionID, request in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
+                    #expect(request.fingerprints.isEmpty)
 
                     let count = connectionCount.withValue {
                         $0 += 1
                         return $0
                     }
+                    connectionContinuation.yield(count)
                     return switch count {
                     case 1:
                         firstStream
@@ -216,9 +221,12 @@ struct ChatTests {
             }
             #expect(try #require(store.state.turns).isEmpty)
             #expect(try #require(store.state.rows).isEmpty)
-            #expect(connectionCount.value == 1)
+            let firstConnection = await connectionIterator.next()
+            #expect(firstConnection == 1)
 
-            firstContinuation.yield([])
+            firstContinuation.yield(
+                MessageSyncResponse(messages: [], deletedMessageIDs: [])
+            )
             await store.receive(\.initialMessagesResponse) {
                 $0.isLoadingMessages = false
             }
@@ -228,10 +236,12 @@ struct ChatTests {
             #expect(connectionCount.value == 1)
 
             await clock.advance(by: .seconds(1))
-            #expect(connectionCount.value == 2)
+            let secondConnection = await connectionIterator.next()
+            #expect(secondConnection == 2)
 
             await task.cancel()
             #expect(secondConnectionCancelled.value)
+            connectionContinuation.finish()
         }
     }
 
@@ -269,16 +279,17 @@ struct ChatTests {
         mutableUpdatedLateMessage.content = "Updated late message"
         let updatedLateMessage = mutableUpdatedLateMessage
         let (stream, continuation) = AsyncThrowingStream<
-            [Message],
+            MessageSyncResponse,
             any Error
         >.makeStream()
         let store = TestStore(initialState: Chat.State(session: session)) {
             Chat()
         } withDependencies: {
             $0.defaultDatabase = database
-            $0.desktopClient.observeMessages = { workspaceID, sessionID in
+            $0.desktopClient.observeMessages = { workspaceID, sessionID, request in
                 #expect(workspaceID == session.workspaceID)
                 #expect(sessionID == session.id)
+                #expect(request.fingerprints.keys.sorted() == ["early", "late"])
                 return stream
             }
         }
@@ -296,7 +307,12 @@ struct ChatTests {
             ]
         )
 
-        continuation.yield([lateMessage, updatedEarlyMessage])
+        continuation.yield(
+            MessageSyncResponse(
+                messages: [lateMessage, updatedEarlyMessage],
+                deletedMessageIDs: []
+            )
+        )
         await store.receive(\.initialMessagesResponse) {
             $0.isLoadingMessages = false
         }
@@ -310,7 +326,12 @@ struct ChatTests {
                 .init(id: "late", content: "Message late"),
             ]
         )
-        continuation.yield([updatedLateMessage])
+        continuation.yield(
+            MessageSyncResponse(
+                messages: [updatedLateMessage],
+                deletedMessageIDs: []
+            )
+        )
         await store.receive(\.messagesUpdated)
         try expectHumanPresentationCaches(
             store.state,
@@ -386,6 +407,117 @@ struct ChatTests {
                 messages: [.init(id: "human-1", content: "Hello")]
             )
         }
+    }
+
+    @Test("An empty sync acknowledgement preserves cached messages")
+    func emptySyncAcknowledgement() async throws {
+        let database = try appDatabase()
+        let session = try makeSession()
+        let message = try makeMessage(
+            id: "cached",
+            sessionID: session.id,
+            createdAt: "2026-07-09 01:00:00"
+        )
+        try await database.write { db in
+            try Message.insert { message }.execute(db)
+        }
+        let baselineChangeCount = try await database.write { $0.totalChangesCount }
+
+        let messages = try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            try await Chat().reconcileMessages(
+                MessageSyncResponse(messages: [], deletedMessageIDs: []),
+                sessionID: session.id
+            )
+        }
+
+        expectNoDifference(messages, [message])
+        #expect(
+            try await database.write { $0.totalChangesCount }
+                == baselineChangeCount
+        )
+    }
+
+    @Test("Message sync applies upserts and session-scoped deletions atomically")
+    func messageSyncReconciliation() async throws {
+        let database = try appDatabase()
+        let session = try makeSession()
+        let stale = try makeMessage(
+            id: "stale",
+            sessionID: session.id,
+            createdAt: "2026-07-09 01:00:00"
+        )
+        let otherSessionMessage = try makeMessage(
+            id: "other",
+            sessionID: "session-2",
+            createdAt: "2026-07-09 00:00:00"
+        )
+        var updated = try makeMessage(
+            id: "updated",
+            sessionID: session.id,
+            createdAt: "2026-07-09 02:00:00"
+        )
+        updated.content = "Updated"
+        try await database.write { db in
+            try Message.insert { [stale, otherSessionMessage] }.execute(db)
+        }
+
+        let messages = try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            try await Chat().reconcileMessages(
+                MessageSyncResponse(
+                    messages: [updated],
+                    deletedMessageIDs: [stale.id, otherSessionMessage.id]
+                ),
+                sessionID: session.id
+            )
+        }
+
+        expectNoDifference(messages, [updated])
+        let storedOtherMessage = try await database.read {
+            try Message.find(otherSessionMessage.id).fetchOne($0)
+        }
+        expectNoDifference(storedOtherMessage, otherSessionMessage)
+    }
+
+    @Test("Message sync rejects rows from another session without mutating the cache")
+    func messageSyncRejectsAnotherSession() async throws {
+        let database = try appDatabase()
+        let sessionID = "session-1"
+        let cached = try makeMessage(
+            id: "cached",
+            sessionID: sessionID,
+            createdAt: "2026-07-09 01:00:00"
+        )
+        let incoming = try makeMessage(
+            id: "incoming",
+            sessionID: "session-2",
+            createdAt: "2026-07-09 02:00:00"
+        )
+        try await database.write { db in
+            try Message.insert { cached }.execute(db)
+        }
+
+        await #expect(throws: MessageReconciliationError.self) {
+            try await withDependencies {
+                $0.defaultDatabase = database
+            } operation: {
+                try await Chat().reconcileMessages(
+                    MessageSyncResponse(
+                        messages: [incoming],
+                        deletedMessageIDs: [cached.id]
+                    ),
+                    sessionID: sessionID
+                )
+            }
+        }
+
+        let storedMessages = try await database.read {
+            try Message.order(by: \.id).fetchAll($0)
+        }
+        expectNoDifference(storedMessages, [cached])
     }
 
     @Test("An empty initial response replaces cached presentation and shows the empty state")
@@ -1097,6 +1229,299 @@ struct ChatTests {
             )
         }
     }
+
+    @Test("Cloud summary taps preserve the shared working status")
+    func cloudTurnSummaryTappedPreservesWorkingStatus() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let completedTurn = Turn(
+                id: "turn-1",
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                rows: [
+                    .humanMessageRow(.init(id: "human-1", content: "Inspect it")),
+                    .assistantMessage(
+                        .toolCall(
+                            messageID: "tool-1",
+                            toolCall: .readFile(
+                                toolUseID: "tool-1",
+                                filePath: "File.swift"
+                            )
+                        )
+                    ),
+                    .assistantMessage(
+                        .text(
+                            messageID: "final-1",
+                            content: .init("Inspected"),
+                            isMostRecentTextInTurn: true
+                        )
+                    ),
+                ]
+            )
+            let activeTurn = Turn(
+                id: "turn-2",
+                startedAt: Date(timeIntervalSince1970: 2_000),
+                rows: [
+                    .humanMessageRow(.init(id: "human-2", content: "Fix it")),
+                ]
+            )
+            let summaryID = "turn-1:human-1"
+            var state = Chat.State(
+                cloudSession: cloudSession(),
+                workspaceID: "workspace-1"
+            )
+            state.cloudSessionStatus = .working
+            state.turns = [completedTurn, activeTurn]
+            state.updateRows(sessionStatus: state.sessionStatus)
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(.turnSummaryTapped(summaryID)) {
+                $0.expandedSummaryIDs = [summaryID]
+                $0.rows = [completedTurn, activeTurn].flattenedChatRows(
+                    activeTurnID: activeTurn.id,
+                    expandedSummaryIDs: [summaryID]
+                )
+            }
+            let rows = try #require(store.state.rows)
+            #expect(
+                rows.contains {
+                    if case .turnInProgress = $0.content {
+                        true
+                    } else {
+                        false
+                    }
+                }
+            )
+        }
+    }
+
+    @Test("Real cloud transcript events use the canonical chat rows")
+    func cloudTranscriptUsesCanonicalRows() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let transcript = try cloudTranscriptMessages()
+            let canonicalMessages = transcript.flatMap(\.chatMessages)
+            let status = CloudSessionStatusResponse(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                status: .working,
+                updatedAt: try #require(transcript.last?.receivedAt)
+            )
+            let clock = TestClock()
+            let store = TestStore(
+                initialState: Chat.State(
+                    cloudSession: cloudSession(),
+                    workspaceID: "workspace-1"
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.continuousClock = clock
+            }
+
+            await store.send(
+                .cloudSnapshotResponse(
+                    isInitial: true,
+                    .success(
+                        Chat.CloudSnapshot(
+                            messages: transcript,
+                            status: status
+                        )
+                    )
+                )
+            ) {
+                $0.cloudMessages = canonicalMessages
+                $0.cloudSessionStatus = .working
+                $0.isLoadingMessages = false
+                $0.lastCloudMessageID = "agent-text"
+                $0.turns = Turn.parse(messages: canonicalMessages)
+                $0.updateRows(sessionStatus: .working)
+            }
+
+            expectNoDifference(
+                canonicalMessages.map(\.id),
+                [
+                    "user-1",
+                    "agent-command-start",
+                    "agent-command-complete",
+                    "agent-text",
+                ]
+            )
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: "user-1", content: "Run the tests."),
+                    .assistant(id: "assistant:agent-command-start"),
+                    .assistant(id: "assistant:agent-text:chunk:0"),
+                    .turnInProgress(
+                        id: "turn-1",
+                        startedAt: canonicalMessages[0].createdAt
+                    ),
+                ]
+            )
+
+            await store.send(.viewDisappeared)
+            await store.finish()
+        }
+    }
+
+    @Test("Cloud send uses the shared draft and send actions")
+    func cloudMessageSendSucceeds() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let clock = TestClock()
+            let request = LockIsolated<(String, String, String)?>(nil)
+            let fixedUUID = UUID(42)
+            let store = TestStore(
+                initialState: Chat.State(
+                    cloudSession: cloudSession(),
+                    workspaceID: "workspace-1"
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.continuousClock = clock
+                $0.uuid = .constant(fixedUUID)
+                $0.cloudAPIClient.sendMessage = { sessionID, messageID, message in
+                    request.setValue((sessionID, messageID, message))
+                    return CloudSendMessageResponse(
+                        messageID: "server-message",
+                        state: .queued
+                    )
+                }
+            }
+
+            store.state.$messageDraft.withLock {
+                $0 = "  Please run the tests.  "
+            }
+            await store.send(.sendButtonTapped) {
+                $0.isMessageSendInFlight = true
+                $0.scrollToBottomRequest = 1
+            }
+            await store.receive(\.sendMessageResponse) {
+                $0.$messageDraft.withLock { $0 = "" }
+                $0.cloudSessionStatus = .working
+                $0.isMessageSendInFlight = false
+            }
+            expectNoDifference(
+                request.value.map {
+                    [$0.0, $0.1, $0.2]
+                },
+                [
+                    "session-1",
+                    fixedUUID.uuidString.lowercased(),
+                    "Please run the tests.",
+                ]
+            )
+
+            await store.send(.viewDisappeared)
+            await store.finish()
+        }
+    }
+
+    @Test("Cloud task advances the transcript cursor through the shared chat")
+    func cloudTaskPollsIncrementally() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let transcript = try cloudTranscriptMessages()
+            let canonicalMessages = transcript.flatMap(\.chatMessages)
+            let clock = TestClock()
+            let requestedCursors = LockIsolated<[String?]>([])
+            let status = CloudSessionStatusResponse(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                status: .working,
+                updatedAt: try #require(transcript.last?.receivedAt)
+            )
+            let store = TestStore(
+                initialState: Chat.State(
+                    cloudSession: cloudSession(),
+                    workspaceID: "workspace-1"
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.continuousClock = clock
+                $0.cloudAPIClient.messages = { _, _, _, after in
+                    requestedCursors.withValue { $0.append(after) }
+                    return CloudPage(
+                        data: after == nil ? transcript : [],
+                        offset: 0,
+                        hasMore: false
+                    )
+                }
+                $0.cloudAPIClient.sessionStatus = { _ in status }
+            }
+
+            await store.send(.task)
+            await store.receive(\.cloudSnapshotResponse) {
+                $0.cloudMessages = canonicalMessages
+                $0.cloudSessionStatus = .working
+                $0.isLoadingMessages = false
+                $0.lastCloudMessageID = "agent-text"
+                $0.turns = Turn.parse(messages: canonicalMessages)
+                $0.updateRows(sessionStatus: .working)
+            }
+
+            await clock.advance(by: .seconds(3))
+            await store.receive(\.cloudPoll)
+            await store.receive(\.cloudSnapshotResponse)
+            expectNoDifference(
+                requestedCursors.value,
+                [nil, "agent-text"]
+            )
+
+            await store.send(.viewDisappeared)
+            await store.finish()
+        }
+    }
+
+    @Test("Cloud stop uses the shared stop action")
+    func cloudStopSucceeds() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let cancelledSessionID = LockIsolated<String?>(nil)
+            var state = Chat.State(
+                cloudSession: cloudSession(),
+                workspaceID: "workspace-1"
+            )
+            state.cloudSessionStatus = .working
+            let store = TestStore(initialState: state) {
+                Chat()
+            } withDependencies: {
+                $0.cloudAPIClient.cancelSession = { sessionID in
+                    cancelledSessionID.setValue(sessionID)
+                    return CloudCancelResponse(
+                        workspaceID: "workspace-1",
+                        sessionID: sessionID,
+                        status: .idle,
+                        canceledQueuedMessages: 0
+                    )
+                }
+            }
+
+            await store.send(.stopButtonTapped) {
+                $0.isStopInFlight = true
+            }
+            await store.receive(\.stopSessionResponse) {
+                $0.cloudSessionStatus = .idle
+                $0.isStopInFlight = false
+            }
+
+            #expect(cancelledSessionID.value == "session-1")
+        }
+    }
 }
 
 @MainActor
@@ -1156,6 +1581,123 @@ private func makeSession(status: String = "idle") throws -> Session {
             """.utf8
         )
     )
+}
+
+private func cloudSession() -> CloudSession {
+    CloudSession(
+        id: "session-1",
+        deepLink: CloudAPIClient.productionBaseURL,
+        name: "Cloud chat",
+        model: Session.Model.gpt_5_6_sol.rawValue
+    )
+}
+
+private func cloudTranscriptMessages() throws -> [CloudTranscriptMessage] {
+    try JSONDecoder.cloud.decode(
+        CloudPage<CloudTranscriptMessage>.self,
+        from: Data(
+            #"""
+            {
+              "data": [
+                {
+                  "id": "user-1",
+                  "sessionId": "session-1",
+                  "sessionIndex": 1,
+                  "type": "userMessage",
+                  "content": {
+                    "type": "userMessage",
+                    "id": "user-item-1",
+                    "message": "Run the tests.",
+                    "state": "sent",
+                    "turnId": "turn-1",
+                    "config": {"model": "gpt-5.6-sol"},
+                    "senderId": "user-1"
+                  },
+                  "receivedAt": "2026-07-24 15:24:17.562275+00"
+                },
+                {
+                  "id": "agent-command-start",
+                  "sessionId": "session-1",
+                  "sessionIndex": 2,
+                  "type": "agent",
+                  "content": {
+                    "type": "agent",
+                    "eventId": "event-1",
+                    "turnId": "turn-1",
+                    "userMessageId": "user-item-1",
+                    "rawPayload": {
+                      "thread_id": "thread-1",
+                      "event": {
+                        "type": "item.started",
+                        "item": {
+                          "id": "command-1",
+                          "type": "commandExecution",
+                          "command": "mise -C ios run test",
+                          "status": "inProgress"
+                        }
+                      }
+                    }
+                  },
+                  "receivedAt": "2026-07-24 15:24:18.000001+00"
+                },
+                {
+                  "id": "agent-command-complete",
+                  "sessionId": "session-1",
+                  "sessionIndex": 3,
+                  "type": "agent",
+                  "content": {
+                    "type": "agent",
+                    "eventId": "event-2",
+                    "turnId": "turn-1",
+                    "userMessageId": "user-item-1",
+                    "rawPayload": {
+                      "thread_id": "thread-1",
+                      "event": {
+                        "type": "item.completed",
+                        "item": {
+                          "id": "command-1",
+                          "type": "commandExecution",
+                          "command": "mise -C ios run test",
+                          "aggregatedOutput": "All tests passed.",
+                          "exitCode": 0,
+                          "status": "completed"
+                        }
+                      }
+                    }
+                  },
+                  "receivedAt": "2026-07-24 15:24:19.000001+00"
+                },
+                {
+                  "id": "agent-text",
+                  "sessionId": "session-1",
+                  "sessionIndex": 4,
+                  "type": "agent",
+                  "content": {
+                    "type": "agent",
+                    "eventId": "event-3",
+                    "turnId": "turn-1",
+                    "userMessageId": "user-item-1",
+                    "rawPayload": {
+                      "thread_id": "thread-1",
+                      "event": {
+                        "type": "item.completed",
+                        "item": {
+                          "id": "assistant-item-1",
+                          "type": "agentMessage",
+                          "text": "All tests passed."
+                        }
+                      }
+                    }
+                  },
+                  "receivedAt": "2026-07-24 15:24:20.000001+00"
+                }
+              ],
+              "offset": 0,
+              "hasMore": false
+            }
+            """#.utf8
+        )
+    ).data
 }
 
 private struct TestError: LocalizedError {

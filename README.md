@@ -75,6 +75,18 @@ When you open the iOS app it'll immediately open the Settings screen in order to
 
 ## How does it work?
 
+### Experimental Conductor Cloud API
+
+This prototype originally used only the local desktop companion because it
+predates Conductor's public API. It now also has an experimental, intentionally
+incomplete API path for cloud workspaces: add an API key in Settings, then
+browse or create cloud workspaces alongside local ones and open their sessions
+directly on iPhone.
+
+The public API is beta and this is not a production authentication system. API
+keys are stored in the device Keychain; no key is bundled with the app,
+committed to the repository, or collected by this project.
+
 ### Reading data
 
 For the most part all of the data we get is from Conductor's SQLite database. Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms, which you might want to reduce - and if there are any changes we send them to the app over a web socket.
@@ -94,7 +106,6 @@ As a result of this, we install a "UI Hook" where instead of writing the data to
 
 The core of it works for what I personally need (from my testing!), but I'm certainly missing a ton of features:
 
-- Conductor Cloud
 - File diffs / file viewing
   - I just use GitHub for this!
 - Tool use results

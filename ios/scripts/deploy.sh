@@ -78,9 +78,7 @@ XCODEBUILD_ARGS=(
   -derivedDataPath "$DERIVED_DATA_PATH"
 )
 
-if [[ "$IS_SIMULATOR" == true ]]; then
-  XCODEBUILD_ARGS+=(CODE_SIGNING_ALLOWED=NO)
-else
+if [[ "$IS_SIMULATOR" == false ]]; then
   XCODEBUILD_ARGS+=(-allowProvisioningUpdates)
 fi
 

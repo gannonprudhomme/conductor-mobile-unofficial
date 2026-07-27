@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Dependencies
@@ -15,6 +16,29 @@ import Testing
 
 @MainActor
 struct ConductorSettingsTests {
+    @Test("A fresh launch does not access Keychain before Cloud is configured")
+    func freshLaunchDoesNotLoadCloudCredential() async {
+        let loadCount = LockIsolated(0)
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudCredentialClient.loadAPIKey = {
+                loadCount.withValue { $0 += 1 }
+                Issue.record("A fresh launch should not access Keychain")
+                return nil
+            }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(.task)
+
+            #expect(loadCount.value == 0)
+            #expect(store.state.alert == nil)
+        }
+    }
+
     @Test("Unsaved settings changes are detected")
     func unsavedChanges() {
         withDependencies {
@@ -326,6 +350,107 @@ struct ConductorSettingsTests {
                 ConductorSettings.State().storedDisplayConfiguration,
                 nil
             )
+        }
+    }
+
+    @Test("Cloud connection testing uses the draft key without saving it")
+    func testCloudConnection() async {
+        let testedKeys = LockIsolated<[String]>([])
+        let savedKeys = LockIsolated<[String]>([])
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.testConnection = { apiKey in
+                testedKeys.withValue { $0.append(apiKey) }
+                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .binding(.set(\.cloudAPIKey, "  synthetic-cloud-key  "))
+            ) {
+                $0.cloudAPIKey = "  synthetic-cloud-key  "
+            }
+            await store.send(.testCloudConnectionButtonTapped) {
+                $0.cloudAPIKey = "synthetic-cloud-key"
+                $0.cloudConnectionTestSource = .testButtonTapped
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudConnectionTestSource = nil
+                $0.isCloudConnectionTested = true
+            }
+
+            expectNoDifference(testedKeys.value, ["synthetic-cloud-key"])
+            #expect(savedKeys.value.isEmpty)
+            #expect(!store.state.isCloudCredentialConfigured)
+        }
+    }
+
+    @Test("Saving settings tests and stores both cloud and local connections")
+    func saveCloudCredentialAlongsideLocalPairing() async {
+        let checkedServerAddresses = LockIsolated<[String]>([])
+        let savedKeys = LockIsolated<[String]>([])
+        let isDismissed = LockIsolated(false)
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.testConnection = { _ in
+                CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+            $0.desktopClient.checkConnection = { serverAddress in
+                checkedServerAddresses.withValue { $0.append(serverAddress) }
+            }
+            $0.dismiss = DismissEffect {
+                isDismissed.setValue(true)
+            }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .binding(.set(\.initialServerAddress, "my-mac"))
+            ) {
+                $0.initialServerAddress = "my-mac"
+            }
+            await store.send(
+                .binding(.set(\.cloudAPIKey, "synthetic-cloud-key"))
+            ) {
+                $0.cloudAPIKey = "synthetic-cloud-key"
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudConnectionTestSource = .saveButtonTapped
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.isCloudConnectionTested = true
+                $0.$isCloudCredentialConfigured.withLock { $0 = true }
+                $0.$storedServerAddress.withLock { $0 = "my-mac" }
+            }
+            await store.receive(\.cloudSaveResult) {
+                $0.cloudConnectionTestSource = nil
+                $0.cloudAPIKey = ""
+                $0.connectionTestSource = .saveButtonTapped
+            }
+            await store.receive(\.connectionTestResult) {
+                $0.connectionTestSource = nil
+                $0.testedServerAddress = "my-mac"
+            }
+            await store.finish()
+
+            expectNoDifference(savedKeys.value, ["synthetic-cloud-key"])
+            expectNoDifference(checkedServerAddresses.value, ["my-mac"])
+            #expect(isDismissed.value)
+            #expect(store.state.isCloudCredentialConfigured)
+            expectNoDifference(store.state.storedServerAddress, "my-mac")
         }
     }
 }

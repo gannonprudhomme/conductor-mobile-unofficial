@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import LucideIcons
@@ -20,9 +21,14 @@ public struct CreateWorkspace: Sendable {
     @ObservableState
     public struct State: Equatable {
         @Presents public var alert: AlertState<Action.Alert>?
+        @Shared(.cloudCredentialConfigured)
+        public var isCloudCredentialConfigured
+
         public var agentType = Session.AgentType.codex
+        public let cloudProjects: [CloudProject]
         public var hasUserSelectedModel = false
         public var isCreateAPIInFlight = false
+        public var isCloudWorkspace = false
         public var isFastModeEnabled = false
         public let repositories: [Repository]
 
@@ -35,14 +41,62 @@ public struct CreateWorkspace: Sendable {
 
         public init(
             repositories: [Repository],
+            cloudProjects: [CloudProject] = [],
             selectedRepositoryIDFilter: Repository.ID? = nil
         ) {
             precondition(!repositories.isEmpty, "CreateWorkspace requires a repository")
             self.repositories = repositories
+            self.cloudProjects = cloudProjects
             self.selectedRepositoryID = repositories
                 .first { $0.id == selectedRepositoryIDFilter }?
                 .id
                 ?? repositories[0].id
+        }
+
+        var isCloudCreationAvailable: Bool {
+            isCloudCredentialConfigured && cloudCreationRequest != nil
+        }
+
+        var selectedRepository: Repository? {
+            repositories.first { $0.id == selectedRepositoryID }
+        }
+
+        var cloudCreationRequest: CloudCreateWorkspaceRequest? {
+            guard let repository = selectedRepository else {
+                return nil
+            }
+            if let repositoryRemote = repository.remoteURL.map(Self.normalizedGitRemote),
+               let project = cloudProjects.first(where: {
+                   Self.normalizedGitRemote($0.gitRemote) == repositoryRemote
+               }) {
+                return CloudCreateWorkspaceRequest(
+                    projectID: project.id,
+                    agent: agentType.rawValue,
+                    model: selectedModel.rawValue
+                )
+            }
+            guard let remote = repository.remoteURL,
+                  let remoteURL = URL(string: remote),
+                  remoteURL.scheme != nil
+            else {
+                return nil
+            }
+            return CloudCreateWorkspaceRequest(
+                repositoryURL: remoteURL,
+                agent: agentType.rawValue,
+                model: selectedModel.rawValue
+            )
+        }
+
+        private static func normalizedGitRemote(_ remote: String) -> String {
+            let normalized = remote
+                .lowercased()
+                .replacingOccurrences(of: "git@github.com:", with: "https://github.com/")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if normalized.hasSuffix(".git") {
+                return String(normalized.dropLast(4))
+            }
+            return normalized
         }
     }
 
@@ -51,6 +105,7 @@ public struct CreateWorkspace: Sendable {
         case alert(PresentationAction<Alert>)
         case binding(BindingAction<State>)
         case createButtonTapped
+        case createCloudWorkspaceSucceeded(CloudWorkspaceCreationResult)
         case createWorkspaceFailed(String)
         case createWorkspaceSucceeded(CreatedWorkspace, selectedModel: Session.Model)
         case defaultModelFetched(Session.Model)
@@ -59,11 +114,13 @@ public struct CreateWorkspace: Sendable {
         public enum Alert: Equatable {}
 
         public enum Delegate: Equatable {
+            case cloudWorkspaceCreated(CloudWorkspaceCreationResult)
             case workspaceCreated(WorkspaceCreationResult)
         }
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.uuid) var uuid
 
@@ -86,6 +143,36 @@ public struct CreateWorkspace: Sendable {
                 guard !state.isCreateAPIInFlight else {
                     return .none
                 }
+                if state.isCloudWorkspace {
+                    guard let request = state.cloudCreationRequest else {
+                        state.alert = .failedToCreateWorkspace(
+                            message: "The selected repository is not available to Conductor Cloud."
+                        )
+                        return .none
+                    }
+                    state.isCreateAPIInFlight = true
+                    return .run {
+                        [prompt = state.prompt, request] send in
+                        do {
+                            let response = try await cloudAPIClient.createWorkspace(
+                                request: request
+                            )
+                            await send(
+                                .createCloudWorkspaceSucceeded(
+                                    CloudWorkspaceCreationResult(
+                                        response: response,
+                                        initialPrompt: prompt.trimmingCharacters(
+                                            in: .whitespacesAndNewlines
+                                        )
+                                    )
+                                )
+                            )
+                        } catch {
+                            await send(.createWorkspaceFailed(error.localizedDescription))
+                        }
+                    }
+                }
+
                 let workspaceID = state.workspaceID ?? uuid().uuidString.lowercased()
                 state.isCreateAPIInFlight = true
                 state.workspaceID = workspaceID
@@ -144,6 +231,12 @@ public struct CreateWorkspace: Sendable {
                 }
                 return .none
 
+            case .binding(\.isCloudWorkspace):
+                if state.isCloudWorkspace {
+                    state.isFastModeEnabled = false
+                }
+                return .none
+
             case let .createWorkspaceFailed(message):
                 state.alert = .failedToCreateWorkspace(message: message)
                 state.isCreateAPIInFlight = false
@@ -168,6 +261,11 @@ public struct CreateWorkspace: Sendable {
                         )
                     )
                 )
+
+            case let .createCloudWorkspaceSucceeded(creation):
+                state.isCreateAPIInFlight = false
+                state.$prompt.withLock { $0 = "" }
+                return .send(.delegate(.cloudWorkspaceCreated(creation)))
 
             case let .defaultModelFetched(model):
                 guard !state.hasUserSelectedModel else {
@@ -200,6 +298,19 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
     ) {
         self.selectedModel = selectedModel
         self.workspace = workspace
+    }
+}
+
+public struct CloudWorkspaceCreationResult: Equatable, Sendable {
+    public let response: CloudCreateWorkspaceResponse
+    public let initialPrompt: String
+
+    public init(
+        response: CloudCreateWorkspaceResponse,
+        initialPrompt: String
+    ) {
+        self.response = response
+        self.initialPrompt = initialPrompt
     }
 }
 
@@ -258,9 +369,34 @@ public struct CreateWorkspaceView: View {
             .opacity(0)
             .accessibilityHidden(true)
             .overlay {
-                repositoryMenu
-                    .labelStyle(.titleAndIcon)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 12) {
+                    repositoryMenu
+                        .labelStyle(.titleAndIcon)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if store.isCloudCredentialConfigured {
+                        Toggle(isOn: $store.isCloudWorkspace) {
+                            HStack(spacing: 5) {
+                                CloudWorkspaceIcon(size: 16)
+
+                                Text("Cloud")
+                            }
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textPrimary))
+                        }
+                        .fixedSize()
+                        .tint(.theme(.accent))
+                        .disabled(
+                            store.isCreateAPIInFlight
+                                || (!store.isCloudWorkspace && !store.isCloudCreationAvailable)
+                        )
+                        .accessibilityHint(
+                            store.isCloudCreationAvailable
+                                ? "Creates this workspace in Conductor Cloud"
+                                : "The selected repository is unavailable in Conductor Cloud"
+                        )
+                    }
+                }
             }
     }
 
@@ -321,6 +457,7 @@ public struct CreateWorkspaceView: View {
                 agentType: store.agentType,
                 allowsAgentSwitching: true,
                 isFastModeEnabled: store.isFastModeEnabled,
+                isFastModeButtonDisabled: store.isCloudWorkspace,
                 selectedModel: store.selectedModel,
                 onFastModeTapped: { store.isFastModeEnabled.toggle() },
                 onSelectModel: { store.selectedModel = $0 }

@@ -18,6 +18,7 @@ struct ChatTextField: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
     let isFastModeEnabled: Bool
+    let isFastModeButtonDisabled: Bool
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
@@ -31,6 +32,7 @@ struct ChatTextField: View {
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool,
         isFastModeEnabled: Bool,
+        isFastModeButtonDisabled: Bool = false,
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
@@ -44,6 +46,7 @@ struct ChatTextField: View {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
         self.isFastModeEnabled = isFastModeEnabled
+        self.isFastModeButtonDisabled = isFastModeButtonDisabled
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
@@ -98,7 +101,7 @@ struct ChatTextField: View {
                 agentType: agentType,
                 allowsAgentSwitching: allowsAgentSwitching,
                 isFastModeEnabled: isFastModeEnabled,
-                isFastModeButtonDisabled: isAnyActionInFlight,
+                isFastModeButtonDisabled: isFastModeButtonDisabled || isAnyActionInFlight,
                 selectedModel: selectedModel,
                 onFastModeTapped: onFastModeTapped,
                 onSelectModel: { selectedModel = $0 }

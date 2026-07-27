@@ -980,7 +980,7 @@ public struct WorkspaceChatView: View {
         (store.workspace.unread ?? 0) > 0
     }
 
-    private struct SessionPicker: View {
+    struct SessionPicker: View {
         let sessions: [Session]
         let selectedSessionID: Session.ID?
         let isCreatingSession: Bool
@@ -1141,10 +1141,13 @@ public struct WorkspaceChatView: View {
                 continuation.yield(content.sessions)
             }
         }
-        $0.desktopClient.observeMessages = { _, sessionID in
+        $0.desktopClient.observeMessages = { _, sessionID, _ in
             AsyncThrowingStream { continuation in
                 continuation.yield(
-                    content.messages.filter { $0.sessionID == sessionID }
+                    MessageSyncResponse(
+                        messages: content.messages.filter { $0.sessionID == sessionID },
+                        deletedMessageIDs: []
+                    )
                 )
             }
         }

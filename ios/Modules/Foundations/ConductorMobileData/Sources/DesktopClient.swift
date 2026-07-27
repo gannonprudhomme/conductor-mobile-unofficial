@@ -26,7 +26,11 @@ public struct DesktopClient: Sendable {
     public var fetchDefaultModel: @Sendable () async throws -> Session.Model = {
         throw CancellationError()
     }
-    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<[Message], any Error> = { _, _ in
+    public var observeMessages: @Sendable (
+        _ workspaceID: String,
+        _ sessionID: String,
+        _ request: MessageSyncRequest
+    ) -> AsyncThrowingStream<MessageSyncResponse, any Error> = { _, _, _ in
         AsyncThrowingStream { $0.finish() }
     }
     public var observeSessions: @Sendable (_ workspaceID: String) -> AsyncThrowingStream<[Session], any Error> = { _ in
@@ -197,12 +201,16 @@ extension DesktopClient: DependencyKey {
         } fetchDefaultModel: {
             let settings = try await get(SettingsResponse.self, from: settingsURL())
             return Session.Model(rawValue: settings.defaultModel)
-        } observeMessages: { workspaceID, sessionID in
+        } observeMessages: { workspaceID, sessionID, request in
             // Messages are the only unbounded observation: frames after the initial snapshot
             // contain incremental changes, so dropping one could permanently miss an update.
             // Workspace and session frames are complete snapshots and can safely keep only the
             // newest pending value.
-            observe([Message].self, bufferingPolicy: .unbounded) { serverAddress in
+            observe(
+                MessageSyncResponse.self,
+                sending: request,
+                bufferingPolicy: .unbounded
+            ) { serverAddress in
                 messagesWebSocketURL(
                     serverAddress: serverAddress,
                     workspaceID: workspaceID,

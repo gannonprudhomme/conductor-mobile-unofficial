@@ -6,11 +6,12 @@
 //
 
 import ComposableArchitecture
-import SharedConductorData
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Dependencies
 import Foundation
+import SharedConductorData
 import Sharing
 import SQLiteData
 @testable import ConductorWorkspaces
@@ -143,6 +144,82 @@ struct WorkspacesTests {
             },
             ["First", "Second", "missing-repo"]
         )
+    }
+
+    @Test("Cloud API workspaces replace matching companion rows")
+    func cloudAPIWorkspacesReplaceCompanionRows() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let repository = Repository.preview(
+                id: "repository",
+                name: "Conductor",
+                remoteURL: "https://github.com/example/conductor.git"
+            )
+            let companionItem = workspace(
+                id: "cloud-workspace",
+                repository: repository
+            )
+            var state = Workspaces.State()
+            state.sections = Workspaces.State.sections(
+                groupedBy: state.grouping,
+                workspaces: [companionItem]
+            )
+            let project = CloudProject(
+                id: "project",
+                name: repository.displayName,
+                gitRemote: try #require(repository.remoteURL)
+            )
+            let cloudWorkspace = CloudWorkspace(
+                id: companionItem.id,
+                name: "Cloud workspace",
+                createdAt: .now,
+                deepLink: try #require(URL(string: "conductor://cloud-workspace"))
+            )
+            let cloudItem = CloudProjectWorkspace(
+                project: project,
+                workspace: cloudWorkspace
+            )
+            let status = CloudWorkspaceStatusResponse(
+                workspaceID: cloudWorkspace.id,
+                status: .ready,
+                updatedAt: Date(timeIntervalSince1970: 1)
+            )
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            } withDependencies: {
+                $0.cloudAPIClient.workspaceStatus = { workspaceID in
+                    #expect(workspaceID == cloudWorkspace.id)
+                    return status
+                }
+            }
+
+            await store.send(
+                .cloudCatalog(
+                    .response(
+                        .success(
+                            CloudWorkspaceCatalog.Snapshot(
+                                projects: [project],
+                                workspaces: [cloudItem]
+                            )
+                        )
+                    )
+                )
+            ) {
+                $0.cloudCatalog.projects = [project]
+                $0.cloudCatalog.workspaces = [cloudItem]
+                $0.sections = Workspaces.State.sections(
+                    groupedBy: $0.grouping,
+                    workspaces: []
+                )
+            }
+            await store.receive(\.cloudCatalog.statusResponse) {
+                $0.cloudCatalog.statuses[cloudWorkspace.id] = status
+            }
+
+            expectNoDifference(store.state.visibleCloudWorkspaces, [cloudItem])
+        }
     }
 
     @Test("Grouping changes update sections through the reducer")
@@ -501,6 +578,70 @@ struct WorkspacesTests {
             await task.cancel()
             #expect(secondConnectionCancelled.value)
         }
+    }
+
+    @Test("A full desktop snapshot removes stale rows from the phone mirror")
+    func workspaceSnapshotReconciliation() async throws {
+        let database = try appDatabase()
+        let repository = Repository.preview(id: "repository")
+        let currentWorkspace = Workspace.preview(
+            id: "current",
+            repositoryID: repository.id
+        )
+        let staleWorkspace = Workspace.preview(
+            id: "stale",
+            repositoryID: repository.id
+        )
+        try await database.write { db in
+            try Repository.insert { repository }.execute(db)
+            try Workspace.insert { [currentWorkspace, staleWorkspace] }.execute(db)
+            try MobileWorkspaceState.insert {
+                [
+                    MobileWorkspaceState(
+                        workspaceID: currentWorkspace.id,
+                        isWorking: false
+                    ),
+                    MobileWorkspaceState(
+                        workspaceID: staleWorkspace.id,
+                        isWorking: false
+                    ),
+                ]
+            }
+            .execute(db)
+        }
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            try await Workspaces().reconcileWorkspaceSnapshot(
+                WorkspaceListSnapshot(
+                    repositories: [repository],
+                    workspaces: [
+                        WorkspaceSnapshot(
+                            workspace: currentWorkspace,
+                            isWorking: true
+                        ),
+                    ]
+                )
+            )
+        }
+
+        let storedCurrentWorkspace = try await database.read {
+            try Workspace.find(currentWorkspace.id).fetchOne($0)
+        }
+        let storedStaleWorkspace = try await database.read {
+            try Workspace.find(staleWorkspace.id).fetchOne($0)
+        }
+        let staleMobileState = try await database.read {
+            try MobileWorkspaceState.find(staleWorkspace.id).fetchOne($0)
+        }
+        let currentMobileState = try await database.read {
+            try MobileWorkspaceState.find(currentWorkspace.id).fetchOne($0)
+        }
+        expectNoDifference(storedCurrentWorkspace, currentWorkspace)
+        expectNoDifference(storedStaleWorkspace, nil)
+        expectNoDifference(staleMobileState, nil)
+        #expect(currentMobileState?.isWorking == true)
     }
 
     @Test("Task pings the desktop immediately and every three seconds")

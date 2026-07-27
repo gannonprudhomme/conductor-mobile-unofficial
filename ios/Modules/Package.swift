@@ -14,6 +14,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ConductorChat", targets: ["ConductorChat"]),
+        .library(name: "ConductorCloud", targets: ["ConductorCloud"]),
         .library(name: "ConductorDesign", targets: ["ConductorDesign"]),
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
         .library(name: "ConductorMobileData", targets: ["ConductorMobileData"]),
@@ -35,6 +36,19 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-syntax", exact: "603.0.2"),
     ],
     targets: [
+        .target(
+            name: "ConductorCloud",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "Dependencies", package: "swift-dependencies"),
+                .product(name: "DependenciesMacros", package: "swift-dependencies"),
+                .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                .product(name: "Sharing", package: "swift-sharing"),
+                "ConductorDesign",
+            ],
+            path: "ConductorCloud/Sources",
+            swiftSettings: swiftSettings
+        ),
         .target(
             name: "ConductorMobileData",
             dependencies: [
@@ -60,6 +74,7 @@ let package = Package(
                 .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                "ConductorCloud",
                 "ConductorMobileData",
                 "ConductorDesign",
             ],
@@ -87,6 +102,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 .product(name: "Sharing", package: "swift-sharing"),
+                "ConductorCloud",
                 "ConductorDesign",
                 "ConductorMobileData",
             ],
@@ -102,6 +118,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Sharing", package: "swift-sharing"),
                 .product(name: "SQLiteData", package: "sqlite-data"),
+                "ConductorCloud",
                 "ConductorMobileData",
                 "ConductorDesign",
             ],
@@ -113,6 +130,8 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "ConductorChat",
+                "ConductorCloud",
+                "ConductorMobileData",
                 "ConductorSettings",
                 "ConductorWorkspaces",
             ],

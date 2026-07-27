@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Foundation
@@ -140,6 +141,67 @@ struct CreateWorkspaceTests {
                 try Message.find(sentMessage.id).fetchOne(database)
             }
             expectNoDifference(message, sentMessage)
+        }
+    }
+
+    @Test("Cloud creation uses the matching project and keeps the prompt for cloud chat")
+    func createCloudWorkspace() async throws {
+        let remoteURL = "https://example.test/mobile.git"
+        let repository = Repository.preview(remoteURL: remoteURL)
+        let project = CloudProject(
+            id: "project-1",
+            name: "Mobile",
+            gitRemote: remoteURL
+        )
+        let deepLink = try #require(URL(string: "conductor://workspace/cloud-workspace"))
+        let response = CloudCreateWorkspaceResponse(
+            workspaceID: "cloud-workspace",
+            sessionID: "cloud-session",
+            deepLink: deepLink
+        )
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let state = CreateWorkspace.State(
+                repositories: [repository],
+                cloudProjects: [project]
+            )
+            state.$isCloudCredentialConfigured.withLock { $0 = true }
+            state.$prompt.withLock { $0 = "  Run the cloud tests.  " }
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.cloudAPIClient.createWorkspace = { request in
+                    #expect(
+                        request == CloudCreateWorkspaceRequest(
+                            projectID: project.id,
+                            agent: "codex",
+                            model: "gpt-5.6-sol"
+                        )
+                    )
+                    return response
+                }
+            }
+
+            await store.send(.binding(.set(\.isCloudWorkspace, true))) {
+                $0.isCloudWorkspace = true
+            }
+            await store.send(.createButtonTapped) {
+                $0.isCreateAPIInFlight = true
+            }
+            let creation = CloudWorkspaceCreationResult(
+                response: response,
+                initialPrompt: "Run the cloud tests."
+            )
+            await store.receive(\.createCloudWorkspaceSucceeded) {
+                $0.$prompt.withLock { $0 = "" }
+                $0.isCreateAPIInFlight = false
+            }
+            await store.receive(
+                \.delegate,
+                .cloudWorkspaceCreated(creation)
+            )
         }
     }
 

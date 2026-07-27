@@ -55,6 +55,43 @@ extension DesktopClient {
         >.Continuation.BufferingPolicy = .bufferingNewest(1),
         at makeURL: @escaping @Sendable (String) -> URL?
     ) -> AsyncThrowingStream<Value, any Error> {
+        observe(
+            type,
+            bufferingPolicy: bufferingPolicy,
+            makeInitialMessage: { nil },
+            at: makeURL
+        )
+    }
+
+    static func observe<Value, Request>(
+        _ type: Value.Type,
+        sending request: Request,
+        bufferingPolicy: AsyncThrowingStream<
+            Value,
+            any Error
+        >.Continuation.BufferingPolicy = .bufferingNewest(1),
+        at makeURL: @escaping @Sendable (String) -> URL?
+    ) -> AsyncThrowingStream<Value, any Error>
+    where Value: Decodable & Sendable, Request: Encodable & Sendable {
+        observe(
+            type,
+            bufferingPolicy: bufferingPolicy,
+            makeInitialMessage: {
+                .data(try JSONEncoder.conductor.encode(request))
+            },
+            at: makeURL
+        )
+    }
+
+    private static func observe<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        bufferingPolicy: AsyncThrowingStream<
+            Value,
+            any Error
+        >.Continuation.BufferingPolicy,
+        makeInitialMessage: @escaping @Sendable () throws -> URLSessionWebSocketTask.Message?,
+        at makeURL: @escaping @Sendable (String) -> URL?
+    ) -> AsyncThrowingStream<Value, any Error> {
         @Dependency(\.urlSession) var urlSession
         @Shared(.desktopServerAddress) var desktopServerAddress
 
@@ -77,8 +114,10 @@ extension DesktopClient {
                 return webSocketStream(
                     type,
                     bufferingPolicy: bufferingPolicy,
+                    makeInitialMessage: makeInitialMessage,
                     using: WebSocketTaskClient(
-                        urlSession.webSocketTask(with: url)
+                        url: url,
+                        configuration: urlSession.configuration
                     )
                 )
             }
@@ -119,6 +158,43 @@ extension DesktopClient {
         >.Continuation.BufferingPolicy = .bufferingNewest(1),
         using task: WebSocketTaskClient
     ) -> AsyncThrowingStream<Value, any Error> {
+        webSocketStream(
+            type,
+            bufferingPolicy: bufferingPolicy,
+            makeInitialMessage: { nil },
+            using: task
+        )
+    }
+
+    static func webSocketStream<Value, Request>(
+        _ type: Value.Type,
+        sending request: Request,
+        bufferingPolicy: AsyncThrowingStream<
+            Value,
+            any Error
+        >.Continuation.BufferingPolicy = .bufferingNewest(1),
+        using task: WebSocketTaskClient
+    ) -> AsyncThrowingStream<Value, any Error>
+    where Value: Decodable & Sendable, Request: Encodable & Sendable {
+        webSocketStream(
+            type,
+            bufferingPolicy: bufferingPolicy,
+            makeInitialMessage: {
+                .data(try JSONEncoder.conductor.encode(request))
+            },
+            using: task
+        )
+    }
+
+    private static func webSocketStream<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        bufferingPolicy: AsyncThrowingStream<
+            Value,
+            any Error
+        >.Continuation.BufferingPolicy,
+        makeInitialMessage: @escaping @Sendable () throws -> URLSessionWebSocketTask.Message?,
+        using task: WebSocketTaskClient
+    ) -> AsyncThrowingStream<Value, any Error> {
         @Shared(.desktopConnectionStatus) var connectionStatus
         let sharedConnectionStatus = $connectionStatus
 
@@ -129,7 +205,6 @@ extension DesktopClient {
         }
 
         return AsyncThrowingStream(bufferingPolicy: bufferingPolicy) { continuation in
-            task.resume()
             let producer = Task {
                 // A producer can fail before its termination handler is installed. In that case,
                 // `finish` does not invoke the handler later, so the producer closes the socket.
@@ -140,6 +215,12 @@ extension DesktopClient {
                 }
 
                 do {
+                    try await task.resume()
+
+                    if let initialMessage = try makeInitialMessage() {
+                        try await task.send(initialMessage)
+                    }
+
                     while !Task.isCancelled {
                         let message = try await task.receive()
                         guard !Task.isCancelled else {
@@ -177,7 +258,8 @@ extension DesktopClient {
     struct WebSocketTaskClient: Sendable {
         fileprivate var cancel: @Sendable () -> Void
         fileprivate var receive: @Sendable () async throws -> URLSessionWebSocketTask.Message
-        fileprivate var resume: @Sendable () -> Void
+        fileprivate var resume: @Sendable () async throws -> Void
+        fileprivate var send: @Sendable (URLSessionWebSocketTask.Message) async throws -> Void
 
         init(_ task: URLSessionWebSocketTask) {
             task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
@@ -190,16 +272,86 @@ extension DesktopClient {
             self.resume = {
                 task.resume()
             }
+            self.send = { message in
+                try await task.send(message)
+            }
+        }
+
+        init(url: URL, configuration: URLSessionConfiguration) {
+            let delegate = WebSocketConnectionDelegate()
+            let session = URLSession(
+                configuration: configuration,
+                delegate: delegate,
+                delegateQueue: nil
+            )
+            let task = session.webSocketTask(with: url)
+            task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
+            self.cancel = {
+                task.cancel(with: .goingAway, reason: nil)
+                session.invalidateAndCancel()
+            }
+            self.receive = {
+                try await task.receive()
+            }
+            self.resume = {
+                task.resume()
+                try await delegate.waitUntilOpen()
+            }
+            self.send = { message in
+                try await task.send(message)
+            }
         }
 
         init( // only exists for tests
             cancel: @escaping @Sendable () -> Void,
             receive: @escaping @Sendable () async throws -> URLSessionWebSocketTask.Message,
-            resume: @escaping @Sendable () -> Void
+            resume: @escaping @Sendable () async throws -> Void,
+            send: @escaping @Sendable (
+                URLSessionWebSocketTask.Message
+            ) async throws -> Void = { _ in }
         ) {
             self.cancel = cancel
             self.receive = receive
             self.resume = resume
+            self.send = send
+        }
+    }
+}
+
+private final class WebSocketConnectionDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    private let openEvents: AsyncThrowingStream<Void, any Error>
+    private let openEventsContinuation: AsyncThrowingStream<Void, any Error>.Continuation
+
+    override init() {
+        (openEvents, openEventsContinuation) = AsyncThrowingStream.makeStream()
+        super.init()
+    }
+
+    func waitUntilOpen() async throws {
+        for try await _ in openEvents {
+            return
+        }
+        throw CancellationError()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        openEventsContinuation.yield()
+        openEventsContinuation.finish()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: (any Error)?
+    ) {
+        if let error {
+            openEventsContinuation.finish(throwing: error)
+        } else {
+            openEventsContinuation.finish()
         }
     }
 }

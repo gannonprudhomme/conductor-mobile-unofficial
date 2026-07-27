@@ -7,10 +7,11 @@
 
 import Combine
 import ComposableArchitecture
-import ConductorSettings
-import SharedConductorData
+import ConductorCloud
 import ConductorMobileData
+import ConductorSettings
 import ConductorWorkspaces
+import SharedConductorData
 import Sharing
 import SQLiteData
 import SwiftUI
@@ -71,6 +72,125 @@ struct MainTests {
                 $0.path.append(
                     .workspaceChat(
                         WorkspaceChat.State(workspaceWithRepository: item)
+                    )
+                )
+            }
+        }
+    }
+
+    @Test("A cloud-badged desktop workspace uses the cloud chat backend")
+    func localCloudWorkspaceSelectionUsesCloud() async throws {
+        let workspace = Workspace.preview(
+            activeSessionID: "cloud-session",
+            branch: "cloud-workspace",
+            hostingServerURL: "https://hosting.example.test"
+        )
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: .preview()
+        )
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+
+            await store.send(.workspaces(.workspaceTapped(item))) {
+                $0.path.append(
+                    .cloudWorkspace(
+                        CloudWorkspaceFeature.State(
+                            workspaceID: item.id,
+                            fallbackTitle: item.workspace.displayName
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    @Test("The Cloud API path wins when both backends know a workspace")
+    func catalogWorkspaceSelectionUsesCloud() async throws {
+        let workspace = Workspace.preview(
+            activeSessionID: "cloud-session",
+            branch: "cloud-workspace"
+        )
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: .preview()
+        )
+        let cloudWorkspace = CloudWorkspace(
+            id: workspace.id,
+            name: workspace.displayName,
+            createdAt: .now,
+            deepLink: try #require(URL(string: "conductor://cloud-workspace"))
+        )
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            var initialState = Main.State()
+            initialState.workspaces.cloudCatalog.workspaces = [
+                CloudProjectWorkspace(
+                    project: CloudProject(
+                        id: "project",
+                        name: "Project",
+                        gitRemote: "https://example.test/repository.git"
+                    ),
+                    workspace: cloudWorkspace
+                )
+            ]
+            let store = TestStore(initialState: initialState) {
+                Main()
+            }
+
+            await store.send(.workspaces(.workspaceTapped(item))) {
+                $0.path.append(
+                    .cloudWorkspace(
+                        CloudWorkspaceFeature.State(
+                            workspaceID: cloudWorkspace.id,
+                            fallbackTitle: cloudWorkspace.name
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    @Test("An API-only cloud workspace uses the cloud backend")
+    func cloudCatalogWorkspaceSelectionUsesCloud() async throws {
+        let item = CloudProjectWorkspace(
+            project: CloudProject(
+                id: "project",
+                name: "Project",
+                gitRemote: "https://example.test/repository.git"
+            ),
+            workspace: CloudWorkspace(
+                id: "cloud-workspace",
+                name: "API-only workspace",
+                createdAt: .now,
+                deepLink: try #require(URL(string: "conductor://cloud-workspace"))
+            )
+        )
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+
+            await store.send(.workspaces(.cloudCatalog(.workspaceTapped(item)))) {
+                $0.path.append(
+                    .cloudWorkspace(
+                        CloudWorkspaceFeature.State(
+                            workspaceID: item.id,
+                            fallbackTitle: item.workspace.name
+                        )
                     )
                 )
             }
@@ -168,7 +288,7 @@ struct MainTests {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
             $0.defaultInMemoryStorage = InMemoryStorage()
-            $0.desktopClient.observeMessages = { _, _ in
+            $0.desktopClient.observeMessages = { _, _, _ in
                 AsyncThrowingStream { $0.finish() }
             }
             $0.desktopClient.observeSessions = { _ in
@@ -260,14 +380,14 @@ struct MainTests {
             any Error
         >.makeStream()
         let (messages, messagesContinuation) = AsyncThrowingStream<
-            [Message],
+            MessageSyncResponse,
             any Error
         >.makeStream()
         let workspaceConnectionCount = LockIsolated(0)
 
         try await withDependencies {
             $0.defaultDatabase = database
-            $0.desktopClient.observeMessages = { workspaceID, _ in
+            $0.desktopClient.observeMessages = { workspaceID, _, _ in
                 #expect(workspaceID == cachedWorkspace.id)
                 return messages
             }

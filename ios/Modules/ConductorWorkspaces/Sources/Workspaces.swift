@@ -7,12 +7,13 @@
 
 import Combine
 import ComposableArchitecture
-import SharedConductorData
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
 import Logging
+import SharedConductorData
 import Sharing
 import SQLiteData
 import SwiftUI
@@ -22,6 +23,7 @@ public struct Workspaces: Sendable {
     @ObservableState
     public struct State: Equatable {
         @Presents public var destination: Destination.State?
+        public var cloudCatalog = CloudWorkspaceCatalog.State()
 
         @Shared(.desktopConnectionStatus)
         public var connectionStatus
@@ -49,6 +51,7 @@ public struct Workspaces: Sendable {
         public var sort
 
         var deferredWorkspaces: [WorkspaceWithRepository]?
+        var pendingCloudWorkspaceCreation: CloudWorkspaceCreationResult?
         var pendingWorkspaceCreation: WorkspaceCreationResult?
 
         @FetchAll(
@@ -61,7 +64,31 @@ public struct Workspaces: Sendable {
         var sections: [WorkspaceSection] = []
 
         var hasVisibleWorkspaces: Bool {
-            sections.contains { !$0.items.isEmpty }
+            sections.contains { !$0.items.isEmpty } || !visibleCloudWorkspaces.isEmpty
+        }
+
+        var visibleCloudWorkspaces: [CloudProjectWorkspace] {
+            let selectedRemote = selectedRepositoryID
+                .flatMap { selectedID in
+                    repositories.first { $0.id == selectedID }?.remoteURL
+                }
+                .map(Self.normalizedGitRemote)
+
+            return cloudCatalog.workspaces.filter { item in
+                guard let selectedRemote else {
+                    return true
+                }
+                return Self.normalizedGitRemote(item.project.gitRemote) == selectedRemote
+            }
+        }
+
+        var cloudWorkspaceRepositories: [String: Repository] {
+            cloudCatalog.workspaces.reduce(into: [:]) { result, item in
+                let remote = Self.normalizedGitRemote(item.project.gitRemote)
+                result[item.id] = repositories.first {
+                    $0.remoteURL.map(Self.normalizedGitRemote) == remote
+                }
+            }
         }
 
         public init() {
@@ -73,7 +100,31 @@ public struct Workspaces: Sendable {
                 ),
                 animation: .default
             )
-            sections = Self.sections(groupedBy: grouping, workspaces: workspaces)
+            updateSections(from: workspaces)
+        }
+
+        private static func normalizedGitRemote(_ remote: String) -> String {
+            let normalized = remote
+                .lowercased()
+                .replacingOccurrences(of: "git@github.com:", with: "https://github.com/")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if normalized.hasSuffix(".git") {
+                return String(normalized.dropLast(4))
+            }
+            return normalized
+        }
+
+        mutating func updateSections(
+            from workspaces: [WorkspaceWithRepository],
+            groupedBy grouping: WorkspaceWithRepository.Grouping? = nil
+        ) {
+            let cloudWorkspaceIDs = Set(cloudCatalog.workspaces.map(\.id))
+            sections = Self.sections(
+                groupedBy: grouping ?? self.grouping,
+                workspaces: workspaces.filter {
+                    !cloudWorkspaceIDs.contains($0.id)
+                }
+            )
         }
 
         static func sections(
@@ -181,6 +232,8 @@ public struct Workspaces: Sendable {
     }
 
     public enum Action {
+        case cloudCatalog(CloudWorkspaceCatalog.Action)
+        case cloudWorkspaceCreated(CloudWorkspaceCreationResult)
         case createButtonTapped
         case createWorkspaceSheetDismissed
         case destination(PresentationAction<Destination.Action>)
@@ -213,14 +266,26 @@ public struct Workspaces: Sendable {
     }
 
     public var body: some ReducerOf<Self> {
+        Scope(state: \.cloudCatalog, action: \.cloudCatalog) {
+            CloudWorkspaceCatalog()
+        }
+
         Reduce { state, action in
             switch action {
             case .task:
+                let cloudCredentialConfiguration =
+                    state.cloudCatalog.$isCloudCredentialConfigured
                 let grouping = state.$grouping
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
                 return .merge(
+                    .publisher {
+                        cloudCredentialConfiguration.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map { _ in Action.cloudCatalog(.task) }
+                    },
                     .publisher {
                         grouping.publisher
                             .removeDuplicates()
@@ -233,14 +298,17 @@ public struct Workspaces: Sendable {
                             .dropFirst()
                             .map(Action.workspacesChanged)
                     },
+                    state.cloudCatalog.isCloudCredentialConfigured
+                        ? .send(.cloudCatalog(.task))
+                        : .none,
                     monitorConnection(),
                     observeWorkspaces(state)
                 )
 
             case let .groupingChanged(grouping):
-                state.sections = State.sections(
-                    groupedBy: grouping,
-                    workspaces: state.workspaces
+                state.updateSections(
+                    from: state.workspaces,
+                    groupedBy: grouping
                 )
                 return reloadWorkspaces(state)
 
@@ -252,17 +320,24 @@ public struct Workspaces: Sendable {
                 state.destination = .createWorkspace(
                     CreateWorkspace.State(
                         repositories: state.repositories,
+                        cloudProjects: state.cloudCatalog.projects,
                         selectedRepositoryIDFilter: state.selectedRepositoryID
                     )
                 )
                 return .none
 
             case .createWorkspaceSheetDismissed:
-                state.sections = State.sections(
-                    groupedBy: state.grouping,
-                    workspaces: state.deferredWorkspaces ?? state.workspaces
+                state.updateSections(
+                    from: state.deferredWorkspaces ?? state.workspaces
                 )
                 state.deferredWorkspaces = nil
+                if let creation = state.pendingCloudWorkspaceCreation {
+                    state.pendingCloudWorkspaceCreation = nil
+                    return .run { send in
+                        try await clock.sleep(for: .milliseconds(250))
+                        await send(.cloudWorkspaceCreated(creation))
+                    }
+                }
                 guard let creation = state.pendingWorkspaceCreation else {
                     return .none
                 }
@@ -271,6 +346,13 @@ public struct Workspaces: Sendable {
                     try await clock.sleep(for: .milliseconds(250))
                     await send(.workspaceCreated(creation))
                 }
+
+            case let .destination(
+                .presented(.createWorkspace(.delegate(.cloudWorkspaceCreated(creation))))
+            ):
+                state.destination = nil
+                state.pendingCloudWorkspaceCreation = creation
+                return .none
 
             case let .destination(
                 .presented(.createWorkspace(.delegate(.workspaceCreated(creation))))
@@ -305,14 +387,16 @@ public struct Workspaces: Sendable {
 
             case let .workspacesChanged(workspaces):
                 guard state.destination?.createWorkspace == nil,
+                      state.pendingCloudWorkspaceCreation == nil,
                       state.pendingWorkspaceCreation == nil else {
                     state.deferredWorkspaces = workspaces
                     return .none
                 }
-                state.sections = State.sections(
-                    groupedBy: state.grouping,
-                    workspaces: workspaces
-                )
+                state.updateSections(from: workspaces)
+                return .none
+
+            case .cloudCatalog(.response), .cloudCatalog(.task):
+                state.updateSections(from: state.workspaces)
                 return .none
 
             case let .workspaceArchiveButtonTapped(item):
@@ -434,7 +518,12 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .destination, .settingsButtonTapped, .workspaceCreated, .workspaceTapped:
+            case .cloudCatalog,
+                 .cloudWorkspaceCreated,
+                 .destination,
+                 .settingsButtonTapped,
+                 .workspaceCreated,
+                 .workspaceTapped:
                 return .none
             }
         }
@@ -499,25 +588,7 @@ public struct Workspaces: Sendable {
             await WebSocketHelpers.observe {
                 desktopClient.observeWorkspaces()
             } onValue: { snapshot in
-                try await database.write { db in
-                    try Repository
-                        .upsert { snapshot.repositories }
-                        .execute(db)
-                    try Workspace
-                        .upsert { snapshot.workspaces.map(\.workspace) }
-                        .execute(db)
-
-                    try MobileWorkspaceState.upsert {
-                        snapshot.workspaces.map {
-                            MobileWorkspaceState(
-                                workspaceID: $0.workspace.id,
-                                isWorking: $0.isWorking,
-                                pullRequest: snapshot.pullRequests[$0.workspace.id]
-                            )
-                        }
-                    }
-                    .execute(db)
-                }
+                try await reconcileWorkspaceSnapshot(snapshot)
 
                 if isAwaitingInitialResponse {
                     isAwaitingInitialResponse = false
@@ -527,6 +598,35 @@ public struct Workspaces: Sendable {
                 Logger.workspace.error("Failed to observe workspaces: \(error)")
                 await send(.loadWorkspacesFailed(error))
             }
+        }
+    }
+
+    @concurrent func reconcileWorkspaceSnapshot( // only non-private for tests
+        _ snapshot: WorkspaceListSnapshot
+    ) async throws {
+        let workspaceIDs = snapshot.workspaces.map(\.workspace.id)
+        try await database.write { db in
+            try Workspace
+                .where { $0.id.notIn(workspaceIDs) }
+                .delete()
+                .execute(db)
+            try Repository
+                .upsert { snapshot.repositories }
+                .execute(db)
+            try Workspace
+                .upsert { snapshot.workspaces.map(\.workspace) }
+                .execute(db)
+
+            try MobileWorkspaceState.upsert {
+                snapshot.workspaces.map {
+                    MobileWorkspaceState(
+                        workspaceID: $0.workspace.id,
+                        isWorking: $0.isWorking,
+                        pullRequest: snapshot.pullRequests[$0.workspace.id]
+                    )
+                }
+            }
+            .execute(db)
         }
     }
 
@@ -613,17 +713,33 @@ public struct WorkspacesView: View {
                     }
                 }
             }
+
+            if store.cloudCatalog.isCloudCredentialConfigured,
+               (
+                   store.cloudCatalog.isLoading
+                       || store.cloudCatalog.errorMessage != nil
+                       || !store.visibleCloudWorkspaces.isEmpty
+               ) {
+                CloudCatalogSection(
+                    catalog: store.scope(state: \.cloudCatalog, action: \.cloudCatalog),
+                    workspaces: store.visibleCloudWorkspaces,
+                    repositories: store.cloudWorkspaceRepositories,
+                    showsRepositoryIcon: store.grouping == .status
+                        && store.selectedRepositoryID == nil
+                )
+            }
         }
         .contentMargins(.top, 0)
         .listStyle(.plain)
         .animation(.default, value: store.sections)
+        .animation(.default, value: store.cloudCatalog.workspaces)
         .listSectionSpacing(0)
         .environment(\.defaultMinListRowHeight, 44)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .overlay {
-            if store.isLoadingWorkspaces {
+            if store.isLoadingWorkspaces && store.cloudCatalog.workspaces.isEmpty {
                 ProgressView()
                     .progressViewStyle(.network)
                     .tint(.theme(.textSecondary))
@@ -634,7 +750,11 @@ public struct WorkspacesView: View {
                 ContentUnavailableView(
                     "No Workspaces",
                     systemImage: "rectangle.stack",
-                    description: Text("Pair with Conductor on your Mac to see workspaces here.")
+                    description: Text(
+                        store.cloudCatalog.isCloudCredentialConfigured
+                            ? "Create a local or cloud workspace to see it here."
+                            : "Pair with Conductor on your Mac to see workspaces here."
+                    )
                 )
                 .foregroundStyle(.theme(.textPrimary))
                 .font(.theme(.body))
@@ -698,9 +818,75 @@ public struct WorkspacesView: View {
             }
             .matchedTransitionSource(id: "new-workspace", in: namespace)
         }
+        .refreshable {
+            await store.send(.cloudCatalog(.refresh)).finish()
+        }
         .background(.theme(.background))
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .preferredColorScheme(.dark)
+    }
+
+    private struct CloudCatalogSection: View {
+        let catalog: StoreOf<CloudWorkspaceCatalog>
+        let workspaces: [CloudProjectWorkspace]
+        let repositories: [String: Repository]
+        let showsRepositoryIcon: Bool
+
+        var body: some View {
+            Section {
+                if catalog.isLoading && workspaces.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .progressViewStyle(.network)
+
+                        Text("Loading cloud workspaces")
+                            .foregroundStyle(.theme(.textSecondary))
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } else if let errorMessage = catalog.errorMessage, workspaces.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(errorMessage)
+                            .font(.theme(.small))
+                            .foregroundStyle(.theme(.textSecondary))
+
+                        Button("Retry") {
+                            catalog.send(.refresh)
+                        }
+                        .buttonStyle(.conductorSecondary)
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } else {
+                    ForEach(workspaces) { item in
+                        CloudWorkspaceListRow(
+                            item: item,
+                            repository: repositories[item.id],
+                            showsRepositoryIcon: showsRepositoryIcon,
+                            status: catalog.statuses[item.id]
+                        ) {
+                            catalog.send(.workspaceTapped(item))
+                        }
+                        .padding(.leading, 12)
+                        .listRowInsets(
+                            EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+                        )
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                    }
+                }
+            } header: {
+                Label {
+                    Text("Cloud")
+                        .font(.theme(.body))
+                        .fontWeight(.semibold)
+                } icon: {
+                    CloudWorkspaceIcon(size: 16)
+                }
+                .foregroundStyle(.theme(.textPrimary))
+                .textCase(nil)
+            }
+        }
     }
 
     private struct ConnectionStatusSubtitle: View {

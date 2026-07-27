@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/13/26.
 //
 
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import LucideIcons
@@ -30,38 +31,16 @@ struct WorkspaceRow: View {
         Button {
             action(.open)
         } label: {
-            Label {
-                Text(item.workspace.displayName)
-                    .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
-                    .fontWeight(isUnread ? .semibold : .regular)
-                    .lineLimit(1)
-            } icon: {
-                if showsRepositoryIcon {
-                    RepositoryIcon(repository: item.repository, size: 20, relativeTo: .body)
-                        .foregroundStyle(.theme(.textSecondary))
-                }
-
-                if item.isWorking {
-                    ProgressView()
-                        .progressViewStyle(.conductor(phaseSeed: item.workspace.id))
-                        .tint(.theme(.textSecondary))
-                        .frame(width: iconSize, height: iconSize)
-                } else if let pullRequestStatus = item.pullRequestStatus {
-                    PullRequestStatusIcon(
-                        status: pullRequestStatus,
-                        size: 20,
-                        relativeTo: .body
-                    )
-                } else {
-                    LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
-                        .foregroundStyle(.theme(.textSecondary))
-                }
-            }
-            .labelStyle(.conductorStandard)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(.theme(.textPrimary))
-            .font(.theme(.body))
-            .contentShape(.rect)
+            WorkspaceRowLabel(
+                title: item.workspace.displayName,
+                phaseSeed: item.workspace.id,
+                isCloudHosted: item.workspace.isCloudHosted,
+                isUnread: isUnread,
+                isWorking: item.isWorking,
+                pullRequestStatus: item.pullRequestStatus,
+                repository: item.repository,
+                showsRepositoryIcon: showsRepositoryIcon
+            )
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -160,6 +139,85 @@ struct WorkspaceRow: View {
 
     private var isUnread: Bool {
         (item.workspace.unread ?? 0) > 0
+    }
+}
+
+struct CloudWorkspaceListRow: View {
+    let item: CloudProjectWorkspace
+    let repository: Repository?
+    let showsRepositoryIcon: Bool
+    let status: CloudWorkspaceStatusResponse?
+    let action: @MainActor () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            WorkspaceRowLabel(
+                title: item.workspace.name,
+                phaseSeed: item.id,
+                isCloudHosted: true,
+                isUnread: false,
+                isWorking: status?.status == .initializing || status?.status == .updating,
+                pullRequestStatus: nil,
+                repository: repository,
+                showsRepositoryIcon: showsRepositoryIcon
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct WorkspaceRowLabel: View {
+    let title: String
+    let phaseSeed: String
+    let isCloudHosted: Bool
+    let isUnread: Bool
+    let isWorking: Bool
+    let pullRequestStatus: MobileWorkspaceState.PullRequestStatus?
+    let repository: Repository?
+    let showsRepositoryIcon: Bool
+
+    @ScaledMetric(relativeTo: .body) private var iconSize = 20
+
+    var body: some View {
+        Label {
+            HStack(spacing: 5) {
+                Text(title)
+                    .lineLimit(1)
+
+                if isCloudHosted {
+                    CloudWorkspaceIcon(size: 16)
+                        .accessibilityLabel("Cloud workspace")
+                }
+            }
+            .foregroundStyle(.theme(isUnread ? .textPrimary : .textSecondary))
+            .fontWeight(isUnread ? .semibold : .regular)
+        } icon: {
+            if showsRepositoryIcon {
+                RepositoryIcon(repository: repository, size: 20, relativeTo: .body)
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+
+            if isWorking {
+                ProgressView()
+                    .progressViewStyle(.conductor(phaseSeed: phaseSeed))
+                    .tint(.theme(.textSecondary))
+                    .frame(width: iconSize, height: iconSize)
+            } else if let pullRequestStatus {
+                PullRequestStatusIcon(
+                    status: pullRequestStatus,
+                    size: 20,
+                    relativeTo: .body
+                )
+            } else {
+                LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+        }
+        .labelStyle(.conductorStandard)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(.theme(.textPrimary))
+        .font(.theme(.body))
+        .contentShape(.rect)
     }
 }
 
