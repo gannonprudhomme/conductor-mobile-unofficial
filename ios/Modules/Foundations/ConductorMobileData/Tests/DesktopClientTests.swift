@@ -649,6 +649,73 @@ struct DesktopClientTests {
         }
     }
 
+    @Test("Session menu requests use the session endpoint")
+    func sessionMenuRequests() async throws {
+        let requests = LockIsolated<[URLRequest]>([])
+        DesktopClientURLProtocol.handler.setValue { request in
+            requests.withValue { $0.append(request) }
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 204,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data()
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            let client = DesktopClient.liveValue
+            try await client.renameSession(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                title: "Renamed chat"
+            )
+            try await client.closeSession(
+                workspaceID: "workspace-1",
+                sessionID: "session-1"
+            )
+            try await client.restoreSession(
+                workspaceID: "workspace-1",
+                sessionID: "session-1"
+            )
+        }
+
+        expectNoDifference(
+            requests.value.map {
+                "\($0.httpMethod ?? "") \($0.url?.path ?? "")"
+            },
+            [
+                "PATCH /workspaces/workspace-1/sessions/session-1",
+                "PATCH /workspaces/workspace-1/sessions/session-1",
+                "PATCH /workspaces/workspace-1/sessions/session-1",
+            ]
+        )
+        let bodies = try requests.value.map { request in
+            let body = try #require(request.bodyData)
+            return try #require(
+                JSONSerialization.jsonObject(
+                    with: body
+                ) as? [String: AnyHashable]
+            )
+        }
+        #expect(bodies[0] == ["title": AnyHashable("Renamed chat")])
+        #expect(bodies[1] == ["hidden": AnyHashable(true)])
+        #expect(bodies[2] == ["hidden": AnyHashable(false)])
+    }
+
     @Test("UI-hook mutations map only exact 204 and 202 responses")
     func uiHookMutationResponses() throws {
         for (statusCode, expectedPath) in [

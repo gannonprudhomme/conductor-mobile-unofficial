@@ -100,7 +100,7 @@ struct MessageRouteTests {
             $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
             $0.workspaceUIHook.dispatch = { _, fallback, _ in
-                try await fallback()
+                try await fallback?()
                 return .sqliteFallback
             }
             $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in

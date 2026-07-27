@@ -624,21 +624,6 @@ extension WorkspaceMutation: Decodable {
         }
     }
 
-    private struct AnyCodingKey: CodingKey {
-        let intValue: Int?
-        let stringValue: String
-
-        init?(intValue: Int) {
-            self.intValue = intValue
-            self.stringValue = String(intValue)
-        }
-
-        init?(stringValue: String) {
-            self.intValue = nil
-            self.stringValue = stringValue
-        }
-    }
-
     private enum RequestDecodingError: Error {
         case invalidBody
     }

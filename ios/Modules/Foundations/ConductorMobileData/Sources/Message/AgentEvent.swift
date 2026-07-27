@@ -63,6 +63,20 @@ public enum AgentEvent: Decodable, Equatable {
         // public let type: EventType
         // public let sessionID: String?
         public let message: AssistantMessage
+        public let parentToolUseID: String?
+
+        public init(
+            message: AssistantMessage,
+            parentToolUseID: String? = nil
+        ) {
+            self.message = message
+            self.parentToolUseID = parentToolUseID
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case message
+            case parentToolUseID = "parent_tool_use_id"
+        }
 
         /// `Message.content(parsed).message`
         public struct AssistantMessage: Decodable, Hashable, Sendable {
@@ -110,6 +124,31 @@ public enum AgentEvent: Decodable, Equatable {
                     public let id: String
                     public let name: String
                     public let input: [String: JSONValue]
+
+                    public init(
+                        id: String = "",
+                        name: String,
+                        input: [String: JSONValue] = [:]
+                    ) {
+                        self.id = id
+                        self.name = name
+                        self.input = input
+                    }
+
+                    public init(from decoder: any Decoder) throws {
+                        let container = try decoder.container(keyedBy: CodingKeys.self)
+                        self.id = (try? container.decode(String.self, forKey: .id)) ?? ""
+                        self.name = try container.decode(String.self, forKey: .name)
+                        self.input = (
+                            try? container.decode([String: JSONValue].self, forKey: .input)
+                        ) ?? [:]
+                    }
+
+                    private enum CodingKeys: String, CodingKey {
+                        case id
+                        case input
+                        case name
+                    }
                 }
 
                 private struct AssistantMessageContentType: Codable, Hashable, RawRepresentable {
@@ -132,10 +171,22 @@ public enum AgentEvent: Decodable, Equatable {
         // public let type: EventType // Don't need it
         public let sessionID: String?
         public let message: UserMessage
+        public let parentToolUseID: String?
+
+        public init(
+            sessionID: String?,
+            message: UserMessage,
+            parentToolUseID: String? = nil
+        ) {
+            self.sessionID = sessionID
+            self.message = message
+            self.parentToolUseID = parentToolUseID
+        }
 
         private enum CodingKeys: String, CodingKey {
             case sessionID = "session_id"
             case message
+            case parentToolUseID = "parent_tool_use_id"
         }
 
         public struct UserMessage: Decodable, Hashable, Sendable {
@@ -186,8 +237,33 @@ public enum AgentEvent: Decodable, Equatable {
     }
 
     public struct SystemEvent: Decodable, Hashable, Sendable {
+        public let content: String?
+        public let parentToolUseID: String?
+        public let status: Status?
         public let subtype: Subtype?
         public let state: State?
+
+        public init(
+            subtype: Subtype?,
+            state: State?,
+            content: String? = nil,
+            parentToolUseID: String? = nil,
+            status: Status? = nil
+        ) {
+            self.content = content
+            self.parentToolUseID = parentToolUseID
+            self.status = status
+            self.subtype = subtype
+            self.state = state
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case content
+            case parentToolUseID = "parent_tool_use_id"
+            case state
+            case status
+            case subtype
+        }
 
         public struct Subtype: Codable, Hashable, RawRepresentable, Sendable {
             public var rawValue: String
@@ -230,10 +306,24 @@ public enum AgentEvent: Decodable, Equatable {
             /// The agent paused until the user answers a prompt or grants permission.
             public static let requiresAction = Self(rawValue: "requires_action")
         }
+
+        public struct Status: Codable, Hashable, RawRepresentable, Sendable {
+            public var rawValue: String
+
+            public init(rawValue: String) {
+                self.rawValue = rawValue
+            }
+
+            public static let compacting = Self(rawValue: "compacting")
+        }
     }
 
     public struct ResultEvent: Decodable, Hashable, Sendable {
         // public let type: EventType
+        public let errors: [String]?
+        public let isError: Bool
+        public let parentToolUseID: String?
+        public let result: String?
         public let sessionID: String?
         public let usage: Usage
         // public let conductorSDKMetadata: JSONValue
@@ -248,11 +338,50 @@ public enum AgentEvent: Decodable, Equatable {
                 case outputTokens = "output_tokens"
                 case cacheReadInputTokens = "cache_read_input_tokens"
             }
+
+            static let zero = Self(
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadInputTokens: 0
+            )
         }
 
         private enum CodingKeys: String, CodingKey {
+            case errors
+            case isError = "is_error"
+            case parentToolUseID = "parent_tool_use_id"
+            case result
             case sessionID = "session_id"
             case usage
+        }
+
+        public init(
+            sessionID: String?,
+            usage: Usage,
+            errors: [String]? = nil,
+            isError: Bool = false,
+            parentToolUseID: String? = nil,
+            result: String? = nil
+        ) {
+            self.errors = errors
+            self.isError = isError
+            self.parentToolUseID = parentToolUseID
+            self.result = result
+            self.sessionID = sessionID
+            self.usage = usage
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.errors = try? container.decode([String].self, forKey: .errors)
+            self.isError = (try? container.decode(Bool.self, forKey: .isError)) ?? false
+            self.parentToolUseID = try? container.decode(
+                String.self,
+                forKey: .parentToolUseID
+            )
+            self.result = try? container.decode(String.self, forKey: .result)
+            self.sessionID = try? container.decode(String.self, forKey: .sessionID)
+            self.usage = (try? container.decode(Usage.self, forKey: .usage)) ?? .zero
         }
     }
 
@@ -264,6 +393,23 @@ public enum AgentEvent: Decodable, Equatable {
         public let errorInfo: JSONValue?
         public let additionalDetails: String?
         public let willRetry: Bool?
+        public let parentToolUseID: String?
+
+        public init(
+            sessionID: String?,
+            content: String,
+            errorInfo: JSONValue?,
+            additionalDetails: String?,
+            willRetry: Bool?,
+            parentToolUseID: String? = nil
+        ) {
+            self.sessionID = sessionID
+            self.content = content
+            self.errorInfo = errorInfo
+            self.additionalDetails = additionalDetails
+            self.willRetry = willRetry
+            self.parentToolUseID = parentToolUseID
+        }
 
         private enum CodingKeys: String, CodingKey {
             // case type
@@ -272,6 +418,7 @@ public enum AgentEvent: Decodable, Equatable {
             case errorInfo
             case additionalDetails
             case willRetry
+            case parentToolUseID = "parent_tool_use_id"
         }
     }
 

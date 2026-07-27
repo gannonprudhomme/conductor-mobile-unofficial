@@ -39,7 +39,11 @@ export async function prepareWorkspaceUIHook() {
   eventsURL.searchParams.set("revision", hookRevision);
   const commandResultURL = new URL("command-result", hookBaseURL);
   // Keep one queue across loader runs so a replacement cannot overtake a pending setter.
-  const commandQueue = globalThis[commandQueueKey] ?? { tail: Promise.resolve() };
+  const commandQueue = globalThis[commandQueueKey] ?? {
+    pendingCancellations: new Map(),
+    tail: Promise.resolve(),
+  };
+  commandQueue.pendingCancellations ??= new Map();
   const controller = createController({
     commandQueue,
     eventsURL,
@@ -147,12 +151,15 @@ function resolveConductorServices(serviceModule) {
       "createSession",
       "getSessionsForWorkspace",
       "setSessionAgentAndModel",
+      "hideSession",
       "markWorkspaceAsRead",
       "setUnread",
       "updateSessionClaudeEffortLevel",
       "updateSessionCodexThinkingLevel",
+      "unhideSession",
       "updateSessionFastMode",
       "updateSessionModel",
+      "updateSessionTitle",
     ],
     "SessionService",
   );
@@ -254,13 +261,14 @@ function createController({
           commandResultURL,
           gitService,
           messageProcessingController,
+          pendingCancellations: commandQueue.pendingCancellations,
           sessionService,
           workspaceService,
         }, command);
         const reportError = (error) => {
           console.error("Conductor Mobile UI command failed.", error);
         };
-        if (command.field === "sendMessage") {
+        if (command.field === "hidden" || command.field === "sendMessage") {
           execute().catch(reportError);
           return;
         }
@@ -352,7 +360,13 @@ function delay(milliseconds) {
 }
 
 async function executeCommand(
-  { gitService, messageProcessingController, sessionService, workspaceService },
+  {
+    gitService,
+    messageProcessingController,
+    pendingCancellations,
+    sessionService,
+    workspaceService,
+  },
   command,
 ) {
   switch (command.field) {
@@ -389,6 +403,41 @@ async function executeCommand(
           onCreation: resolve,
         }).catch(reject);
       });
+      return;
+    case "hidden":
+      const sessionInput = {
+        sessionId: command.sessionId,
+        workspaceId: command.workspaceId,
+      };
+      if (!command.value) {
+        try {
+          await pendingCancellations.get(command.sessionId);
+        } catch {
+          // A failed close leaves the session visible, but a later restore may still unhide it.
+        }
+        await sessionService.unhideSession(sessionInput);
+        return;
+      }
+      const previousCancellation = pendingCancellations.get(command.sessionId);
+      const cancellation = (async () => {
+        try {
+          await previousCancellation;
+        } catch {
+          // A newer close can retry after an earlier cancellation failed.
+        }
+        await messageProcessingController.cancelSession(command.sessionId, {
+          compressLogsAfterStop: true,
+        });
+        await sessionService.hideSession(sessionInput);
+      })();
+      pendingCancellations.set(command.sessionId, cancellation);
+      try {
+        await cancellation;
+      } finally {
+        if (pendingCancellations.get(command.sessionId) === cancellation) {
+          pendingCancellations.delete(command.sessionId);
+        }
+      }
       return;
     case "model":
       await sessionService.updateSessionModel(command.sessionId, command.value);
@@ -448,6 +497,13 @@ async function executeCommand(
       await workspaceService.setWorkspaceManualStatus({
         workspaceId: command.workspaceId,
         status: command.value,
+      });
+      return;
+    case "title":
+      await sessionService.updateSessionTitle({
+        sessionId: command.sessionId,
+        workspaceId: command.workspaceId,
+        title: command.value,
       });
       return;
     case "unread":

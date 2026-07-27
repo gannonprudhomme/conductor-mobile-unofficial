@@ -235,6 +235,19 @@ public enum Server {
             )
         }
 
+        router.patch("/workspaces/{workspaceID}/sessions/{sessionID}") { request, context in
+            guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
+                throw HTTPError(.forbidden)
+            }
+
+            return try await SessionRoute.patch(
+                request: request,
+                context: context,
+                database: database,
+                persistenceTimeout: uiCommandTimeout
+            )
+        }
+
         router.post("/workspaces/{workspaceID}/sessions/{sessionID}/stop") { request, context in
             guard originIsAllowed(request, allowedOrigin: allowedOrigin) else {
                 throw HTTPError(.forbidden)

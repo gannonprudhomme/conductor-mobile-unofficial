@@ -468,6 +468,43 @@ struct WorkspaceUIHookTests {
         #expect(didDispatchAgentAndModel)
     }
 
+    @Test("Session changes emit their workspace and session IDs")
+    func sessionFrames() async throws {
+        let uiHook = WorkspaceUIHook.liveValue
+        let connection = await uiHook.connect()
+        var events = connection.events.makeAsyncIterator()
+
+        #expect(
+            try await uiHook.dispatch(
+                command: .session(
+                    id: "session-1",
+                    workspaceID: "workspace-1",
+                    mutation: .title("Renamed chat")
+                ),
+                fallback: nil
+            ) {} == .hook
+        )
+        #expect(
+            await events.next()
+                == "data: {\"sessionId\":\"session-1\",\"workspaceId\":\"workspace-1\",\"title\":\"Renamed chat\"}\n\n"
+        )
+
+        #expect(
+            try await uiHook.dispatch(
+                command: .session(
+                    id: "session-1",
+                    workspaceID: "workspace-1",
+                    mutation: .hidden(isHidden: true)
+                ),
+                fallback: nil
+            ) {} == .hook
+        )
+        #expect(
+            await events.next()
+                == "data: {\"sessionId\":\"session-1\",\"workspaceId\":\"workspace-1\",\"hidden\":true}\n\n"
+        )
+    }
+
     @Test("Fallback holds the global slot without waiting for persistence")
     func disconnectedFallback() async throws {
         let uiHook = WorkspaceUIHook.liveValue

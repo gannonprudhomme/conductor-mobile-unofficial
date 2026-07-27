@@ -15,6 +15,7 @@ import LucideIcons
 import Logging
 import SQLiteData
 import SwiftUI
+import UIKit
 
 /// A wrapper over ``Chat`` which enables switch between sessions for this workspace
 @Reducer
@@ -39,6 +40,10 @@ public struct WorkspaceChat: Sendable {
         /// Cleared once observation identifies a session created after this snapshot.
         var sessionIDsBeforeCreation: Set<Session.ID>?
         var sessionIDAwaitingObservation: Session.ID?
+        var conciseTranscript = ""
+        var transcriptCopyCount = 0
+        var renamingSession: Session?
+        var sessionTitleDraft = ""
 
         @FetchAll public var activeSessions: [Session]
         @FetchAll public var archivedSessions: [Session]
@@ -97,6 +102,11 @@ public struct WorkspaceChat: Sendable {
             let branch = branchNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             return !isRenamingBranch && !branch.isEmpty && branch != workspace.branch
         }
+
+        var canRenameSession: Bool {
+            let title = sessionTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !title.isEmpty && title != renamingSession?.title
+        }
     }
 
     @Reducer
@@ -104,6 +114,7 @@ public struct WorkspaceChat: Sendable {
         case alert(AlertState<Alert>)
         case archivedSessions(ArchivedSessions)
         case renameBranch
+        case renameSession
 
         public enum Alert: Equatable { }
     }
@@ -115,6 +126,10 @@ public struct WorkspaceChat: Sendable {
         case archivedSessionsButtonTapped
         case binding(BindingAction<State>)
         case chat(Chat.Action)
+        case closeSessionButtonTapped(Session)
+        case closeSessionResponse(Result<Void, any Error>)
+        case copyConciseTranscriptButtonTapped(Session)
+        case copyConciseTranscriptResponse(Result<String, any Error>)
         case createSessionButtonTapped
         case createSessionResponse(Result<Session, any Error>)
         case destination(PresentationAction<Destination.Action>)
@@ -122,6 +137,9 @@ public struct WorkspaceChat: Sendable {
         case renameBranchButtonTapped
         case renameBranchResponse(Result<Void, any Error>)
         case renameBranchSubmitted
+        case renameSessionButtonTapped(Session)
+        case renameSessionResponse(Result<Void, any Error>)
+        case renameSessionSubmitted
         case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
         case task
@@ -203,7 +221,8 @@ public struct WorkspaceChat: Sendable {
                 state.destination = .archivedSessions(
                     ArchivedSessions.State(
                         workspaceID: state.workspace.id,
-                        sessions: state.archivedSessions
+                        sessions: state.archivedSessions,
+                        activeSessions: state.activeSessions
                     )
                 )
                 return .none
@@ -246,6 +265,65 @@ public struct WorkspaceChat: Sendable {
                 state.isRenamingBranch = false
                 state.destination = .alert(
                     .failedToRenameBranch(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .closeSessionButtonTapped(session):
+                return .run { [workspaceID = state.workspace.id] send in
+                    await send(
+                        .closeSessionResponse(
+                            Result {
+                                try await desktopClient.closeSession(
+                                    workspaceID: workspaceID,
+                                    sessionID: session.id
+                                )
+                            }
+                        )
+                    )
+                }
+
+            case let .closeSessionResponse(.failure(error)):
+                Logger.chat.error("Failed to close session: \(error)")
+                state.destination = .alert(
+                    .failedToCloseSession(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .copyConciseTranscriptButtonTapped(session):
+                return .run { send in
+                    await send(
+                        .copyConciseTranscriptResponse(
+                            Result {
+                                let messages = try await database.read { database in
+                                    try Message
+                                        .where { $0.sessionID.eq(session.id) }
+                                        .order {
+                                            (
+                                                $0.sentAt.asc(nulls: .last),
+                                                $0.createdAt,
+                                                $0.id
+                                            )
+                                        }
+                                        .fetchAll(database)
+                                }
+                                guard let transcript = ConciseTranscript.format(messages) else {
+                                    throw ConciseTranscriptCopyError.empty
+                                }
+                                return transcript
+                            }
+                        )
+                    )
+                }
+
+            case let .copyConciseTranscriptResponse(.success(transcript)):
+                state.conciseTranscript = transcript
+                state.transcriptCopyCount &+= 1
+                return .none
+
+            case let .copyConciseTranscriptResponse(.failure(error)):
+                Logger.chat.error("Failed to copy concise transcript: \(error)")
+                state.destination = .alert(
+                    .failedToCopyTranscript(message: error.localizedDescription)
                 )
                 return .none
 
@@ -326,6 +404,47 @@ public struct WorkspaceChat: Sendable {
 
                 state.destination = .alert(
                     .failedToLoadSessions(message: error.localizedDescription)
+                )
+                return .none
+
+            case let .renameSessionButtonTapped(session):
+                state.renamingSession = session
+                state.sessionTitleDraft = session.title
+                state.destination = .renameSession
+                return .none
+
+            case .renameSessionSubmitted:
+                guard state.canRenameSession, let session = state.renamingSession else {
+                    return .none
+                }
+                let title = state.sessionTitleDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                state.sessionTitleDraft = title
+                state.renamingSession = nil
+                state.destination = nil
+                return .run { [
+                    workspaceID = state.workspace.id,
+                    sessionID = session.id,
+                    title,
+                ] send in
+                    await send(
+                        .renameSessionResponse(
+                            Result {
+                                try await desktopClient.renameSession(
+                                    workspaceID: workspaceID,
+                                    sessionID: sessionID,
+                                    title: title
+                                )
+                            }
+                        )
+                    )
+                }
+
+            case let .renameSessionResponse(.failure(error)):
+                Logger.chat.error("Failed to rename session: \(error)")
+                state.destination = .alert(
+                    .failedToRenameSession(message: error.localizedDescription)
                 )
                 return .none
 
@@ -499,7 +618,12 @@ public struct WorkspaceChat: Sendable {
                     )
                 }
 
-            case .binding, .chat, .delegate, .destination:
+            case .binding,
+                 .chat,
+                 .closeSessionResponse,
+                 .delegate,
+                 .destination,
+                 .renameSessionResponse:
                 return .none
 
             }
@@ -641,6 +765,14 @@ public struct WorkspaceChat: Sendable {
     }
 }
 
+private enum ConciseTranscriptCopyError: LocalizedError {
+    case empty
+
+    var errorDescription: String? {
+        "This chat has no locally cached transcript."
+    }
+}
+
 extension WorkspaceChat.Destination.State: Equatable { }
 
 extension AlertState where Action == WorkspaceChat.Destination.Alert {
@@ -674,6 +806,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
         }
     }
 
+    static func failedToCloseSession(message: String) -> Self {
+        AlertState {
+            TextState("Failed to close tab")
+        } message: {
+            TextState(message)
+        }
+    }
+
     static var workspaceMutationUsedSQLiteFallback: Self {
         AlertState {
             TextState("Workspace change saved")
@@ -683,6 +823,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
                     + "may remain stale until Conductor reloads. Reconnect the Workspace UI hook "
                     + "for live updates."
             )
+        }
+    }
+
+    static func failedToCopyTranscript(message: String) -> Self {
+        AlertState {
+            TextState("Failed to copy transcript")
+        } message: {
+            TextState(message)
         }
     }
 
@@ -713,6 +861,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     static func failedToSendMessage(message: String) -> Self {
         AlertState {
             TextState("Failed to send message")
+        } message: {
+            TextState(message)
+        }
+    }
+
+    static func failedToRenameSession(message: String) -> Self {
+        AlertState {
+            TextState("Failed to rename chat")
         } message: {
             TextState(message)
         }
@@ -783,6 +939,12 @@ public struct WorkspaceChatView: View {
                 height: sessionPickerHeight
             ) { session in
                 store.send(.sessionButtonTapped(session))
+            } renameSession: { session in
+                store.send(.renameSessionButtonTapped(session))
+            } copyConciseTranscript: { session in
+                store.send(.copyConciseTranscriptButtonTapped(session))
+            } closeSession: { session in
+                store.send(.closeSessionButtonTapped(session))
             } createSession: {
                 store.send(.createSessionButtonTapped)
             }
@@ -801,14 +963,7 @@ public struct WorkspaceChatView: View {
         .background(.theme(.background))
         .alert(
             "Rename branch",
-            isPresented: Binding(
-                get: { store.destination == .renameBranch },
-                set: { isPresented in
-                    if !isPresented {
-                        store.send(.destination(.dismiss))
-                    }
-                }
-            )
+            isPresented: isRenameBranchPresented
         ) {
             TextField("Branch name", text: $store.branchNameDraft)
                 .textInputAutocapitalization(.never)
@@ -823,9 +978,30 @@ public struct WorkspaceChatView: View {
 
             Button("Cancel", role: .cancel) { }
         }
+        .alert(
+            "Rename chat",
+            isPresented: isRenameSessionPresented
+        ) {
+            TextField("Chat name", text: $store.sessionTitleDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .tint(.theme(.accent))
+
+            Button("Rename", role: .confirm) {
+                store.send(.renameSessionSubmitted)
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(!store.canRenameSession)
+
+            Button("Cancel", role: .cancel) { }
+        }
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .sensoryFeedback(.error, trigger: store.destination) { _, destination in
             destination?.alert != nil
+        }
+        .sensoryFeedback(.selection, trigger: store.transcriptCopyCount)
+        .onChange(of: store.transcriptCopyCount) {
+            UIPasteboard.general.string = store.conciseTranscript
         }
         .sheet(
             item: $store.scope(
@@ -838,6 +1014,28 @@ public struct WorkspaceChatView: View {
         }
         .task {
             await store.send(.task).finish()
+        }
+    }
+
+    private var isRenameBranchPresented: Binding<Bool> {
+        Binding {
+            store.destination == .renameBranch
+        } set: {
+            dismissDestination(isPresented: $0)
+        }
+    }
+
+    private var isRenameSessionPresented: Binding<Bool> {
+        Binding {
+            store.destination == .renameSession
+        } set: {
+            dismissDestination(isPresented: $0)
+        }
+    }
+
+    private func dismissDestination(isPresented: Bool) {
+        if !isPresented {
+            store.send(.destination(.dismiss))
         }
     }
 
@@ -989,39 +1187,45 @@ public struct WorkspaceChatView: View {
         let animatesSessionChanges: Bool
         let height: CGFloat
         let action: @MainActor (Session) -> Void
+        let renameSession: @MainActor (Session) -> Void
+        let copyConciseTranscript: @MainActor (Session) -> Void
+        let closeSession: @MainActor (Session) -> Void
         let createSession: @MainActor () -> Void
         @State private var scrollPosition = ScrollPosition(idType: Session.ID.self)
 
         var body: some View {
             ScrollView(.horizontal) {
-                GlassEffectContainer(spacing: 8) {
-                    HStack(spacing: 8) {
-                        ForEach(sessions) { session in
-                            SessionButton(
-                                session: session,
-                                isSelected: session.id == selectedSessionID
-                            ) {
-                                action(session)
-                            }
-                            // This padding originally lived on the GlassEffectContainer, but
-                            // applying it directly to the edge buttons keeps them from touching
-                            // the screen edge when ScrollPosition scrolls to them.
-                            .padding(.leading, session.id == sessions.first?.id ? 16 : 0)
+                HStack(spacing: 8) {
+                    ForEach(sessions) { session in
+                        SessionButton(
+                            session: session,
+                            isSelected: session.id == selectedSessionID
+                        ) {
+                            action(session)
+                        } rename: {
+                            renameSession(session)
+                        } copyConciseTranscript: {
+                            copyConciseTranscript(session)
+                        } close: {
+                            closeSession(session)
                         }
-
-                        NewSessionButton(
-                            isCreatingSession: isCreatingSession,
-                            action: createSession
-                        )
-                        .padding(.leading, sessions.isEmpty ? 16 : 0)
-                        .padding(.trailing, 16)
+                        // Applying this to the edge button keeps it from touching the screen edge
+                        // when ScrollPosition scrolls to it.
+                        .padding(.leading, session.id == sessions.first?.id ? 16 : 0)
                     }
-                    .scrollTargetLayout()
-                    .animation(
-                        animatesSessionChanges ? .default : nil,
-                        value: sessions.map(\.id)
+
+                    NewSessionButton(
+                        isCreatingSession: isCreatingSession,
+                        action: createSession
                     )
+                    .padding(.leading, sessions.isEmpty ? 16 : 0)
+                    .padding(.trailing, 16)
                 }
+                .scrollTargetLayout()
+                .animation(
+                    animatesSessionChanges ? .default : nil,
+                    value: sessions.map(\.id)
+                )
                 .padding(.vertical, 8)
             }
             .scrollPosition($scrollPosition)
@@ -1087,6 +1291,9 @@ public struct WorkspaceChatView: View {
         let session: Session
         let isSelected: Bool
         let action: @MainActor () -> Void
+        let rename: @MainActor () -> Void
+        let copyConciseTranscript: @MainActor () -> Void
+        let close: @MainActor () -> Void
         @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
         private var iconSize = ThemeFontStyle.small.size
 
@@ -1114,13 +1321,44 @@ public struct WorkspaceChatView: View {
                 .font(.theme(.small))
                 .frame(maxWidth: 120)
                 .padding(EdgeInsets(vertical: 4, horizontal: 12))
+                .contentShape(.interaction, Capsule())
             }
             .glassEffect(
                 .clear
                     .tint(isSelected ? .theme(.highlight) : Color.clear)
-                    .interactive()
             )
-            .tint(isSelected ? .theme(.highlight) : .clear)
+            .accessibilityIdentifier("workspace-chat.session.\(session.id)")
+            .contextMenu {
+                Button {
+                    rename()
+                } label: {
+                    Label {
+                        Text("Rename chat")
+                    } icon: {
+                        ColoredMenuImage(Lucide.pencil)
+                    }
+                }
+
+                Button {
+                    copyConciseTranscript()
+                } label: {
+                    Label {
+                        Text("Copy concise transcript")
+                    } icon: {
+                        ColoredMenuImage(Lucide.copy)
+                    }
+                }
+
+                Button(role: .destructive) {
+                    close()
+                } label: {
+                    Label {
+                        Text("Close tab")
+                    } icon: {
+                        ColoredMenuImage(Lucide.x, color: .theme(.destructive))
+                    }
+                }
+            }
             .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
     }

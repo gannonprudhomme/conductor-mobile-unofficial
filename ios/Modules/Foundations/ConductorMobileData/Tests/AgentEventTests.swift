@@ -112,8 +112,14 @@ struct AgentEventTests {
             events,
             [
                 .system(.init(subtype: nil, state: nil)),
-                .system(.init(subtype: .status, state: nil)),
-                .system(.init(subtype: .compactBoundary, state: nil)),
+                .system(.init(subtype: .status, state: nil, status: .compacting)),
+                .system(
+                    .init(
+                        subtype: .compactBoundary,
+                        state: nil,
+                        content: "Compacted from 143,300 to 4,499 tokens"
+                    )
+                ),
                 .system(.init(subtype: .sessionStateChanged, state: .running)),
                 .system(.init(subtype: .sessionStateChanged, state: .idle)),
             ]
@@ -293,7 +299,6 @@ struct AgentEventTests {
         let invalidEvents = [
             #"{"type":"assistant"}"#,
             #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"item_1"}]}}"#,
-            #"{"type":"result","usage":{"input_tokens":1}}"#,
             #"{"type":"error"}"#,
         ]
 

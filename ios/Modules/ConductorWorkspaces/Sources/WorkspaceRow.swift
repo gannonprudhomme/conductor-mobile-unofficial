@@ -64,6 +64,7 @@ struct WorkspaceRow: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("workspaces.workspace.\(item.id)")
         .contextMenu {
             contextMenu
         }

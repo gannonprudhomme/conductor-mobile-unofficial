@@ -33,10 +33,15 @@ public struct WorkspaceUIHook: Sendable {
     ) async throws -> Bool = { _, _ in false }
     var dispatch: @Sendable (
         _ command: UIHookCommand,
-        _ fallback: @escaping @Sendable () async throws -> Void,
+        _ fallback: (@Sendable () async throws -> Void)?,
         _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
     ) async throws -> DispatchPath
     var listenerUnavailable: @Sendable () async -> Void
+    var mutateSession: @Sendable (
+        _ requestID: UUID,
+        _ command: UIHookCommand,
+        _ waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws -> Void
     var sendMessage: @Sendable (
         _ requestID: UUID,
         _ sessionID: Session.ID,
@@ -133,6 +138,13 @@ extension WorkspaceUIHook: DependencyKey {
                 )
             },
             listenerUnavailable: { await state.listenerUnavailable() },
+            mutateSession: { requestID, command, waitUntilChangeAvailableInDatabase in
+                try await state.mutateSession(
+                    requestID: requestID,
+                    command: command,
+                    waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
+                )
+            },
             sendMessage: { requestID, sessionID, workspaceID, content, mode, reasoningEffort in
                 try await state.sendMessage(
                     requestID: requestID,
@@ -249,17 +261,18 @@ private actor WorkspaceUIHookState {
 
     /// Serializes UI mutations while coordinating browser-hook delivery with SQLite.
     ///
-    /// If no active listener can accept the event, this performs `fallback`. Once an event is
-    /// enqueued, it waits for `waitUntilChangeAvailableInDatabase` and never falls back because
-    /// Conductor may already have applied the mutation. Injecting both operations keeps this actor
-    /// independent of persistence details.
+    /// If no active listener can accept the event, this performs `fallback` or reports that the
+    /// listener is unavailable. Once an event is enqueued, it waits for
+    /// `waitUntilChangeAvailableInDatabase` and never falls back because Conductor may already have
+    /// applied the mutation. Injecting both operations keeps this actor independent of persistence
+    /// details.
     func dispatch(
         _ command: UIHookCommand,
-        fallback: @escaping @Sendable () async throws -> Void = {},
+        fallback: (@Sendable () async throws -> Void)?,
         waitUntilChangeAvailableInDatabase: @Sendable () async throws -> Void
     ) async throws -> WorkspaceUIHook.DispatchPath {
         try await dispatch(
-            event: try command.event,
+            event: try command.event(),
             fallback: fallback,
             waitUntilChangeAvailableInDatabase: waitUntilChangeAvailableInDatabase
         )
@@ -290,6 +303,34 @@ private actor WorkspaceUIHookState {
             command.continuation.finish()
         }
         return true
+    }
+
+    func mutateSession(
+        requestID: UUID,
+        command: UIHookCommand,
+        waitUntilChangeAvailableInDatabase: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        guard !isMutationInFlight else {
+            throw WorkspaceUIHook.DispatchError.mutationInFlight
+        }
+        isMutationInFlight = true
+        defer { isMutationInFlight = false }
+
+        let event = try command.event(requestID: requestID)
+        let (results, continuation) = try enqueueCommand(requestID: requestID, event: event)
+        defer {
+            continuation.finish()
+            pendingCommands[requestID] = nil
+        }
+
+        for try await _ in results {
+            try await waitUntilChangeAvailableInDatabase()
+            return
+        }
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        throw WorkspaceUIHook.CommandDispatchError.deliveryUnknown
     }
 
     func sendMessage(
@@ -618,16 +659,19 @@ struct CreateWorkspaceCommand: Codable, Equatable, Sendable {
 }
 
 private extension UIHookCommand {
-    var event: String {
-        get throws {
-            let payload: String = switch self {
-            case let .workspace(workspaceID, mutation):
-                "\"workspaceId\":\(try Self.jsonString(workspaceID)),\(try mutation.field)"
-            case let .sessionFastMode(sessionID, isEnabled):
-                "\"sessionId\":\(try Self.jsonString(sessionID)),\"fastMode\":\(isEnabled)"
-            }
-            return "data: {\(payload)}\n\n"
+    func event(requestID: UUID? = nil) throws -> String {
+        let requestIDPayload = try requestID.map {
+            "\"requestId\":\(try Self.jsonString($0.uuidString)),"
+        } ?? ""
+        let payload: String = switch self {
+        case let .session(sessionID, workspaceID, mutation):
+            "\"sessionId\":\(try Self.jsonString(sessionID)),\"workspaceId\":\(try Self.jsonString(workspaceID)),\(try mutation.field)"
+        case let .workspace(workspaceID, mutation):
+            "\"workspaceId\":\(try Self.jsonString(workspaceID)),\(try mutation.field)"
+        case let .sessionFastMode(sessionID, isEnabled):
+            "\"sessionId\":\(try Self.jsonString(sessionID)),\"fastMode\":\(isEnabled)"
         }
+        return "data: {\(requestIDPayload)\(payload)}\n\n"
     }
 
     // JSONEncoder escapes values even though the surrounding SSE frame is assembled directly.
@@ -637,6 +681,19 @@ private extension UIHookCommand {
 
     static func getCreateSessionEventName(workspaceID: String) throws -> String {
         "data: {\"workspaceId\":\(try jsonString(workspaceID)),\"createSession\":true}\n\n"
+    }
+}
+
+private extension SessionMutation {
+    var field: String {
+        get throws {
+            switch self {
+            case let .hidden(isHidden):
+                "\"hidden\":\(isHidden)"
+            case .title(let title):
+                "\"title\":\(try UIHookCommand.jsonString(title))"
+            }
+        }
     }
 }
 

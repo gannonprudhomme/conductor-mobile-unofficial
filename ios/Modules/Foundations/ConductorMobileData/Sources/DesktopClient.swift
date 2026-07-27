@@ -15,6 +15,7 @@ import Sharing
 public struct DesktopClient: Sendable {
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
+    public var closeSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
     public var createSession: @Sendable (_ workspaceID: String) async throws -> Session
     public var createWorkspace: @Sendable (
         _ workspaceID: Workspace.ID,
@@ -40,6 +41,8 @@ public struct DesktopClient: Sendable {
         _ workspaceID: String,
         _ branch: String
     ) async throws -> Void
+    public var renameSession: @Sendable (_ workspaceID: String, _ sessionID: String, _ title: String) async throws -> Void
+    public var restoreSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
     public var sendMessage: @Sendable (
         _ workspaceID: String,
         _ sessionID: String,
@@ -164,6 +167,11 @@ extension DesktopClient: DependencyKey {
             )
         } checkConnection: { serverAddress in
             try await ping(serverAddress: serverAddress)
+        } closeSession: { workspaceID, sessionID in
+            _ = try await patch(
+                SessionPatchBody(isHidden: true),
+                at: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
         } createSession: { workspaceID in
             guard let session = try await post(
                 [String: String](),
@@ -227,6 +235,16 @@ extension DesktopClient: DependencyKey {
             _ = try await patch(
                 WorkspacePatchBody(branch: branch),
                 at: workspaceURL(workspaceID: workspaceID)
+            )
+        } renameSession: { workspaceID, sessionID, title in
+            _ = try await patch(
+                SessionPatchBody(title: title),
+                at: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
+            )
+        } restoreSession: { workspaceID, sessionID in
+            _ = try await patch(
+                SessionPatchBody(isHidden: false),
+                at: sessionURL(workspaceID: workspaceID, sessionID: sessionID)
             )
         } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled, reasoningEffort in
             try await post(
@@ -529,6 +547,16 @@ struct WorkspacePatchBody: Encodable, Sendable {
         case isPinned = "pinned"
         case isUnread = "unread"
         case status
+    }
+}
+
+private struct SessionPatchBody: Encodable, Sendable {
+    var isHidden: Bool? = nil
+    var title: String? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case isHidden = "hidden"
+        case title
     }
 }
 

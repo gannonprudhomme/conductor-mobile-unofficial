@@ -29,7 +29,6 @@ public struct ColoredMenuImage: View {
                 renderingMode: .alwaysOriginal
             )
         )
-        .accessibilityHidden(true)
     }
 }
 
