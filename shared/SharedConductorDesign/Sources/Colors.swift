@@ -119,3 +119,20 @@ public extension ShapeStyle where Self == Color {
         }
     }
 }
+
+public extension ShapeStyle where Self == LinearGradient {
+    static var reasoningUltra: Self {
+        LinearGradient(
+            colors: [
+                Color(red: 226.0 / 255.0, green: 55.0 / 255.0, blue: 43.0 / 255.0),
+                Color(red: 244.0 / 255.0, green: 128.0 / 255.0, blue: 25.0 / 255.0),
+                Color(red: 236.0 / 255.0, green: 206.0 / 255.0, blue: 32.0 / 255.0),
+                Color(red: 45.0 / 255.0, green: 180.0 / 255.0, blue: 86.0 / 255.0),
+                Color(red: 24.0 / 255.0, green: 166.0 / 255.0, blue: 217.0 / 255.0),
+                Color(red: 169.0 / 255.0, green: 62.0 / 255.0, blue: 219.0 / 255.0),
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+}

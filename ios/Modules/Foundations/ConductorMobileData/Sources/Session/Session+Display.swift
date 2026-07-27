@@ -77,3 +77,28 @@ extension Session.Model {
         }
     }
 }
+
+extension Session.ReasoningEffort {
+    public var displayName: String {
+        switch self {
+        case .none:
+            "Default"
+        case .low:
+            "Light"
+        case .medium:
+            "Medium"
+        case .high:
+            "High"
+        case .extraHigh:
+            "Extra high"
+        case .max:
+            "Max"
+        case .ultra:
+            "Ultra"
+        case .ultracode:
+            "Ultra"
+        default:
+            rawValue.capitalized
+        }
+    }
+}

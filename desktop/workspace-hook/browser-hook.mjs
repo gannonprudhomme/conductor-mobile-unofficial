@@ -149,6 +149,8 @@ function resolveConductorServices(serviceModule) {
       "setSessionAgentAndModel",
       "markWorkspaceAsRead",
       "setUnread",
+      "updateSessionClaudeEffortLevel",
+      "updateSessionCodexThinkingLevel",
       "updateSessionFastMode",
       "updateSessionModel",
     ],
@@ -405,11 +407,16 @@ async function executeCommand(
           hidden: false,
         })).find((candidate) => candidate?.id === command.sessionId);
         if (!session) throw new Error("Session not found.");
+        const messageSession = await withReasoningEffort(
+          sessionService,
+          session,
+          command.value.reasoningEffort,
+        );
 
         switch (command.value.mode) {
           case "sent":
             await messageProcessingController.sendMessageImmediately({
-              session,
+              session: messageSession,
               message: command.value.content,
               workspaceId: command.workspaceId,
               includeAttachments: false,
@@ -417,7 +424,7 @@ async function executeCommand(
             return;
           case "queued":
             await messageProcessingController.enqueueMessage({
-              session,
+              session: messageSession,
               message: command.value.content,
               workspaceId: command.workspaceId,
               includeAttachments: false,
@@ -465,5 +472,33 @@ async function executeCommand(
       }
     default:
       throw new Error(`Unsupported workspace command: ${command.field}`);
+  }
+}
+
+async function withReasoningEffort(sessionService, session, reasoningEffort) {
+  if (reasoningEffort === undefined || reasoningEffort === null) return session;
+  if (typeof reasoningEffort !== "string" || reasoningEffort.length === 0) {
+    throw new Error("The reasoning effort is invalid.");
+  }
+
+  switch (session.agentType) {
+    case "claude":
+      if (session.claudeEffortLevel !== reasoningEffort) {
+        await sessionService.updateSessionClaudeEffortLevel({
+          sessionId: session.id,
+          claudeEffortLevel: reasoningEffort,
+        });
+      }
+      return { ...session, claudeEffortLevel: reasoningEffort };
+    case "codex":
+      if (session.codexThinkingLevel !== reasoningEffort) {
+        await sessionService.updateSessionCodexThinkingLevel(
+          session.id,
+          reasoningEffort,
+        );
+      }
+      return { ...session, codexThinkingLevel: reasoningEffort };
+    default:
+      throw new Error(`Unsupported session agent: ${session.agentType}`);
   }
 }

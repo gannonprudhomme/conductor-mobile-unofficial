@@ -59,6 +59,7 @@ public struct Main: Sendable {
                             WorkspaceChat.State(
                                 workspaceWithRepository: creation.workspace,
                                 selectedModel: creation.selectedModel,
+                                selectedReasoningEffort: creation.selectedReasoningEffort,
                                 shouldFocusMessageField: true
                             )
                         )

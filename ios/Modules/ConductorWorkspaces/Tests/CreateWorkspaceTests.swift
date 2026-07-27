@@ -81,6 +81,7 @@ struct CreateWorkspaceTests {
             var state = CreateWorkspace.State(repositories: [repository])
             state.isFastModeEnabled = true
             state.selectedModel = .gpt_5_6_terra
+            state.selectedReasoningEffort = .ultra
             state.$prompt.withLock { $0 = "  Run the tests.  " }
             let store = TestStore(initialState: state) {
                 CreateWorkspace()
@@ -105,12 +106,14 @@ struct CreateWorkspaceTests {
                     sessionID,
                     message,
                     model,
-                    isFastModeEnabled in
+                    isFastModeEnabled,
+                    reasoningEffort in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(reasoningEffort == .ultra)
                     return sentMessage
                 }
             }
@@ -128,6 +131,7 @@ struct CreateWorkspaceTests {
                 .workspaceCreated(
                     WorkspaceCreationResult(
                         selectedModel: .gpt_5_6_terra,
+                        selectedReasoningEffort: .ultra,
                         workspace: WorkspaceWithRepository(
                             workspace: workspace,
                             repository: repository
@@ -190,6 +194,7 @@ struct CreateWorkspaceTests {
             await store.receive(\.defaultModelFetched) {
                 $0.agentType = .claude
                 $0.selectedModel = .sonnet5_1M
+                $0.selectedReasoningEffort = .high
             }
 
             await store.send(.binding(.set(\.selectedModel, .opus4_8_1M))) {
@@ -201,6 +206,35 @@ struct CreateWorkspaceTests {
                 $0.selectedModel = .gpt_5_6_sol
             }
             await store.send(.defaultModelFetched(.gpt_5_6_sol))
+        }
+    }
+
+    @Test("Reasoning effort selects values supported by the selected model")
+    func reasoningEffortSelection() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let store = TestStore(
+                initialState: CreateWorkspace.State(repositories: [.preview()])
+            ) {
+                CreateWorkspace()
+            }
+
+            await store.send(.reasoningEffortSelected(.medium)) {
+                $0.selectedReasoningEffort = .medium
+            }
+            await store.send(.reasoningEffortSelected(.ultracode))
+            await store.send(.binding(.set(\.selectedModel, .gpt5_4))) {
+                $0.hasUserSelectedModel = true
+                $0.selectedModel = .gpt5_4
+            }
+            await store.send(.binding(.set(\.selectedModel, .fable5))) {
+                $0.agentType = .claude
+                $0.selectedModel = .fable5
+            }
+            await store.send(.reasoningEffortSelected(.ultracode)) {
+                $0.selectedReasoningEffort = .ultracode
+            }
         }
     }
 

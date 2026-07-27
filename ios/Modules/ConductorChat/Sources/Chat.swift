@@ -45,6 +45,7 @@ public struct Chat: Sendable {
         var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
         var selectedModel: Session.Model
+        var selectedReasoningEffort: Session.ReasoningEffort?
 
         /// The turns + parsed rows (e.g. `Message.content` -> `AgentEvent`)
         ///
@@ -65,6 +66,10 @@ public struct Chat: Sendable {
             shouldShowEmptyChat && !isMessageSendInFlight
         }
 
+        var availableReasoningEfforts: [Session.ReasoningEffort] {
+            session.availableReasoningEfforts(for: selectedModel)
+        }
+
         mutating func updateRows(sessionStatus: Session.Status) {
             guard let turns else {
                 rows = nil
@@ -81,6 +86,7 @@ public struct Chat: Sendable {
             session: Session,
             messages: [Message] = [],
             selectedModel: Session.Model? = nil,
+            selectedReasoningEffort: Session.ReasoningEffort? = nil,
             shouldFocusMessageField: Bool = false
         ) {
             @Shared(.messageDrafts) var messageDrafts
@@ -105,7 +111,20 @@ public struct Chat: Sendable {
             )
             self.hasUserSelectedModel = selectedModel != nil
             self.selectedModel = selectedModel ?? session.model
+            self.selectedReasoningEffort = selectedReasoningEffort ?? session.reasoningEffort
             self.shouldFocusMessageField = shouldFocusMessageField
+            reconcileSelectedReasoningEffort()
+        }
+
+        mutating func reconcileSelectedReasoningEffort() {
+            let efforts = availableReasoningEfforts
+            guard let selectedReasoningEffort,
+                  efforts.contains(selectedReasoningEffort) else {
+                selectedReasoningEffort = efforts.contains(selectedModel.defaultReasoningEffort)
+                    ? selectedModel.defaultReasoningEffort
+                    : efforts.first
+                return
+            }
         }
 
         /// `turns` and `rows` are derived presentation caches, while `session` captures
@@ -128,6 +147,7 @@ public struct Chat: Sendable {
                     == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
                 && lhs.selectedModel == rhs.selectedModel
+                && lhs.selectedReasoningEffort == rhs.selectedReasoningEffort
         }
 
         /// Read by ``WorkspaceChat`` to track the selected session.
@@ -151,6 +171,7 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             message: Message
         )
+        case reasoningEffortSelected(Session.ReasoningEffort)
         case sendButtonTapped
         case sendMessageResponse(
             sessionID: Session.ID,
@@ -159,6 +180,7 @@ public struct Chat: Sendable {
         case sessionModelChanged(Session.Model)
         case sessionFastModeChanged(Bool)
         case sessionStatusChanged(Session.Status)
+        case sessionReasoningEffortChanged(Session.ReasoningEffort?)
         case stopButtonTapped
         case stopSessionResponse(
             sessionID: Session.ID,
@@ -202,10 +224,12 @@ public struct Chat: Sendable {
                     return .none
                 }
                 state.selectedModel = model
+                state.reconcileSelectedReasoningEffort()
                 return .none
 
             case .binding(\.selectedModel):
                 state.hasUserSelectedModel = true
+                state.reconcileSelectedReasoningEffort()
                 return .none
 
             case .messagesUpdated(let messages):
@@ -256,6 +280,7 @@ public struct Chat: Sendable {
                 }
                 state.hasObservedSessionModelChange = true
                 state.selectedModel = model
+                state.reconcileSelectedReasoningEffort()
                 return .none
 
             case let .sessionFastModeChanged(isFastModeEnabled):
@@ -264,6 +289,18 @@ public struct Chat: Sendable {
 
             case .fastModeButtonTapped:
                 state.isFastModeEnabled.toggle()
+                return .none
+
+            case let .reasoningEffortSelected(reasoningEffort):
+                guard state.availableReasoningEfforts.contains(reasoningEffort) else {
+                    return .none
+                }
+                state.selectedReasoningEffort = reasoningEffort
+                return .none
+
+            case let .sessionReasoningEffortChanged(reasoningEffort):
+                state.selectedReasoningEffort = reasoningEffort
+                state.reconcileSelectedReasoningEffort()
                 return .none
 
             case .turnSummaryTapped(let summaryID):
@@ -284,6 +321,7 @@ public struct Chat: Sendable {
                 return .run {
                     [
                         model = state.selectedModel,
+                        reasoningEffort = state.selectedReasoningEffort,
                         isFastModeEnabled = state.isFastModeEnabled,
                         sessionID = state.session.id,
                         workspaceID = state.session.workspaceID,
@@ -294,7 +332,8 @@ public struct Chat: Sendable {
                             sessionID: sessionID,
                             message: message,
                             model: model,
-                            isFastModeEnabled: isFastModeEnabled
+                            isFastModeEnabled: isFastModeEnabled,
+                            reasoningEffort: reasoningEffort
                         ) {
                             await send(
                                 .messageConfirmed(
@@ -522,8 +561,13 @@ struct ChatView: View {
                         isStopInFlight: store.isStopInFlight,
                         isWorking: store.session.status == .working,
                         selectedModel: $store.selectedModel,
+                        selectedReasoningEffort: store.selectedReasoningEffort,
+                        availableReasoningEfforts: store.availableReasoningEfforts,
                         shouldFocusOnAppear: store.shouldFocusMessageField,
                         onFastModeTapped: { store.send(.fastModeButtonTapped) },
+                        onSelectReasoningEffort: {
+                            store.send(.reasoningEffortSelected($0))
+                        },
                         onSendTapped: { store.send(.sendButtonTapped) },
                         onStopTapped: { store.send(.stopButtonTapped) }
                     )
@@ -539,6 +583,9 @@ struct ChatView: View {
             }
             .onChange(of: store.session.isFastModeEnabled) { _, isFastModeEnabled in
                 store.send(.sessionFastModeChanged(isFastModeEnabled ?? false))
+            }
+            .onChange(of: store.session.reasoningEffort) { _, reasoningEffort in
+                store.send(.sessionReasoningEffortChanged(reasoningEffort))
             }
             .task(id: store.session.id) {
                 await store.send(.task).finish()

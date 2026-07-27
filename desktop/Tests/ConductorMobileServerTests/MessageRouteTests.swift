@@ -51,12 +51,13 @@ struct MessageRouteTests {
                 try await waitUntilChangeAvailableInDatabase()
                 return .hook
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, reasoningEffort in
                 let persistedSession = try await database.read { database in
                     try Session.find(sessionID).fetchOne(database)
                 }
                 #expect(persistedSession?.model == .gpt_5_6_terra)
                 #expect(persistedSession?.isFastModeEnabled == true)
+                #expect(reasoningEffort == .ultra)
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -71,7 +72,7 @@ struct MessageRouteTests {
                     method: .post,
                     headers: [.contentType: "application/json"],
                     body: ByteBuffer(
-                        string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra","fast_mode":true}"#
+                        string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra","fast_mode":true,"reasoning_effort":"ultra"}"#
                     )
                 ) { response in
                     #expect(response.status == .noContent)
@@ -102,7 +103,7 @@ struct MessageRouteTests {
                 try await fallback()
                 return .sqliteFallback
             }
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _ in
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
                 throw WorkspaceUIHook.CommandDispatchError.listenerUnavailable
             }
         } operation: {
@@ -142,7 +143,7 @@ struct MessageRouteTests {
                 Issue.record("Fast Mode should not be synchronized when unchanged.")
                 return .hook
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -176,7 +177,7 @@ struct MessageRouteTests {
             $0.workspaceUIHook.dispatch = { _, _, _ in
                 throw WorkspaceUIHook.DispatchError.deliveryUnknown
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -231,12 +232,13 @@ struct MessageRouteTests {
                 try await waitUntilChangeAvailableInDatabase()
                 return true
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, reasoningEffort in
                 let persistedSession = try await database.read { database in
                     try Session.find(sessionID).fetchOne(database)
                 }
                 #expect(persistedSession?.agentType == .claude)
                 #expect(persistedSession?.model == .fable5)
+                #expect(reasoningEffort == .ultracode)
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -251,7 +253,7 @@ struct MessageRouteTests {
                     method: .post,
                     headers: [.contentType: "application/json"],
                     body: ByteBuffer(
-                        string: #"{"message":"Switch providers.","model":"fable-5"}"#
+                        string: #"{"message":"Switch providers.","model":"fable-5","reasoning_effort":"ultracode"}"#
                     )
                 ) { response in
                     #expect(response.status == .noContent)
@@ -273,7 +275,7 @@ struct MessageRouteTests {
         let recorder = MessageRouteRecorder()
         try await withDependencies {
             $0.workspaceUIHook.updateSessionModel = { _, _, _ in false }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -315,7 +317,7 @@ struct MessageRouteTests {
         let recorder = MessageRouteRecorder()
         try await withDependencies {
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -361,7 +363,7 @@ struct MessageRouteTests {
         try await withDependencies {
             $0.continuousClock = clock
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _ in
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
                 sendStartedContinuation.yield(())
                 for await _ in receiptGate {}
                 throw CancellationError()
@@ -401,7 +403,7 @@ struct MessageRouteTests {
         try await withDependencies {
             $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _ in
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
                 throw WorkspaceUIHook.CommandDispatchError.commandFailed("Rejected.")
             }
         } operation: {
@@ -423,6 +425,109 @@ struct MessageRouteTests {
         }
     }
 
+    @Test("POST message rejects Ultra reasoning for Claude")
+    func claudeUltraReasoning() async throws {
+        let database = try await messageRouteDatabase()
+        try await database.write { database in
+            try Session
+                .find("session-1")
+                .update {
+                    $0.agentType = #bind(Session.AgentType.claude)
+                    $0.model = #bind(Session.Model.fable5)
+                    $0.claudeEffortLevel = #bind(Session.ReasoningEffort.high)
+                }
+                .execute(database)
+        }
+
+        try await withDependencies {
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
+                Issue.record("Invalid reasoning effort should not be sent.")
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Think deeply.","reasoning_effort":"ultra"}"#
+                    )
+                ) { response in
+                    #expect(response.status == .badRequest)
+                    #expect(
+                        String(buffer: response.body)
+                            == "Reasoning effort is not available for this model."
+                    )
+                }
+            }
+        }
+    }
+
+    @Test("POST message forwards Ultracode reasoning for Claude")
+    func claudeUltracodeReasoning() async throws {
+        let database = try await messageRouteDatabase()
+        try await database.write { database in
+            try Session
+                .find("session-1")
+                .update {
+                    $0.agentType = #bind(Session.AgentType.claude)
+                    $0.model = #bind(Session.Model.fable5)
+                    $0.claudeEffortLevel = #bind(Session.ReasoningEffort.high)
+                }
+                .execute(database)
+        }
+
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, reasoningEffort in
+                #expect(reasoningEffort == .ultracode)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Think deeply.","reasoning_effort":"ultracode"}"#
+                    )
+                ) { response in
+                    #expect(response.status == .noContent)
+                }
+            }
+        }
+    }
+
+    @Test("POST message forwards Default reasoning for Codex")
+    func defaultReasoning() async throws {
+        let database = try await messageRouteDatabase()
+
+        try await withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, reasoningEffort in
+                #expect(reasoningEffort == Session.ReasoningEffort.none)
+            }
+        } operation: {
+            let application = Server.makeApplication(database: database)
+            try await application.test(.router) { client in
+                try await client.execute(
+                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(
+                        string: #"{"message":"Use the default.","reasoning_effort":"none"}"#
+                    )
+                ) { response in
+                    #expect(response.status == .noContent)
+                }
+            }
+        }
+    }
+
     @Test("POST message sends immediately for an idle session")
     func idleSession() async throws {
         let database = try await messageRouteDatabase()
@@ -437,7 +542,7 @@ struct MessageRouteTests {
         try await withDependencies {
             $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,
@@ -467,7 +572,7 @@ struct MessageRouteTests {
         let recorder = MessageRouteRecorder()
         try await withDependencies {
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode in
+            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
                 await recorder.recordMessage(
                     sessionID: sessionID,
                     content: content,

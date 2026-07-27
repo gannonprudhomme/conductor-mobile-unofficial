@@ -320,6 +320,8 @@ isolatedTest("commands run in order with real service signatures and continue af
     async updateSessionFastMode(input) {
       calls.push(["fastMode", input]);
     },
+    async updateSessionClaudeEffortLevel() {},
+    async updateSessionCodexThinkingLevel() {},
     async setSessionAgentAndModel(sessionID, agentType, model) {
       calls.push(["agentAndModel", sessionID, agentType, model]);
     },
@@ -386,13 +388,19 @@ isolatedTest("commands run in order with real service signatures and continue af
   assert.equal(environment.fetches.length, 2);
 });
 
-isolatedTest("message commands call the explicit controller modes and report results", async () => {
+isolatedTest("message commands persist effort, call the explicit controller modes, and report results", async () => {
   const calls = [];
   const shell = emptyWorkspaceShell();
-  const session = { id: "session-1", title: "Session" };
+  const session = { agentType: "codex", id: "session-1", title: "Session" };
   shell.sessionService.getSessionsForWorkspace = async (input) => {
     calls.push(["sessions", input]);
     return [session];
+  };
+  shell.sessionService.updateSessionCodexThinkingLevel = async (...arguments_) => {
+    calls.push(["codexEffort", arguments_]);
+  };
+  shell.sessionService.updateSessionClaudeEffortLevel = async (...arguments_) => {
+    calls.push(["claudeEffort", arguments_]);
   };
   shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
     calls.push(["sent", arguments_]);
@@ -409,6 +417,7 @@ isolatedTest("message commands call the explicit controller modes and report res
     requestId: "request-1",
     content: "Run the tests.",
     mode: "sent",
+    reasoningEffort: "ultra",
   }));
   await waitUntil(() => environment.commandResults.length === 1);
   assert.deepEqual(calls[0], [
@@ -416,9 +425,13 @@ isolatedTest("message commands call the explicit controller modes and report res
     { workspaceId: "workspace-1", hidden: false },
   ]);
   assert.deepEqual(calls[1], [
+    "codexEffort",
+    ["session-1", "ultra"],
+  ]);
+  assert.deepEqual(calls[2], [
     "sent",
     [{
-      session,
+      session: { ...session, codexThinkingLevel: "ultra" },
       message: "Run the tests.",
       workspaceId: "workspace-1",
       includeAttachments: false,
@@ -428,21 +441,30 @@ isolatedTest("message commands call the explicit controller modes and report res
     requestId: "request-1",
   });
 
+  session.agentType = "claude";
   source.onmessage(messageCommand({
     requestId: "request-2",
     content: "Fail.",
     mode: "queued",
+    reasoningEffort: "ultracode",
   }));
   await waitUntil(() => environment.commandResults.length === 2);
   await waitUntil(() => environment.errors.length === 1);
-  assert.deepEqual(calls[2], [
+  assert.deepEqual(calls[3], [
     "sessions",
     { workspaceId: "workspace-1", hidden: false },
   ]);
-  assert.deepEqual(calls[3], [
+  assert.deepEqual(calls[4], [
+    "claudeEffort",
+    [{
+      sessionId: "session-1",
+      claudeEffortLevel: "ultracode",
+    }],
+  ]);
+  assert.deepEqual(calls[5], [
     "queued",
     [{
-      session,
+      session: { ...session, claudeEffortLevel: "ultracode" },
       message: "Fail.",
       workspaceId: "workspace-1",
       includeAttachments: false,
@@ -708,6 +730,8 @@ function emptyWorkspaceShell() {
     async setSessionAgentAndModel() {},
     async setUnread() {},
     async markWorkspaceAsRead() {},
+    async updateSessionClaudeEffortLevel() {},
+    async updateSessionCodexThinkingLevel() {},
     async updateSessionFastMode() {},
     async updateSessionModel() {},
   };

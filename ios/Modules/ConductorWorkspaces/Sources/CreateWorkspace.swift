@@ -31,7 +31,26 @@ public struct CreateWorkspace: Sendable {
 
         public var selectedRepositoryID: Repository.ID
         public var selectedModel = Session.Model.gpt_5_6_sol
+        public var selectedReasoningEffort: Session.ReasoningEffort? = Session.ReasoningEffort.none
         var workspaceID: Workspace.ID?
+
+        var availableReasoningEfforts: [Session.ReasoningEffort] {
+            Session.availableReasoningEfforts(
+                agentType: agentType,
+                model: selectedModel
+            )
+        }
+
+        mutating func reconcileSelectedReasoningEffort() {
+            let efforts = availableReasoningEfforts
+            guard let selectedReasoningEffort,
+                  efforts.contains(selectedReasoningEffort) else {
+                selectedReasoningEffort = efforts.contains(selectedModel.defaultReasoningEffort)
+                    ? selectedModel.defaultReasoningEffort
+                    : efforts.first
+                return
+            }
+        }
 
         public init(
             repositories: [Repository],
@@ -52,8 +71,13 @@ public struct CreateWorkspace: Sendable {
         case binding(BindingAction<State>)
         case createButtonTapped
         case createWorkspaceFailed(String)
-        case createWorkspaceSucceeded(CreatedWorkspace, selectedModel: Session.Model)
+        case createWorkspaceSucceeded(
+            CreatedWorkspace,
+            selectedModel: Session.Model,
+            selectedReasoningEffort: Session.ReasoningEffort?
+        )
         case defaultModelFetched(Session.Model)
+        case reasoningEffortSelected(Session.ReasoningEffort)
         case delegate(Delegate)
 
         public enum Alert: Equatable {}
@@ -96,6 +120,7 @@ public struct CreateWorkspace: Sendable {
                         model = state.selectedModel,
                         prompt = state.prompt.trimmingCharacters(in: .whitespacesAndNewlines),
                         repositoryID = state.selectedRepositoryID,
+                        reasoningEffort = state.selectedReasoningEffort,
                         workspaceID,
                     ] send in
                     do {
@@ -118,7 +143,8 @@ public struct CreateWorkspace: Sendable {
                                 sessionID: createdWorkspace.session.id,
                                 message: prompt,
                                 model: model,
-                                isFastModeEnabled: isFastModeEnabled
+                                isFastModeEnabled: isFastModeEnabled,
+                                reasoningEffort: reasoningEffort
                             )
                         }
                         if let message {
@@ -129,7 +155,8 @@ public struct CreateWorkspace: Sendable {
                         await send(
                             .createWorkspaceSucceeded(
                                 createdWorkspace,
-                                selectedModel: model
+                                selectedModel: model,
+                                selectedReasoningEffort: reasoningEffort
                             )
                         )
                     } catch {
@@ -142,6 +169,14 @@ public struct CreateWorkspace: Sendable {
                 if let agentType = state.selectedModel.agentType {
                     state.agentType = agentType
                 }
+                state.reconcileSelectedReasoningEffort()
+                return .none
+
+            case let .reasoningEffortSelected(reasoningEffort):
+                guard state.availableReasoningEfforts.contains(reasoningEffort) else {
+                    return .none
+                }
+                state.selectedReasoningEffort = reasoningEffort
                 return .none
 
             case let .createWorkspaceFailed(message):
@@ -149,7 +184,11 @@ public struct CreateWorkspace: Sendable {
                 state.isCreateAPIInFlight = false
                 return .none
 
-            case let .createWorkspaceSucceeded(createdWorkspace, selectedModel):
+            case let .createWorkspaceSucceeded(
+                createdWorkspace,
+                selectedModel,
+                selectedReasoningEffort
+            ):
                 state.isCreateAPIInFlight = false
                 state.$prompt.withLock { $0 = "" }
                 let repository = state.repositories.first {
@@ -160,6 +199,7 @@ public struct CreateWorkspace: Sendable {
                         .workspaceCreated(
                             WorkspaceCreationResult(
                                 selectedModel: selectedModel,
+                                selectedReasoningEffort: selectedReasoningEffort,
                                 workspace: WorkspaceWithRepository(
                                     workspace: createdWorkspace.workspace,
                                     repository: repository
@@ -180,6 +220,7 @@ public struct CreateWorkspace: Sendable {
                     state.agentType = .codex
                     state.selectedModel = model
                 }
+                state.reconcileSelectedReasoningEffort()
                 return .none
 
             case .alert, .binding, .delegate:
@@ -192,13 +233,16 @@ public struct CreateWorkspace: Sendable {
 
 public struct WorkspaceCreationResult: Equatable, Sendable {
     public let selectedModel: Session.Model
+    public let selectedReasoningEffort: Session.ReasoningEffort?
     public let workspace: WorkspaceWithRepository
 
     public init(
         selectedModel: Session.Model,
+        selectedReasoningEffort: Session.ReasoningEffort? = nil,
         workspace: WorkspaceWithRepository
     ) {
         self.selectedModel = selectedModel
+        self.selectedReasoningEffort = selectedReasoningEffort
         self.workspace = workspace
     }
 }
@@ -320,9 +364,14 @@ public struct CreateWorkspaceView: View {
             ModelAndFastModeControls(
                 agentType: store.agentType,
                 allowsAgentSwitching: true,
+                availableReasoningEfforts: store.availableReasoningEfforts,
                 isFastModeEnabled: store.isFastModeEnabled,
                 selectedModel: store.selectedModel,
+                selectedReasoningEffort: store.selectedReasoningEffort,
                 onFastModeTapped: { store.isFastModeEnabled.toggle() },
+                onSelectReasoningEffort: {
+                    store.send(.reasoningEffortSelected($0))
+                },
                 onSelectModel: { store.selectedModel = $0 }
             )
             .tint(.theme(.textPrimary))

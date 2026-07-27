@@ -25,8 +25,12 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
     public var lastUserMessageAt: String?
     public var status: Status
     public var model: Model
+    @Column("codex_thinking_level")
+    public var codexThinkingLevel: ReasoningEffort?
     @Column("fast_mode")
     public var isFastModeEnabled: Bool?
+    @Column("claude_effort_level")
+    public var claudeEffortLevel: ReasoningEffort?
     @Column("unread_count")
     public var unreadCount: Int
     @Column("freshly_compacted")
@@ -48,7 +52,9 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
         unreadCount: Int,
         freshlyCompacted: Int,
         contextTokenCount: Int,
-        isFastModeEnabled: Bool? = nil
+        codexThinkingLevel: ReasoningEffort? = nil,
+        isFastModeEnabled: Bool? = nil,
+        claudeEffortLevel: ReasoningEffort? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -60,7 +66,9 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
         self.lastUserMessageAt = lastUserMessageAt
         self.status = status
         self.model = model
+        self.codexThinkingLevel = codexThinkingLevel
         self.isFastModeEnabled = isFastModeEnabled
+        self.claudeEffortLevel = claudeEffortLevel
         self.unreadCount = unreadCount
         self.freshlyCompacted = freshlyCompacted
         self.contextTokenCount = contextTokenCount
@@ -158,9 +166,51 @@ extension Session {
         public static let error = Self(rawValue: "error")
         public static let working = Self(rawValue: "working")
     }
+
+    public struct ReasoningEffort: Codable, Hashable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let none = Self(rawValue: "none")
+        public static let low = Self(rawValue: "low")
+        public static let medium = Self(rawValue: "medium")
+        public static let high = Self(rawValue: "high")
+        public static let extraHigh = Self(rawValue: "xhigh")
+        public static let max = Self(rawValue: "max")
+        public static let ultra = Self(rawValue: "ultra")
+        public static let ultracode = Self(rawValue: "ultracode")
+    }
 }
 
 extension Session {
+    public var reasoningEffort: ReasoningEffort? {
+        agentType == .claude ? claudeEffortLevel : codexThinkingLevel
+    }
+
+    public func availableReasoningEfforts(for model: Model) -> [ReasoningEffort] {
+        Self.availableReasoningEfforts(
+            agentType: model.agentType ?? agentType,
+            model: model
+        )
+    }
+
+    public static func availableReasoningEfforts(
+        agentType: AgentType,
+        model: Model
+    ) -> [ReasoningEffort] {
+        switch agentType {
+        case .codex:
+            model.availableCodexReasoningEfforts
+        case .claude:
+            model.availableClaudeReasoningEfforts
+        default:
+            []
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case workspaceID = "workspace_id"
@@ -172,9 +222,50 @@ extension Session {
         case lastUserMessageAt = "last_user_message_at"
         case status
         case model
+        case codexThinkingLevel = "codex_thinking_level"
         case isFastModeEnabled = "fast_mode"
+        case claudeEffortLevel = "claude_effort_level"
         case unreadCount = "unread_count"
         case freshlyCompacted = "freshly_compacted"
         case contextTokenCount = "context_token_count"
+    }
+}
+
+extension Session.Model {
+    public var availableClaudeReasoningEfforts: [Session.ReasoningEffort] {
+        switch self {
+        case .fable5, .opus4_8_1M, .opus4_7_1M, .sonnet5_1M:
+            [.low, .medium, .high, .extraHigh, .max, .ultracode]
+        case .opus4_6_1M, .sonnet_4_6_1M, .sonnet_4_6:
+            [.low, .medium, .high, .max]
+        case .opus, .opus_1M:
+            [.low, .medium, .high]
+        default:
+            []
+        }
+    }
+
+    public var availableCodexReasoningEfforts: [Session.ReasoningEffort] {
+        switch self {
+        case .gpt_5_6_sol, .gpt_5_6_terra:
+            [.none, .low, .medium, .high, .extraHigh, .max, .ultra]
+        case .gpt_5_6_luna:
+            [.none, .low, .medium, .high, .extraHigh, .max]
+        case .gpt5_5, .gpt5_4, .gpt5_3Codex:
+            [.none, .low, .medium, .high, .extraHigh]
+        default:
+            []
+        }
+    }
+
+    public var defaultReasoningEffort: Session.ReasoningEffort {
+        switch self {
+        case .gpt_5_6_sol:
+            .low
+        case .gpt_5_6_terra, .gpt_5_6_luna, .gpt5_5:
+            .medium
+        default:
+            .high
+        }
     }
 }

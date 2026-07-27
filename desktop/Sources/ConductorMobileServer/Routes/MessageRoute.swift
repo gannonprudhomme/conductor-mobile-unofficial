@@ -72,6 +72,27 @@ enum MessageRoute {
         let isFastModeEnabled = sendMessageRequest.isFastModeEnabled
             ?? session.isFastModeEnabled
             ?? false
+        let availableReasoningEfforts = Session.availableReasoningEfforts(
+            agentType: requestedAgentType,
+            model: requestedModel
+        )
+        if let requestedReasoningEffort = sendMessageRequest.reasoningEffort,
+           !availableReasoningEfforts.contains(requestedReasoningEffort) {
+            throw PlainTextResponseError(
+                .badRequest,
+                message: "Reasoning effort is not available for this model."
+            )
+        }
+        let reasoningEffort: Session.ReasoningEffort? = if let requestedReasoningEffort = sendMessageRequest.reasoningEffort {
+            requestedReasoningEffort
+        } else if let persistedReasoningEffort = session.reasoningEffort,
+                  availableReasoningEfforts.contains(persistedReasoningEffort) {
+            persistedReasoningEffort
+        } else {
+            availableReasoningEfforts.contains(requestedModel.defaultReasoningEffort)
+                ? requestedModel.defaultReasoningEffort
+                : availableReasoningEfforts.first
+        }
 
         do {
             if requestedAgentType != session.agentType {
@@ -180,7 +201,8 @@ enum MessageRoute {
                         sessionID: sessionID,
                         workspaceID: workspaceID,
                         content: sendMessageRequest.message,
-                        mode: .sent
+                        mode: .sent,
+                        reasoningEffort: reasoningEffort
                     )
                     return .accepted
                 } catch is CancellationError {
@@ -274,11 +296,13 @@ enum MessageRoute {
         let message: String
         let model: String?
         let isFastModeEnabled: Bool?
+        let reasoningEffort: Session.ReasoningEffort?
 
         private enum CodingKeys: String, CodingKey {
             case message
             case model
             case isFastModeEnabled = "fast_mode"
+            case reasoningEffort = "reasoning_effort"
         }
     }
 

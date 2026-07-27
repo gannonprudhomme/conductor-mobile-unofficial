@@ -170,7 +170,8 @@ struct DesktopClientTests {
                     sessionID: "session-1",
                     message: "Run the tests.",
                     model: .gpt_5_6_terra,
-                    isFastModeEnabled: false
+                    isFastModeEnabled: false,
+                    reasoningEffort: .medium
                 )
             }
             await #expect(throws: DesktopClientError.invalidServerAddress) {
@@ -288,7 +289,8 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
-                isFastModeEnabled: true
+                isFastModeEnabled: true,
+                reasoningEffort: .max
             )
         }
 
@@ -305,7 +307,8 @@ struct DesktopClientTests {
         #expect(object["message"] as? String == "Run the tests.")
         #expect(object["model"] as? String == "gpt-5.6-terra")
         #expect(object["fast_mode"] as? Bool == true)
-        #expect(object.count == 3)
+        #expect(object["reasoning_effort"] as? String == "max")
+        #expect(object.count == 4)
     }
 
     @Test("Sending supports a legacy no-content response")
@@ -339,7 +342,8 @@ struct DesktopClientTests {
                 sessionID: "session-1",
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
-                isFastModeEnabled: false
+                isFastModeEnabled: false,
+                reasoningEffort: nil
             )
         }
 

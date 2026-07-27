@@ -115,6 +115,7 @@ struct MainTests {
         let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
         let creation = WorkspaceCreationResult(
             selectedModel: .gpt_5_6_terra,
+            selectedReasoningEffort: .ultra,
             workspace: item
         )
 
@@ -131,6 +132,7 @@ struct MainTests {
                         WorkspaceChat.State(
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
+                            selectedReasoningEffort: .ultra,
                             shouldFocusMessageField: true
                         )
                     )

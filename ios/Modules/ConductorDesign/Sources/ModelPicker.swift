@@ -13,27 +13,36 @@ import SwiftUI
 public struct ModelAndFastModeControls: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let availableReasoningEfforts: [Session.ReasoningEffort]
     let isFastModeEnabled: Bool
     let isFastModeButtonDisabled: Bool
     let selectedModel: Session.Model
+    let selectedReasoningEffort: Session.ReasoningEffort?
     let onFastModeTapped: @MainActor () -> Void
+    let onSelectReasoningEffort: @MainActor (Session.ReasoningEffort) -> Void
     let onSelectModel: @MainActor (Session.Model) -> Void
 
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        availableReasoningEfforts: [Session.ReasoningEffort],
         isFastModeEnabled: Bool,
         isFastModeButtonDisabled: Bool = false,
         selectedModel: Session.Model,
+        selectedReasoningEffort: Session.ReasoningEffort?,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onSelectReasoningEffort: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSelectModel: @escaping @MainActor (Session.Model) -> Void
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.availableReasoningEfforts = availableReasoningEfforts
         self.isFastModeEnabled = isFastModeEnabled
         self.isFastModeButtonDisabled = isFastModeButtonDisabled
         self.selectedModel = selectedModel
+        self.selectedReasoningEffort = selectedReasoningEffort
         self.onFastModeTapped = onFastModeTapped
+        self.onSelectReasoningEffort = onSelectReasoningEffort
         self.onSelectModel = onSelectModel
     }
 
@@ -70,6 +79,15 @@ public struct ModelAndFastModeControls: View {
                 .disabled(isFastModeButtonDisabled)
                 .accessibilityLabel("Fast mode")
                 .accessibilityValue(isFastModeEnabled ? "On" : "Off")
+
+                if !availableReasoningEfforts.isEmpty {
+                    ReasoningEffortControl(
+                        availableEfforts: availableReasoningEfforts,
+                        selectedEffort: selectedReasoningEffort,
+                        isDisabled: isFastModeButtonDisabled,
+                        onSelect: onSelectReasoningEffort
+                    )
+                }
             }
         }
         .scrollIndicators(.hidden)
@@ -199,9 +217,12 @@ public struct ModelPicker: Equatable, View {
     ModelAndFastModeControls(
         agentType: .codex,
         allowsAgentSwitching: true,
+        availableReasoningEfforts: Session.Model.gpt_5_6_sol.availableCodexReasoningEfforts,
         isFastModeEnabled: true,
         selectedModel: .gpt_5_6_sol,
+        selectedReasoningEffort: .ultra,
         onFastModeTapped: { },
+        onSelectReasoningEffort: { _ in },
         onSelectModel: { _ in }
     )
     .padding()

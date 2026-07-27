@@ -23,7 +23,9 @@ extension Session {
         unreadCount: Int = 0,
         freshlyCompacted: Int = 0,
         contextTokenCount: Int = 0,
-        isFastModeEnabled: Bool? = false
+        codexThinkingLevel: ReasoningEffort? = .high,
+        isFastModeEnabled: Bool? = false,
+        claudeEffortLevel: ReasoningEffort? = nil
     ) -> Self {
         Self(
             id: id,
@@ -39,7 +41,9 @@ extension Session {
             unreadCount: unreadCount,
             freshlyCompacted: freshlyCompacted,
             contextTokenCount: contextTokenCount,
-            isFastModeEnabled: isFastModeEnabled
+            codexThinkingLevel: codexThinkingLevel,
+            isFastModeEnabled: isFastModeEnabled,
+            claudeEffortLevel: claudeEffortLevel
         )
     }
 }

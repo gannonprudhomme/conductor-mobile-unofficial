@@ -72,7 +72,9 @@ func createTestConductorSchema(in database: Database) throws {
               last_user_message_at TEXT,
               status TEXT NOT NULL,
               model TEXT NOT NULL,
+              codex_thinking_level TEXT,
               fast_mode INTEGER DEFAULT 0,
+              claude_effort_level TEXT,
               unread_count INTEGER NOT NULL DEFAULT 0,
               freshly_compacted INTEGER NOT NULL DEFAULT 0,
               context_token_count INTEGER NOT NULL DEFAULT 0

@@ -22,7 +22,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: nil
             )
         }
 
@@ -35,7 +36,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: .ultra
             )
         }
         let command = try decodeMessageCommand(try #require(await events.next()))
@@ -44,6 +46,7 @@ struct WorkspaceUIHookTests {
         #expect(command.workspaceID == "workspace-1")
         #expect(command.sendMessage.content == "Run the tests.")
         #expect(command.sendMessage.mode == "sent")
+        #expect(command.sendMessage.reasoningEffort == "ultra")
         #expect(
             await uiHook.didCompleteCommand(
                 result: WorkspaceUIHook.CommandResult(
@@ -61,7 +64,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Fail.",
-                mode: .queued
+                mode: .queued,
+                reasoningEffort: nil
             )
         }
         let rejectedCommand = try decodeMessageCommand(try #require(await events.next()))
@@ -92,7 +96,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "First",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: nil
             )
         }
         let second = Task {
@@ -101,7 +106,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-2",
                 workspaceID: "workspace-1",
                 content: "Second",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: nil
             )
         }
 
@@ -142,7 +148,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Slow",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: nil
             )
         }
         _ = await events.next()
@@ -173,7 +180,8 @@ struct WorkspaceUIHookTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Slow",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: nil
             )
         }
         _ = await events.next()
@@ -614,6 +622,7 @@ private struct TestMessageCommand: Decodable {
     struct SendMessage: Decodable {
         let content: String
         let mode: String
+        let reasoningEffort: String?
     }
 
     private enum CodingKeys: String, CodingKey {

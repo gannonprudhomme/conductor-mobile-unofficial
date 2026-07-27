@@ -47,6 +47,7 @@ public struct WorkspaceChat: Sendable {
         public init(
             workspaceWithRepository: WorkspaceWithRepository,
             selectedModel: Session.Model? = nil,
+            selectedReasoningEffort: Session.ReasoningEffort? = nil,
             shouldFocusMessageField: Bool = false
         ) {
             let workspace = workspaceWithRepository.workspace
@@ -82,6 +83,7 @@ public struct WorkspaceChat: Sendable {
                 Chat.State(
                     session: $0,
                     selectedModel: selectedModel,
+                    selectedReasoningEffort: selectedReasoningEffort,
                     shouldFocusMessageField: shouldFocusMessageField
                 )
             }

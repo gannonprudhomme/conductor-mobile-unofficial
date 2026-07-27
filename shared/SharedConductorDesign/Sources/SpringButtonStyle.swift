@@ -35,7 +35,7 @@ struct SpringButtonStyleBody<Label: View>: View {
 
     var body: some View {
         label
-            .scaleEffect(!shouldReduceMotion && isVisuallyPressed ? 0.925 : 1)
+            .scaleEffect(!shouldReduceMotion && isVisuallyPressed ? 0.97 : 1)
             .animation(
                 shouldReduceMotion ? nil : .interactiveSpring(duration: 0.150),
                 value: isVisuallyPressed

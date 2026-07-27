@@ -74,4 +74,14 @@ struct SessionDisplayTests {
             expectNoDifference(Session.Model(rawValue: rawValue).displayName, displayName)
         }
     }
+
+    @Test("Reasoning efforts use readable labels")
+    func reasoningEffortDisplayName() {
+        #expect(Session.ReasoningEffort.none.displayName == "Default")
+        #expect(Session.ReasoningEffort.low.displayName == "Light")
+        #expect(Session.ReasoningEffort.extraHigh.displayName == "Extra high")
+        #expect(Session.ReasoningEffort.max.displayName == "Max")
+        #expect(Session.ReasoningEffort.ultra.displayName == "Ultra")
+        #expect(Session.ReasoningEffort.ultracode.displayName == "Ultra")
+    }
 }

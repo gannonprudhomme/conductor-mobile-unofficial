@@ -42,7 +42,8 @@ public struct WorkspaceUIHook: Sendable {
         _ sessionID: Session.ID,
         _ workspaceID: Workspace.ID,
         _ content: String,
-        _ mode: MessageMode
+        _ mode: MessageMode,
+        _ reasoningEffort: Session.ReasoningEffort?
     ) async throws -> Void
     var stopSession: @Sendable (
         _ requestID: UUID,
@@ -132,13 +133,14 @@ extension WorkspaceUIHook: DependencyKey {
                 )
             },
             listenerUnavailable: { await state.listenerUnavailable() },
-            sendMessage: { requestID, sessionID, workspaceID, content, mode in
+            sendMessage: { requestID, sessionID, workspaceID, content, mode, reasoningEffort in
                 try await state.sendMessage(
                     requestID: requestID,
                     sessionID: sessionID,
                     workspaceID: workspaceID,
                     content: content,
-                    mode: mode
+                    mode: mode,
+                    reasoningEffort: reasoningEffort
                 )
             },
             stopSession: { requestID, sessionID, waitUntilStopped in
@@ -295,14 +297,16 @@ private actor WorkspaceUIHookState {
         sessionID: Session.ID,
         workspaceID: Workspace.ID,
         content: String,
-        mode: WorkspaceUIHook.MessageMode
+        mode: WorkspaceUIHook.MessageMode,
+        reasoningEffort: Session.ReasoningEffort?
     ) async throws {
         let event = try Self.messageEvent(
             requestID: requestID,
             sessionID: sessionID,
             workspaceID: workspaceID,
             content: content,
-            mode: mode
+            mode: mode,
+            reasoningEffort: reasoningEffort
         )
         let (results, continuation) = try enqueueCommand(requestID: requestID, event: event)
         defer {
@@ -530,6 +534,7 @@ private actor WorkspaceUIHookState {
         struct SendMessage: Encodable {
             let content: String
             let mode: WorkspaceUIHook.MessageMode
+            let reasoningEffort: Session.ReasoningEffort?
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -545,7 +550,8 @@ private actor WorkspaceUIHookState {
         sessionID: Session.ID,
         workspaceID: Workspace.ID,
         content: String,
-        mode: WorkspaceUIHook.MessageMode
+        mode: WorkspaceUIHook.MessageMode,
+        reasoningEffort: Session.ReasoningEffort?
     ) throws -> String {
         let command = MessageCommand(
             requestID: requestID,
@@ -553,7 +559,8 @@ private actor WorkspaceUIHookState {
             workspaceID: workspaceID,
             sendMessage: MessageCommand.SendMessage(
                 content: content,
-                mode: mode
+                mode: mode,
+                reasoningEffort: reasoningEffort
             )
         )
         let data = try JSONEncoder().encode(command)

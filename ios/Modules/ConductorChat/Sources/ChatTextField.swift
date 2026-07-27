@@ -15,6 +15,8 @@ struct ChatTextField: View {
 
     @Binding var text: String
     @Binding var selectedModel: Session.Model
+    let selectedReasoningEffort: Session.ReasoningEffort?
+    let availableReasoningEfforts: [Session.ReasoningEffort]
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
     let isFastModeEnabled: Bool
@@ -23,6 +25,7 @@ struct ChatTextField: View {
     let isWorking: Bool
     let shouldFocusOnAppear: Bool
     let onFastModeTapped: @MainActor () -> Void
+    let onSelectReasoningEffort: @MainActor (Session.ReasoningEffort) -> Void
     let onSendTapped: @MainActor () -> Void
     let onStopTapped: @MainActor () -> Void
 
@@ -35,8 +38,11 @@ struct ChatTextField: View {
         isStopInFlight: Bool,
         isWorking: Bool,
         selectedModel: Binding<Session.Model>,
+        selectedReasoningEffort: Session.ReasoningEffort?,
+        availableReasoningEfforts: [Session.ReasoningEffort],
         shouldFocusOnAppear: Bool = false,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onSelectReasoningEffort: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSendTapped: @escaping @MainActor () -> Void,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
@@ -48,8 +54,11 @@ struct ChatTextField: View {
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
         self._selectedModel = selectedModel
+        self.selectedReasoningEffort = selectedReasoningEffort
+        self.availableReasoningEfforts = availableReasoningEfforts
         self.shouldFocusOnAppear = shouldFocusOnAppear
         self.onFastModeTapped = onFastModeTapped
+        self.onSelectReasoningEffort = onSelectReasoningEffort
         self.onSendTapped = onSendTapped
         self.onStopTapped = onStopTapped
     }
@@ -97,10 +106,13 @@ struct ChatTextField: View {
             ModelAndFastModeControls(
                 agentType: agentType,
                 allowsAgentSwitching: allowsAgentSwitching,
+                availableReasoningEfforts: availableReasoningEfforts,
                 isFastModeEnabled: isFastModeEnabled,
                 isFastModeButtonDisabled: isAnyActionInFlight,
                 selectedModel: selectedModel,
+                selectedReasoningEffort: selectedReasoningEffort,
                 onFastModeTapped: onFastModeTapped,
+                onSelectReasoningEffort: onSelectReasoningEffort,
                 onSelectModel: { selectedModel = $0 }
             )
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -245,7 +257,10 @@ struct ChatTextField: View {
             isStopInFlight: false,
             isWorking: true,
             selectedModel: $selectedModel,
+            selectedReasoningEffort: .ultra,
+            availableReasoningEfforts: selectedModel.availableCodexReasoningEfforts,
             onFastModeTapped: { isFastModeEnabled.toggle() },
+            onSelectReasoningEffort: { _ in },
             onSendTapped: { },
             onStopTapped: { }
         )

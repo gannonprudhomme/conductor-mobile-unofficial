@@ -623,12 +623,13 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled, reasoningEffort in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Please run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
+                    #expect(reasoningEffort == .high)
                     return sentMessage
                 }
             }
@@ -668,7 +669,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in nil }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in nil }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -694,7 +695,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
                     for await response in responses {
                         return response
                     }
@@ -749,7 +750,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -791,7 +792,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in responseMessage }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in responseMessage }
             }
 
             store.state.$messageDraft.withLock { $0 = "Run the tests." }
@@ -824,7 +825,7 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _ in
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _ in
                     throw TestError()
                 }
             }
@@ -849,7 +850,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled in
+                $0.desktopClient.sendMessage = { workspaceID, sessionID, message, model, isFastModeEnabled, _ in
                     #expect(workspaceID == session.workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Use the next setting.")
@@ -892,6 +893,109 @@ struct ChatTests {
             }
             await store.send(.sessionFastModeChanged(true)) {
                 $0.isFastModeEnabled = true
+            }
+        }
+    }
+
+    @Test("Reasoning effort selects a supported option")
+    func reasoningEffortSelection() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: .preview(codexThinkingLevel: .ultra)
+                )
+            ) {
+                Chat()
+            }
+
+            await store.send(.reasoningEffortSelected(.medium)) {
+                $0.selectedReasoningEffort = .medium
+            }
+            await store.send(.reasoningEffortSelected(.ultracode))
+        }
+    }
+
+    @Test("Claude reasoning selects an available option")
+    func claudeReasoningEffortSelection() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: .preview(
+                        agentType: .claude,
+                        model: .fable5,
+                        claudeEffortLevel: .ultracode
+                    )
+                )
+            ) {
+                Chat()
+            }
+
+            await store.send(.reasoningEffortSelected(.low)) {
+                $0.selectedReasoningEffort = .low
+            }
+            await store.send(.reasoningEffortSelected(.ultra))
+        }
+    }
+
+    @Test("A newly selected Claude model accepts Ultracode")
+    func selectedClaudeModelAcceptsUltracode() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: .preview(codexThinkingLevel: .high),
+                    selectedModel: .fable5
+                )
+            ) {
+                Chat()
+            }
+
+            await store.send(.reasoningEffortSelected(.ultracode)) {
+                $0.selectedReasoningEffort = .ultracode
+            }
+        }
+    }
+
+    @Test("Changing models replaces an unsupported reasoning effort")
+    func reasoningEffortFollowsModel() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: .preview(codexThinkingLevel: .ultra)
+                )
+            ) {
+                Chat()
+            }
+
+            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_luna))) {
+                $0.selectedModel = .gpt_5_6_luna
+                $0.selectedReasoningEffort = .medium
+                $0.hasUserSelectedModel = true
+            }
+            await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
+                $0.selectedModel = .gpt5_5
+            }
+        }
+    }
+
+    @Test("Reasoning effort follows the observed session setting")
+    func reasoningEffortFollowsObservedSession() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Chat.State(session: .preview())) {
+                Chat()
+            }
+
+            await store.send(.sessionReasoningEffortChanged(.max)) {
+                $0.selectedReasoningEffort = .max
             }
         }
     }

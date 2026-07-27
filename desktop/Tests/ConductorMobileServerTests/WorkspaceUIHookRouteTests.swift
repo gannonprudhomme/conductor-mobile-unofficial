@@ -27,7 +27,8 @@ struct WorkspaceUIHookRouteTests {
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
-                mode: .sent
+                mode: .sent,
+                reasoningEffort: nil
             )
         }
         let event = try #require(await events.next())

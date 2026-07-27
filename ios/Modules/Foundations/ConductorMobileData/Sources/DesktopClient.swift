@@ -45,7 +45,8 @@ public struct DesktopClient: Sendable {
         _ sessionID: String,
         _ message: String,
         _ model: Session.Model,
-        _ isFastModeEnabled: Bool
+        _ isFastModeEnabled: Bool,
+        _ reasoningEffort: Session.ReasoningEffort?
     ) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> UIHookMutationPath
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> UIHookMutationPath
@@ -227,12 +228,13 @@ extension DesktopClient: DependencyKey {
                 WorkspacePatchBody(branch: branch),
                 at: workspaceURL(workspaceID: workspaceID)
             )
-        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled in
+        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled, reasoningEffort in
             try await post(
                 SendMessageRequest(
                     message: message,
                     model: model.rawValue,
-                    isFastModeEnabled: isFastModeEnabled
+                    isFastModeEnabled: isFastModeEnabled,
+                    reasoningEffort: reasoningEffort
                 ),
                 to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
                 decoding: Message.self
@@ -333,11 +335,13 @@ extension DesktopClient: DependencyKey {
         let message: String
         let model: String
         let isFastModeEnabled: Bool
+        let reasoningEffort: Session.ReasoningEffort?
 
         private enum CodingKeys: String, CodingKey {
             case message
             case model
             case isFastModeEnabled = "fast_mode"
+            case reasoningEffort = "reasoning_effort"
         }
     }
 
