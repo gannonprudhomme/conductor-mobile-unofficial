@@ -24,8 +24,8 @@ public struct Chat: Sendable {
 
     @ObservableState
     public struct State: Equatable {
-        @Shared(.desktopConnectionStatus)
-        var connectionStatus
+//        @Shared(.desktopConnectionStatus)
+        var connectionStatus: DesktopClient.ConnectionStatus = .connecting
 
         @Shared var messageDraft: String
 
@@ -514,8 +514,10 @@ struct ChatView: View {
             let statusLayout = if queuedMessagesStore.isExpanded {
                 AnyLayout(VStackLayout(spacing: 8))
             } else {
-                AnyLayout(ZStackLayout(alignment: .trailing))
+                // AnyLayout(ZStackLayout(alignment: .trailing))
+                AnyLayout(HStackLayout(spacing: 0))
             }
+            
             let reconnectingHorizontalOffset = if queuedMessagesStore.isExpanded
                 || queuedMessagesStore.displayedMessages.isEmpty {
                 CGFloat.zero
@@ -525,8 +527,9 @@ struct ChatView: View {
                     reconnectingWidth: reconnectingSize.width,
                     queueTrailingExtent: max(
                         0,
-                        queuedMessagesWidth - QueuedMessagesPresentation.horizontalPadding
-                    )
+                        queuedMessagesWidth //- QueuedMessagesPresentation.horizontalPadding
+                    ),
+                    isDisplayingReconnecting: store.connectionStatus != .connected
                 )
             }
 
@@ -581,31 +584,44 @@ struct ChatView: View {
         queuedMessagesStore: StoreOf<QueuedMessages>,
         reconnectingHorizontalOffset: CGFloat
     ) -> some View {
-        VStack(spacing: 8) {
+        
+        return VStack(spacing: 8) {
             statusLayout {
-                if store.connectionStatus != .connected {
-                    Label {
-                        Text("Reconnecting")
-                    } icon: {
-                        ProgressView()
-                            .progressViewStyle(.network)
-                            .tint(.theme(.textSecondary))
-                            .controlSize(.mini)
+                HStack(spacing: 0) {
+                    scrollDownButton
+                        .padding(.leading, QueuedMessagesPresentation.horizontalPadding)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+//                        .frame(maxWidth: .infinity, alignment: .leading)
+//                        .background { Color.green }
+                    
+                    Spacer()
+                    
+                    if store.connectionStatus != .connected {
+                        
+                        reconnecting
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+//                            .frame(maxWidth: .infinity, alignment: .center)
+//                            .background { Color.red }
+                        
+                        Spacer()
                     }
-                    .labelStyle(.conductorSmall)
-                    .font(.theme(.small))
-                    .foregroundStyle(.theme(.textSecondary))
-                    .fixedSize()
-                    .onGeometryChange(for: CGSize.self) { geometry in
-                        geometry.size
-                    } action: { size in
-                        reconnectingSize = size
+                    
+                    // Dummy to ensure it's centered
+                    if !queuedMessagesStore.displayedMessages.isEmpty && queuedMessagesStore.isExpanded {
+                        scrollDownButton // Just to ensure it's equal
+                            .opacity(0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                            .padding(.trailing, QueuedMessagesPresentation.horizontalPadding)
                     }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .offset(x: reconnectingHorizontalOffset)
-                    .animation(.default, value: reconnectingHorizontalOffset)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                .layoutPriority(-1)
+//                .animation(.default, value: reconnectingHorizontalOffset)
+//                .background { Color.yellow}
+//                .frame(maxWidth: .infinity, alignment: .center)
+//                .padding(.trailing, reconnectingHorizontalOffset)
+//                .background { Color.blue }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
 
                 if !queuedMessagesStore.displayedMessages.isEmpty {
                     QueuedMessagesView(
@@ -618,52 +634,12 @@ struct ChatView: View {
                         queuedMessagesWidth = width
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .layoutPriority(10)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
 
-            ChatTextField(
-                text: composerText(queuedMessagesStore: queuedMessagesStore),
-                agentType: store.session.agentType,
-                allowsAgentSwitching: store.allowsAgentSwitching,
-                isFastModeEnabled: store.isFastModeEnabled,
-                isEditingQueuedMessage: queuedMessagesStore.isEditing,
-                isSendInFlight: queuedMessagesStore.isEditing
-                    ? queuedMessagesStore.isEditInFlight
-                    : store.isMessageSendInFlight,
-                isStopInFlight: store.isStopInFlight,
-                isWorking: store.session.status == .working,
-                selectedModel: $store.selectedModel,
-                shouldFocusOnAppear: store.shouldFocusMessageField,
-                onFastModeTapped: {
-                    store.send(.fastModeButtonTapped)
-                },
-                onCancelEditingTapped: {
-                    queuedMessagesStore.send(.cancelEditButtonTapped)
-                },
-                onSendTapped: {
-                    if queuedMessagesStore.isEditing {
-                        queuedMessagesStore.send(.finishEditButtonTapped)
-                    } else {
-                        store.send(.sendButtonTapped(.steer))
-                    }
-                },
-                onQueueTapped: {
-                    store.send(.sendButtonTapped(.queue))
-                },
-                onStopTapped: { store.send(.stopButtonTapped) }
-            )
-            .onGeometryChange(for: CGFloat.self) { geometry in
-                geometry.size.height
-            } action: { height in
-                withAnimation(
-                    composerHeight == 0
-                    ? nil
-                    : QueuedMessagesPresentation.disclosureAnimation
-                ) {
-                    composerHeight = height
-                }
-            }
+            chatTextField(queuedMessagesStore: queuedMessagesStore)
         }
         .animation(.default, value: store.connectionStatus)
         .animation(.default, value: queuedMessagesStore.displayedMessages)
@@ -671,6 +647,102 @@ struct ChatView: View {
             QueuedMessagesPresentation.disclosureAnimation,
             value: queuedMessagesStore.isEditing
         )
+    }
+    
+    private var reconnecting: some View {
+        Label {
+            Text("Reconnecting")
+        } icon: {
+            ProgressView()
+                .progressViewStyle(.network)
+                .tint(.theme(.textSecondary))
+                .controlSize(.mini)
+        }
+        .labelStyle(.conductorSmall)
+        .font(.theme(.small))
+        .foregroundStyle(.theme(.textSecondary))
+        .fixedSize()
+        .onGeometryChange(for: CGSize.self) { geometry in
+            geometry.size
+        } action: { size in
+            reconnectingSize = size
+        }
+    }
+    
+    private var scrollDownButton: some View {
+        Button {
+            
+        } label: {
+            Label {
+                Text("Scroll down!")
+            } icon: {
+                LucideIcon(Lucide.arrowDown, size: 20, relativeTo: .body)
+            }
+            .labelStyle(.iconOnly)
+            .padding(8)
+        }
+        .tint(.theme(.foreground))
+        .glassEffect(
+            .clear
+                .tint(.theme(.background).opacity(0.75))
+                .interactive(),
+            in: .circle
+        )
+        .overlay {
+            Circle()
+                .stroke(.theme(.border))
+        }
+    }
+    
+    private func chatTextField(queuedMessagesStore: StoreOf<QueuedMessages>) -> some View {
+        let isSendInFlight: Bool = if queuedMessagesStore.isEditing {
+            queuedMessagesStore.isEditInFlight
+        } else {
+            store.isMessageSendInFlight
+        }
+        
+        return ChatTextField(
+            text: composerText(queuedMessagesStore: queuedMessagesStore),
+            agentType: store.session.agentType,
+            allowsAgentSwitching: store.allowsAgentSwitching,
+            isFastModeEnabled: store.isFastModeEnabled,
+            isEditingQueuedMessage: queuedMessagesStore.isEditing,
+            isSendInFlight: isSendInFlight,
+            isStopInFlight: store.isStopInFlight,
+            isWorking: store.session.status == .working,
+            selectedModel: $store.selectedModel,
+            shouldFocusOnAppear: store.shouldFocusMessageField,
+            onFastModeTapped: {
+                store.send(.fastModeButtonTapped)
+            },
+            onCancelEditingTapped: {
+                queuedMessagesStore.send(.cancelEditButtonTapped)
+            },
+            onSendTapped: {
+                if queuedMessagesStore.isEditing {
+                    queuedMessagesStore.send(.finishEditButtonTapped)
+                } else {
+                    store.send(.sendButtonTapped(.steer))
+                }
+            },
+            onQueueTapped: {
+                store.send(.sendButtonTapped(.queue))
+            },
+            onStopTapped: { store.send(.stopButtonTapped) }
+        )
+        .onGeometryChange(for: CGFloat.self) { geometry in
+            geometry.size.height
+        } action: { height in
+            let animation: Animation? = if composerHeight == 0 {
+                nil
+            } else {
+                QueuedMessagesPresentation.disclosureAnimation
+            }
+            
+            withAnimation(animation) {
+                composerHeight = height
+            }
+        }
     }
 
     private func collectionView(bottomInset: CGFloat) -> some View {
@@ -697,14 +769,29 @@ struct ChatView: View {
     static func reconnectingHorizontalOffset(
         containerWidth: CGFloat,
         reconnectingWidth: CGFloat,
-        queueTrailingExtent: CGFloat
+        queueTrailingExtent: CGFloat,
+        isDisplayingReconnecting: Bool
     ) -> CGFloat {
+        /*
+        guard !isDisplayingReconnecting else {
+            print("Returning: 0 (b/c not displaying reconnecting)")
+            return 0
+        }
+        */
+        
         let centeredRightEdge = containerWidth / 2 + reconnectingWidth / 2
         let queueLeadingEdge = containerWidth - queueTrailingExtent
-        return min(
-            0,
-            queueLeadingEdge - reconnectingQueueSpacing - centeredRightEdge
-        )
+//        let ret = min(
+//            0,
+//            queueLeadingEdge - reconnectingQueueSpacing - centeredRightEdge
+//        )
+        
+        let ret = queueLeadingEdge
+        
+        print("Returning: \(ret)")
+        
+        // return ret
+        return ret
     }
 
     private func composerText(

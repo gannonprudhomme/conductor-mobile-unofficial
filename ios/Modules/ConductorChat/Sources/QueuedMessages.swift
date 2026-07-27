@@ -569,6 +569,7 @@ struct QueuedMessagesView: View {
                         .numericText(value: Double(store.messages.count))
                     )
             }
+            .lineLimit(1)
             .font(.theme(.small))
             .foregroundStyle(.theme(.textPrimary))
             .contentShape(.rect)

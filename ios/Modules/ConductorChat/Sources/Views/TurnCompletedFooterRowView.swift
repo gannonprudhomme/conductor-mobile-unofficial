@@ -14,8 +14,8 @@ struct TurnCompletedFooterRowView: View {
     @State private var copyCount = 0
     @State private var isShowingCopiedConfirmation = false
 
-    private let animation: Animation = .interactiveSpring(extraBounce: 0.3)
-    private let transition = AnyTransition.asymmetric(insertion: .scale, removal: .opacity)
+    private let animation: Animation = .interactiveSpring(duration: 0.2, extraBounce: 0.2)
+    private let transition: some Transition = BlurReplaceTransition(configuration: .downUp).combined(with: .scale)
 
     var body: some View {
         HStack(spacing: 12) {
@@ -42,7 +42,7 @@ struct TurnCompletedFooterRowView: View {
                 .labelStyle(.iconOnly)
                 .contentShape(.rect)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.spring)
             .sensoryFeedback(.selection, trigger: copyCount)
             .task(id: copyCount) { // start the animation
                 guard copyCount > 0 else {
