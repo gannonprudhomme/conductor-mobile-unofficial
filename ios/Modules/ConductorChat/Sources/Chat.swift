@@ -72,6 +72,7 @@ public struct Chat: Sendable {
         var hasUserSelectedFastMode = false
         var hasUserSelectedModel = false
         var hasUserSelectedReasoningEffort = false
+        var animatedScrollToBottomRequest = 0
         var scrollToBottomRequest = 0
         var shouldFocusMessageField = false
 
@@ -220,6 +221,7 @@ public struct Chat: Sendable {
                 && lhs.hasUserSelectedFastMode == rhs.hasUserSelectedFastMode
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.hasUserSelectedReasoningEffort == rhs.hasUserSelectedReasoningEffort
+                && lhs.animatedScrollToBottomRequest == rhs.animatedScrollToBottomRequest
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
                 && lhs.shouldFocusMessageField == rhs.shouldFocusMessageField
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
@@ -273,6 +275,7 @@ public struct Chat: Sendable {
             result: Result<Void, any Error>
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
+        case scrollDownButtonTapped
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -346,6 +349,11 @@ public struct Chat: Sendable {
             case .binding(\.selectedModel):
                 state.hasUserSelectedModel = true
                 state.reconcileSelectedReasoningEffort()
+                return .none
+
+            case .scrollDownButtonTapped:
+                state.animatedScrollToBottomRequest &+= 1
+                state.scrollToBottomRequest &+= 1
                 return .none
 
             case .messagesUpdated(let messages):
@@ -885,12 +893,15 @@ private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.D
 }
 
 struct ChatView: View {
-    private static let reconnectingQueueSpacing: CGFloat = 12
+    private static let overlaySpacing: CGFloat = 8
+    private static let scrollDownButtonContentSpacing: CGFloat = 16
 
     @Bindable var store: StoreOf<Chat>
     @State private var composerHeight: CGFloat = 0
     @State private var queuedMessagesHeight: CGFloat = 0
     @State private var reconnectingSize: CGSize = .zero
+    @State private var scrollDownButtonHeight: CGFloat = 0
+    @State private var shouldShowScrollDownButton = false
     let directoryName: String
     let firstQueuedRowFrameChanged: @MainActor (CGRect) -> Void
 
@@ -912,9 +923,8 @@ struct ChatView: View {
 
         GeometryReader { proxy in
             let statusLayout = if queuedMessagesStore.isExpanded {
-                AnyLayout(VStackLayout(spacing: 8))
+                AnyLayout(VStackLayout(spacing: Self.overlaySpacing))
             } else {
-                // AnyLayout(ZStackLayout(alignment: .trailing))
                 AnyLayout(HStackLayout(spacing: 0))
             }
 
@@ -972,12 +982,19 @@ struct ChatView: View {
         statusLayout: AnyLayout,
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Self.overlaySpacing) {
             statusLayout {
                 if !store.isCloudHosted,
                    store.connectionStatus != .connected {
                     reconnecting
                         .frame(maxWidth: .infinity, alignment: .center)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                if shouldShowScrollDownButton {
+                    scrollDownButton
+                        .padding(.leading, QueuedMessagesPresentation.horizontalPadding)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
@@ -1017,6 +1034,7 @@ struct ChatView: View {
                 }
         }
         .animation(.default, value: store.connectionStatus)
+        .animation(.default, value: shouldShowScrollDownButton)
         .animation(.default, value: queuedMessagesStore.displayedMessages)
         .animation(
             QueuedMessagesPresentation.disclosureAnimation,
@@ -1044,10 +1062,39 @@ struct ChatView: View {
         }
     }
 
+    private var scrollDownButton: some View {
+        Button {
+            store.send(.scrollDownButtonTapped)
+        } label: {
+            Label {
+                Text("Scroll down")
+            } icon: {
+                LucideIcon(Lucide.arrowDown, size: 20, relativeTo: .body)
+            }
+            .labelStyle(.iconOnly)
+            .padding(8)
+        }
+        .accessibilityLabel("Scroll down")
+        .accessibilityIdentifier("chat.scroll-down")
+        .tint(.theme(.foreground))
+        .glassEffect(
+            .clear
+                .tint(.theme(.background).opacity(0.75))
+                .interactive(),
+            in: .circle
+        )
+        .onGeometryChange(for: CGFloat.self) { geometry in
+            geometry.size.height
+        } action: { height in
+            scrollDownButtonHeight = height
+        }
+    }
+
     private func collectionView(bottomInset: CGFloat) -> some View {
         GeometryReader { proxy in
             ChatCollectionView(
                 rows: store.rows ?? [],
+                animatedScrollToBottomRequest: store.animatedScrollToBottomRequest,
                 scrollToBottomRequest: store.scrollToBottomRequest,
                 safeAreaInsets: EdgeInsets(
                     top: proxy.safeAreaInsets.top,
@@ -1056,6 +1103,9 @@ struct ChatView: View {
                     trailing: proxy.safeAreaInsets.trailing
                 ),
                 contentInsetAnimationDuration: QueuedMessagesPresentation.animationDuration,
+                scrollDownButtonVisibilityChanged: {
+                    shouldShowScrollDownButton = $0
+                },
                 turnSummaryTapped: {
                     store.send(.turnSummaryTapped($0), animation: .default)
                 }
@@ -1069,12 +1119,15 @@ struct ChatView: View {
         safeAreaBottom: CGFloat,
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> CGFloat {
-        let spacing: CGFloat = 8
-
         let queueHeight = if queuedMessagesStore.displayedMessages.isEmpty {
             CGFloat.zero
         } else {
             queuedMessagesHeight
+        }
+        let buttonHeight = if shouldShowScrollDownButton {
+            scrollDownButtonHeight
+        } else {
+            CGFloat.zero
         }
         let connectionHeight = if store.isCloudHosted
             || store.connectionStatus == .connected {
@@ -1083,17 +1136,31 @@ struct ChatView: View {
             reconnectingSize.height
         }
 
-        let statusHeight = if queuedMessagesStore.isExpanded,
-                              queueHeight > 0,
-                              connectionHeight > 0 {
-            connectionHeight + spacing + queueHeight
+        let statusHeight = if queuedMessagesStore.isExpanded {
+            buttonHeight
+                + queueHeight
+                + (
+                    buttonHeight > 0 && queueHeight > 0
+                        ? Self.overlaySpacing
+                        : 0
+                )
         } else {
-            max(connectionHeight, queueHeight)
+            max(buttonHeight, queueHeight)
         }
+        let connectionSpacing = connectionHeight > 0
+            ? Self.overlaySpacing
+            : 0
+        let statusSpacing = statusHeight > 0
+            ? Self.overlaySpacing
+            : 0
+        let contentSpacing = shouldShowScrollDownButton
+            ? Self.scrollDownButtonContentSpacing
+            : 0
 
-        return safeAreaBottom
-            + composerHeight
-            + (statusHeight > 0 ? spacing + statusHeight : 0)
+        return safeAreaBottom + composerHeight
+            + statusSpacing + statusHeight
+            + connectionSpacing + connectionHeight
+            + contentSpacing
     }
 
     private struct EmptyChatView: View {

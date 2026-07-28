@@ -495,6 +495,25 @@ struct ChatTests {
         }
     }
 
+    @Test("The scroll-down button requests an animated bottom placement")
+    func scrollDownButtonTapped() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(
+                initialState: Chat.State(session: session)
+            ) {
+                Chat()
+            }
+
+            await store.send(.scrollDownButtonTapped) {
+                $0.animatedScrollToBottomRequest = 1
+                $0.scrollToBottomRequest = 1
+            }
+        }
+    }
+
     @Test("State equality tracks presentation state but not derived caches")
     func stateEquality() throws {
         try withDependencies {
