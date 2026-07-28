@@ -49,7 +49,7 @@ extension Session.Model {
             "Opus"
         case .opus_1M:
             "Opus 1M"
-        case .opus5:
+        case .opus5_1M:
             "Opus 5"
         case .opus4_8_1M:
             "Opus 4.8 1M"
