@@ -127,8 +127,8 @@ struct CompanionView: View {
 
     private var workspaceUIHookRow: some View {
         MenuRow(
-            title: Text("Workspace UI Hook"),
-            subtitle: Text("Runs send, stop, and workspace changes through Conductor’s frontend services.")
+            title: Text("UI Hook"),
+            subtitle: Text("Performs changes inside Conductor so mobile actions update its UI. Only required for local, not Conductor Cloud.")
         ) {
             HStack(spacing: 8) {
                 StatusTag(
