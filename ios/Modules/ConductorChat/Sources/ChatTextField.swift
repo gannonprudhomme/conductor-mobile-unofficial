@@ -19,6 +19,7 @@ struct ChatTextField: View {
     let availableReasoningEfforts: [Session.ReasoningEffort]
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let contextWindowUsage: ContextWindowUsage?
     let isFastModeEnabled: Bool
     let isEditingQueuedMessage: Bool
     let isSendInFlight: Bool
@@ -36,6 +37,7 @@ struct ChatTextField: View {
         text: Binding<String>,
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool,
+        contextWindowUsage: ContextWindowUsage? = nil,
         isFastModeEnabled: Bool,
         isEditingQueuedMessage: Bool = false,
         isSendInFlight: Bool,
@@ -55,6 +57,7 @@ struct ChatTextField: View {
         self._text = text
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.contextWindowUsage = contextWindowUsage
         self.isFastModeEnabled = isFastModeEnabled
         self.isEditingQueuedMessage = isEditingQueuedMessage
         self.isSendInFlight = isSendInFlight
@@ -151,6 +154,10 @@ struct ChatTextField: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
+                if let contextWindowUsage {
+                    ContextWindowUsageGauge(usage: contextWindowUsage)
+                }
+
                 if !isEditingQueuedMessage && (isWorking || isStopInFlight) {
                     StopButton(
                         isEnabled: !isAnyActionInFlight,
@@ -304,6 +311,43 @@ struct ChatTextField: View {
             }
         }
     }
+
+    private struct ContextWindowUsageGauge: View {
+        @ScaledMetric(relativeTo: ThemeFontStyle.body.textStyle)
+        private var size = 18.0
+
+        let usage: ContextWindowUsage
+
+        var body: some View {
+            ZStack {
+                Circle()
+                    .stroke(
+                        Color.theme(.textSecondary).opacity(0.3),
+                        lineWidth: 2.5
+                    )
+
+                if usage.fraction > 0 {
+                    Circle()
+                        .trim(from: 0, to: CGFloat(usage.fraction))
+                        .stroke(
+                            Color.theme(.textSecondary),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                }
+            }
+            .frame(width: size, height: size)
+            .padding(EdgeInsets(vertical: 8, horizontal: 4))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Context window usage")
+            .accessibilityValue(
+                "\(usage.percentage) percent used, "
+                    + "\(usage.usedTokens.formatted()) of \(usage.tokenLimit.formatted()) tokens"
+            )
+            .accessibilityIdentifier("chat.contextUsage")
+            .animation(.smooth(duration: 0.25), value: usage.fraction)
+        }
+    }
 }
 
 #Preview {
@@ -325,6 +369,10 @@ struct ChatTextField: View {
             text: $text,
             agentType: .codex,
             allowsAgentSwitching: true,
+            contextWindowUsage: ContextWindowUsage(
+                usedTokens: 137_000,
+                tokenLimit: 272_000
+            ),
             isFastModeEnabled: isFastModeEnabled,
             isSendInFlight: false,
             isStopInFlight: false,

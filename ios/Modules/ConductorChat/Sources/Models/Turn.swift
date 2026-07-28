@@ -19,6 +19,7 @@ import MarkdownUI
 struct Turn: Identifiable {
     let id: String
     let startedAt: Date
+    private(set) var contextWindowReport: AgentEvent.ResultEvent.ContextWindowReport?
     private(set) var finishedAt: Date? = nil
     private(set) var rows: [Row]
     private var assistantMessageGroupIDByMessageID: [String: AssistantMessageGroupID] = [:]
@@ -26,11 +27,13 @@ struct Turn: Identifiable {
     init(
         id: String,
         startedAt: Date,
+        contextWindowReport: AgentEvent.ResultEvent.ContextWindowReport? = nil,
         finishedAt: Date? = nil,
         rows: [Row]
     ) {
         self.id = id
         self.startedAt = startedAt
+        self.contextWindowReport = contextWindowReport
         self.finishedAt = finishedAt
         self.rows = rows
     }
@@ -409,9 +412,12 @@ extension Turn {
                         continue
                     }
 
-                    if case .result = agentEvent {
+                    if case .result(let resultEvent) = agentEvent {
                         if let existingTurnIndex {
                             turns[existingTurnIndex].finishedAt = occurredAt
+                            if let contextWindowReport = resultEvent.contextWindowReport {
+                                turns[existingTurnIndex].contextWindowReport = contextWindowReport
+                            }
                         }
                         continue
                     }
