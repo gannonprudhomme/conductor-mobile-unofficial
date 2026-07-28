@@ -10,6 +10,8 @@ import ConductorFoundation
 import IssueReporting
 
 extension Workspace {
+    public static let conductorCloudHostingServerURL = "https://api.conductor.build"
+
     public var status: Status {
         guard let rawValue = manualStatus?.nilIfEmpty ?? derivedStatus?.nilIfEmpty
         else {

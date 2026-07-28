@@ -447,7 +447,13 @@ extension DesktopClient: DependencyKey {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        let (data, response) = try await urlSession.data(for: request)
+        let session = URLSession(
+            configuration: localNetworkConfiguration(
+                from: urlSession.configuration
+            )
+        )
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 
@@ -640,9 +646,15 @@ extension DesktopClient: DependencyKey {
     private static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         @Dependency(\.urlSession) var urlSession
         @Shared(.desktopConnectionStatus) var connectionStatus
+        let session = URLSession(
+            configuration: localNetworkConfiguration(
+                from: urlSession.configuration
+            )
+        )
+        defer { session.invalidateAndCancel() }
 
         do {
-            let result = try await urlSession.data(for: request)
+            let result = try await session.data(for: request)
             $connectionStatus.withLock { $0 = .connected }
             return result
         } catch {
@@ -651,6 +663,14 @@ extension DesktopClient: DependencyKey {
             }
             throw error
         }
+    }
+
+    static func localNetworkConfiguration(
+        from configuration: URLSessionConfiguration
+    ) -> URLSessionConfiguration {
+        let configuration = configuration.copy() as! URLSessionConfiguration
+        configuration.connectionProxyDictionary = [:]
+        return configuration
     }
 }
 

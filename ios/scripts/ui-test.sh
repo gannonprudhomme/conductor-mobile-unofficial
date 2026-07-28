@@ -24,5 +24,4 @@ xcodebuild test \
   -derivedDataPath "$DERIVED_DATA_PATH" \
   -parallel-testing-enabled NO \
   -skipMacroValidation \
-  -skipPackagePluginValidation \
-  CODE_SIGNING_ALLOWED=NO | xcbeautify
+  -skipPackagePluginValidation | xcbeautify

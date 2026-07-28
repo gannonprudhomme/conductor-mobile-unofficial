@@ -106,11 +106,27 @@ targets:
       - package: ConductorShared
         product: SharedConductorData
       - package: ConductorModules
+        product: ConductorCloud
+      - package: ConductorModules
         product: ConductorMobileData
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorMobileDataTests
+        PRODUCT_NAME: $(TARGET_NAME)
+  ConductorCloudTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/ConductorCloud/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorCloud
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorCloudTests
         PRODUCT_NAME: $(TARGET_NAME)
   ConductorDesignTests:
     type: bundle.unit-test
@@ -133,6 +149,8 @@ targets:
     sources:
       - path: Modules/ConductorWorkspaces/Tests
     dependencies:
+      - package: ConductorModules
+        product: ConductorCloud
       - package: ConductorModules
         product: ConductorWorkspaces
     settings:
@@ -175,6 +193,10 @@ targets:
     sources:
       - path: Modules/ConductorSettings/Tests
     dependencies:
+      - package: ConductorShared
+        product: SharedConductorData
+      - package: ConductorModules
+        product: ConductorCloud
       - package: ConductorModules
         product: ConductorSettings
     settings:
@@ -221,6 +243,13 @@ schemes:
     test:
       targets:
         - ConductorMobileDataTests
+  ConductorCloudTests:
+    build:
+      targets:
+        ConductorCloudTests: test
+    test:
+      targets:
+        - ConductorCloudTests
   ConductorDesignTests:
     build:
       targets:

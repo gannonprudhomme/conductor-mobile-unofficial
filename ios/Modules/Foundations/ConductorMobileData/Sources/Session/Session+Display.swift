@@ -10,7 +10,10 @@ import SharedConductorData
 
 extension Session {
     public var displayTitle: String {
-        title.isEmpty ? "Untitled Session" : title
+        guard let title, !title.isEmpty else {
+            return "Untitled Session"
+        }
+        return title
     }
 
     public var debugSubtitle: String {

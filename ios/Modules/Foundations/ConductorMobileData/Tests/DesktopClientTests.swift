@@ -15,6 +15,26 @@ import Testing
 
 @Suite(.serialized)
 struct DesktopClientTests {
+    @Test("Local companion requests bypass system HTTP proxies")
+    func localNetworkConfiguration() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [
+            "HTTPEnable": 1,
+            "HTTPProxy": "proxy.example.test",
+        ]
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+
+        let localConfiguration = DesktopClient.localNetworkConfiguration(
+            from: configuration
+        )
+
+        #expect(localConfiguration.connectionProxyDictionary?.isEmpty == true)
+        expectNoDifference(
+            localConfiguration.protocolClasses?.map(ObjectIdentifier.init),
+            [ObjectIdentifier(DesktopClientURLProtocol.self)]
+        )
+    }
+
     @Test("Conductor model defaults are available before connecting")
     func conductorModelDefaults() {
         expectNoDifference(

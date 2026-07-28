@@ -18,16 +18,13 @@ struct CloudModelsTests {
                 #"""
                 {
                   "workspaceId": "workspace-1",
-                  "status": "pausing",
-                  "lifecycleStep": "snapshotting_v2",
-                  "updatedAt": "2026-07-24T12:34:56.123Z"
+                  "status": "pausing"
                 }
                 """#.utf8
             )
         )
 
         #expect(response.status.rawValue == "pausing")
-        #expect(response.lifecycleStep?.rawValue == "snapshotting_v2")
     }
 
     @Test("Fractional timestamps and pagination envelopes decode from API responses")
@@ -42,7 +39,6 @@ struct CloudModelsTests {
                       "id": "workspace-1",
                       "name": "Cloud workspace",
                       "createdAt": "2026-07-24 15:24:17.562275+00",
-                      "deepLink": "conductor://workspace/workspace-1",
                       "lastActivityAt": "2026-07-24T15:25:18.000001Z"
                     }
                   ],

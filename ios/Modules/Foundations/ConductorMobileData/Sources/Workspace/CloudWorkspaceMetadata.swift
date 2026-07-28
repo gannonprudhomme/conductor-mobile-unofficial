@@ -15,41 +15,55 @@ public struct CloudWorkspaceMetadata: Equatable, Identifiable, Sendable {
     public let workspaceID: Workspace.ID
     @Column("account_id")
     public var accountID: String
-    @Column("cloud_project_id")
-    public var cloudProjectID: String
-    @Column("deep_link")
-    public var deepLink: String
-    @Column("lifecycle_step")
-    public var lifecycleStep: String?
-    @Column("lifecycle_error")
-    public var lifecycleError: String?
-    @Column(
-        "lifecycle_updated_at",
-        as: Date.ConductorDatabaseRepresentation?.self
-    )
-    public var lifecycleUpdatedAt: Date?
     @Column("last_seen_generation")
     public var lastSeenGeneration: String
 
     public init(
         workspaceID: Workspace.ID,
         accountID: String,
-        cloudProjectID: String,
-        deepLink: String,
-        lifecycleStep: String? = nil,
-        lifecycleError: String? = nil,
-        lifecycleUpdatedAt: Date? = nil,
         lastSeenGeneration: String
     ) {
         self.workspaceID = workspaceID
         self.accountID = accountID
-        self.cloudProjectID = cloudProjectID
-        self.deepLink = deepLink
-        self.lifecycleStep = lifecycleStep
-        self.lifecycleError = lifecycleError
-        self.lifecycleUpdatedAt = lifecycleUpdatedAt
         self.lastSeenGeneration = lastSeenGeneration
     }
 
     public var id: Workspace.ID { workspaceID }
+}
+
+extension CloudWorkspaceMetadata {
+    public static func clearCachedRows(
+        in database: Database,
+        keepingAccountID: String? = nil
+    ) throws {
+        let metadata = if let keepingAccountID {
+            try Self
+                .where { $0.accountID.neq(keepingAccountID) }
+                .fetchAll(database)
+        } else {
+            try Self.all.fetchAll(database)
+        }
+        try removeCachedRows(metadata, from: database)
+    }
+
+    public static func removeCachedRows(
+        _ metadata: [Self],
+        from database: Database
+    ) throws {
+        for item in metadata {
+            try Self.find(item.id).delete().execute(database)
+
+            let hasDesktopObservation = try MobileWorkspaceState
+                .find(item.workspaceID)
+                .fetchOne(database) != nil
+            let hasSessions = try Session
+                .where { $0.workspaceID.eq(item.workspaceID) }
+                .fetchCount(database) > 0
+            guard !hasDesktopObservation, !hasSessions else {
+                continue
+            }
+
+            try Workspace.find(item.workspaceID).delete().execute(database)
+        }
+    }
 }

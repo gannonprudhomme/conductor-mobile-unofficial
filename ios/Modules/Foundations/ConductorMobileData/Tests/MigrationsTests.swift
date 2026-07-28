@@ -26,6 +26,13 @@ struct MigrationsTests {
         let sessions = try database.read { db in
             try Session.fetchCount(db)
         }
+        let untitledSession = Session.preview(title: nil)
+        try database.write { db in
+            try Session.insert { untitledSession }.execute(db)
+        }
+        let persistedUntitledSession = try database.read { db in
+            try Session.find(untitledSession.id).fetchOne(db)
+        }
         let repositories = try database.read { db in
             try Repository.fetchCount(db)
         }
@@ -61,6 +68,7 @@ struct MigrationsTests {
         #expect(mobileWorkspaceStates == 0)
         #expect(cloudWorkspaceMetadata == 0)
         #expect(sessions == 0)
+        #expect(persistedUntitledSession?.title == nil)
         #expect(repositories == 0)
         #expect(messages == 0)
         #expect(!workspaceColumns.contains("CUSTOM_is_working"))
@@ -73,8 +81,9 @@ struct MigrationsTests {
         #expect(sessionColumns.contains("queue_paused_at"))
         #expect(sessionColumns.contains("codex_thinking_level"))
         #expect(sessionColumns.contains("claude_effort_level"))
-        #expect(cloudWorkspaceMetadataColumns.contains("account_id"))
-        #expect(cloudWorkspaceMetadataColumns.contains("lifecycle_step"))
-        #expect(cloudWorkspaceMetadataColumns.contains("last_seen_generation"))
+        #expect(
+            cloudWorkspaceMetadataColumns
+                == ["workspace_id", "account_id", "last_seen_generation"]
+        )
     }
 }

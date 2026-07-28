@@ -41,7 +41,14 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
 
     public var id: Workspace.ID { workspace.id }
     public var isCloudOnly: Bool {
-        cloudMetadata != nil && mobileState == nil
+        if mobileState != nil {
+            return false
+        } else if cloudMetadata != nil {
+            return true
+        } else {
+            return workspace.hostingServerURL
+                == Workspace.conductorCloudHostingServerURL
+        }
     }
     public var isWorking: Bool { mobileState?.isWorking ?? false }
     public var status: Workspace.Status {

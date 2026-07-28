@@ -7,33 +7,35 @@
 
 import Foundation
 
-public struct CloudPage<Element: Decodable & Equatable & Sendable>: Decodable, Equatable, Sendable {
-    public let data: [Element]
-    public let offset: Int
-    public let hasMore: Bool
+/// Pagination envelope returned by the Cloud API's offset-based list routes.
+struct CloudPage<Element: Decodable & Equatable & Sendable>: Decodable, Equatable, Sendable {
+    let data: [Element]
+    let offset: Int
+    let hasMore: Bool
 
-    public init(data: [Element], offset: Int, hasMore: Bool) {
+    init(data: [Element], offset: Int, hasMore: Bool) {
         self.data = data
         self.offset = offset
         self.hasMore = hasMore
     }
 }
 
+/// Response from `GET /me`.
 public struct CloudIdentity: Decodable, Equatable, Sendable {
     public let userID: String
     public let email: String?
     public let organizationID: String?
     public let workspaceID: String?
-    public let authMethod: CloudAuthMethod
-    public let apiKey: CloudAPIKeyIdentity?
+    public let authMethod: AuthMethod
+    public let apiKey: APIKey?
 
     public init(
         userID: String,
         email: String? = nil,
         organizationID: String? = nil,
         workspaceID: String? = nil,
-        authMethod: CloudAuthMethod,
-        apiKey: CloudAPIKeyIdentity? = nil
+        authMethod: AuthMethod,
+        apiKey: APIKey? = nil
     ) {
         self.userID = userID
         self.email = email
@@ -55,26 +57,27 @@ public struct CloudIdentity: Decodable, Equatable, Sendable {
     public var cacheID: String {
         [userID, organizationID ?? "", workspaceID ?? ""].joined(separator: ":")
     }
-}
 
-public struct CloudAPIKeyIdentity: Decodable, Equatable, Sendable {
-    public let id: String
+    public struct APIKey: Decodable, Equatable, Sendable {
+        public let id: String
 
-    public init(id: String) {
-        self.id = id
+        public init(id: String) {
+            self.id = id
+        }
+    }
+
+    public struct AuthMethod: Codable, Hashable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let apiKey = Self(rawValue: "api-key")
     }
 }
 
-public struct CloudAuthMethod: Codable, Hashable, RawRepresentable, Sendable {
-    public var rawValue: String
-
-    public init(rawValue: String) {
-        self.rawValue = rawValue
-    }
-
-    public static let apiKey = Self(rawValue: "api-key")
-}
-
+/// Project item from `GET /v0/projects`.
 public struct CloudProject: Decodable, Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -87,6 +90,7 @@ public struct CloudProject: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Client-side association between two independent Cloud API resources.
 public struct CloudProjectWorkspace: Equatable, Identifiable, Sendable {
     public var id: String { workspace.id }
     public let project: CloudProject
@@ -98,11 +102,31 @@ public struct CloudProjectWorkspace: Equatable, Identifiable, Sendable {
     }
 }
 
+/// Client-constructed snapshot combining paginated projects, workspaces, and statuses.
+public struct CloudWorkspaceSnapshot: Equatable, Sendable {
+    public let accountID: String
+    public let projects: [CloudProject]
+    public let statuses: [CloudWorkspace.ID: CloudWorkspaceStatusResponse]
+    public let workspaces: [CloudProjectWorkspace]
+
+    public init(
+        accountID: String,
+        projects: [CloudProject],
+        statuses: [CloudWorkspace.ID: CloudWorkspaceStatusResponse],
+        workspaces: [CloudProjectWorkspace]
+    ) {
+        self.accountID = accountID
+        self.projects = projects
+        self.statuses = statuses
+        self.workspaces = workspaces
+    }
+}
+
+/// Workspace item from `GET /v0/projects/{projectID}/workspaces`.
 public struct CloudWorkspace: Decodable, Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
     public let createdAt: Date
-    public let deepLink: URL
     public let creatorID: String?
     public let lastActivityAt: Date?
 
@@ -110,14 +134,12 @@ public struct CloudWorkspace: Decodable, Equatable, Identifiable, Sendable {
         id: String,
         name: String,
         createdAt: Date,
-        deepLink: URL,
         creatorID: String? = nil,
         lastActivityAt: Date? = nil
     ) {
         self.id = id
         self.name = name
         self.createdAt = createdAt
-        self.deepLink = deepLink
         self.creatorID = creatorID
         self.lastActivityAt = lastActivityAt
     }
@@ -126,77 +148,53 @@ public struct CloudWorkspace: Decodable, Equatable, Identifiable, Sendable {
         case id
         case name
         case createdAt
-        case deepLink
         case creatorID = "creatorId"
         case lastActivityAt
     }
 }
 
+/// Response from `GET /v0/workspaces/{workspaceID}/status`.
 public struct CloudWorkspaceStatusResponse: Decodable, Equatable, Sendable {
     public let workspaceID: String
-    public let status: CloudWorkspaceStatus
-    public let lifecycleStep: CloudLifecycleStep?
-    public let updatedAt: Date
-    public let errorMessage: String?
+    public let status: Status
 
     public init(
         workspaceID: String,
-        status: CloudWorkspaceStatus,
-        lifecycleStep: CloudLifecycleStep? = nil,
-        updatedAt: Date,
-        errorMessage: String? = nil
+        status: Status
     ) {
         self.workspaceID = workspaceID
         self.status = status
-        self.lifecycleStep = lifecycleStep
-        self.updatedAt = updatedAt
-        self.errorMessage = errorMessage
     }
 
     private enum CodingKeys: String, CodingKey {
         case workspaceID = "workspaceId"
         case status
-        case lifecycleStep
-        case updatedAt
-        case errorMessage
+    }
+
+    public struct Status: Codable, Hashable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let initializing = Self(rawValue: "initializing")
+        public static let ready = Self(rawValue: "ready")
+        public static let sleeping = Self(rawValue: "sleeping")
+        public static let archived = Self(rawValue: "archived")
+        public static let deleted = Self(rawValue: "deleted")
+        public static let updating = Self(rawValue: "updating")
     }
 }
 
-public struct CloudWorkspaceStatus: Codable, Hashable, RawRepresentable, Sendable {
-    public var rawValue: String
-
-    public init(rawValue: String) {
-        self.rawValue = rawValue
-    }
-
-    public static let initializing = Self(rawValue: "initializing")
-    public static let ready = Self(rawValue: "ready")
-    public static let sleeping = Self(rawValue: "sleeping")
-    public static let archived = Self(rawValue: "archived")
-    public static let deleted = Self(rawValue: "deleted")
-    public static let updating = Self(rawValue: "updating")
-}
-
-public struct CloudLifecycleStep: Codable, Hashable, RawRepresentable, Sendable {
-    public var rawValue: String
-
-    public init(rawValue: String) {
-        self.rawValue = rawValue
-    }
-
-    public static let buildingSnapshot = Self(rawValue: "building_snapshot")
-    public static let preparing = Self(rawValue: "preparing")
-    public static let settingUp = Self(rawValue: "setting_up")
-    public static let updating = Self(rawValue: "updating")
-}
-
+/// Structured error body returned by Cloud API endpoints.
 public struct CloudStructuredError: Decodable, Equatable, Sendable {
     public let code: String?
     public let userMessage: String
     public let debugMessage: String?
     public let retryable: Bool?
     public let source: String?
-    public let details: [String: CloudJSONValue]?
+    public let details: [String: JSONValue]?
     public let underlying: [Self]?
 
     public init(
@@ -205,7 +203,7 @@ public struct CloudStructuredError: Decodable, Equatable, Sendable {
         debugMessage: String?,
         retryable: Bool?,
         source: String?,
-        details: [String: CloudJSONValue]?,
+        details: [String: JSONValue]?,
         underlying: [Self]?
     ) {
         self.code = code
@@ -216,63 +214,63 @@ public struct CloudStructuredError: Decodable, Equatable, Sendable {
         self.details = details
         self.underlying = underlying
     }
-}
 
-public enum CloudJSONValue: Codable, Hashable, Sendable {
-    case null
-    case bool(Bool)
-    case integer(Int64)
-    case number(Double)
-    case string(String)
-    case array([Self])
-    case object([String: Self])
+    public enum JSONValue: Codable, Hashable, Sendable {
+        case null
+        case bool(Bool)
+        case integer(Int64)
+        case number(Double)
+        case string(String)
+        case array([Self])
+        case object([String: Self])
 
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.singleValueContainer()
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.singleValueContainer()
 
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Int64.self) {
-            self = .integer(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([Self].self) {
-            self = .array(value)
-        } else if let value = try? container.decode([String: Self].self) {
-            self = .object(value)
-        } else {
-            throw DecodingError.typeMismatch(
-                Self.self,
-                DecodingError.Context(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "Expected a JSON value."
+            if container.decodeNil() {
+                self = .null
+            } else if let value = try? container.decode(Bool.self) {
+                self = .bool(value)
+            } else if let value = try? container.decode(Int64.self) {
+                self = .integer(value)
+            } else if let value = try? container.decode(Double.self) {
+                self = .number(value)
+            } else if let value = try? container.decode(String.self) {
+                self = .string(value)
+            } else if let value = try? container.decode([Self].self) {
+                self = .array(value)
+            } else if let value = try? container.decode([String: Self].self) {
+                self = .object(value)
+            } else {
+                throw DecodingError.typeMismatch(
+                    Self.self,
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Expected a JSON value."
+                    )
                 )
-            )
+            }
         }
-    }
 
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.singleValueContainer()
 
-        switch self {
-        case .null:
-            try container.encodeNil()
-        case let .bool(value):
-            try container.encode(value)
-        case let .integer(value):
-            try container.encode(value)
-        case let .number(value):
-            try container.encode(value)
-        case let .string(value):
-            try container.encode(value)
-        case let .array(value):
-            try container.encode(value)
-        case let .object(value):
-            try container.encode(value)
+            switch self {
+            case .null:
+                try container.encodeNil()
+            case let .bool(value):
+                try container.encode(value)
+            case let .integer(value):
+                try container.encode(value)
+            case let .number(value):
+                try container.encode(value)
+            case let .string(value):
+                try container.encode(value)
+            case let .array(value):
+                try container.encode(value)
+            case let .object(value):
+                try container.encode(value)
+            }
         }
     }
 }

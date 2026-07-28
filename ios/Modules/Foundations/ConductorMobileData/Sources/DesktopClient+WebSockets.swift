@@ -78,7 +78,10 @@ extension DesktopClient {
                     type,
                     bufferingPolicy: bufferingPolicy,
                     using: WebSocketTaskClient(
-                        urlSession.webSocketTask(with: url)
+                        url: url,
+                        configuration: localNetworkConfiguration(
+                            from: urlSession.configuration
+                        )
                     )
                 )
             }
@@ -183,6 +186,22 @@ extension DesktopClient {
             task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
             self.cancel = {
                 task.cancel(with: .goingAway, reason: nil)
+            }
+            self.receive = {
+                try await task.receive()
+            }
+            self.resume = {
+                task.resume()
+            }
+        }
+
+        init(url: URL, configuration: URLSessionConfiguration) {
+            let session = URLSession(configuration: configuration)
+            let task = session.webSocketTask(with: url)
+            task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
+            self.cancel = {
+                task.cancel(with: .goingAway, reason: nil)
+                session.invalidateAndCancel()
             }
             self.receive = {
                 try await task.receive()
