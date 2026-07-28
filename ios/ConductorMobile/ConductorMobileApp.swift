@@ -11,7 +11,6 @@ import ConductorFoundation
 import ConductorMain
 import ConductorMobileData
 import Dependencies
-import Foundation
 import Logging
 import SwiftUI
 
@@ -24,23 +23,8 @@ struct ConductorMobileApp: App {
     init() {
         LoggingSystem.bootstrap(LoggingOSLog.init)
 
-        #if DEBUG
-        let uiTestScenario = ProcessInfo.processInfo.environment[
-            "CONDUCTOR_UI_TEST_FIXTURE"
-        ].flatMap(CloudUITestScenario.init(rawValue:))
-        #endif
         try! prepareDependencies {
             try $0.bootstrapDatabase()
-
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-workspace-chat-ui-test") {
-                try $0.prepareWorkspaceChatUITest()
-            }
-            #endif
-
-            #if DEBUG
-            try uiTestScenario?.install(in: &$0)
-            #endif
         }
     }
 
