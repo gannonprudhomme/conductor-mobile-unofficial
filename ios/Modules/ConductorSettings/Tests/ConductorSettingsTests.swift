@@ -747,7 +747,10 @@ struct ConductorSettingsTests {
             savePermissionContinuation.finish()
             await store.receive(\.cloudSaveResult) {
                 $0.$cloudConfiguration.withLock {
-                    $0 = CloudConfiguration(accountID: "synthetic-user::")
+                    $0 = CloudConfiguration(
+                        accountID: "synthetic-user::",
+                        credentialRevision: 1
+                    )
                 }
                 $0.cloudAPIKey = ""
             }
@@ -766,6 +769,7 @@ struct ConductorSettingsTests {
         let isDismissed = LockIsolated(false)
         let testedKeys = LockIsolated<[String]>([])
         let savedKeys = LockIsolated<[String]>([])
+        let (savePermission, savePermissionContinuation) = AsyncStream<Void>.makeStream()
         let database = try appDatabase()
 
         await withDependencies {
@@ -777,6 +781,9 @@ struct ConductorSettingsTests {
             }
             $0.cloudCredentialClient.saveAPIKey = { apiKey in
                 savedKeys.withValue { $0.append(apiKey) }
+                for await _ in savePermission {
+                    break
+                }
             }
             $0.dismiss = DismissEffect {
                 isDismissed.setValue(true)
@@ -804,9 +811,14 @@ struct ConductorSettingsTests {
                 $0.testedCloudAccountID = "synthetic-user::"
                 $0.cloudOperation = .saving
             }
+            savePermissionContinuation.yield()
+            savePermissionContinuation.finish()
             await store.receive(\.cloudSaveResult) {
                 $0.$cloudConfiguration.withLock {
-                    $0 = CloudConfiguration(accountID: "synthetic-user::")
+                    $0 = CloudConfiguration(
+                        accountID: "synthetic-user::",
+                        credentialRevision: 1
+                    )
                 }
                 $0.cloudAPIKey = ""
             }
@@ -859,7 +871,10 @@ struct ConductorSettingsTests {
             }
             await store.receive(\.cloudSaveResult) {
                 $0.$cloudConfiguration.withLock {
-                    $0 = CloudConfiguration(accountID: "synthetic-user::")
+                    $0 = CloudConfiguration(
+                        accountID: "synthetic-user::",
+                        credentialRevision: 1
+                    )
                 }
                 $0.cloudAPIKey = ""
             }
@@ -929,7 +944,10 @@ struct ConductorSettingsTests {
                 )
             ) {
                 $0.$cloudConfiguration.withLock {
-                    $0 = CloudConfiguration(accountID: "new-account")
+                    $0 = CloudConfiguration(
+                        accountID: "new-account",
+                        credentialRevision: 1
+                    )
                 }
             }
             await store.receive(\.cloudCacheCleanupResult) {
@@ -940,7 +958,10 @@ struct ConductorSettingsTests {
             }
             #expect(
                 store.state.cloudConfiguration
-                    == CloudConfiguration(accountID: "new-account")
+                    == CloudConfiguration(
+                        accountID: "new-account",
+                        credentialRevision: 1
+                    )
             )
         }
     }

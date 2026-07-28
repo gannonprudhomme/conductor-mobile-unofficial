@@ -11,6 +11,12 @@ import SQLiteData
 
 public func appDatabase() throws -> any DatabaseWriter {
     let database = try SQLiteData.defaultDatabase()
+    let migrator = appDatabaseMigrator()
+    try migrator.migrate(database)
+    return database
+}
+
+func appDatabaseMigrator() -> DatabaseMigrator {
     var migrator = DatabaseMigrator()
 
     #if DEBUG
@@ -308,8 +314,96 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
-    try migrator.migrate(database)
-    return database
+    migrator.registerMigration("Create cloud chat metadata") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_session_metadata" (
+              "canonical_session_id" TEXT PRIMARY KEY
+                REFERENCES "sessions" ("id") ON DELETE CASCADE,
+              "cloud_session_id" TEXT NOT NULL,
+              "workspace_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "list_order" INTEGER NOT NULL,
+              "refresh_generation" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE UNIQUE INDEX "cloud_session_metadata_account_remote"
+            ON "cloud_session_metadata" ("account_id", "cloud_session_id");
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_session_metadata_workspace_order"
+            ON "cloud_session_metadata" ("workspace_id", "list_order");
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            CREATE TABLE "cloud_message_metadata" (
+              "canonical_message_id" TEXT PRIMARY KEY
+                REFERENCES "session_messages" ("id") ON DELETE CASCADE,
+              "cloud_event_id" TEXT NOT NULL,
+              "canonical_session_id" TEXT NOT NULL
+                REFERENCES "sessions" ("id") ON DELETE CASCADE,
+              "session_index" REAL NOT NULL,
+              "adapter_part_order" INTEGER NOT NULL,
+              "account_id" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_message_metadata_session_order"
+            ON "cloud_message_metadata" (
+              "canonical_session_id",
+              "session_index",
+              "adapter_part_order"
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_message_metadata_account_event"
+            ON "cloud_message_metadata" ("account_id", "cloud_event_id");
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Add cloud transcript checkpoint") { db in
+        try #sql(
+            """
+            ALTER TABLE "cloud_session_metadata"
+            ADD COLUMN "transcript_cursor" TEXT;
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            ALTER TABLE "cloud_session_metadata"
+            ADD COLUMN "has_complete_transcript" INTEGER NOT NULL DEFAULT 0;
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            ALTER TABLE "cloud_session_metadata"
+            ADD COLUMN "transcript_projection_version" INTEGER NOT NULL DEFAULT 0;
+            """
+        )
+        .execute(db)
+    }
+
+    return migrator
 }
 
 public extension DependencyValues {

@@ -150,4 +150,100 @@ struct ArchivedSessionsTests {
             responseContinuation.finish()
         }
     }
+
+    @Test("Cloud history preserves API order, isolation, and remote routing")
+    func cloudHistoryIsSourceAware() async throws {
+        let workspaceID = "workspace"
+        let cloudActive = Session.preview(
+            id: "canonical-active",
+            workspaceID: workspaceID
+        )
+        let firstCloudArchived = Session.preview(
+            id: "canonical-first",
+            workspaceID: workspaceID,
+            isHidden: true
+        )
+        let secondCloudArchived = Session.preview(
+            id: "canonical-second",
+            workspaceID: workspaceID,
+            isHidden: true
+        )
+        let desktopSessions = (1...6).map {
+            Session.preview(
+                id: "desktop-\($0)",
+                workspaceID: workspaceID,
+                isHidden: $0 == 6
+            )
+        }
+        let request = LockIsolated<(String, String)?>(nil)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert {
+                    [cloudActive, firstCloudArchived, secondCloudArchived]
+                        + desktopSessions
+                }
+                .execute(database)
+                try CloudSessionMetadata.insert {
+                    [
+                        CloudSessionMetadata(
+                            canonicalSessionID: cloudActive.id,
+                            cloudSessionID: "remote-active",
+                            workspaceID: workspaceID,
+                            accountID: "account",
+                            listOrder: 0,
+                            refreshGeneration: "generation"
+                        ),
+                        CloudSessionMetadata(
+                            canonicalSessionID: secondCloudArchived.id,
+                            cloudSessionID: "remote-second",
+                            workspaceID: workspaceID,
+                            accountID: "account",
+                            listOrder: 1,
+                            refreshGeneration: "generation"
+                        ),
+                        CloudSessionMetadata(
+                            canonicalSessionID: firstCloudArchived.id,
+                            cloudSessionID: "remote-first",
+                            workspaceID: workspaceID,
+                            accountID: "account",
+                            listOrder: 2,
+                            refreshGeneration: "generation"
+                        ),
+                    ]
+                }
+                .execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: ArchivedSessions.State(
+                    workspaceID: workspaceID,
+                    isCloudHosted: true,
+                    sessions: [],
+                    activeSessions: []
+                )
+            ) {
+                ArchivedSessions()
+            } withDependencies: {
+                $0.desktopClient.restoreSession = { workspaceID, sessionID in
+                    request.setValue((workspaceID, sessionID))
+                }
+            }
+
+            #expect(store.state.activeSessions.map(\.id) == [cloudActive.id])
+            #expect(
+                store.state.sessions.map(\.id)
+                    == [secondCloudArchived.id, firstCloudArchived.id]
+            )
+            await store.send(.restoreSessionButtonTapped(secondCloudArchived)) {
+                $0.restoringSessionIDs = [secondCloudArchived.id]
+            }
+            await store.receive(\.restoreSessionSucceeded) {
+                $0.restoringSessionIDs = []
+            }
+            #expect(request.value?.0 == workspaceID)
+            #expect(request.value?.1 == "remote-second")
+        }
+    }
 }

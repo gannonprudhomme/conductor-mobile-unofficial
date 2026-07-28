@@ -10,6 +10,53 @@ import Foundation
 import Testing
 
 struct CloudModelsTests {
+    @Test("Cloud session and transcript transport preserve unknown values")
+    func sessionAndTranscriptValues() throws {
+        let sessionStatus = try JSONDecoder.cloud.decode(
+            CloudSessionStatusResponse.self,
+            from: Data(
+                #"""
+                {
+                  "workspaceId": "workspace",
+                  "sessionId": "session",
+                  "status": "waiting-for-future",
+                  "updatedAt": "2026-07-24T12:00:00Z"
+                }
+                """#.utf8
+            )
+        )
+        let transcript = try JSONDecoder.cloud.decode(
+            CloudTranscriptMessage.self,
+            from: Data(
+                #"""
+                {
+                  "id": "event",
+                  "sessionId": "session",
+                  "sessionIndex": 1,
+                  "type": "future-event",
+                  "content": {
+                    "nested": [true, 42, null]
+                  },
+                  "receivedAt": "2026-07-24T12:00:00Z"
+                }
+                """#.utf8
+            )
+        )
+
+        #expect(sessionStatus.status.rawValue == "waiting-for-future")
+        #expect(transcript.type.rawValue == "future-event")
+        #expect(
+            transcript.content
+                == .object([
+                    "nested": .array([
+                        .bool(true),
+                        .integer(42),
+                        .null,
+                    ]),
+                ])
+        )
+    }
+
     @Test("Unknown server-owned status values decode without being discarded")
     func unknownStatusValues() throws {
         let response = try JSONDecoder.cloud.decode(

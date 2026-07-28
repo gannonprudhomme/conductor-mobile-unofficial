@@ -21,24 +21,52 @@ public struct ArchivedSessions: Sendable {
         @Presents public var alert: AlertState<Action.Alert>?
         @FetchAll public var activeSessions: [Session]
         @FetchAll public var sessions: [Session]
+        public let isCloudHosted: Bool
         public var restoringSessionIDs: Set<Session.ID> = []
 
         public init(
             workspaceID: String,
+            isCloudHosted: Bool = false,
             sessions: [Session],
             activeSessions: [Session]
         ) {
-            self._activeSessions = FetchAll(
-                wrappedValue: activeSessions,
-                Session.where { $0.workspaceID.eq(workspaceID).and(!$0.isHidden) }
-            )
-            self._sessions = FetchAll(
-                wrappedValue: sessions,
-                Session
-                    .where { $0.workspaceID.eq(workspaceID).and($0.isHidden) }
-                    .order { $0.updatedAt.desc() },
-                animation: .default
-            )
+            self.isCloudHosted = isCloudHosted
+            self._activeSessions = if isCloudHosted {
+                FetchAll(
+                    wrappedValue: activeSessions,
+                    CloudSessionMetadata.sessions(
+                        workspaceID: workspaceID,
+                        isHidden: false
+                    )
+                )
+            } else {
+                FetchAll(
+                    wrappedValue: activeSessions,
+                    Session.where {
+                        $0.workspaceID.eq(workspaceID).and(!$0.isHidden)
+                    }
+                )
+            }
+            self._sessions = if isCloudHosted {
+                FetchAll(
+                    wrappedValue: sessions,
+                    CloudSessionMetadata.sessions(
+                        workspaceID: workspaceID,
+                        isHidden: true
+                    ),
+                    animation: .default
+                )
+            } else {
+                FetchAll(
+                    wrappedValue: sessions,
+                    Session
+                        .where {
+                            $0.workspaceID.eq(workspaceID).and($0.isHidden)
+                        }
+                        .order { $0.updatedAt.desc() },
+                    animation: .default
+                )
+            }
         }
 
         var canRestoreMoreSessions: Bool {
@@ -60,6 +88,7 @@ public struct ArchivedSessions: Sendable {
     }
 
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.defaultDatabase) var database
 
     public init() { }
 
@@ -75,11 +104,25 @@ public struct ArchivedSessions: Sendable {
                     return .none
                 }
                 state.restoringSessionIDs.insert(session.id)
-                return .run { [session] send in
+                return .run { [isCloudHosted = state.isCloudHosted, session] send in
                     do {
+                        let sessionID: Session.ID
+                        if isCloudHosted {
+                            guard let remoteSessionID = try await database.read({
+                                try CloudChatPersistence.remoteSessionID(
+                                    for: session.id,
+                                    in: $0
+                                )
+                            }) else {
+                                throw ArchivedSessionRoutingError.missingSessionMetadata
+                            }
+                            sessionID = remoteSessionID
+                        } else {
+                            sessionID = session.id
+                        }
                         try await desktopClient.restoreSession(
                             workspaceID: session.workspaceID,
-                            sessionID: session.id
+                            sessionID: sessionID
                         )
                         await send(.restoreSessionSucceeded(sessionID: session.id))
                     } catch {
@@ -101,6 +144,14 @@ public struct ArchivedSessions: Sendable {
             }
         }
         .ifLet(\.$alert, action: \.alert)
+    }
+}
+
+private enum ArchivedSessionRoutingError: LocalizedError {
+    case missingSessionMetadata
+
+    var errorDescription: String? {
+        "This Cloud chat has not finished loading. Try again shortly."
     }
 }
 
