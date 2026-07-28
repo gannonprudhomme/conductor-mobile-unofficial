@@ -16,6 +16,27 @@ import Sharing
 import SQLiteData
 import SwiftUI
 
+struct ContextWindowUsage: Equatable, Sendable {
+    let usedTokens: Int
+    let tokenLimit: Int
+
+    init(usedTokens: Int, tokenLimit: Int) {
+        self.usedTokens = max(0, usedTokens)
+        self.tokenLimit = tokenLimit
+    }
+
+    var fraction: Double {
+        guard tokenLimit > 0 else {
+            return 0
+        }
+        return min(max(Double(usedTokens) / Double(tokenLimit), 0), 1)
+    }
+
+    var percentage: Int {
+        Int((fraction * 100).rounded())
+    }
+}
+
 /// Note: this is always embedded in ``WorkspaceChat``, never solo
 /// i.e. this doesn't own its nav bar
 @Reducer
@@ -52,6 +73,7 @@ public struct Chat: Sendable {
         /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
         var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
+        var reportedContextWindowTokenLimits: [Session.Model: Int] = [:]
         var selectedModel: Session.Model
         var selectedReasoningEffort: Session.ReasoningEffort?
 
@@ -73,8 +95,21 @@ public struct Chat: Sendable {
         var allowsAgentSwitching: Bool {
             shouldShowEmptyChat && !isMessageSendInFlight
         }
+
         var availableReasoningEfforts: [Session.ReasoningEffort] {
             session.availableReasoningEfforts(for: selectedModel)
+        }
+
+        var contextWindowUsage: ContextWindowUsage? {
+            let tokenLimit = reportedContextWindowTokenLimits[selectedModel]
+                ?? selectedModel.fallbackContextWindowTokenLimit
+            guard let tokenLimit else {
+                return nil
+            }
+            return ContextWindowUsage(
+                usedTokens: session.contextTokenCount,
+                tokenLimit: tokenLimit
+            )
         }
 
         mutating func updateRows(sessionStatus: Session.Status) {
@@ -87,6 +122,15 @@ public struct Chat: Sendable {
                 activeTurnID: sessionStatus == .working ? turns.last?.id : nil,
                 expandedSummaryIDs: expandedSummaryIDs
             )
+        }
+
+        mutating func updateReportedContextWindowTokenLimits() {
+            reportedContextWindowTokenLimits = (turns ?? []).reduce(into: [:]) { limits, turn in
+                guard let report = turn.contextWindowReport else {
+                    return
+                }
+                limits[Session.Model(rawValue: report.requestedModel)] = report.tokenLimit
+            }
         }
 
         init(
@@ -165,6 +209,8 @@ public struct Chat: Sendable {
                 && lhs.confirmedMessagesAwaitingInitialSnapshot
                     == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
+                && lhs.reportedContextWindowTokenLimits
+                    == rhs.reportedContextWindowTokenLimits
                 && lhs.selectedModel == rhs.selectedModel
                 && lhs.selectedReasoningEffort == rhs.selectedReasoningEffort
         }
@@ -271,6 +317,7 @@ public struct Chat: Sendable {
                     messages: messages,
                     reusing: state.turns ?? []
                 )
+                state.updateReportedContextWindowTokenLimits()
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
 
@@ -295,6 +342,7 @@ public struct Chat: Sendable {
                     messages: transcriptMessages,
                     reusing: state.turns ?? []
                 )
+                state.updateReportedContextWindowTokenLimits()
                 state.updateRows(sessionStatus: state.session.status)
                 state.isLoadingMessages = false
                 return .none
@@ -911,6 +959,7 @@ private struct ChatComposer: View {
             text: composerText,
             agentType: store.session.agentType,
             allowsAgentSwitching: store.allowsAgentSwitching,
+            contextWindowUsage: store.contextWindowUsage,
             isFastModeEnabled: store.isFastModeEnabled,
             isEditingQueuedMessage: queuedMessagesStore.isEditing,
             isSendInFlight: isSendInFlight,

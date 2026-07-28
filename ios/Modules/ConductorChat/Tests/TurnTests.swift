@@ -436,6 +436,41 @@ struct TurnTests {
         )
     }
 
+    @Test("Turns retain the active model context window from result events")
+    func contextWindowReport() throws {
+        let turnID = "turn-1"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Run it", turnID: turnID),
+            makeEventMessage(
+                id: "result",
+                event: """
+                {
+                  "type": "result",
+                  "conductor_sdk_metadata": {
+                    "requestedModel": "opus-5-1m",
+                    "model": "claude-opus-5[1m]"
+                  },
+                  "modelUsage": {
+                    "claude-opus-5[1m]": {
+                      "contextWindow": 1000000
+                    },
+                    "claude-haiku-4-5-20251001": {
+                      "contextWindow": 200000
+                    }
+                  }
+                }
+                """,
+                turnID: turnID
+            ),
+        ]
+
+        let turn = try #require(Turn.parse(messages: messages).first)
+        expectNoDifference(
+            turn.contextWindowReport,
+            .init(requestedModel: "opus-5-1m", tokenLimit: 1_000_000)
+        )
+    }
+
     @Test("Nested subagent events do not enter their parent turn")
     func nestedSubagentEvents() throws {
         let turnID = "turn-1"
