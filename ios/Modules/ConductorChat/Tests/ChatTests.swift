@@ -174,6 +174,10 @@ struct ChatTests {
             changedExpansion.expandedSummaryIDs.insert("turn-1:human-1")
             #expect(original != changedExpansion)
 
+            var changedContextLimits = original
+            changedContextLimits.reportedContextWindowTokenLimits[.gpt5_5] = 1_000_000
+            #expect(original != changedContextLimits)
+
             var finishedLoading = original
             finishedLoading.isLoadingMessages = false
             #expect(original != finishedLoading)
@@ -187,6 +191,61 @@ struct ChatTests {
             emptySnapshot.isMessageSendInFlight = true
             #expect(!emptySnapshot.allowsAgentSwitching)
         }
+    }
+
+    @Test("Context usage prefers reports and follows the selected model")
+    func contextWindowUsageSelection() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = Chat.State(
+                session: .preview(
+                    agentType: .codex,
+                    model: .gpt5_5,
+                    contextTokenCount: 136_000
+                )
+            )
+
+            expectNoDifference(
+                state.contextWindowUsage,
+                ContextWindowUsage(usedTokens: 136_000, tokenLimit: 272_000)
+            )
+
+            state.reportedContextWindowTokenLimits[.gpt5_5] = 400_000
+            expectNoDifference(
+                state.contextWindowUsage,
+                ContextWindowUsage(usedTokens: 136_000, tokenLimit: 400_000)
+            )
+
+            state.selectedModel = .sonnet_4_6
+            expectNoDifference(
+                state.contextWindowUsage,
+                ContextWindowUsage(usedTokens: 136_000, tokenLimit: 200_000)
+            )
+
+            state.selectedModel = Session.Model(rawValue: "future-model")
+            #expect(state.contextWindowUsage == nil)
+        }
+    }
+
+    @Test("Context usage clamps invalid and over-limit values")
+    func contextWindowUsageMath() {
+        let empty = ContextWindowUsage(usedTokens: -1, tokenLimit: 272_000)
+        #expect(empty.usedTokens == 0)
+        #expect(empty.fraction == 0)
+        #expect(empty.percentage == 0)
+
+        let partial = ContextWindowUsage(usedTokens: 136_000, tokenLimit: 272_000)
+        #expect(partial.fraction == 0.5)
+        #expect(partial.percentage == 50)
+
+        let full = ContextWindowUsage(usedTokens: 400_000, tokenLimit: 272_000)
+        #expect(full.fraction == 1)
+        #expect(full.percentage == 100)
+
+        let invalidLimit = ContextWindowUsage(usedTokens: 10, tokenLimit: 0)
+        #expect(invalidLimit.fraction == 0)
+        #expect(invalidLimit.percentage == 0)
     }
 
     @Test("Message drafts are restored per session")

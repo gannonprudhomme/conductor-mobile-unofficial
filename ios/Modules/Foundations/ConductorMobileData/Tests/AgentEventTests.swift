@@ -212,6 +212,75 @@ struct AgentEventTests {
         )
     }
 
+    @Test("Claude result events normalize the active model context window")
+    func resultContextWindow() throws {
+        let event = try decodeAgentEvent(
+            """
+            {
+              "type": "result",
+              "conductor_sdk_metadata": {
+                "requestedModel": "opus-5-1m",
+                "model": "claude-opus-5[1m]"
+              },
+              "modelUsage": {
+                "claude-opus-5[1m]": {
+                  "contextWindow": 1000000
+                },
+                "claude-haiku-4-5-20251001": {
+                  "contextWindow": 200000
+                }
+              }
+            }
+            """
+        )
+
+        guard case .result(let result) = event else {
+            Issue.record("Expected a result event")
+            return
+        }
+        expectNoDifference(
+            result.contextWindowReport,
+            .init(requestedModel: "opus-5-1m", tokenLimit: 1_000_000)
+        )
+    }
+
+    @Test("Result context windows require matching active-model metadata")
+    func resultContextWindowRequiresActiveModel() throws {
+        let events = try [
+            """
+            {
+              "type": "result",
+              "conductor_sdk_metadata": {
+                "requestedModel": "gpt-5.5",
+                "model": "gpt-5.5"
+              }
+            }
+            """,
+            """
+            {
+              "type": "result",
+              "conductor_sdk_metadata": {
+                "requestedModel": "opus-5-1m",
+                "model": "claude-opus-5[1m]"
+              },
+              "modelUsage": {
+                "claude-haiku-4-5-20251001": {
+                  "contextWindow": 200000
+                }
+              }
+            }
+            """,
+        ].map(decodeAgentEvent)
+
+        for event in events {
+            guard case .result(let result) = event else {
+                Issue.record("Expected a result event")
+                continue
+            }
+            #expect(result.contextWindowReport == nil)
+        }
+    }
+
     @Test("Every observed error event variation decodes")
     func errorEvents() throws {
         let events = try [

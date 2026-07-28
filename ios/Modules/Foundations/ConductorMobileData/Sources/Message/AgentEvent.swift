@@ -357,13 +357,13 @@ public enum AgentEvent: Decodable, Equatable {
 
     public struct ResultEvent: Decodable, Hashable, Sendable {
         // public let type: EventType
+        public let contextWindowReport: ContextWindowReport?
         public let errors: [String]?
         public let isError: Bool
         public let parentToolUseID: String?
         public let result: String?
         public let sessionID: String?
         public let usage: Usage
-        // public let conductorSDKMetadata: JSONValue
 
         public struct Usage: Codable, Hashable, Sendable {
             public let inputTokens: Int
@@ -383,9 +383,30 @@ public enum AgentEvent: Decodable, Equatable {
             )
         }
 
+        public struct ContextWindowReport: Hashable, Sendable {
+            public let requestedModel: String
+            public let tokenLimit: Int
+
+            public init(requestedModel: String, tokenLimit: Int) {
+                self.requestedModel = requestedModel
+                self.tokenLimit = tokenLimit
+            }
+        }
+
+        private struct ConductorSDKMetadata: Decodable {
+            let model: String?
+            let requestedModel: String?
+        }
+
+        private struct ModelUsage: Decodable {
+            let contextWindow: Int?
+        }
+
         private enum CodingKeys: String, CodingKey {
+            case conductorSDKMetadata = "conductor_sdk_metadata"
             case errors
             case isError = "is_error"
+            case modelUsage
             case parentToolUseID = "parent_tool_use_id"
             case result
             case sessionID = "session_id"
@@ -398,8 +419,10 @@ public enum AgentEvent: Decodable, Equatable {
             errors: [String]? = nil,
             isError: Bool = false,
             parentToolUseID: String? = nil,
-            result: String? = nil
+            result: String? = nil,
+            contextWindowReport: ContextWindowReport? = nil
         ) {
+            self.contextWindowReport = contextWindowReport
             self.errors = errors
             self.isError = isError
             self.parentToolUseID = parentToolUseID
@@ -410,6 +433,25 @@ public enum AgentEvent: Decodable, Equatable {
 
         public init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            let metadata = try? container.decode(
+                ConductorSDKMetadata.self,
+                forKey: .conductorSDKMetadata
+            )
+            let modelUsage = try? container.decode(
+                [String: ModelUsage].self,
+                forKey: .modelUsage
+            )
+            if let requestedModel = metadata?.requestedModel,
+               let model = metadata?.model,
+               let tokenLimit = modelUsage?[model]?.contextWindow,
+               tokenLimit > 0 {
+                self.contextWindowReport = ContextWindowReport(
+                    requestedModel: requestedModel,
+                    tokenLimit: tokenLimit
+                )
+            } else {
+                self.contextWindowReport = nil
+            }
             self.errors = try? container.decode([String].self, forKey: .errors)
             self.isError = (try? container.decode(Bool.self, forKey: .isError)) ?? false
             self.parentToolUseID = try? container.decode(

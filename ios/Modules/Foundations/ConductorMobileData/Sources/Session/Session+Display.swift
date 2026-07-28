@@ -81,6 +81,31 @@ extension Session.Model {
             rawValue
         }
     }
+
+    public var fallbackContextWindowTokenLimit: Int? {
+        switch self {
+        case .fable5,
+             .opus_1M,
+             .opus5_1M,
+             .opus4_8_1M,
+             .opus4_7_1M,
+             .opus4_6_1M,
+             .sonnet5_1M,
+             .sonnet_4_6_1M:
+            1_000_000
+        case .opus, .sonnet_4_6, .haiku4_5:
+            200_000
+        case .gpt_5_6_sol,
+             .gpt_5_6_terra,
+             .gpt_5_6_luna,
+             .gpt5_5,
+             .gpt5_4,
+             .gpt5_3Codex:
+            272_000
+        default:
+            nil
+        }
+    }
 }
 
 extension Session.ReasoningEffort {

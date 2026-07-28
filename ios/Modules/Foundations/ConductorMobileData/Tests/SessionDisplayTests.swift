@@ -82,6 +82,46 @@ struct SessionDisplayTests {
         }
     }
 
+    @Test("Models provide known fallback context window limits")
+    func modelContextWindowLimits() {
+        let oneMillionTokenModels: [Session.Model] = [
+            .fable5,
+            .opus_1M,
+            .opus5_1M,
+            .opus4_8_1M,
+            .opus4_7_1M,
+            .opus4_6_1M,
+            .sonnet5_1M,
+            .sonnet_4_6_1M,
+        ]
+        let standardClaudeModels: [Session.Model] = [
+            .opus,
+            .sonnet_4_6,
+            .haiku4_5,
+        ]
+        let codexModels: [Session.Model] = [
+            .gpt_5_6_sol,
+            .gpt_5_6_terra,
+            .gpt_5_6_luna,
+            .gpt5_5,
+            .gpt5_4,
+            .gpt5_3Codex,
+        ]
+
+        for model in oneMillionTokenModels {
+            #expect(model.fallbackContextWindowTokenLimit == 1_000_000)
+        }
+        for model in standardClaudeModels {
+            #expect(model.fallbackContextWindowTokenLimit == 200_000)
+        }
+        for model in codexModels {
+            #expect(model.fallbackContextWindowTokenLimit == 272_000)
+        }
+        #expect(
+            Session.Model(rawValue: "future-model").fallbackContextWindowTokenLimit == nil
+        )
+    }
+
     @Test("Reasoning efforts use readable labels")
     func reasoningEffortDisplayName() {
         #expect(Session.ReasoningEffort.none.displayName == "Default")
