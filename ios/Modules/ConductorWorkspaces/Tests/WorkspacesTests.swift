@@ -355,6 +355,66 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Foreground reconnection suppresses immediate offline failures")
+    func foregroundReconnectionSuppressesTransientFailures() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+
+            let now = Date(timeIntervalSinceReferenceDate: 1_000)
+            let clock = TestClock()
+            let (stream, continuation) = AsyncThrowingStream<
+                CloudWorkspaceSnapshot,
+                any Error
+            >.makeStream()
+            var state = Workspaces.State()
+            state.cloudObservationStatus = .connected
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            } withDependencies: {
+                $0.cloudAPIClient.observeWorkspaces = { stream }
+                $0.continuousClock = clock
+                $0.date.now = now
+            }
+            let failure = Workspaces.CloudFailure.offline(
+                "The network connection was lost."
+            )
+
+            await store.send(.appEnteredBackground) {
+                $0.cloudFailureSuppressionDeadline = .distantFuture
+                $0.cloudObservationStatus = .loading
+            }
+            let foregroundTask = await store.send(.appBecameActive) {
+                $0.cloudFailureSuppressionDeadline = now
+                    .addingTimeInterval(5)
+            }
+            await store.send(.cloudObservationFailed(failure))
+
+            #expect(store.state.destination == nil)
+
+            continuation.yield(
+                CloudWorkspaceSnapshot(
+                    accountID: "account",
+                    projects: [],
+                    statuses: [:],
+                    workspaces: []
+                )
+            )
+            await store.receive(\.cloudSnapshotReceived) {
+                $0.cloudFailureSuppressionDeadline = nil
+                $0.cloudObservationStatus = .connected
+            }
+
+            continuation.finish()
+            await foregroundTask.cancel()
+        }
+    }
+
     @Test("Only the first failure in a Cloud outage presents an alert")
     func cloudFailurePresentsOneAlert() async throws {
         try await withDependencies {
