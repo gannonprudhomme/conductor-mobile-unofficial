@@ -45,6 +45,28 @@ public enum AgentEvent: Decodable, Equatable {
         case type
     }
 
+    /// The parent Agent tool call when this event belongs to a nested subagent transcript.
+    public var parentToolUseID: String? {
+        switch self {
+        case .assistant(let event):
+            event.parentToolUseID
+        case .error(let event):
+            event.parentToolUseID
+        case .result(let event):
+            event.parentToolUseID
+        case .system(let event):
+            event.parentToolUseID
+        case .user(let event):
+            event.parentToolUseID
+        case .unknown(let value):
+            if case .string(let parentToolUseID) = value["parent_tool_use_id"] {
+                parentToolUseID
+            } else {
+                nil
+            }
+        }
+    }
+
     public struct EventType: Codable, Hashable, RawRepresentable, Sendable {
         public var rawValue: String
 
@@ -82,6 +104,21 @@ public enum AgentEvent: Decodable, Equatable {
         public struct AssistantMessage: Decodable, Hashable, Sendable {
             // public let role: Role // Doubt we need this, it's the same thing as the `type`
             public let content: [AssistantMessageContent]
+            public let id: String?
+            public let model: String?
+            public let usage: JSONValue?
+
+            public init(
+                content: [AssistantMessageContent],
+                id: String? = nil,
+                model: String? = nil,
+                usage: JSONValue? = nil
+            ) {
+                self.content = content
+                self.id = id
+                self.model = model
+                self.usage = usage
+            }
 
             public enum AssistantMessageContent: Decodable, Hashable, Sendable {
                 case text(TextBlock)

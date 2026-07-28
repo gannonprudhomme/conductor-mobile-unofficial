@@ -1652,7 +1652,10 @@ private enum DisplayedRowProjection: Equatable {
         self = switch row {
         case .humanMessage(let message):
             .human(id: message.id, content: message.content)
-        case .assistantTextChunk, .assistantToolCall, .assistantError:
+        case .assistantTextChunk,
+             .assistantThinking,
+             .assistantToolCall,
+             .assistantError:
             .assistant(id: row.id)
         case .turnInProgress(let progress):
             .turnInProgress(id: progress.id, startedAt: progress.startedAt)

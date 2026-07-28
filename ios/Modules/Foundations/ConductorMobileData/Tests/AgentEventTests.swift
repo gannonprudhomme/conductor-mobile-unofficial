@@ -12,12 +12,50 @@ import Testing
 
 @Suite("Agent event decoding")
 struct AgentEventTests {
+    @Test("Assistant messages retain their logical ID and usage snapshot")
+    func assistantMessageIdentity() throws {
+        let event = try decodeAgentEvent(
+            #"{"type":"assistant","message":{"id":"message-1","model":"claude-opus-5","usage":{"input_tokens":42},"content":[]}}"#
+        )
+
+        expectNoDifference(
+            event,
+            .assistant(
+                .init(
+                    message: .init(
+                        content: [],
+                        id: "message-1",
+                        model: "claude-opus-5",
+                        usage: .object(["input_tokens": .integer(42)])
+                    )
+                )
+            )
+        )
+    }
+
+    @Test("Every nested event exposes its parent Agent tool call")
+    func parentToolUseID() throws {
+        let events = try [
+            #"{"type":"assistant","parent_tool_use_id":"parent","message":{"content":[]}}"#,
+            #"{"type":"user","parent_tool_use_id":"parent","message":{"content":[]}}"#,
+            #"{"type":"system","parent_tool_use_id":"parent"}"#,
+            #"{"type":"result","parent_tool_use_id":"parent"}"#,
+            #"{"type":"error","parent_tool_use_id":"parent","content":"Failed"}"#,
+            #"{"type":"future_event","parent_tool_use_id":"parent"}"#,
+        ].map(decodeAgentEvent)
+
+        expectNoDifference(
+            events.map(\.parentToolUseID),
+            Array(repeating: "parent", count: 6)
+        )
+    }
+
     @Test("Assistant events decode every observed content block")
     func assistantEvents() throws {
         let events = try [
             #"{"type":"assistant","session_id":"019cb186-53df-7aa0-9361-725d0c70a4fb","message":{"role":"assistant","content":[{"type":"text","text":"Ready."}]}}"#,
             #"{"type":"assistant","session_id":"019c5efa-3487-7500-8305-914f0ec7e314","message":{"role":"assistant","content":[{"type":"thinking","thinking":"[reasoning text intentionally omitted]"}]}}"#,
-            #"{"type":"assistant","session_id":"019cc647-f80f-74b3-815d-9d7ec5d66392","message":{"role":"assistant","content":[{"type":"tool_use","id":"item_1","name":"Bash","input":{"command":"pwd"}}]}}"#,
+            #"{"type":"assistant","session_id":"019cc647-f80f-74b3-815d-9d7ec5d66392","message":{"model":"claude-opus-5","role":"assistant","content":[{"type":"tool_use","id":"item_1","name":"Bash","input":{"command":"pwd"}}]}}"#,
         ].map(decodeAgentEvent)
 
         expectNoDifference(
@@ -52,7 +90,8 @@ struct AgentEventTests {
                                         input: ["command": .string("pwd")]
                                     )
                                 ),
-                            ]
+                            ],
+                            model: "claude-opus-5"
                         )
                     )
                 ),

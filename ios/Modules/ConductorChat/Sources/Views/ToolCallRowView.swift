@@ -7,6 +7,8 @@
 
 import Foundation
 import ConductorDesign
+import ConductorMobileData
+import SharedConductorData
 import SwiftUI
 import LucideIcons
 
@@ -34,6 +36,8 @@ struct ToolCallRowView: View {
                         style: .small
                     )
                 }
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
             }
             .lineLimit(1)
             .labelStyle(.conductorSmall)
@@ -131,6 +135,14 @@ struct ToolCallRowView: View {
             return "List files"
         case .bash:
             return "Bash"
+        case .toolSearch:
+            return "Tool Search"
+        case .agent(_, let model, _):
+            if let model {
+                return "Agent · \(agentModelDisplayName(model))"
+            } else {
+                return "Agent"
+            }
         case .webSearch:
             return "Web Search"
         case .grep:
@@ -162,6 +174,10 @@ struct ToolCallRowView: View {
             somethingText(command)
         case .runLocalCommand(_, let command, _, _):
             somethingText(command)
+        case .toolSearch:
+            EmptyView()
+        case .agent(_, _, let description):
+            somethingText(description)
         case .webSearch:
             EmptyView()
         case .grep(_, let pattern, let path):
@@ -176,6 +192,8 @@ struct ToolCallRowView: View {
     
     func somethingText(_ string: String) -> some View {
         Text(string)
+            .lineLimit(1)
+            .truncationMode(.tail)
             .monospaced()
             .padding(EdgeInsets(vertical: 4, horizontal: 6))
             .background(
@@ -186,6 +204,15 @@ struct ToolCallRowView: View {
     
     private func fileName(from path: String) -> String {
         URL(filePath: path).lastPathComponent
+    }
+
+    private func agentModelDisplayName(_ rawValue: String) -> String {
+        let withoutProvider = rawValue.hasPrefix("claude-")
+            ? String(rawValue.dropFirst("claude-".count))
+            : rawValue
+        let normalized = withoutProvider.split(separator: "[").first.map(String.init)
+            ?? withoutProvider
+        return Session.Model(rawValue: normalized).displayName
     }
 }
 
@@ -208,6 +235,10 @@ extension DisplayedChatRow.TurnSummary.ToolIcon {
             Lucide.search
         case .airplay:
             Lucide.airplay
+        case .wrench:
+            Lucide.wrench
+        case .bot:
+            Lucide.bot
         }
     }
 
@@ -229,6 +260,10 @@ extension DisplayedChatRow.TurnSummary.ToolIcon {
             "code searches"
         case .airplay:
             "MCP tools"
+        case .wrench:
+            "tool searches"
+        case .bot:
+            "subagents"
         }
     }
 }
@@ -371,6 +406,18 @@ private func diffableLines(in string: String) -> [Substring] {
                         command: "sed -n '80,180p' shared/SharedConductorData/Sources/Cloud.swift",
                         description: "Read Cloud stream and checkpoint implementation",
                         reason: nil
+                    )
+                )
+
+                ToolCallRowView(
+                    toolCall: .toolSearch(toolUseID: "tool-search")
+                )
+
+                ToolCallRowView(
+                    toolCall: .agent(
+                        toolUseID: "tool-agent",
+                        model: "claude-opus-5",
+                        description: "Map current Cloud read implementation"
                     )
                 )
                 

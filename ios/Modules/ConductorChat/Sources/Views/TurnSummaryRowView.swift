@@ -53,7 +53,13 @@ struct TurnSummaryRowView: View {
     private var title: String {
         let toolCalls = "\(summary.toolCallCount) tool call\(summary.toolCallCount == 1 ? "" : "s")"
         let messages = "\(summary.messageCount) message\(summary.messageCount == 1 ? "" : "s")"
-        return "\(toolCalls), \(messages)"
+        var components = [toolCalls, messages]
+        if summary.subagentCount > 0 {
+            components.append(
+                "\(summary.subagentCount) subagent\(summary.subagentCount == 1 ? "" : "s")"
+            )
+        }
+        return components.joined(separator: ", ")
     }
 
     private var accessibilityLabel: String {
@@ -76,7 +82,8 @@ struct TurnSummaryRowView: View {
                 isExpanded: false,
                 toolCallCount: 34,
                 messageCount: 12,
-                toolIcons: [.fileText, .filePen, .terminal, .search]
+                subagentCount: 3,
+                toolIcons: [.fileText, .filePen, .terminal, .search, .wrench, .bot]
             ),
             action: {}
         )

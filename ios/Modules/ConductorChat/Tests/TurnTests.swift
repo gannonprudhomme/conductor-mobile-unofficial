@@ -363,7 +363,7 @@ struct TurnTests {
         )
     }
 
-    @Test("Protocol-only events are ignored and errors become visible rows")
+    @Test("Thinking and errors become visible while protocol-only events are ignored")
     func protocolEvents() throws {
         let turnID = "turn-1"
         let messages = try [
@@ -414,8 +414,95 @@ struct TurnTests {
                     startedAt: startedAt,
                     rows: [
                         .humanMessage(id: "human", content: "Run it"),
+                        .assistantThinking(
+                            messageID: "thinking",
+                            content: "Inspecting the implementation."
+                        ),
                         .assistantError(messageID: "error", message: "aborted by user"),
                     ]
+                ),
+            ]
+        )
+        expectNoDifference(
+            Turn.parse(messages: messages)
+                .flattenedChatRows(activeTurnID: turnID)
+                .map(\.id),
+            [
+                "human:human",
+                "assistant:thinking",
+                "assistant:error",
+                "turn-in-progress:turn-1",
+            ]
+        )
+    }
+
+    @Test("Nested subagent events do not enter their parent turn")
+    func nestedSubagentEvents() throws {
+        let turnID = "turn-1"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Map it", turnID: turnID),
+            makeEventMessage(
+                id: "agent",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"tool_use","id":"parent","name":"Agent","input":{"description":"Map the implementation"}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "child-thinking",
+                event: #"{"type":"assistant","parent_tool_use_id":"parent","message":{"content":[{"type":"thinking","thinking":"Inspecting child files."}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "child-tool",
+                event: #"{"type":"assistant","parent_tool_use_id":"parent","message":{"content":[{"type":"tool_use","id":"child-tool","name":"Bash","input":{"command":"find ."}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "child-text",
+                event: #"{"type":"assistant","parent_tool_use_id":"parent","message":{"content":[{"type":"text","text":"Child result"}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "child-error",
+                event: #"{"type":"error","parent_tool_use_id":"parent","content":"Child failed"}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "child-result",
+                event: #"{"type":"result","parent_tool_use_id":"parent"}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "top-thinking",
+                event: #"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Returning to the parent."}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "top-text",
+                event: #"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}"#,
+                turnID: turnID
+            ),
+        ]
+
+        expectNoDifference(
+            Turn.parse(messages: messages).first?.rows.map(\.testProjection),
+            [
+                .humanMessage(id: "human", content: "Map it"),
+                .assistantToolCall(
+                    messageID: "agent",
+                    toolCall: .agent(
+                        toolUseID: "parent",
+                        model: "claude-opus-5",
+                        description: "Map the implementation"
+                    )
+                ),
+                .assistantThinking(
+                    messageID: "top-thinking",
+                    content: "Returning to the parent."
+                ),
+                .assistantText(
+                    messageID: "top-text",
+                    renderedChunks: ["Done"],
+                    isMostRecentTextInTurn: true
                 ),
             ]
         )
@@ -870,7 +957,7 @@ struct TurnTests {
             id: "error-ended:human",
             isExpanded: false,
             toolCallCount: 1,
-            messageCount: 2,
+            messageCount: 3,
             toolIcons: [.fileText]
         )
 
@@ -1019,6 +1106,28 @@ struct TurnTests {
                         )
                     )
                 ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "tool-search",
+                        toolCall: .toolSearch(toolUseID: "tool-search")
+                    )
+                ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "agent",
+                        toolCall: .agent(
+                            toolUseID: "agent",
+                            model: "claude-opus-5",
+                            description: "Map current Cloud read implementation"
+                        )
+                    )
+                ),
+                .assistantMessage(
+                    .thinking(
+                        messageID: "thinking",
+                        content: "Checking the implementation."
+                    )
+                ),
                 .assistantMessage(.error(messageID: "error", message: "Recovered")),
                 .assistantMessage(
                     .text(
@@ -1045,7 +1154,62 @@ struct TurnTests {
         )
         #expect(summary.toolCallCount == 4)
         #expect(summary.messageCount == 2)
-        expectNoDifference(summary.toolIcons, [.fileText, .filePen, .laptop])
+        #expect(summary.subagentCount == 1)
+        expectNoDifference(
+            summary.toolIcons,
+            [.fileText, .filePen, .laptop, .wrench, .bot]
+        )
+    }
+
+    @Test("Summary matches desktop logical message and activity counts")
+    func summaryCounts() throws {
+        let turnID = "turn"
+        let messages = try [
+            makeStoredMessage(id: "human", role: "user", content: "Inspect it", turnID: turnID),
+            makeEventMessage(
+                id: "thinking",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":1},"content":[{"type":"thinking","thinking":"Checking tools."}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "bash",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":1},"content":[{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"pwd"}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "tool-search",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":1},"content":[{"type":"tool_use","id":"tool-search","name":"ToolSearch","input":{}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "agent",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":2},"content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"description":"Map it"}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "ask-user",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":3},"content":[{"type":"tool_use","id":"ask-user","name":"mcp__conductor__AskUserQuestion","input":{}}]}}"#,
+                turnID: turnID
+            ),
+            makeEventMessage(
+                id: "text",
+                event: #"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":4},"content":[{"type":"text","text":"Done"}]}}"#,
+                turnID: turnID
+            ),
+        ]
+        let rows = Turn.parse(messages: messages).flattenedChatRows(activeTurnID: nil)
+        let summary = try #require(
+            rows.compactMap { row -> DisplayedChatRow.TurnSummary? in
+                guard case .turnSummary(let summary) = row.content else {
+                    return nil
+                }
+                return summary
+            }.first
+        )
+
+        #expect(summary.toolCallCount == 1)
+        #expect(summary.messageCount == 4)
+        #expect(summary.subagentCount == 1)
     }
 
     @Test("Every specialized tool uses its observed input shape")
@@ -1115,6 +1279,20 @@ struct TurnTests {
                 )
             ),
             (
+                "tool-search",
+                #"{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"tool_use","id":"tool-search","name":"ToolSearch","input":{"query":"xcodebuild simulator","max_results":10}}]}}"#,
+                .toolSearch(toolUseID: "tool-search")
+            ),
+            (
+                "agent",
+                #"{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"subagent_type":"Explore","description":"Map current Cloud read implementation","prompt":"Inspect the implementation."}}]}}"#,
+                .agent(
+                    toolUseID: "agent",
+                    model: "claude-opus-5",
+                    description: "Map current Cloud read implementation"
+                )
+            ),
+            (
                 "mcp",
                 #"{"type":"assistant","session_id":"019f4a14-8620-78f3-8790-12226f343678","message":{"role":"assistant","content":[{"type":"tool_use","id":"exec-b47bcc51-0a63-4ab3-9915-b82736764f03","name":"mcp__XcodeBuildMCP__screenshot","input":{}}]}}"#,
                 .mcp(
@@ -1143,6 +1321,7 @@ struct TurnTests {
             ("grep", "Grep", #"{"pattern":"TODO"}"#, ["pattern": .string("TODO")]),
             ("read", "Read", "{}", [:]),
             ("write", "Write", #"{"file_path":"File.swift"}"#, ["file_path": .string("File.swift")]),
+            ("agent", "Agent", #"{"prompt":"Inspect it"}"#, ["prompt": .string("Inspect it")]),
             (
                 "run-local-command",
                 "mcp__conductor__RunLocalCommand",
@@ -1199,6 +1378,7 @@ private enum TurnRowProjection: Equatable {
         renderedChunks: [String],
         isMostRecentTextInTurn: Bool
     )
+    case assistantThinking(messageID: String, content: String)
     case assistantToolCall(
         messageID: String,
         toolCall: Turn.Row.AssistantMessage.ToolCall
@@ -1221,7 +1401,10 @@ private enum DisplayedRowProjection: Equatable {
         self = switch row {
         case .humanMessage(let message):
             .human(id: message.id)
-        case .assistantTextChunk, .assistantToolCall, .assistantError:
+        case .assistantTextChunk,
+             .assistantThinking,
+             .assistantToolCall,
+             .assistantError:
             .assistant(id: row.id)
         case .turnInProgress(let progress):
             .turnInProgress(id: progress.id)
@@ -1274,6 +1457,8 @@ private extension Turn.Row {
                     renderedChunks: content.chunks.map { $0.markdown.renderPlainText() },
                     isMostRecentTextInTurn: isMostRecentTextInTurn
                 )
+            case let .thinking(messageID, content):
+                .assistantThinking(messageID: messageID, content: content)
             case let .toolCall(messageID, toolCall):
                 .assistantToolCall(messageID: messageID, toolCall: toolCall)
             case let .error(messageID, message):
