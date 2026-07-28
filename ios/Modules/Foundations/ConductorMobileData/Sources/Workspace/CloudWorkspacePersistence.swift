@@ -11,6 +11,38 @@ import SharedConductorData
 import SQLiteData
 
 public enum CloudWorkspacePersistence {
+    /// Persists a Desktop workspace snapshot without allowing it to replace Cloud-owned fields.
+    ///
+    /// Desktop remains authoritative for its enrichment fields, including branch, pull-request,
+    /// pin, unread, and local workspace details. Once Cloud metadata owns the canonical row,
+    /// however, snapshot arrival order must not change its Cloud identity or lifecycle.
+    public static func persistDesktopWorkspaces(
+        _ workspaces: [Workspace],
+        in database: Database
+    ) throws {
+        for desktopWorkspace in workspaces {
+            guard try CloudWorkspaceMetadata
+                .find(desktopWorkspace.id)
+                .fetchOne(database) != nil,
+                  let cloudWorkspace = try Workspace
+                    .find(desktopWorkspace.id)
+                    .fetchOne(database) else {
+                try Workspace.upsert { desktopWorkspace }.execute(database)
+                continue
+            }
+
+            var mergedWorkspace = desktopWorkspace
+            mergedWorkspace.createdAt = cloudWorkspace.createdAt
+            mergedWorkspace.creatorUserID = cloudWorkspace.creatorUserID
+            mergedWorkspace.hostingServerURL = cloudWorkspace.hostingServerURL
+            mergedWorkspace.repositoryID = cloudWorkspace.repositoryID
+            mergedWorkspace.state = cloudWorkspace.state
+            mergedWorkspace.updatedAt = cloudWorkspace.updatedAt
+            mergedWorkspace.workspaceName = cloudWorkspace.workspaceName
+            try Workspace.upsert { mergedWorkspace }.execute(database)
+        }
+    }
+
     public static func persist(
         _ snapshot: CloudWorkspaceSnapshot,
         in database: Database
@@ -167,22 +199,15 @@ public enum CloudWorkspacePersistence {
         let existingWorkspace = try Workspace
             .find(workspace.id)
             .fetchOne(database)
-        let hasDesktopObservation = try MobileWorkspaceState
-            .find(workspace.id)
-            .fetchOne(database) != nil
 
         if let existingWorkspace {
-            // MobileWorkspaceState proves desktop ownership. In that case Cloud only updates its
-            // metadata row so branch, PR, unread, pin, and working fields remain desktop-owned.
-            if !hasDesktopObservation {
-                try updateAPIOnlyWorkspace(
-                    existingWorkspace,
-                    from: workspace,
-                    status: status,
-                    repositoryID: repositoryID,
-                    in: database
-                )
-            }
+            try updateCloudWorkspace(
+                existingWorkspace,
+                from: workspace,
+                status: status,
+                repositoryID: repositoryID,
+                in: database
+            )
         } else {
             try insertAPIOnlyWorkspace(
                 workspace,
@@ -224,31 +249,29 @@ public enum CloudWorkspacePersistence {
             .execute(database)
     }
 
-    private static func updateAPIOnlyWorkspace(
+    private static func updateCloudWorkspace(
         _ existingWorkspace: Workspace,
         from workspace: CloudWorkspace,
         status: CloudWorkspaceStatusResponse?,
         repositoryID: Repository.ID,
         in database: Database
     ) throws {
-        let creatorID = existingWorkspace.creatorUserID ?? workspace.creatorID
-        let updatedAt = max(
-            existingWorkspace.updatedAt,
-            workspace.lastActivityAt ?? workspace.createdAt
-        )
         let state = status.map {
             Workspace.State(rawValue: $0.status.rawValue)
         } ?? existingWorkspace.state
         try Workspace
             .find(workspace.id)
             .update {
-                $0.creatorUserID = #bind(creatorID)
+                $0.createdAt = #bind(workspace.createdAt)
+                $0.creatorUserID = #bind(workspace.creatorID)
                 $0.hostingServerURL = #bind(
                     Workspace.conductorCloudHostingServerURL
                 )
                 $0.repositoryID = #bind(repositoryID)
                 $0.state = #bind(state)
-                $0.updatedAt = #bind(updatedAt)
+                $0.updatedAt = #bind(
+                    workspace.lastActivityAt ?? workspace.createdAt
+                )
                 $0.workspaceName = #bind(workspace.name)
             }
             .execute(database)

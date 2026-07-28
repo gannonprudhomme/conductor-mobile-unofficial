@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Foundation
@@ -155,6 +156,342 @@ struct ChatTests {
 
             $connectionStatus.withLock { $0 = .disconnected }
             expectNoDifference(state.connectionStatus, .disconnected)
+        }
+    }
+
+    @Test("A complete empty Cloud cache clears the loader before observation")
+    func completeEmptyCloudCacheClearsLoader() async throws {
+        let database = try appDatabase()
+        let sessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "remote-session"
+        )
+        let session = Session.preview(id: sessionID)
+        try await database.write { db in
+            try Session.insert { session }.execute(db)
+            try CloudSessionMetadata
+                .insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: sessionID,
+                        cloudSessionID: "remote-session",
+                        workspaceID: session.workspaceID,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation",
+                        transcriptCursor: nil,
+                        hasCompleteTranscript: true,
+                        transcriptProjectionVersion: CloudTranscriptAdapter
+                            .projectionVersion
+                    )
+                }
+                .execute(db)
+        }
+
+        await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.cloudAPIClient.observeTranscript = {
+                    remoteSessionID,
+                    workspaceID,
+                    checkpoint in
+                    #expect(remoteSessionID == "remote-session")
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(
+                        checkpoint
+                            == CloudTranscriptCheckpoint(
+                                accountID: "account",
+                                remoteSessionID: "remote-session",
+                                rawCursor: nil
+                            )
+                    )
+                    return AsyncThrowingStream { _ in }
+                }
+            }
+            store.exhaustivity = .off
+
+            let task = await store.send(.task)
+            await store.receive(\.initialMessagesResponse) {
+                $0.isMessageSnapshotEmpty = true
+                $0.isLoadingMessages = false
+            }
+            await task.cancel()
+        }
+    }
+
+    @Test("A same-account credential revision restarts transcript observation")
+    func credentialRevisionRestartsTranscriptObservation() async throws {
+        let database = try appDatabase()
+        let sessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "remote-session"
+        )
+        let session = Session.preview(id: sessionID)
+        try await database.write { db in
+            try Session.insert { session }.execute(db)
+            try CloudSessionMetadata.insert {
+                CloudSessionMetadata(
+                    canonicalSessionID: sessionID,
+                    cloudSessionID: "remote-session",
+                    workspaceID: session.workspaceID,
+                    accountID: "account",
+                    listOrder: 0,
+                    refreshGeneration: "generation"
+                )
+            }
+            .execute(db)
+        }
+
+        await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialRevision: 1
+                )
+            }
+            let connectionCount = LockIsolated(0)
+            let (stream, continuation) = AsyncThrowingStream<
+                CloudTranscriptUpdate,
+                any Error
+            >.makeStream()
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.cloudAPIClient.observeTranscript = { _, _, _ in
+                    connectionCount.withValue { $0 += 1 }
+                    return stream
+                }
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort:
+                            session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let task = await store.send(.task)
+            for _ in 0..<1_000 where connectionCount.value < 1 {
+                await Task.yield()
+            }
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialRevision: 2
+                )
+            }
+            await store.receive(\.cloudConfigurationChanged)
+            for _ in 0..<10_000 where connectionCount.value < 2 {
+                await Task.yield()
+            }
+            #expect(connectionCount.value == 2)
+
+            await task.cancel()
+            continuation.finish()
+        }
+    }
+
+    @Test("A stale Cloud projection keeps loading until complete recovery commits")
+    func staleCloudProjectionRequiresRecovery() async throws {
+        let database = try appDatabase()
+        let sessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "remote-session"
+        )
+        let session = Session.preview(id: sessionID)
+        try await database.write { db in
+            try Session.insert { session }.execute(db)
+            try CloudSessionMetadata
+                .insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: sessionID,
+                        cloudSessionID: "remote-session",
+                        workspaceID: session.workspaceID,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation",
+                        transcriptCursor: "stale",
+                        hasCompleteTranscript: true,
+                        transcriptProjectionVersion: 0
+                    )
+                }
+                .execute(db)
+        }
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.cloudAPIClient.observeTranscript = {
+                    remoteSessionID,
+                    workspaceID,
+                    checkpoint in
+                    #expect(remoteSessionID == "remote-session")
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(checkpoint == nil)
+                    return AsyncThrowingStream { continuation in
+                        continuation.yield(
+                            CloudTranscriptUpdate(
+                                accountID: "account",
+                                sessionID: remoteSessionID,
+                                messages: [],
+                                kind: .complete,
+                                rawCursor: nil
+                            )
+                        )
+                        continuation.finish()
+                    }
+                }
+            }
+            store.exhaustivity = .off
+
+            let task = await store.send(.task)
+            #expect(store.state.isLoadingMessages)
+            await store.receive(\.initialMessagesResponse) {
+                $0.isMessageSnapshotEmpty = true
+                $0.isLoadingMessages = false
+            }
+            await task.cancel()
+
+            let cache = try await database.read { db in
+                try CloudChatPersistence.cachedTranscript(
+                    for: sessionID,
+                    in: db
+                )
+            }
+            #expect(cache.checkpoint?.rawCursor == nil)
+        }
+    }
+
+    @Test("Cloud ownership failure terminates observation at the committed checkpoint")
+    func cloudOwnershipFailureTerminatesObservation() async throws {
+        let database = try appDatabase()
+        let sessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "remote-session"
+        )
+        let session = Session.preview(id: sessionID)
+        try await database.write { db in
+            try Session.insert { session }.execute(db)
+            try CloudSessionMetadata
+                .insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: sessionID,
+                        cloudSessionID: "remote-session",
+                        workspaceID: session.workspaceID,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation",
+                        transcriptCursor: "committed",
+                        hasCompleteTranscript: true,
+                        transcriptProjectionVersion: CloudTranscriptAdapter
+                            .projectionVersion
+                    )
+                }
+                .execute(db)
+        }
+        let (stream, continuation) = AsyncThrowingStream<
+            CloudTranscriptUpdate,
+            any Error
+        >.makeStream()
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.cloudAPIClient.observeTranscript = { _, _, _ in stream }
+            }
+            store.exhaustivity = .off
+
+            let task = await store.send(.task)
+            await store.receive(\.initialMessagesResponse)
+            continuation.yield(
+                CloudTranscriptUpdate(
+                    accountID: "other-account",
+                    sessionID: "remote-session",
+                    messages: [],
+                    kind: .incremental,
+                    rawCursor: "uncommitted"
+                )
+            )
+            await store.receive(\.loadMessagesFailed)
+            continuation.yield(
+                CloudTranscriptUpdate(
+                    accountID: "account",
+                    sessionID: "remote-session",
+                    messages: [],
+                    kind: .incremental,
+                    rawCursor: "later-in-memory"
+                )
+            )
+            for _ in 0..<100 {
+                await Task.yield()
+            }
+
+            let cache = try await database.read { db in
+                try CloudChatPersistence.cachedTranscript(
+                    for: sessionID,
+                    in: db
+                )
+            }
+            #expect(cache.checkpoint?.rawCursor == "committed")
+            await task.cancel()
         }
     }
 

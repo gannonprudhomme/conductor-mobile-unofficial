@@ -12,9 +12,27 @@ import IssueReporting
 import Testing
 
 struct WorkspaceDisplayTests {
-    @Test("A hosting server URL identifies locally observed cloud workspaces")
+    @Test("Only the normalized production endpoint identifies Cloud workspaces")
     func cloudHosting() {
-        #expect(Workspace.preview(hostingServerURL: "https://cloud.test").isCloudHosted)
+        #expect(
+            Workspace.preview(
+                hostingServerURL: "https://API.CONDUCTOR.BUILD/"
+            )
+            .isCloudHosted
+        )
+        #expect(
+            Workspace.preview(
+                hostingServerURL: "https://api.conductor.build:443"
+            )
+            .isCloudHosted
+        )
+        #expect(!Workspace.preview(hostingServerURL: "https://cloud.test").isCloudHosted)
+        #expect(
+            !Workspace.preview(
+                hostingServerURL: "https://api.conductor.build/other"
+            )
+            .isCloudHosted
+        )
         #expect(!Workspace.preview(hostingServerURL: "").isCloudHosted)
         #expect(!Workspace.preview(hostingServerURL: nil).isCloudHosted)
     }

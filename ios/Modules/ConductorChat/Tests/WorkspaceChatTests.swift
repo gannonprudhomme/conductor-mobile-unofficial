@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import Foundation
 import SharedConductorData
@@ -15,6 +16,74 @@ import Testing
 
 @MainActor
 struct WorkspaceChatTests {
+    @Test("Only quiescent workspace chat presentation is warm-restorable")
+    func warmPresentationRequiresQuiescence() throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.upsert { workspace }.execute(database)
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            var idleState = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            idleState.isLoadingSessions = false
+            idleState.chat?.isLoadingMessages = false
+            #expect(idleState.canRestoreWarmPresentation)
+
+            func expectNotRestorable(
+                _ mutate: (inout WorkspaceChat.State) -> Void
+            ) {
+                var state = idleState
+                mutate(&state)
+                #expect(!state.canRestoreWarmPresentation)
+            }
+
+            expectNotRestorable { $0.isLoadingSessions = true }
+            expectNotRestorable { $0.chat?.isLoadingMessages = true }
+            expectNotRestorable { $0.chat?.isMessageSendInFlight = true }
+            expectNotRestorable { $0.chat?.isStopInFlight = true }
+            expectNotRestorable { $0.isCreatingSession = true }
+            expectNotRestorable { $0.isArchivingWorkspace = true }
+            expectNotRestorable { $0.isClosingSession = true }
+            expectNotRestorable { $0.isRenamingBranch = true }
+            expectNotRestorable { $0.isRenamingSession = true }
+            expectNotRestorable { $0.isWorkspaceMutationInFlight = true }
+            expectNotRestorable { $0.sessionIDsBeforeCreation = [] }
+            expectNotRestorable { $0.sessionIDAwaitingObservation = "pending" }
+            expectNotRestorable { $0.renamingSession = session }
+            expectNotRestorable { $0.destination = .renameBranch }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.isEditStartInFlight = true
+            }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.editingMessageID = "editing"
+            }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.isEditInFlight = true
+            }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.messageActionInFlightID = "deleting"
+            }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.isReorderInFlight = true
+            }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.isResumeInFlight = true
+            }
+            expectNotRestorable {
+                $0.chat?.queuedMessages.pendingMessageIDs = ["pending"]
+            }
+        }
+    }
+
     @Test("Loading unread sessions marks their workspace as read")
     func loadingUnreadSessionsMarksWorkspaceAsRead() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active", unread: 1)
@@ -160,6 +229,361 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Cached Cloud sessions remain visible during an offline retry")
+    func cachedCloudSessionsRemainVisibleOffline() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            activeSessionID: "canonical-session",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let session = Session.preview(
+            id: "canonical-session",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.upsert { workspace }.execute(database)
+                try Session.upsert { session }.execute(database)
+                try CloudSessionMetadata.insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: session.id,
+                        cloudSessionID: "remote-session",
+                        workspaceID: workspace.id,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation"
+                    )
+                }
+                .execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            #expect(!store.state.isLoadingSessions)
+            #expect(store.state.chat?.sessionID == session.id)
+            await store.send(
+                .loadSessionsResponse(
+                    .failure(URLError(.notConnectedToInternet))
+                )
+            )
+            #expect(!store.state.isLoadingSessions)
+            #expect(store.state.chat?.sessionID == session.id)
+        }
+    }
+
+    @Test("Cloud session observation reconciles Desktop visibility")
+    func cloudObservationReconcilesDesktopVisibility() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let activeDesktopSession = Session.preview(
+            id: "active",
+            workspaceID: workspace.id
+        )
+        let archivedDesktopSession = Session.preview(
+            id: "archived",
+            workspaceID: workspace.id,
+            isHidden: true
+        )
+        let database = try appDatabase()
+        try await database.write { database in
+            try Workspace.upsert { workspace }.execute(database)
+        }
+
+        let (cloudStream, cloudContinuation) = AsyncThrowingStream<
+            CloudWorkspaceSessionSnapshot,
+            any Error
+        >.makeStream()
+        let (desktopStream, desktopContinuation) = AsyncThrowingStream<
+            [Session],
+            any Error
+        >.makeStream()
+        let cloudConnectionCount = LockIsolated(0)
+        let desktopConnectionCount = LockIsolated(0)
+        let store = TestStore(
+            initialState: WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+        ) {
+            WorkspaceChat()
+        } withDependencies: {
+            $0.defaultDatabase = database
+            $0.cloudAPIClient.observeSessions = { workspaceID in
+                #expect(workspaceID == workspace.id)
+                cloudConnectionCount.withValue { $0 += 1 }
+                return cloudStream
+            }
+            $0.desktopClient.observeSessions = { workspaceID in
+                #expect(workspaceID == workspace.id)
+                desktopConnectionCount.withValue { $0 += 1 }
+                return desktopStream
+            }
+        }
+        store.exhaustivity = .off(showSkippedAssertions: false)
+
+        let task = await store.send(.task)
+        cloudContinuation.yield(
+            cloudSessionSnapshot(
+                workspaceID: workspace.id,
+                sessionIDs: ["active", "archived"]
+            )
+        )
+        desktopContinuation.yield(
+            [activeDesktopSession, archivedDesktopSession]
+        )
+
+        for _ in 0..<1_000 {
+            let counts = try await database.read { database in
+                (
+                    try CloudSessionMetadata
+                        .sessions(
+                            workspaceID: workspace.id,
+                            isHidden: false
+                        )
+                        .fetchAll(database)
+                        .count,
+                    try CloudSessionMetadata
+                        .sessions(
+                            workspaceID: workspace.id,
+                            isHidden: true
+                        )
+                        .fetchAll(database)
+                        .count
+                )
+            }
+            if counts.0 == 1, counts.1 == 1 {
+                break
+            }
+            await Task.yield()
+        }
+
+        let visibleSessionIDs = try await database.read { database in
+            try CloudSessionMetadata
+                .sessions(workspaceID: workspace.id, isHidden: false)
+                .fetchAll(database)
+                .map(\.id)
+        }
+        #expect(
+            visibleSessionIDs
+                == [
+                    CloudCanonicalID.session(
+                        accountID: "account",
+                        remoteSessionID: "active"
+                    ),
+                ]
+        )
+        #expect(cloudConnectionCount.value == 1)
+        #expect(desktopConnectionCount.value == 1)
+
+        await task.cancel()
+        cloudContinuation.finish()
+        desktopContinuation.finish()
+    }
+
+    @Test("Cloud sessions load without a Desktop connection")
+    func cloudSessionsLoadWithoutDesktopConnection() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let database = try appDatabase()
+        try await database.write { database in
+            try Workspace.upsert { workspace }.execute(database)
+        }
+        let (cloudStream, cloudContinuation) = AsyncThrowingStream<
+            CloudWorkspaceSessionSnapshot,
+            any Error
+        >.makeStream()
+        let cloudConnectionCount = LockIsolated(0)
+        let desktopConnectionCount = LockIsolated(0)
+        let store = TestStore(
+            initialState: WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+        ) {
+            WorkspaceChat()
+        } withDependencies: {
+            $0.continuousClock = TestClock()
+            $0.defaultDatabase = database
+            $0.cloudAPIClient.observeSessions = { workspaceID in
+                #expect(workspaceID == workspace.id)
+                cloudConnectionCount.withValue { $0 += 1 }
+                return cloudStream
+            }
+            $0.desktopClient.observeSessions = { workspaceID in
+                #expect(workspaceID == workspace.id)
+                desktopConnectionCount.withValue { $0 += 1 }
+                return AsyncThrowingStream {
+                    $0.finish(throwing: TestError())
+                }
+            }
+        }
+        store.exhaustivity = .off(showSkippedAssertions: false)
+
+        let task = await store.send(.task)
+        cloudContinuation.yield(
+            cloudSessionSnapshot(
+                workspaceID: workspace.id,
+                sessionIDs: ["cloud-only"]
+            )
+        )
+        await store.receive(\.loadSessionsResponse.success)
+
+        #expect(cloudConnectionCount.value == 1)
+        #expect(desktopConnectionCount.value == 1)
+        #expect(!store.state.isLoadingSessions)
+        #expect(
+            store.state.chat?.sessionID
+                == CloudCanonicalID.session(
+                    accountID: "account",
+                    remoteSessionID: "cloud-only"
+                )
+        )
+        #expect(store.state.destination == nil)
+
+        await task.cancel()
+        cloudContinuation.finish()
+    }
+
+    @Test("A same-account credential revision restarts session observation")
+    func credentialRevisionRestartsSessionObservation() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            activeSessionID: "canonical-session",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let session = Session.preview(
+            id: "canonical-session",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.upsert { workspace }.execute(database)
+                try Session.upsert { session }.execute(database)
+                try CloudSessionMetadata.insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: session.id,
+                        cloudSessionID: "remote-session",
+                        workspaceID: workspace.id,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation"
+                    )
+                }
+                .execute(database)
+            }
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialRevision: 1
+                )
+            }
+            let connectionCount = LockIsolated(0)
+            let (stream, continuation) = AsyncThrowingStream<
+                CloudWorkspaceSessionSnapshot,
+                any Error
+            >.makeStream()
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.continuousClock = TestClock()
+                $0.cloudAPIClient.observeSessions = { _ in
+                    connectionCount.withValue { $0 += 1 }
+                    return stream
+                }
+                $0.desktopClient.observeSessions = { _ in
+                    AsyncThrowingStream { _ in }
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let task = await store.send(.task)
+            for _ in 0..<1_000 where connectionCount.value < 1 {
+                await Task.yield()
+            }
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialRevision: 2
+                )
+            }
+            await store.receive(\.cloudConfigurationChanged)
+            for _ in 0..<1_000 where connectionCount.value < 2 {
+                await Task.yield()
+            }
+            #expect(connectionCount.value == 2)
+
+            await task.cancel()
+            continuation.finish()
+        }
+    }
+
+    @Test("A stale transcript failure cannot alert a replacement chat")
+    func staleTranscriptFailureIsIgnored() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "current")
+        let session = try makeSession(
+            id: "current",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .loadMessagesFailed(
+                        sessionID: "replaced-session",
+                        error: TestError()
+                    )
+                )
+            )
+            #expect(store.state.destination == nil)
+        }
+    }
+
     @Test("The active workspace session is selected")
     func activeSessionIsSelected() throws {
         let activeSession = try makeSession(id: "active", workspaceID: "workspace-1")
@@ -246,6 +670,86 @@ struct WorkspaceChatTests {
             }
             await store.send(.activeSessionIDChanged(activeSession.id))
             #expect(store.state.chat?.sessionID == activeSession.id)
+        }
+    }
+
+    @Test("A mounted Desktop workspace rebuilds from Cloud-owned sessions")
+    func mountedWorkspaceReclassifiesAsCloud() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "desktop")
+        let desktopSession = try makeSession(
+            id: "desktop",
+            workspaceID: workspace.id
+        )
+        let cloudSession = try makeSession(
+            id: "canonical-cloud",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.upsert { workspace }.execute(database)
+                try Session.upsert { desktopSession }.execute(database)
+            }
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.continuousClock = TestClock()
+                $0.cloudAPIClient.observeSessions = { _ in
+                    AsyncThrowingStream { _ in }
+                }
+                $0.desktopClient.observeSessions = { _ in
+                    AsyncThrowingStream { _ in }
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+            #expect(store.state.chat?.sessionID == desktopSession.id)
+            await store.send(.archivedSessionsButtonTapped)
+            #expect(store.state.destination != nil)
+
+            try await database.write { database in
+                try Session.upsert { cloudSession }.execute(database)
+                try CloudSessionMetadata.insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: cloudSession.id,
+                        cloudSessionID: "remote-cloud",
+                        workspaceID: workspace.id,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation"
+                    )
+                }
+                .execute(database)
+                try Workspace
+                    .find(workspace.id)
+                    .update {
+                        $0.hostingServerURL =
+                            #bind(Workspace.conductorCloudHostingServerURL)
+                        $0.activeSessionID = #bind(cloudSession.id)
+                    }
+                    .execute(database)
+            }
+
+            for _ in 0..<1_000 where !store.state.workspace.isCloudHosted {
+                await Task.yield()
+            }
+            #expect(store.state.workspace.isCloudHosted)
+            let reload = await store.send(.hostingSourceChanged(true))
+            #expect(store.state.destination == nil)
+            await store.receive(\.hostingSourceReloaded)
+            #expect(store.state.activeSessions.map(\.id) == [cloudSession.id])
+            #expect(store.state.chat?.sessionID == cloudSession.id)
+            #expect(store.state.chat?.isCloudHosted == true)
+            await reload.cancel()
         }
     }
 
@@ -786,11 +1290,14 @@ struct WorkspaceChatTests {
                 $0.sessionTitleDraft = "  New title  "
             }
             await store.send(.renameSessionSubmitted) {
+                $0.isRenamingSession = true
                 $0.renamingSession = nil
                 $0.sessionTitleDraft = "New title"
                 $0.destination = nil
             }
-            await store.receive(\.renameSessionResponse)
+            await store.receive(\.renameSessionResponse) {
+                $0.isRenamingSession = false
+            }
             #expect(requests.value == ["\(workspace.id):\(session.id):New title"])
         }
     }
@@ -1129,8 +1636,11 @@ struct WorkspaceChatTests {
                 }
             }
 
-            await store.send(.workspacePinnedButtonTapped)
+            await store.send(.workspacePinnedButtonTapped) {
+                $0.isWorkspaceMutationInFlight = true
+            }
             await store.receive(\.workspaceMutationFailed) {
+                $0.isWorkspaceMutationInFlight = false
                 $0.destination = .alert(
                     .failedToUpdateWorkspace(message: TestError().localizedDescription)
                 )
@@ -1163,8 +1673,11 @@ struct WorkspaceChatTests {
                 $0.desktopClient.setWorkspacePinned = { _, _ in .sqliteFallback }
             }
 
-            await store.send(.workspacePinnedButtonTapped)
+            await store.send(.workspacePinnedButtonTapped) {
+                $0.isWorkspaceMutationInFlight = true
+            }
             await store.receive(\.workspaceMutationUsedSQLiteFallback) {
+                $0.isWorkspaceMutationInFlight = false
                 $0.destination = .alert(.workspaceMutationUsedSQLiteFallback)
             }
         }
@@ -1249,7 +1762,14 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             }
 
-            await store.send(.chat(.loadMessagesFailed(TestError()))) {
+            await store.send(
+                .chat(
+                    .loadMessagesFailed(
+                        sessionID: activeSession.id,
+                        error: TestError()
+                    )
+                )
+            ) {
                 $0.destination = .alert(
                     .failedToLoadMessages(message: TestError().localizedDescription)
                 )
@@ -1556,7 +2076,14 @@ struct WorkspaceChatTests {
             }
 
             await store.send(.loadSessionsResponse(.failure(error)))
-            await store.send(.chat(.loadMessagesFailed(error)))
+            await store.send(
+                .chat(
+                    .loadMessagesFailed(
+                        sessionID: activeSession.id,
+                        error: error
+                    )
+                )
+            )
             await store.send(
                 .chat(
                     .sendMessageResponse(
@@ -1700,6 +2227,29 @@ private func makeSession(
             }
             """.utf8
         )
+    )
+}
+
+private func cloudSessionSnapshot(
+    workspaceID: String,
+    sessionIDs: [String]
+) -> CloudWorkspaceSessionSnapshot {
+    let date = Date(timeIntervalSince1970: 100)
+    return CloudWorkspaceSessionSnapshot(
+        accountID: "account",
+        workspace: CloudWorkspace(
+            id: workspaceID,
+            name: "Cloud workspace",
+            createdAt: date
+        ),
+        sessions: sessionIDs.map { sessionID in
+            CloudSession(
+                id: sessionID,
+                deepLink: URL(string: "https://app.conductor.build")!,
+                name: sessionID
+            )
+        },
+        statuses: [:]
     )
 }
 

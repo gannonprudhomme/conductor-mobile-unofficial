@@ -17,7 +17,9 @@ struct SessionTests {
                 "fable-5",
                 "opus-5-1m",
                 "opus-4-8-1m",
+                "opus-4-8",
                 "opus-4-7-1m",
+                "opus-4-7",
                 "opus-4-6-1m",
                 "sonnet-5-1m",
                 "sonnet-4-6-1m",
@@ -32,10 +34,15 @@ struct SessionTests {
                 "gpt-5.6-luna",
                 "gpt-5.5",
                 "gpt-5.4",
+                "gpt-5.3-codex-spark",
+                "gpt-5.3-codex",
+                "gpt-5.2-codex",
             ]
         )
         #expect(Session.Model.fable5.agentType == .claude)
+        #expect(Session.Model.opus4_8.agentType == .claude)
         #expect(Session.Model.gpt_5_6_sol.agentType == .codex)
+        #expect(Session.Model.gpt5_2Codex.agentType == .codex)
         #expect(Session.Model(rawValue: "future-model").agentType == nil)
     }
 

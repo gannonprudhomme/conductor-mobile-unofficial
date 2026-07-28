@@ -27,6 +27,7 @@ public struct Main: Sendable {
         @Shared(.cloudConfiguration)
         public var cloudConfiguration
 
+        var cachedWorkspaceChat: WorkspaceChat.State?
         public var path = StackState<Path.State>()
         @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
@@ -93,6 +94,9 @@ public struct Main: Sendable {
 
                     case .success(nil):
                         state.$cloudConfiguration.withLock { $0 = nil }
+                        if state.cachedWorkspaceChat?.workspace.isCloudHosted == true {
+                            state.cachedWorkspaceChat = nil
+                        }
                         let settings = ConductorSettings.State()
                         if settings.requiresConnectionConfiguration {
                             state.settings = settings
@@ -120,6 +124,14 @@ public struct Main: Sendable {
                 case .cloudCacheCleanupResult(.success):
                     return .none
 
+                case .settings(
+                    .presented(.cloudCredentialDeleteResult(.success))
+                ):
+                    if state.cachedWorkspaceChat?.workspace.isCloudHosted == true {
+                        state.cachedWorkspaceChat = nil
+                    }
+                    return .none
+
                 // We handle the displaying of Settings in here so we can keep ConductorSettings + ConductorWorkspaces decoupled
                 // akin to how modules are decoupled for push navigation
                 case .workspaces(.settingsButtonTapped):
@@ -140,14 +152,26 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceTapped(item)):
-                    guard !item.isCloudOnly else {
-                        return .none
+                    let workspaceChat: WorkspaceChat.State
+                    if let cachedWorkspaceChat = state.cachedWorkspaceChat,
+                       cachedWorkspaceChat.workspace.id == item.id {
+                        workspaceChat = cachedWorkspaceChat
+                        state.cachedWorkspaceChat = nil
+                    } else {
+                        workspaceChat = WorkspaceChat.State(
+                            workspaceWithRepository: item
+                        )
                     }
                     state.path.append(
-                        .workspaceChat(
-                            WorkspaceChat.State(workspaceWithRepository: item)
-                        )
+                        .workspaceChat(workspaceChat)
                     )
+                    return .none
+
+                case let .path(.popFrom(id)):
+                    if case let .workspaceChat(workspaceChat) = state.path[id: id],
+                       workspaceChat.canRestoreWarmPresentation {
+                        state.cachedWorkspaceChat = workspaceChat
+                    }
                     return .none
 
                 case let .path(
@@ -157,6 +181,15 @@ public struct Main: Sendable {
                     )
                 ):
                     state.path.pop(from: id)
+                    return .none
+
+                case .path(
+                    .element(
+                        id: _,
+                        action: .workspaceChat(.delegate(.openSettings))
+                    )
+                ):
+                    state.settings = ConductorSettings.State()
                     return .none
 
                 case .path, .settings, .workspaces:

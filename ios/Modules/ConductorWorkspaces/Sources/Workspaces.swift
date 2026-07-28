@@ -725,9 +725,10 @@ public struct Workspaces: Sendable {
                     try Repository
                         .upsert { snapshot.repositories }
                         .execute(db)
-                    try Workspace
-                        .upsert { snapshot.workspaces.map(\.workspace) }
-                        .execute(db)
+                    try CloudWorkspacePersistence.persistDesktopWorkspaces(
+                        snapshot.workspaces.map(\.workspace),
+                        in: db
+                    )
 
                     // The desktop snapshot is authoritative for this source-specific table.
                     try MobileWorkspaceState.delete().execute(db)
@@ -1400,12 +1401,8 @@ public struct WorkspacesView: View {
         private func rowAction(
             for item: WorkspaceWithRepository
         ) -> (@MainActor (WorkspaceRowAction) -> Void)? {
-            if item.isCloudOnly {
-                return nil
-            } else {
-                return { workspaceRowAction in
-                    action(item, workspaceRowAction)
-                }
+            return { workspaceRowAction in
+                action(item, workspaceRowAction)
             }
         }
     }
