@@ -1,5 +1,5 @@
 //
-//  SwiftUIView.swift
+//  HumanMessageRowView.swift
 //  ConductorChat
 //
 //  Created by Gannon Prudomme on 7/10/26.
@@ -12,10 +12,47 @@ import SwiftUI
 struct HumanMessageRowView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    let row: Turn.Row.HumanMessageRow
-    
+    private let content: String
+    private let deliveryDetail: String?
+    private let status: DisplayedChatRow.OptimisticMessage.Status?
+
+    init(row: Turn.Row.HumanMessageRow) {
+        self.content = row.content
+        self.deliveryDetail = nil
+        self.status = nil
+    }
+
+    init(optimisticMessage: DisplayedChatRow.OptimisticMessage) {
+        self.content = optimisticMessage.content
+        self.deliveryDetail = optimisticMessage.deliveryDetail
+        self.status = optimisticMessage.status
+    }
+
     var body: some View {
-        ParsedContentView(content: row.content)
+        HStack(spacing: 8) {
+            if let status, status != .acceptedAwaitingObservation {
+                DeliveryAccessory(detail: deliveryDetail, status: status)
+            }
+
+            messageBubble
+        }
+        .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in
+            if dynamicTypeSize.isAccessibilitySize {
+                width
+            } else {
+                width * 0.75
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityValue(
+            [status?.accessibilityDescription, deliveryDetail]
+                .compactMap { $0 }
+                .joined(separator: ": ")
+        )
+    }
+
+    private var messageBubble: some View {
+        ParsedContentView(content: content)
             .textSelection(.enabled)
             .font(.theme(.body))
             .foregroundStyle(.theme(.highlightForeground))
@@ -24,17 +61,9 @@ struct HumanMessageRowView: View {
                 Color.theme(.highlight),
                 in: .rect(cornerRadius: 26)
             )
-            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in
-                if dynamicTypeSize.isAccessibilitySize {
-                    width
-                } else {
-                    width * 0.75
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
             .contextMenu {
                 Button {
-                    UIPasteboard.general.string = row.content
+                    UIPasteboard.general.string = content
                 } label: {
                     Label {
                         Text("Copy")
@@ -46,6 +75,63 @@ struct HumanMessageRowView: View {
                 }
                 .preferredColorScheme(.dark)
             }
+    }
+
+    private struct DeliveryAccessory: View {
+        @State private var isShowingDetail = false
+
+        let detail: String?
+        let status: DisplayedChatRow.OptimisticMessage.Status
+
+        var body: some View {
+            switch status {
+            case .sending:
+                ProgressView()
+                    .progressViewStyle(.network)
+                    .tint(.theme(.textSecondary))
+                    .controlSize(.mini)
+                    .accessibilityLabel("Sending")
+            case .rejected:
+                deliveryDetailButton(
+                    icon: Lucide.x,
+                    color: .destructive
+                )
+            case .unconfirmed:
+                deliveryDetailButton(
+                    icon: Lucide.circleQuestionMark,
+                    color: .textSecondary
+                )
+            case .acceptedAwaitingObservation:
+                EmptyView()
+            }
+        }
+
+        private func deliveryDetailButton(
+            icon: UIImage,
+            color: ThemeColorStyle
+        ) -> some View {
+            Button {
+                isShowingDetail = true
+            } label: {
+                LucideIcon(icon, style: .small)
+                    .foregroundStyle(.theme(color))
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                status.accessibilityDescription ?? "Message delivery failed"
+            )
+            .accessibilityHint("Shows delivery details")
+            .alert(
+                status.title ?? "Message delivery",
+                isPresented: $isShowingDetail
+            ) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(detail ?? status.accessibilityDescription ?? "Delivery could not be confirmed.")
+            }
+        }
     }
 
     /// Displays stored file-reference markup (`@⟦label⟧(encodedPath)`) as only
@@ -112,11 +198,47 @@ struct HumanMessageRowView: View {
                     content: "Content"
                 )
             )
-            
+
             HumanMessageRowView(
                 row: Turn.Row.HumanMessageRow(
                     id: "12345",
                     content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
+                )
+            )
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Sending",
+                    deliveryDetail: nil,
+                    status: .sending
+                )
+            )
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Syncing",
+                    deliveryDetail: nil,
+                    status: .acceptedAwaitingObservation
+                )
+            )
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Rejected",
+                    deliveryDetail: "The message was rejected.",
+                    status: .rejected
+                )
+            )
+
+            HumanMessageRowView(
+                optimisticMessage: .init(
+                    id: UUID(),
+                    content: "Unknown",
+                    deliveryDetail: "Check Conductor before trying again.",
+                    status: .unconfirmed
                 )
             )
         }

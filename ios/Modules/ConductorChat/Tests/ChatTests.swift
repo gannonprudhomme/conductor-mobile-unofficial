@@ -525,8 +525,23 @@ struct ChatTests {
 
             emptySnapshot.isLoadingMessages = false
             #expect(emptySnapshot.allowsAgentSwitching)
-            emptySnapshot.isMessageSendInFlight = true
+            emptySnapshot.optimisticMessages = [
+                .init(
+                    id: UUID(),
+                    workspaceID: emptySnapshot.session.workspaceID,
+                    sessionID: emptySnapshot.sessionID,
+                    content: "Sending",
+                    model: emptySnapshot.selectedModel,
+                    isFastModeEnabled: emptySnapshot.isFastModeEnabled,
+                    mode: .sent,
+                    reasoningEffort: emptySnapshot.selectedReasoningEffort,
+                    status: .sending,
+                    previousTurnID: nil
+                ),
+            ]
             #expect(!emptySnapshot.allowsAgentSwitching)
+            emptySnapshot.optimisticMessages[0].status = .rejected
+            #expect(emptySnapshot.allowsAgentSwitching)
         }
     }
 
@@ -715,22 +730,25 @@ struct ChatTests {
     @Test("Task applies message snapshots, changes, and deletions")
     func taskIngestsMessageBatches() async throws {
         let database = try appDatabase()
-        let session = try makeSession()
+        let testID = UUID().uuidString
+        let session = try makeSession(id: "session-\(testID)")
         var mutableEarlyMessage = try makeMessage(
-            id: "early",
+            id: "early-\(testID)",
             sessionID: session.id,
             createdAt: "2026-07-09 01:00:00"
         )
         mutableEarlyMessage.role = .user
+        mutableEarlyMessage.content = "Message early"
         mutableEarlyMessage.turnID = "turn-1"
         let earlyMessage = mutableEarlyMessage
 
         var mutableLateMessage = try makeMessage(
-            id: "late",
+            id: "late-\(testID)",
             sessionID: session.id,
             createdAt: "2026-07-09 02:00:00"
         )
         mutableLateMessage.role = .user
+        mutableLateMessage.content = "Message late"
         mutableLateMessage.turnID = "turn-1"
         let lateMessage = mutableLateMessage
 
@@ -741,7 +759,7 @@ struct ChatTests {
         mutableUpdatedLateMessage.content = "Updated late message"
         let updatedLateMessage = mutableUpdatedLateMessage
         let staleQueuedMessage = Message(
-            id: "stale-queued",
+            id: "stale-queued-\(testID)",
             sessionID: session.id,
             role: .user,
             content: "Already deleted on desktop",
@@ -749,7 +767,7 @@ struct ChatTests {
             queueOrder: 1
         )
         let queuedMessage = Message(
-            id: "queued",
+            id: "queued-\(testID)",
             sessionID: session.id,
             role: .user,
             content: "Still queued",
@@ -767,7 +785,7 @@ struct ChatTests {
             MessageSyncEvent,
             any Error
         >.makeStream()
-        let store = TestStore(initialState: Chat.State(session: session)) {
+        let store = Store(initialState: Chat.State(session: session)) {
             Chat()
         } withDependencies: {
             $0.defaultDatabase = database
@@ -778,27 +796,31 @@ struct ChatTests {
             }
         }
 
-        let task = await store.send(.task)
-
-        await store.receive(\.messagesUpdated)
+        let task = store.send(.task)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while humanMessageContent(in: store.state, id: lateMessage.id)
+            != lateMessage.content,
+              clock.now < deadline {
+            await Task.yield()
+        }
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
             startedAt: earlyMessage.createdAt,
             messages: [
-                .init(id: "early", content: "Message early"),
-                .init(id: "late", content: "Message late"),
+                .init(id: earlyMessage.id, content: "Message early"),
+                .init(id: lateMessage.id, content: "Message late"),
             ]
         )
 
         continuation.yield(
             .snapshot([lateMessage, updatedEarlyMessage, queuedMessage])
         )
-        store.exhaustivity = .off
-        await store.receive(\.initialMessagesResponse)
-        if store.state.messages.first(where: { $0.id == earlyMessage.id })?.content
-            != updatedEarlyMessage.content {
-            await store.receive(\.messagesUpdated)
+        while humanMessageContent(in: store.state, id: earlyMessage.id)
+            != updatedEarlyMessage.content,
+              clock.now < deadline {
+            await Task.yield()
         }
         #expect(!store.state.isLoadingMessages)
         try expectHumanPresentationCaches(
@@ -806,8 +828,8 @@ struct ChatTests {
             turnID: "turn-1",
             startedAt: earlyMessage.createdAt,
             messages: [
-                .init(id: "early", content: "Updated early message"),
-                .init(id: "late", content: "Message late"),
+                .init(id: earlyMessage.id, content: "Updated early message"),
+                .init(id: lateMessage.id, content: "Message late"),
             ]
         )
         continuation.yield(
@@ -816,14 +838,18 @@ struct ChatTests {
                 deleting: [queuedMessage.id]
             )
         )
-        await store.receive(\.messagesUpdated)
+        while humanMessageContent(in: store.state, id: lateMessage.id)
+            != updatedLateMessage.content,
+              clock.now < deadline {
+            await Task.yield()
+        }
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",
             startedAt: earlyMessage.createdAt,
             messages: [
-                .init(id: "early", content: "Updated early message"),
-                .init(id: "late", content: "Updated late message"),
+                .init(id: earlyMessage.id, content: "Updated early message"),
+                .init(id: lateMessage.id, content: "Updated late message"),
             ]
         )
         let storedMessages = try await database.read { db in
@@ -838,7 +864,7 @@ struct ChatTests {
                 == baselineChangeCount + 6
         )
 
-        await task.cancel()
+        task.cancel()
     }
 
     @Test("Messages updated parses turns")
@@ -866,7 +892,12 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.messagesUpdated([message]))
+            await store.send(.messagesUpdated([message])) {
+                $0.isMessageSnapshotEmpty = false
+                $0.turns = Turn.parse(messages: [message])
+                $0.initializeIdleBaseline()
+                $0.updateRows()
+            }
             try expectHumanPresentationCaches(
                 store.state,
                 turnID: "turn-1",
@@ -874,21 +905,50 @@ struct ChatTests {
                 messages: [.init(id: "human-1", content: "Hello")]
             )
 
-            await store.send(.sessionStatusChanged(.working))
+            await store.send(.sessionStatusChanged(.working)) {
+                $0.sessionStatusChanged(.working)
+            }
             expectNoDifference(
                 try #require(store.state.rows).map(DisplayedRowProjection.init),
                 [
                     .human(id: "human-1", content: "Hello"),
-                    .turnInProgress(id: "turn-1", startedAt: message.createdAt),
+                    .turnInProgress(
+                        id: "\(session.id):pending",
+                        startedAt: try #require(session.updatedDate)
+                    ),
                 ]
             )
 
-            await store.send(.sessionStatusChanged(.idle))
-            try expectHumanPresentationCaches(
-                store.state,
-                turnID: "turn-1",
-                startedAt: message.createdAt,
-                messages: [.init(id: "human-1", content: "Hello")]
+            let nextMessage = Message(
+                id: "human-2",
+                sessionID: session.id,
+                role: .user,
+                content: "Next",
+                createdAt: message.createdAt.addingTimeInterval(1),
+                turnID: "turn-2"
+            )
+            await store.send(.messagesUpdated([message, nextMessage]))
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: "human-1", content: "Hello"),
+                    .human(id: "human-2", content: "Next"),
+                    .turnInProgress(
+                        id: "turn-2",
+                        startedAt: nextMessage.createdAt
+                    ),
+                ]
+            )
+
+            await store.send(.sessionStatusChanged(.idle)) {
+                $0.sessionStatusChanged(.idle)
+            }
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: "human-1", content: "Hello"),
+                    .human(id: "human-2", content: "Next"),
+                ]
             )
         }
     }
@@ -924,7 +984,12 @@ struct ChatTests {
                 $0.desktopClient.observeMessages = { _, _ in stream }
             }
 
-            await store.send(.messagesUpdated(messages))
+            await store.send(.messagesUpdated(messages)) {
+                $0.isMessageSnapshotEmpty = false
+                $0.turns = Turn.parse(messages: messages)
+                $0.initializeIdleBaseline()
+                $0.updateRows()
+            }
             expectNoDifference(store.state.messages, [message])
             #expect(store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
@@ -946,6 +1011,261 @@ struct ChatTests {
 
             await task.cancel()
             continuation.finish()
+        }
+    }
+
+    @Test("A working empty chat shows progress before its first canonical message")
+    func workingEmptyChatShowsProgress() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(.sessionStatusChanged(.working)) {
+                $0.sessionStatusChanged(.working)
+            }
+
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .turnInProgress(
+                        id: "\(session.id):pending",
+                        startedAt: try #require(session.updatedDate)
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test("An initially working chat treats its latest turn as active")
+    func initiallyWorkingChatUsesLatestTurn() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession(status: "working")
+            let message = Message(
+                id: "current",
+                sessionID: session.id,
+                role: .user,
+                content: "Current",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "current-turn"
+            )
+            var state = Chat.State(session: session)
+            state.turns = Turn.parse(messages: [message])
+            state.updateRows()
+
+            expectNoDifference(
+                try #require(state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: message.id, content: "Current"),
+                    .turnInProgress(
+                        id: "current-turn",
+                        startedAt: message.createdAt
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test("A correlated canonical message remains active when status arrives second")
+    func correlatedMessageBeforeWorkingStatus() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let message = Message(
+                id: "canonical",
+                sessionID: session.id,
+                role: .user,
+                content: "Run it",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "attempt"
+            )
+            var state = Chat.State(session: session)
+            state.beginSendCycle(attemptID: UUID(0))
+            state.observeCorrelatedTurn(
+                try #require(message.turnID),
+                attemptID: UUID(0)
+            )
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(.messagesUpdated([message])) {
+                $0.isMessageSnapshotEmpty = false
+                $0.turns = Turn.parse(messages: [message])
+                $0.initializeIdleBaseline()
+                $0.updateRows()
+            }
+            await store.send(.sessionStatusChanged(.working)) {
+                $0.sessionStatusChanged(.working)
+            }
+
+            expectNoDifference(
+                try #require(store.state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: message.id, content: "Run it"),
+                    .turnInProgress(
+                        id: "attempt",
+                        startedAt: message.createdAt
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test("An unconfirmed attempt does not suppress a later active turn")
+    func unconfirmedAttemptDoesNotSuppressLaterWork() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let previousMessage = Message(
+                id: "previous",
+                sessionID: session.id,
+                role: .user,
+                content: "Previous",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                turnID: "previous-turn"
+            )
+            let nextMessage = Message(
+                id: "next",
+                sessionID: session.id,
+                role: .user,
+                content: "Next",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "next-turn"
+            )
+            var state = Chat.State(session: session)
+            state.turns = Turn.parse(messages: [previousMessage])
+            state.optimisticMessages = [
+                .init(
+                    id: UUID(0),
+                    workspaceID: session.workspaceID,
+                    sessionID: session.id,
+                    content: "Unconfirmed",
+                    model: session.model,
+                    isFastModeEnabled: false,
+                    mode: .sent,
+                    reasoningEffort: nil,
+                    status: .unconfirmed,
+                    previousTurnID: "previous-turn"
+                ),
+            ]
+            state.initializeIdleBaseline()
+            state.beginSendCycle(attemptID: UUID(0))
+            state.sessionStatusChanged(.working)
+            state.turns = Turn.parse(
+                messages: [previousMessage, nextMessage],
+                reusing: state.turns ?? []
+            )
+            state.updateRows()
+
+            expectNoDifference(
+                try #require(state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: previousMessage.id, content: "Previous"),
+                    .human(id: UUID(0).uuidString, content: "Unconfirmed"),
+                    .human(id: nextMessage.id, content: "Next"),
+                    .turnInProgress(
+                        id: "next-turn",
+                        startedAt: nextMessage.createdAt
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test("Idle status clears a correlated turn before future work")
+    func idleStatusClearsCorrelatedTurn() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let message = Message(
+                id: "previous",
+                sessionID: session.id,
+                role: .user,
+                content: "Previous",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                turnID: "previous-turn"
+            )
+            var state = Chat.State(session: session)
+            state.turns = Turn.parse(messages: [message])
+            state.initializeIdleBaseline()
+            state.beginSendCycle(attemptID: UUID(0))
+            state.observeCorrelatedTurn(
+                "previous-turn",
+                attemptID: UUID(0)
+            )
+            state.sessionStatusChanged(.idle)
+            state.sessionStatusChanged(.working)
+
+            expectNoDifference(
+                try #require(state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: message.id, content: "Previous"),
+                    .turnInProgress(
+                        id: "\(session.id):pending",
+                        startedAt: try #require(session.updatedDate)
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test("A late canonical observation cannot enter the next work cycle")
+    func lateCanonicalObservationDoesNotPoisonNextCycle() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let lateMessage = Message(
+                id: "late",
+                sessionID: session.id,
+                role: .user,
+                content: "Late",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_700),
+                turnID: "late-turn"
+            )
+            let desktopMessage = Message(
+                id: "desktop",
+                sessionID: session.id,
+                role: .user,
+                content: "Desktop",
+                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+                turnID: "desktop-turn"
+            )
+            var state = Chat.State(session: session)
+            state.beginSendCycle(attemptID: UUID(0))
+            state.sessionStatusChanged(.working)
+            state.sessionStatusChanged(.idle)
+            state.turns = Turn.parse(messages: [lateMessage])
+            state.observeCorrelatedTurn(
+                "late-turn",
+                attemptID: UUID(0)
+            )
+            state.turns = Turn.parse(
+                messages: [lateMessage, desktopMessage],
+                reusing: state.turns ?? []
+            )
+            state.sessionStatusChanged(.working)
+
+            expectNoDifference(
+                try #require(state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: lateMessage.id, content: "Late"),
+                    .human(id: desktopMessage.id, content: "Desktop"),
+                    .turnInProgress(
+                        id: "desktop-turn",
+                        startedAt: desktopMessage.createdAt
+                    ),
+                ]
+            )
         }
     }
 
@@ -1023,52 +1343,6 @@ struct ChatTests {
             #expect(store.state.turns?.isEmpty == true)
             #expect(store.state.rows?.isEmpty == true)
             #expect(!store.state.shouldShowEmptyChat)
-            await store.finish()
-        }
-    }
-
-    @Test("An initial response preserves a canonical message received while loading")
-    func initialResponsePreservesCanonicalMessage() async throws {
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview()
-            let message = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
-                turnID: "turn-1"
-            )
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            }
-
-            await store.send(
-                .messageConfirmed(
-                    sessionID: session.id,
-                    message: message
-                )
-            ) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [message]
-            }
-            await store.send(
-                .initialMessagesResponse(
-                    sessionID: session.id,
-                    messages: []
-                )
-            ) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = []
-                $0.isLoadingMessages = false
-            }
-            #expect(!store.state.shouldShowEmptyChat)
-            try expectHumanPresentationCaches(
-                store.state,
-                turnID: "turn-1",
-                startedAt: message.createdAt,
-                messages: [.init(id: message.id, content: "Run the tests.")]
-            )
             await store.finish()
         }
     }
@@ -1287,345 +1561,6 @@ struct ChatTests {
                 $0.hasUserSelectedModel = true
             }
             await store.send(.sessionModelChanged(.gpt5_4))
-        }
-    }
-
-    @Test("Steering forwards the selected model and fast mode, then clears the draft")
-    func messageSendSucceeds() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-
-            let session = Session.preview(status: .working, isFastModeEnabled: true)
-            let sentMessage = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Please run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
-                turnID: "turn-1"
-            )
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = {
-                    workspaceID,
-                    sessionID,
-                    message,
-                    model,
-                    isFastModeEnabled,
-                    mode,
-                    reasoningEffort in
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(sessionID == session.id)
-                    #expect(message == "Please run the tests.")
-                    #expect(model == .gpt_5_6_terra)
-                    #expect(isFastModeEnabled)
-                    #expect(mode == .steer)
-                    #expect(reasoningEffort == .high)
-                    return sentMessage
-                }
-            }
-
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
-                $0.selectedModel = .gpt_5_6_terra
-                $0.hasUserSelectedModel = true
-            }
-            store.state.$messageDraft.withLock { $0 = "  Please run the tests.  " }
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.messageConfirmed) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [sentMessage]
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            await store.finish()
-
-            let persistedMessage = try await database.read { database in
-                try Message.find(sentMessage.id).fetchOne(database)
-            }
-            expectNoDifference(persistedMessage, sentMessage)
-        }
-    }
-
-    @Test("Queueing sends the queued mode and clears the draft")
-    func messageQueueSucceeds() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview(status: .working)
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = {
-                    workspaceID,
-                    sessionID,
-                    message,
-                    _,
-                    _,
-                    mode,
-                    _ in
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(sessionID == session.id)
-                    #expect(message == "Run these after the current task.")
-                    #expect(mode == .queue)
-                    return nil
-                }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run these after the current task." }
-            await store.send(.sendButtonTapped(.queue)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-        }
-    }
-
-    @Test("A legacy send response still completes successfully")
-    func legacyMessageSendSucceeds() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview()
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in nil }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-        }
-    }
-
-    @Test("A send response preserves a draft edited while the request was in flight")
-    func editedDraftIsPreserved() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview()
-            let (responses, responseContinuation) = AsyncStream<Message?>.makeStream()
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in
-                    for await response in responses {
-                        return response
-                    }
-                    throw TestError()
-                }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            store.state.$messageDraft.withLock { $0 = "Only run unit tests." }
-
-            responseContinuation.yield(Optional<Message>.none)
-            await store.receive(\.sendMessageResponse) {
-                $0.isMessageSendInFlight = false
-            }
-            responseContinuation.finish()
-            await store.finish()
-        }
-    }
-
-    @Test("An observed message wins over the HTTP response with the same ID")
-    func observedMessageWins() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-
-            let session = Session.preview()
-            let observedMessage = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Observed canonical content",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_801),
-                turnID: "turn-1"
-            )
-            let responseMessage = Message(
-                id: observedMessage.id,
-                sessionID: session.id,
-                role: .user,
-                content: "Run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800),
-                turnID: "turn-1"
-            )
-            try await database.write { database in
-                try Message.insert { observedMessage }.execute(database)
-            }
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in responseMessage }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.messageConfirmed) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            await store.finish()
-
-            let persistedMessage = try await database.read { database in
-                try Message.find(observedMessage.id).fetchOne(database)
-            }
-            expectNoDifference(persistedMessage, observedMessage)
-        }
-    }
-
-    @Test("A reconciliation failure completes without producing a load failure")
-    func messageReconciliationFailureStillCompletes() async throws {
-        let database = try appDatabase()
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            $0.defaultDatabase = database
-        } operation: {
-            let session = Session.preview()
-            let responseMessage = Message(
-                id: "message-1",
-                sessionID: session.id,
-                role: .user,
-                content: "Run the tests.",
-                createdAt: Date(timeIntervalSince1970: 1_783_558_800)
-            )
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in responseMessage }
-            }
-
-            store.state.$messageDraft.withLock { $0 = "Run the tests." }
-            try database.close()
-
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.messageConfirmed) {
-                $0.confirmedMessagesAwaitingInitialSnapshot = [responseMessage]
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            await store.finish()
-        }
-    }
-
-    @Test("A send failure keeps the message draft")
-    func messageSendFails() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = try makeSession()
-            let state = Chat.State(session: session)
-            state.$messageDraft.withLock { $0 = "Please try this again." }
-            let store = TestStore(initialState: state) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _ in
-                    throw TestError()
-                }
-            }
-
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.isMessageSendInFlight = false
-            }
-        }
-    }
-
-    @Test("Fast mode changes locally and is sent with the next message")
-    func fastModeChangesLocally() async throws {
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = try makeSession()
-            let isRecordedFastModeEnabled = LockIsolated<Bool?>(nil)
-            let store = TestStore(initialState: Chat.State(session: session)) {
-                Chat()
-            } withDependencies: {
-                $0.desktopClient.sendMessage = {
-                    workspaceID,
-                    sessionID,
-                    message,
-                    model,
-                    isFastModeEnabled,
-                    mode,
-                    _ in
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(sessionID == session.id)
-                    #expect(message == "Use the next setting.")
-                    #expect(model == session.model)
-                    #expect(mode == .steer)
-                    isRecordedFastModeEnabled.withValue { $0 = isFastModeEnabled }
-                    return nil
-                }
-            }
-
-            await store.send(.fastModeButtonTapped) {
-                $0.hasUserSelectedFastMode = true
-                $0.isFastModeEnabled = false
-            }
-            await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: session.model,
-                        defaultReasoningEffort: .medium,
-                        isFastModeEnabled: true
-                    )
-                )
-            )
-            #expect(isRecordedFastModeEnabled.value == nil)
-
-            store.state.$messageDraft.withLock { $0 = "Use the next setting." }
-            await store.send(.sendButtonTapped(.steer)) {
-                $0.isMessageSendInFlight = true
-                $0.scrollToBottomRequest = 1
-            }
-            await store.receive(\.sendMessageResponse) {
-                $0.$messageDraft.withLock { $0 = "" }
-                $0.isMessageSendInFlight = false
-            }
-            expectNoDifference(isRecordedFastModeEnabled.value, false)
         }
     }
 
@@ -1921,7 +1856,7 @@ struct ChatTests {
             let summaryID = "turn-1:human-1"
             var state = Chat.State(session: session)
             state.turns = [turn]
-            state.updateRows(sessionStatus: .idle)
+            state.updateRows()
             let store = TestStore(initialState: state) {
                 Chat()
             }
@@ -2002,13 +1937,16 @@ private func makeMessage(
     )
 }
 
-private func makeSession(status: String = "idle") throws -> Session {
+private func makeSession(
+    id: String = "session-1",
+    status: String = "idle"
+) throws -> Session {
     try JSONDecoder().decode(
         Session.self,
         from: Data(
             """
             {
-              "id": "session-1",
+              "id": "\(id)",
               "workspace_id": "workspace-1",
               "title": "Chat",
               "agent_type": "codex",
@@ -2048,6 +1986,8 @@ private enum DisplayedRowProjection: Equatable {
         self = switch row {
         case .humanMessage(let message):
             .human(id: message.id, content: message.content)
+        case .optimisticMessage(let message):
+            .human(id: message.id.uuidString, content: message.content)
         case .assistantTextChunk,
              .assistantThinking,
              .assistantToolCall,
@@ -2088,4 +2028,20 @@ private func expectHumanPresentationCaches(
         try #require(state.rows).map(DisplayedRowProjection.init),
         expectedMessages.map { .human(id: $0.id, content: $0.content) }
     )
+}
+
+private func humanMessageContent(
+    in state: Chat.State,
+    id: Message.ID
+) -> String? {
+    for turn in state.turns ?? [] {
+        for row in turn.rows {
+            guard case let .humanMessageRow(message) = row,
+                  message.id == id else {
+                continue
+            }
+            return message.content
+        }
+    }
+    return nil
 }

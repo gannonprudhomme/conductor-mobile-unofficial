@@ -1,7 +1,7 @@
 // Pretty AI-slop'y. But gets the job done
 
 // Run SSE commands through Conductor's services. SQLite confirms workspace mutations, while
-// agent commands report Conductor's acceptance through a correlated callback.
+// agent commands report Conductor's acceptance through a correlated per-call callback.
 // Global keys preserve the installed controller and command ordering across cache-busted loads.
 const controllerKey = "__conductorMobileWorkspaceUIHookController";
 const commandQueueKey = "__conductorMobileWorkspaceUIHookCommandQueue";
@@ -9,6 +9,7 @@ const expectedOrigin = "tauri://localhost";
 const shellPathPattern = /^\/assets\/shell-[^/]+\.js$/;
 const rootIndexPathPattern = /^\/assets\/index-[^/]+\.js$/;
 const renderAppPathPattern = /^\/assets\/renderApp-[^/]+\.js$/;
+class MessageDeliveryUnknownError extends Error {}
 // Older builds put the services in a shell chunk; current builds export them from the root index.
 const directShellImportPattern =
   /(?:^|[;\n\r])\s*import(?=\s|["'{*])(?:\s*["'](\.\/shell-[^/"']+\.js)["']|[^;\n\r]*?\bfrom\s*["'](\.\/shell-[^/"']+\.js)["'])/g;
@@ -39,7 +40,7 @@ export async function prepareWorkspaceUIHook() {
   const eventsURL = new URL("events", hookBaseURL);
   eventsURL.searchParams.set("revision", hookRevision);
   const commandResultURL = new URL("command-result", hookBaseURL);
-  // Keep one queue across loader runs so a replacement cannot overtake a pending setter.
+  // Keep one mutation queue across loader runs so a replacement cannot overtake a pending setter.
   const commandQueue = globalThis[commandQueueKey] ?? {
     pendingCancellations: new Map(),
     tail: Promise.resolve(),
@@ -177,7 +178,7 @@ function resolveConductorServices(serviceModule) {
   );
   const messageProcessingController = uniqueService(
     serviceModule,
-    ["enqueueMessage", "sendMessageImmediately", "cancelSession"],
+    ["enqueueMessage", "sendMessageImmediately", "sendToAgent", "cancelSession"],
     "MessageProcessingController",
   );
   return {
@@ -288,7 +289,13 @@ function createController({
         const reportError = (error) => {
           console.error("Conductor Mobile UI command failed.", error);
         };
-        if (command.field === "hidden" || command.field === "sendMessage") {
+        if (
+          command.field === "hidden"
+          || (
+            command.field === "sendMessage"
+            && command.value?.mode === "sent"
+          )
+        ) {
           execute().catch(reportError);
           return;
         }
@@ -400,15 +407,30 @@ function parseCommand(data) {
 }
 
 async function executeAndReportCommand(services, command) {
+  let result;
   try {
-    await executeCommand(services, command);
+    result = await executeCommand(services, command);
   } catch (error) {
-    await reportCommandResult(services.commandResultURL, command, {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    const reason = error instanceof Error ? error.message : String(error);
+    await reportCommandResult(
+      services.commandResultURL,
+      command,
+      command.field === "sendMessage"
+        ? {
+            result: {
+              type: error instanceof MessageDeliveryUnknownError ? "unknown" : "rejected",
+              reason,
+            },
+          }
+        : { error: reason },
+    );
     throw error;
   }
-  await reportCommandResult(services.commandResultURL, command, {});
+  await reportCommandResult(
+    services.commandResultURL,
+    command,
+    command.field === "sendMessage" ? { result } : {},
+  );
 }
 
 async function reportCommandResult(commandResultURL, command, result) {
@@ -534,6 +556,9 @@ async function executeCommand(
       return;
     case "sendMessage":
       {
+        if (typeof command.value.attemptId !== "string" || !command.value.attemptId) {
+          throw new Error("The message attempt ID is invalid.");
+        }
         const session = (await sessionService.getSessionsForWorkspace({
           workspaceId: command.workspaceId,
           hidden: false,
@@ -547,22 +572,69 @@ async function executeCommand(
 
         switch (command.value.mode) {
           case "sent":
-            await messageProcessingController.sendMessageImmediately({
-              session: messageSession,
-              message: command.value.content,
-              workspaceId: command.workspaceId,
-              includeAttachments: false,
-            });
-            return;
+            let messageId;
+            const receiver = scopedMessageReceiver(
+              messageProcessingController,
+              async (messageSession, message, turnId, options) => {
+                if (typeof message?.id !== "string" || !message.id) {
+                  throw new Error("Conductor created an invalid message ID.");
+                }
+                if (messageId !== undefined) {
+                  throw new MessageDeliveryUnknownError(
+                    "Conductor dispatched more than one message for one mobile attempt.",
+                  );
+                }
+                messageId = message.id;
+                await messageProcessingController.sendToAgent(
+                  messageSession,
+                  message,
+                  turnId,
+                  options,
+                );
+              },
+            );
+            try {
+              await messageProcessingController.sendMessageImmediately.call(
+                receiver,
+                {
+                  session: messageSession,
+                  message: command.value.content,
+                  workspaceId: command.workspaceId,
+                  includeAttachments: false,
+                },
+              );
+            } catch (error) {
+              throw new MessageDeliveryUnknownError(
+                "Conductor started sending the message, but delivery could not be confirmed.",
+                { cause: error },
+              );
+            }
+            if (typeof messageId !== "string" || !messageId) {
+              throw new MessageDeliveryUnknownError(
+                "Conductor accepted the send command, but created no observable message receipt.",
+              );
+            }
+            return {
+              type: "accepted",
+              messageId,
+            };
           case "queued":
-            await messageProcessingController.enqueueMessage({
-              session: messageSession,
-              message: command.value.content,
-              workspaceId: command.workspaceId,
-              includeAttachments: false,
-              sendMode: command.value.mode,
-            });
-            return;
+            try {
+              await messageProcessingController.enqueueMessage({
+                session: messageSession,
+                message: command.value.content,
+                workspaceId: command.workspaceId,
+                includeAttachments: false,
+                sendMode: command.value.mode,
+                turnId: command.value.attemptId,
+              });
+            } catch (error) {
+              throw new MessageDeliveryUnknownError(
+                "Conductor started queueing the message, but delivery could not be confirmed.",
+                { cause: error },
+              );
+            }
+            return { type: "accepted" };
           default:
             throw new Error(`Unsupported message mode: ${command.value.mode}`);
         }
@@ -655,6 +727,36 @@ async function executeCommand(
     default:
       throw new Error(`Unsupported workspace command: ${command.field}`);
   }
+}
+
+function scopedMessageReceiver(messageProcessingController, sendToAgent) {
+  // The installed Conductor build delegates immediate sends through `this.sendToAgent`.
+  // Reject before dispatch if that implementation shape changes instead of guessing at
+  // whether a substituted receiver is safe.
+  const source = Function.prototype.toString.call(
+    messageProcessingController.sendMessageImmediately,
+  );
+  const sourceWithoutSupportedReceiverAccess = source.replaceAll(
+    "this.sendToAgent",
+    "",
+  );
+  if (
+    sourceWithoutSupportedReceiverAccess === source
+    || /\bthis\b/.test(sourceWithoutSupportedReceiverAccess)
+  ) {
+    throw new Error(
+      "This Conductor version has an unsupported immediate-message implementation.",
+    );
+  }
+
+  const receiver = Object.create(messageProcessingController);
+  Object.defineProperty(receiver, "sendToAgent", {
+    configurable: false,
+    enumerable: false,
+    value: sendToAgent,
+    writable: false,
+  });
+  return receiver;
 }
 
 async function withReasoningEffort(sessionService, session, reasoningEffort) {

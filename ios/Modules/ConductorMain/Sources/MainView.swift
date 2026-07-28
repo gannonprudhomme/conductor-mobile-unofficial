@@ -31,6 +31,7 @@ public struct Main: Sendable {
         public var path = StackState<Path.State>()
         @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
+        var isInBackground = false
 
         public init() {
             // A fresh install needs at least one usable local or cloud connection.
@@ -78,9 +79,17 @@ public struct Main: Sendable {
                     }
 
                 case .appBecameActive:
+                    guard state.isInBackground else {
+                        return .none
+                    }
+                    state.isInBackground = false
                     return .send(.workspaces(.appBecameActive))
 
                 case .appEnteredBackground:
+                    guard !state.isInBackground else {
+                        return .none
+                    }
+                    state.isInBackground = true
                     return .send(.workspaces(.appEnteredBackground))
 
                 case let .cloudCredentialReconciliationResult(result):
@@ -145,6 +154,13 @@ public struct Main: Sendable {
                                 workspaceWithRepository: creation.workspace,
                                 selectedModel: creation.selectedModel,
                                 selectedReasoningEffort: creation.selectedReasoningEffort,
+                                initialMessage: creation.initialPrompt.map {
+                                    WorkspaceChat.InitialMessage(
+                                        id: $0.attemptID,
+                                        content: $0.content,
+                                        deliveryResult: $0.deliveryResult
+                                    )
+                                },
                                 shouldFocusMessageField: true
                             )
                         )

@@ -73,6 +73,7 @@ public struct Workspaces: Sendable {
         public var cloudObservationStatus: CloudObservationStatus
         var cloudFailureSuppressionDeadline: Date?
         var hasPresentedCloudFailureAlert = false
+        var presentedCloudFailure: CloudFailure?
         var isLoadingWorkspaces: Bool
         var sections: [WorkspaceSection] = []
 
@@ -357,6 +358,7 @@ public struct Workspaces: Sendable {
                 state.cloudFailureSuppressionDeadline = now
                     .addingTimeInterval(5)
                 state.hasPresentedCloudFailureAlert = false
+                state.presentedCloudFailure = nil
                 if state.isCloudCredentialConfigured {
                     state.cloudObservationStatus = .loading
                 }
@@ -380,9 +382,11 @@ public struct Workspaces: Sendable {
                 // Cancelling an observation can race with its final failure action. Keep offline
                 // failures suppressed until the next active phase replaces this deadline.
                 state.cloudFailureSuppressionDeadline = .distantFuture
-                if state.destination?.alert != nil {
+                if let presentedCloudFailure = state.presentedCloudFailure,
+                   state.destination?.alert == .cloudObservationFailed(presentedCloudFailure) {
                     state.destination = nil
                 }
+                state.presentedCloudFailure = nil
                 if state.isCloudCredentialConfigured {
                     state.cloudObservationStatus = .loading
                 }
@@ -398,6 +402,7 @@ public struct Workspaces: Sendable {
             case let .cloudConfigurationChanged(configuration):
                 state.cloudFailureSuppressionDeadline = nil
                 state.hasPresentedCloudFailureAlert = false
+                state.presentedCloudFailure = nil
                 guard configuration != nil else {
                     state.cloudObservationStatus = .disconnected
                     return .merge(
@@ -425,6 +430,7 @@ public struct Workspaces: Sendable {
                     return .none
                 }
                 state.hasPresentedCloudFailureAlert = true
+                state.presentedCloudFailure = failure
                 state.destination = .alert(.cloudObservationFailed(failure))
                 return .none
 
@@ -432,6 +438,7 @@ public struct Workspaces: Sendable {
                 state.cloudFailureSuppressionDeadline = nil
                 state.cloudObservationStatus = .connected
                 state.hasPresentedCloudFailureAlert = false
+                state.presentedCloudFailure = nil
                 return .none
 
             case let .desktopConfigurationChanged(serverAddress):

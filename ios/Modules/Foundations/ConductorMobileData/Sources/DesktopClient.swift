@@ -13,6 +13,9 @@ import Sharing
 
 @DependencyClient
 public struct DesktopClient: Sendable {
+    public typealias MessageDeliveryResult = SharedConductorData.MessageDeliveryResult
+    public typealias MessageMode = MessageSendMode
+
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
     public var beginQueuedMessageEdit: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageID: Message.ID) async throws -> QueuedMessageEdit
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
@@ -61,8 +64,11 @@ public struct DesktopClient: Sendable {
         _ model: Session.Model,
         _ isFastModeEnabled: Bool,
         _ mode: MessageMode,
-        _ reasoningEffort: Session.ReasoningEffort?
-    ) async throws -> Message?
+        _ reasoningEffort: Session.ReasoningEffort?,
+        _ attemptID: UUID
+    ) async throws -> MessageDeliveryResult = { _, _, _, _, _, _, _, _ in
+        .unknown(reason: "Delivery could not be determined.")
+    }
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> UIHookMutationPath
     public var setWorkspaceStatus: @Sendable (_ workspaceID: String, _ status: Workspace.Status) async throws -> UIHookMutationPath
     public var setWorkspaceUnread: @Sendable (_ workspaceID: String, _ isUnread: Bool) async throws -> UIHookMutationPath
@@ -79,11 +85,6 @@ public struct DesktopClient: Sendable {
         case desktop
         case laptop
         case server
-    }
-
-    public enum MessageMode: String, Codable, Equatable, Sendable {
-        case queue = "queued"
-        case steer = "sent"
     }
 
     public struct DisplayConfiguration: Codable, Equatable, Sendable {
@@ -362,17 +363,24 @@ extension DesktopClient: DependencyKey {
             )
             let (data, response) = try await data(for: request)
             try validateSuccessfulHTTPResponse(response, data: data)
-        } sendMessage: { workspaceID, sessionID, message, model, isFastModeEnabled, mode, reasoningEffort in
-            try await post(
-                SendMessageRequest(
-                    message: message,
-                    model: model.rawValue,
-                    isFastModeEnabled: isFastModeEnabled,
-                    mode: mode,
-                    reasoningEffort: reasoningEffort
-                ),
-                to: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
-                decoding: Message.self
+        } sendMessage: {
+            workspaceID,
+            sessionID,
+            message,
+            model,
+            isFastModeEnabled,
+            mode,
+            reasoningEffort,
+            attemptID in
+            try await sendMessage(
+                workspaceID: workspaceID,
+                sessionID: sessionID,
+                message: message,
+                model: model,
+                isFastModeEnabled: isFastModeEnabled,
+                mode: mode,
+                reasoningEffort: reasoningEffort,
+                attemptID: attemptID
             )
         } setWorkspacePinned: { workspaceID, isPinned in
             try await patch(
@@ -482,22 +490,6 @@ extension DesktopClient: DependencyKey {
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 
-    private struct SendMessageRequest: Encodable {
-        let message: String
-        let model: String
-        let isFastModeEnabled: Bool
-        let mode: MessageMode
-        let reasoningEffort: Session.ReasoningEffort?
-
-        private enum CodingKeys: String, CodingKey {
-            case message
-            case model
-            case isFastModeEnabled = "fast_mode"
-            case mode
-            case reasoningEffort = "reasoning_effort"
-        }
-    }
-
     private struct SettingsResponse: Decodable {
         let defaultModel: String
         let defaultFastMode: Bool?
@@ -517,6 +509,70 @@ extension DesktopClient: DependencyKey {
     private static func queueURL(workspaceID: String, sessionID: String) throws -> URL {
         try messagesURL(workspaceID: workspaceID, sessionID: sessionID)
             .appending(path: "queue")
+    }
+
+    private static func sendMessage(
+        workspaceID: String,
+        sessionID: String,
+        message: String,
+        model: Session.Model,
+        isFastModeEnabled: Bool,
+        mode: MessageMode,
+        reasoningEffort: Session.ReasoningEffort?,
+        attemptID: UUID
+    ) async throws -> MessageDeliveryResult {
+        let request: URLRequest
+        do {
+            request = try jsonRequest(
+                method: "POST",
+                body: MessageSendRequest(
+                    attemptID: attemptID,
+                    isFastModeEnabled: isFastModeEnabled,
+                    message: message,
+                    model: model.rawValue,
+                    mode: mode,
+                    reasoningEffort: reasoningEffort
+                ),
+                url: messagesURL(workspaceID: workspaceID, sessionID: sessionID),
+                timeoutInterval: 10
+            )
+        } catch {
+            return .rejected(
+                reason: "The message request could not be created: \(error.localizedDescription)"
+            )
+        }
+
+        let responseData: Data
+        let response: URLResponse
+        do {
+            (responseData, response) = try await data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+
+        guard let response = response as? HTTPURLResponse else {
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+        guard response.statusCode == 200 else {
+            if response.statusCode == 400 {
+                let reason = errorMessage(from: responseData)
+                return .rejected(
+                    reason: reason.isEmpty ? "Message was rejected." : reason
+                )
+            }
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+        guard let response = try? JSONDecoder.conductor.decode(
+            MessageSendResponse.self,
+            from: responseData
+        ), response.attemptID == attemptID else {
+            return .unknown(reason: "Delivery could not be determined.")
+        }
+
+        return response.result
     }
 
     // /workspaces/{workspaceID}/sessions/{sessionID}
@@ -615,9 +671,13 @@ extension DesktopClient: DependencyKey {
     private static func jsonRequest<Body: Encodable>(
         method: String,
         body: Body,
-        url: URL
+        url: URL,
+        timeoutInterval: TimeInterval? = nil
     ) throws -> URLRequest {
         var request = URLRequest(url: url)
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
+        }
         request.httpMethod = method
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

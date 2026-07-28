@@ -40,9 +40,11 @@ user copy the loader. Each run makes one cache-busted import of the current
 bundled hook. The hook keeps native `EventSource` reconnection.
 
 Message sends and stops use correlated commands through Conductor's loaded
-message-processing controller. `sent` messages call `sendMessageImmediately`,
-`queued` messages call `enqueueMessage`, and stops call `cancelSession`. The
-browser reports explicit command acceptance or rejection through
+message-processing controller. `sent` messages use a guarded per-call receiver
+around `sendMessageImmediately` to correlate Conductor's canonical message with
+the client attempt ID without mutating the shared controller. `queued` messages
+call `enqueueMessage` on the same serialized queue as queue mutations, and
+stops call `cancelSession`. The browser reports accepted, rejected, or unknown delivery through
 `POST /workspace-ui-hook/command-result`.
 
 Message sends wait for bounded browser acceptance. If the callback is lost,

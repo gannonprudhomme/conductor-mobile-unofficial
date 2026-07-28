@@ -129,6 +129,32 @@ struct MainTests {
         }
     }
 
+    @Test("Activation reconnects only after entering the background")
+    func activationReconnectsOnlyAfterBackgrounding() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.date.now = Date(timeIntervalSinceReferenceDate: 1_000)
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.appBecameActive)
+
+            await store.send(.appEnteredBackground) {
+                $0.isInBackground = true
+            }
+            await store.receive(\.workspaces.appEnteredBackground)
+
+            await store.send(.appBecameActive) {
+                $0.isInBackground = false
+            }
+            await store.receive(\.workspaces.appBecameActive)
+        }
+    }
+
     @Test("Workspace selection pushes its chat")
     func workspaceSelectionPushesChat() async throws {
         let workspace = Workspace.preview(
@@ -397,8 +423,14 @@ struct MainTests {
     @Test("Workspace creation pushes its chat")
     func workspaceCreationPushesChat() async throws {
         let workspace = Workspace.preview(activeSessionID: "active")
+        let session = Session.preview(id: "active", workspaceID: workspace.id)
         let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
         let creation = WorkspaceCreationResult(
+            initialPrompt: .init(
+                attemptID: UUID(42),
+                content: "Run the tests.",
+                deliveryResult: .unknown(reason: "Delivery unconfirmed.")
+            ),
             selectedModel: .gpt_5_6_terra,
             selectedReasoningEffort: .ultra,
             workspace: item
@@ -406,6 +438,9 @@ struct MainTests {
 
         try await withDependencies {
             try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
         } operation: {
             let store = TestStore(initialState: Main.State()) {
                 Main()
@@ -418,6 +453,13 @@ struct MainTests {
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
                             selectedReasoningEffort: .ultra,
+                            initialMessage: .init(
+                                id: UUID(42),
+                                content: "Run the tests.",
+                                deliveryResult: .unknown(
+                                    reason: "Delivery unconfirmed."
+                                )
+                            ),
                             shouldFocusMessageField: true
                         )
                     )
