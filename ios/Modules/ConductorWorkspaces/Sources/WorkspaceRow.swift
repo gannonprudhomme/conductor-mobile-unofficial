@@ -71,7 +71,7 @@ struct WorkspaceRow: View {
                     action(.toggleUnread)
                 } label: {
                     Label(
-                        isUnread ? "Mark as read" : "Mark as unread",
+                        isUnread ? "Read" : "Unread",
                         systemImage: isUnread ? "envelope.open" : "envelope"
                     )
                 }
