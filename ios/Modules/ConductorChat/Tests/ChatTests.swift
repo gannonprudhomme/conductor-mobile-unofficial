@@ -495,6 +495,25 @@ struct ChatTests {
         }
     }
 
+    @Test("The scroll-down button requests an animated bottom placement")
+    func scrollDownButtonTapped() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(
+                initialState: Chat.State(session: session)
+            ) {
+                Chat()
+            }
+
+            await store.send(.scrollDownButtonTapped) {
+                $0.animatedScrollToBottomRequest = 1
+                $0.scrollToBottomRequest = 1
+            }
+        }
+    }
+
     @Test("State equality tracks presentation state but not derived caches")
     func stateEquality() throws {
         try withDependencies {
@@ -816,7 +835,15 @@ struct ChatTests {
                 deleting: [queuedMessage.id]
             )
         )
-        await store.receive(\.messagesUpdated)
+        while store.state.rows?.contains(where: { row in
+            guard case .humanMessage(let message) = row.content else {
+                return false
+            }
+            return message.id == updatedLateMessage.id
+                && message.content == updatedLateMessage.content
+        }) != true {
+            await store.receive(\.messagesUpdated)
+        }
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",

@@ -138,6 +138,66 @@ struct ChatCollectionViewTests {
         )
     }
 
+    @Test("Scroll-down affordance appears one visible viewport from the bottom")
+    func scrollDownButtonVisibility() {
+        let insets = UIEdgeInsets(top: 20, left: 0, bottom: 180, right: 0)
+
+        #expect(
+            ChatCollectionView.distanceFromBottom(
+                contentHeight: 2_000,
+                boundsHeight: 800,
+                contentOffsetY: 780,
+                adjustedContentInset: insets
+            ) == 600
+        )
+        #expect(
+            ChatCollectionView.shouldShowScrollDownButton(
+                contentHeight: 2_000,
+                boundsHeight: 800,
+                contentOffsetY: 780,
+                adjustedContentInset: insets
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldShowScrollDownButton(
+                contentHeight: 2_000,
+                boundsHeight: 800,
+                contentOffsetY: 781,
+                adjustedContentInset: insets
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldShowScrollDownButton(
+                contentHeight: 100,
+                boundsHeight: 800,
+                contentOffsetY: -20,
+                adjustedContentInset: insets
+            )
+        )
+    }
+
+    @Test("Explicit bottom scrolling animates unless interaction or Reduce Motion prevents it")
+    func scrollToBottomAnimationPolicy() {
+        #expect(
+            ChatCollectionView.shouldAnimateScrollToBottom(
+                isInteractionActive: false,
+                isReduceMotionEnabled: false
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateScrollToBottom(
+                isInteractionActive: true,
+                isReduceMotionEnabled: false
+            )
+        )
+        #expect(
+            !ChatCollectionView.shouldAnimateScrollToBottom(
+                isInteractionActive: false,
+                isReduceMotionEnabled: true
+            )
+        )
+    }
+
     @Test("Layout observation includes adjusted content inset changes")
     func layoutObservation() {
         let collectionView = ChatCollectionView.LayoutObservingCollectionView(
@@ -442,6 +502,147 @@ struct ChatCollectionViewTests {
         #expect(!coordinator.needsScrollToBottom)
     }
 
+    @Test("The scroll-down request uses native animation toward the concrete last item")
+    func scrollDownRequestAnimates() {
+        #expect(
+            ChatCollectionView.boundedBottomAnimationStartOffsetY(
+                previousOffsetY: 0,
+                bottomOffsetY: 1_156,
+                viewportHeight: 844
+            ) == 312
+        )
+
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        let rows = [
+            displayedRow(
+                .humanMessage(.init(id: "message", content: "Message"))
+            ),
+        ]
+        coordinator.render(
+            rows: rows,
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        collectionView.contentSize = CGSize(width: 390, height: 2_000)
+        collectionView.contentOffset.y = 0
+        collectionView.contentOffsetCalls.removeAll()
+        collectionView.scrollToItemCalls.removeAll()
+
+        coordinator.render(
+            rows: rows,
+            animatedScrollToBottomRequest: 1,
+            scrollToBottomRequest: 1,
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+
+        #expect(collectionView.scrollToItemCalls.last?.position == .bottom)
+        #expect(collectionView.scrollToItemCalls.last?.animated == false)
+        #expect(collectionView.contentOffsetCalls.contains { $0.animated })
+    }
+
+    @Test("Scroll events report crossings of the one-viewport visibility threshold")
+    func scrollDownButtonVisibilityCallback() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        var visibilityChanges: [Bool] = []
+        coordinator.render(
+            rows: [],
+            animation: nil,
+            scrollDownButtonVisibilityChanged: {
+                visibilityChanges.append($0)
+            },
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        collectionView.contentInset.bottom = 100
+        collectionView.contentSize = CGSize(width: 390, height: 2_000)
+        collectionView.contentOffset.y = 400
+        coordinator.scrollViewDidScroll(collectionView)
+        collectionView.contentOffset.y = 600
+        coordinator.scrollViewDidScroll(collectionView)
+
+        #expect(visibilityChanges == [true, false])
+    }
+
+    @Test("The scroll-down button hides when its animation reaches the bottom")
+    func scrollDownButtonHidesAfterAnimation() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        var visibilityChanges: [Bool] = []
+        coordinator.render(
+            rows: [],
+            animation: nil,
+            scrollDownButtonVisibilityChanged: {
+                visibilityChanges.append($0)
+            },
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        collectionView.contentInset.bottom = 100
+        collectionView.contentSize = CGSize(width: 390, height: 2_000)
+        collectionView.contentOffset.y = 400
+        coordinator.scrollViewDidScroll(collectionView)
+        #expect(visibilityChanges == [true])
+
+        collectionView.isScrollAnimatingForTests = true
+        collectionView.contentOffset.y = 1_256
+        coordinator.scrollViewDidEndScrollingAnimation(collectionView)
+
+        #expect(visibilityChanges == [true, false])
+    }
+
+    @Test("The scroll-down button immediately overrides active momentum")
+    func scrollDownButtonOverridesMomentum() {
+        let collectionView = TestCollectionView()
+        let coordinator = ChatCollectionView.Coordinator()
+        coordinator.connect(to: collectionView)
+        defer { coordinator.disconnect() }
+
+        let rows = [
+            displayedRow(
+                .humanMessage(.init(id: "message", content: "Message"))
+            ),
+        ]
+        coordinator.render(
+            rows: rows,
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+        collectionView.contentSize = CGSize(width: 390, height: 2_000)
+        collectionView.contentOffset.y = 400
+        collectionView.contentOffsetCalls.removeAll()
+        collectionView.scrollToItemCalls.removeAll()
+        collectionView.isDeceleratingForTests = true
+
+        coordinator.render(
+            rows: rows,
+            animatedScrollToBottomRequest: 1,
+            scrollToBottomRequest: 1,
+            animation: nil,
+            turnSummaryTapped: { _ in },
+            in: collectionView
+        )
+
+        #expect(collectionView.stopScrollingCount == 1)
+        #expect(collectionView.isDecelerating)
+        #expect(collectionView.scrollToItemCalls.last?.position == .bottom)
+        #expect(collectionView.scrollToItemCalls.last?.animated == false)
+    }
+
     @Test("Immediate row changes, dragging, and empty content stop native animation")
     func nativeScrollAnimationCancellation() {
         let collectionView = TestCollectionView()
@@ -564,6 +765,10 @@ private final class TestCollectionView: UICollectionView {
     var isDeceleratingForTests = false
     var isScrollAnimatingForTests = false
     var stopScrollingCount = 0
+    var contentOffsetCalls: [(offset: CGPoint, animated: Bool)] = []
+    var scrollToItemCalls: [
+        (indexPath: IndexPath, position: UICollectionView.ScrollPosition, animated: Bool)
+    ] = []
 
     override var isTracking: Bool { isTrackingForTests }
     override var isDragging: Bool { isDraggingForTests }
@@ -585,6 +790,24 @@ private final class TestCollectionView: UICollectionView {
     override func stopScrollingAndZooming() {
         stopScrollingCount += 1
         isScrollAnimatingForTests = false
+    }
+
+    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+        contentOffsetCalls.append((contentOffset, animated))
+        super.setContentOffset(contentOffset, animated: animated)
+    }
+
+    override func scrollToItem(
+        at indexPath: IndexPath,
+        at scrollPosition: UICollectionView.ScrollPosition,
+        animated: Bool
+    ) {
+        scrollToItemCalls.append((indexPath, scrollPosition, animated))
+        super.scrollToItem(
+            at: indexPath,
+            at: scrollPosition,
+            animated: animated
+        )
     }
 }
 
