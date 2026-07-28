@@ -179,11 +179,11 @@ struct ChatTextField: View {
                     )
                 }
             }
+            .animation(.default, value: hasSendableText)
+            .animation(.default, value: isWorking)
         }
         .frame(maxWidth: .infinity)
         .fixedSize(horizontal: false, vertical: true)
-        .animation(.default, value: hasSendableText)
-        .animation(.default, value: isWorking)
     }
 
     private var hasSendableText: Bool {
