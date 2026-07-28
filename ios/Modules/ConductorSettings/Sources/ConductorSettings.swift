@@ -1125,6 +1125,7 @@ public struct ConductorSettingsView: View {
         .autocorrectionDisabled()
         .textContentType(.URL)
         .keyboardType(.URL)
+        .accessibilityIdentifier("serverAddressField")
         .submitLabel(.done)
         .onSubmit {
             store.send(.testButtonTapped)

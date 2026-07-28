@@ -593,6 +593,7 @@ public struct CreateWorkspaceView: View {
                 }
         }
         .buttonStyle(.spring)
+        .accessibilityIdentifier("create-workspace.submit")
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.5)
     }

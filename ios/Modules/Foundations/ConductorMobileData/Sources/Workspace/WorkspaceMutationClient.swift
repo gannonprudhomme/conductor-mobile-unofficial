@@ -294,7 +294,7 @@ extension WorkspaceMutationClient: DependencyKey {
     ) async throws -> WorkspaceSessionCreationResult {
         let configuration = try currentConfiguration(accountID: accountID)
         let attemptID = UUID()
-        let remoteSessionID = UUID().uuidString
+        let remoteSessionID = UUID().uuidString.lowercased()
         let canonicalSessionID = CloudCanonicalID.session(
             accountID: accountID,
             remoteSessionID: remoteSessionID
@@ -624,7 +624,7 @@ extension WorkspaceMutationClient: DependencyKey {
             throw WorkspaceMutationClientError.accountChanged
         }
         let attemptID = UUID()
-        let stableMessageID = UUID().uuidString
+        let stableMessageID = UUID().uuidString.lowercased()
         let rollbackPayload = try JSONEncoder.cloudMutation.encode(
             CloudSendDraftRollback(submittedDraft: submittedDraft)
         )

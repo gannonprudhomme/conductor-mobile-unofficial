@@ -87,7 +87,7 @@ struct WorkspacesTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 1
+                    credentialGeneration: UUID(1)
                 )
             }
             let connectionCount = LockIsolated(0)
@@ -113,7 +113,7 @@ struct WorkspacesTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 2
+                    credentialGeneration: UUID(2)
                 )
             }
             await store.receive(\.cloudConfigurationChanged)

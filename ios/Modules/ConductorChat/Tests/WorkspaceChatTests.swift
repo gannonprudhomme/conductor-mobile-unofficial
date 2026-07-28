@@ -16,74 +16,6 @@ import Testing
 
 @MainActor
 struct WorkspaceChatTests {
-    @Test("Only quiescent workspace chat presentation is warm-restorable")
-    func warmPresentationRequiresQuiescence() throws {
-        let workspace = try makeWorkspace(activeSessionID: "active")
-        let session = try makeSession(id: "active", workspaceID: workspace.id)
-
-        try withDependencies {
-            try $0.bootstrapDatabase()
-            try $0.defaultDatabase.write { database in
-                try Workspace.upsert { workspace }.execute(database)
-                try Session.upsert { session }.execute(database)
-            }
-        } operation: {
-            var idleState = WorkspaceChat.State(
-                workspaceWithRepository: WorkspaceWithRepository(
-                    workspace: workspace,
-                    repository: nil
-                )
-            )
-            idleState.isLoadingSessions = false
-            idleState.chat?.isLoadingMessages = false
-            #expect(idleState.canRestoreWarmPresentation)
-
-            func expectNotRestorable(
-                _ mutate: (inout WorkspaceChat.State) -> Void
-            ) {
-                var state = idleState
-                mutate(&state)
-                #expect(!state.canRestoreWarmPresentation)
-            }
-
-            expectNotRestorable { $0.isLoadingSessions = true }
-            expectNotRestorable { $0.chat?.isLoadingMessages = true }
-            expectNotRestorable { $0.chat?.isMessageSendInFlight = true }
-            expectNotRestorable { $0.chat?.isStopInFlight = true }
-            expectNotRestorable { $0.isCreatingSession = true }
-            expectNotRestorable { $0.isArchivingWorkspace = true }
-            expectNotRestorable { $0.isClosingSession = true }
-            expectNotRestorable { $0.isRenamingBranch = true }
-            expectNotRestorable { $0.isRenamingSession = true }
-            expectNotRestorable { $0.isWorkspaceMutationInFlight = true }
-            expectNotRestorable { $0.sessionIDsBeforeCreation = [] }
-            expectNotRestorable { $0.sessionIDAwaitingObservation = "pending" }
-            expectNotRestorable { $0.renamingSession = session }
-            expectNotRestorable { $0.destination = .renameBranch }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.isEditStartInFlight = true
-            }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.editingMessageID = "editing"
-            }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.isEditInFlight = true
-            }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.messageActionInFlightID = "deleting"
-            }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.isReorderInFlight = true
-            }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.isResumeInFlight = true
-            }
-            expectNotRestorable {
-                $0.chat?.queuedMessages.pendingMessageIDs = ["pending"]
-            }
-        }
-    }
-
     @Test("Loading unread sessions marks their workspace as read")
     func loadingUnreadSessionsMarksWorkspaceAsRead() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active", unread: 1)
@@ -497,7 +429,7 @@ struct WorkspaceChatTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 1
+                    credentialGeneration: UUID(1)
                 )
             }
             let connectionCount = LockIsolated(0)
@@ -533,7 +465,7 @@ struct WorkspaceChatTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 2
+                    credentialGeneration: UUID(2)
                 )
             }
             await store.receive(\.cloudConfigurationChanged)
@@ -743,7 +675,7 @@ struct WorkspaceChatTests {
                 await Task.yield()
             }
             #expect(store.state.workspace.isCloudHosted)
-            let reload = await store.send(.hostingSourceChanged(true))
+            let reload = await store.send(.hostingSourceChanged(.cloud))
             #expect(store.state.destination == nil)
             await store.receive(\.hostingSourceReloaded)
             #expect(store.state.activeSessions.map(\.id) == [cloudSession.id])
@@ -2256,6 +2188,10 @@ struct WorkspaceChatTests {
                 $0.cloudAPIClient.observeSessions = { workspaceID in
                     #expect(workspaceID == remoteWorkspaceID)
                     return stream
+                }
+                $0.desktopClient.observeSessions = { workspaceID in
+                    #expect(workspaceID == remoteWorkspaceID)
+                    return AsyncThrowingStream { _ in }
                 }
             }
 

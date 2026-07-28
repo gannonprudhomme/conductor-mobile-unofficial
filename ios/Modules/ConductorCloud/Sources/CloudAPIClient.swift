@@ -134,6 +134,13 @@ public enum CloudAPIClientError: Error, Equatable, LocalizedError, Sendable {
         }
         return statusCode == 400 && error?.code == "invalid_cursor"
     }
+
+    fileprivate var isSessionNotFoundFailure: Bool {
+        guard case let .requestFailed(statusCode, error) = self else {
+            return false
+        }
+        return statusCode == 404 && error?.code?.uppercased() == "NOT_FOUND"
+    }
 }
 
 extension CloudAPIClient: DependencyKey {
@@ -458,6 +465,7 @@ extension CloudAPIClient: DependencyKey {
                     : nil
                 var identity: CloudIdentity?
                 var retryDelay = Duration.seconds(1)
+                var remainingSessionNotFoundRetries = 5
                 var status: CloudSessionStatusResponse?
 
                 do {
@@ -521,6 +529,7 @@ extension CloudAPIClient: DependencyKey {
                             guard messages.allSatisfy({ $0.sessionID == sessionID }) else {
                                 throw CloudAPIClientError.invalidResponse
                             }
+                            remainingSessionNotFoundRetries = 0
 
                             if isComplete {
                                 let completedAt = now
@@ -556,8 +565,18 @@ extension CloudAPIClient: DependencyKey {
                                     : .seconds(10)
                             try await clock.sleep(for: pollDelay)
                         } catch {
-                            guard CloudAPIClientError.shouldRetryObservation(after: error) else {
+                            let retriesMissingSession =
+                                (error as? CloudAPIClientError)?
+                                    .isSessionNotFoundFailure == true
+                                    && remainingSessionNotFoundRetries > 0
+                            guard retriesMissingSession
+                                || CloudAPIClientError.shouldRetryObservation(
+                                    after: error
+                                ) else {
                                 throw error
+                            }
+                            if retriesMissingSession {
+                                remainingSessionNotFoundRetries -= 1
                             }
                             try await clock.sleep(for: retryDelay)
                             retryDelay = min(retryDelay * 2, .seconds(30))

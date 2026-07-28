@@ -25,6 +25,9 @@ public struct WorkspaceChat: Sendable {
     public struct State: Equatable {
         @Presents public var destination: Destination.State?
 
+        @Shared(.cloudConfiguration)
+        public var cloudConfiguration
+
         // TODO: Ideally this would be non-nil but couldn't figure out a good way to achieve it
         var chat: Chat.State?
         var mutationRoute: WorkspaceMutationRoute?
@@ -35,9 +38,13 @@ public struct WorkspaceChat: Sendable {
         ///
         /// However we want to prevent that from overriding a local switch from the user
         var hasUserSelectedSession = false
+        var isArchivingWorkspace = false
+        var isClosingSession = false
         var isCreatingSession = false
         var isRenamingBranch = false
+        var isRenamingSession = false
         var isLoadingSessions = true
+        var isWorkspaceMutationInFlight = false
         var branchNameDraft = ""
         var hasPersistedInitialSessionSnapshot = false
         /// Cleared once observation identifies a session created after this snapshot.
@@ -110,6 +117,10 @@ public struct WorkspaceChat: Sendable {
             }
 
             self._activeSessions = activeSessions
+            if source == .cloud,
+               (!self.activeSessions.isEmpty || !self.archivedSessions.isEmpty) {
+                self.isLoadingSessions = false
+            }
             self._mutationOutcomes = FetchAll(
                 wrappedValue: [],
                 CloudMutationOutcome
@@ -193,6 +204,7 @@ public struct WorkspaceChat: Sendable {
         case chat(Chat.Action)
         case closeSessionButtonTapped(Session)
         case closeSessionResponse(Result<Void, any Error>)
+        case cloudConfigurationChanged(CloudConfiguration?)
         case copyConciseTranscriptButtonTapped(Session)
         case copyConciseTranscriptResponse(Result<String, any Error>)
         case createSessionButtonTapped
@@ -201,6 +213,11 @@ public struct WorkspaceChat: Sendable {
         )
         case destination(PresentationAction<Destination.Action>)
         case loadSessionsResponse(Result<[Session], any Error>)
+        case hostingSourceChanged(WorkspaceSource)
+        case hostingSourceReloaded(
+            source: WorkspaceSource,
+            result: Result<[Session], any Error>
+        )
         case mutationOutcomesUpdated([CloudMutationOutcome])
         case renameBranchButtonTapped
         case renameBranchResponse(Result<Void, any Error>)
@@ -212,6 +229,7 @@ public struct WorkspaceChat: Sendable {
         case sessionButtonTapped(Session)
         case task
         case workspaceMutationFailed(any Error)
+        case workspaceMutationFinished
         case workspaceMutationUsedSQLiteFallback
         case workspacePinnedButtonTapped
         case workspaceStatusButtonTapped(Workspace.Status)
@@ -240,6 +258,7 @@ public struct WorkspaceChat: Sendable {
             switch action {
             case .task:
                 let workspace = state.$workspaceWithRepository
+                let cloudConfiguration = state.$cloudConfiguration
                 // The workspace and sessions arrive through independent sockets. Reconcile when
                 // either one changes so an active-session-only update cannot leave chat stale.
                 var observations: [Effect<Action>] = [
@@ -250,15 +269,161 @@ public struct WorkspaceChat: Sendable {
                             .dropFirst()
                             .map(Action.activeSessionIDChanged)
                     },
+                    .publisher {
+                        workspace.publisher
+                            .map(\.source)
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.hostingSourceChanged)
+                    },
+                    .publisher {
+                        cloudConfiguration.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.cloudConfigurationChanged)
+                    },
                     observeSessions(
                         workspaceID: state.sessionObservationWorkspaceID,
-                        isCloudHosted: state.source == .cloud
+                        isCloudHosted: state.source == .cloud,
+                        canonicalWorkspaceID: state.workspace.id
                     ),
                 ]
                 if state.source == .cloud {
                     observations.append(observeMutationOutcomes(state))
                 }
                 return .merge(observations)
+
+            case let .cloudConfigurationChanged(configuration):
+                let mutationRoute = state.workspaceWithRepository.mutationRoute(
+                    cloudConfiguration: configuration
+                )
+                state.mutationRoute = mutationRoute
+                state.chat?.mutationRoute = mutationRoute
+                state.chat?.queuedMessages.mutationRoute = mutationRoute
+                guard configuration != nil,
+                      state.source == .cloud else {
+                    return .cancel(id: CancelID.sessionObservation)
+                }
+                if state.activeSessions.isEmpty {
+                    state.isLoadingSessions = true
+                }
+                return observeSessions(
+                    workspaceID: state.sessionObservationWorkspaceID,
+                    isCloudHosted: true,
+                    canonicalWorkspaceID: state.workspace.id
+                )
+
+            case let .hostingSourceChanged(source):
+                state.source = source
+                state.mutationRoute = state.workspaceWithRepository.mutationRoute(
+                    cloudConfiguration: state.cloudConfiguration
+                )
+                state.chat = nil
+                state.destination = nil
+                state.hasUserSelectedSession = false
+                state.isLoadingSessions = true
+                state.sessionIDsBeforeCreation = nil
+                state.sessionIDAwaitingObservation = nil
+                let activeSessions = state.$activeSessions
+                let archivedSessions = state.$archivedSessions
+                let workspaceID = state.workspace.id
+                return .merge(
+                    .cancel(id: CancelID.sessionObservation),
+                    .run { send in
+                        let result = await Result {
+                            if source == .cloud {
+                                try await activeSessions.load(
+                                    CloudSessionMetadata.sessions(
+                                        workspaceID: workspaceID,
+                                        isHidden: false
+                                    ),
+                                    animation: .default
+                                )
+                                try await archivedSessions.load(
+                                    CloudSessionMetadata.sessions(
+                                        workspaceID: workspaceID,
+                                        isHidden: true
+                                    ),
+                                    animation: .default
+                                )
+                                return try await database.read { database in
+                                    try CloudSessionMetadata
+                                        .sessions(
+                                            workspaceID: workspaceID,
+                                            isHidden: false
+                                        )
+                                        .fetchAll(database)
+                                        + CloudSessionMetadata
+                                            .sessions(
+                                                workspaceID: workspaceID,
+                                                isHidden: true
+                                            )
+                                            .fetchAll(database)
+                                }
+                            }
+
+                            let activeQuery = Session
+                                .where {
+                                    $0.workspaceID.eq(workspaceID)
+                                        .and(!$0.isHidden)
+                                }
+                                .order(by: \.createdAt)
+                            let archivedQuery = Session
+                                .where {
+                                    $0.workspaceID.eq(workspaceID)
+                                        .and($0.isHidden)
+                                }
+                                .order { $0.updatedAt.desc() }
+                            try await activeSessions.load(
+                                activeQuery,
+                                animation: .default
+                            )
+                            try await archivedSessions.load(
+                                archivedQuery,
+                                animation: .default
+                            )
+                            return try await database.read { database in
+                                try activeQuery.fetchAll(database)
+                                    + archivedQuery.fetchAll(database)
+                            }
+                        }
+                        await send(
+                            .hostingSourceReloaded(
+                                source: source,
+                                result: result
+                            )
+                        )
+                    }
+                )
+
+            case let .hostingSourceReloaded(source, .success(sessions)):
+                guard state.workspaceWithRepository.source == source else {
+                    return .none
+                }
+                state.chat = Self.selectedChat(
+                    afterReceiving: sessions,
+                    currentChat: nil,
+                    workspaceActiveSessionID: state.workspace.activeSessionID,
+                    hasUserSelectedSession: false,
+                    sessionIDAwaitingObservation: nil,
+                    isCloudHosted: source == .cloud,
+                    mutationRoute: state.mutationRoute
+                )
+                state.isLoadingSessions = sessions.isEmpty
+                var observations = [
+                    observeSessions(
+                        workspaceID: state.sessionObservationWorkspaceID,
+                        isCloudHosted: source == .cloud,
+                        canonicalWorkspaceID: state.workspace.id
+                    ),
+                ]
+                if source == .cloud {
+                    observations.append(observeMutationOutcomes(state))
+                }
+                return .merge(observations)
+
+            case let .hostingSourceReloaded(_, .failure(error)):
+                return .send(.loadSessionsResponse(.failure(error)))
 
             case let .activeSessionIDChanged(activeSessionID):
                 // The workspace and session snapshots are persisted independently. Do not let a
@@ -280,10 +445,12 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .archiveWorkspaceButtonTapped:
-                guard let mutationRoute = state.mutationRoute,
+                guard !state.isArchivingWorkspace,
+                      let mutationRoute = state.mutationRoute,
                       mutationRoute.capabilities.canArchiveWorkspace else {
                     return .none
                 }
+                state.isArchivingWorkspace = true
                 return .run {
                     [mutationRoute, workspaceID = state.workspace.id] send in
                     await send(
@@ -300,10 +467,12 @@ public struct WorkspaceChat: Sendable {
                 }
 
             case .archiveWorkspaceResponse(.success):
+                state.isArchivingWorkspace = false
                 return .send(.delegate(.workspaceArchived))
 
             case let .archiveWorkspaceResponse(.failure(error)):
                 Logger.chat.error("Failed to archive workspace: \(error)")
+                state.isArchivingWorkspace = false
                 state.destination = .alert(
                     .failedToArchiveWorkspace(message: error.localizedDescription)
                 )
@@ -313,6 +482,7 @@ public struct WorkspaceChat: Sendable {
                 state.destination = .archivedSessions(
                     ArchivedSessions.State(
                         workspaceID: state.workspace.id,
+                        source: state.source,
                         sessions: state.archivedSessions,
                         activeSessions: state.activeSessions,
                         mutationRoute: state.mutationRoute
@@ -362,10 +532,12 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .closeSessionButtonTapped(session):
-                guard let mutationRoute = state.mutationRoute,
+                guard !state.isClosingSession,
+                      let mutationRoute = state.mutationRoute,
                       mutationRoute.capabilities.canArchiveSession else {
                     return .none
                 }
+                state.isClosingSession = true
                 return .run { [mutationRoute, session] send in
                     await send(
                         .closeSessionResponse(
@@ -380,8 +552,13 @@ public struct WorkspaceChat: Sendable {
                     )
                 }
 
+            case .closeSessionResponse(.success):
+                state.isClosingSession = false
+                return .none
+
             case let .closeSessionResponse(.failure(error)):
                 Logger.chat.error("Failed to close session: \(error)")
+                state.isClosingSession = false
                 state.destination = .alert(
                     .failedToCloseSession(message: error.localizedDescription)
                 )
@@ -586,7 +763,8 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .renameSessionSubmitted:
-                guard state.canRenameSession,
+                guard !state.isRenamingSession,
+                      state.canRenameSession,
                       let session = state.renamingSession,
                       let mutationRoute = state.mutationRoute,
                       mutationRoute.capabilities.canRenameSession else {
@@ -598,6 +776,7 @@ public struct WorkspaceChat: Sendable {
                 state.sessionTitleDraft = title
                 state.renamingSession = nil
                 state.destination = nil
+                state.isRenamingSession = true
                 return .run { [mutationRoute, session, title] send in
                     await send(
                         .renameSessionResponse(
@@ -613,8 +792,13 @@ public struct WorkspaceChat: Sendable {
                     )
                 }
 
+            case .renameSessionResponse(.success):
+                state.isRenamingSession = false
+                return .none
+
             case let .renameSessionResponse(.failure(error)):
                 Logger.chat.error("Failed to rename session: \(error)")
+                state.isRenamingSession = false
                 state.destination = .alert(
                     .failedToRenameSession(message: error.localizedDescription)
                 )
@@ -633,7 +817,10 @@ public struct WorkspaceChat: Sendable {
                     selectedSession: state.chat?.session
                 )
 
-            case let .chat(.loadMessagesFailed(error)):
+            case let .chat(.loadMessagesFailed(sessionID, error)):
+                guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
                 if let apiError = error as? CloudAPIClientError,
                    apiError.isAuthenticationFailure {
                     state.destination = .alert(
@@ -815,16 +1002,26 @@ public struct WorkspaceChat: Sendable {
                 )
 
             case let .workspaceMutationFailed(error):
+                state.isWorkspaceMutationInFlight = false
                 state.destination = .alert(
                     .failedToUpdateWorkspace(message: error.localizedDescription)
                 )
                 return .none
 
+            case .workspaceMutationFinished:
+                state.isWorkspaceMutationInFlight = false
+                return .none
+
             case .workspaceMutationUsedSQLiteFallback:
+                state.isWorkspaceMutationInFlight = false
                 state.destination = .alert(.workspaceMutationUsedSQLiteFallback)
                 return .none
 
             case .workspacePinnedButtonTapped:
+                guard !state.isWorkspaceMutationInFlight else {
+                    return .none
+                }
+                state.isWorkspaceMutationInFlight = true
                 let item = state.workspaceWithRepository
                 let isPinned = item.workspace.pinnedAt == nil
                 let previousPinnedAt = item.workspace.pinnedAt
@@ -858,10 +1055,14 @@ public struct WorkspaceChat: Sendable {
                 }
 
             case let .workspaceStatusButtonTapped(status):
+                guard !state.isWorkspaceMutationInFlight else {
+                    return .none
+                }
                 let item = state.workspaceWithRepository
                 guard item.workspace.status != status else {
                     return .none
                 }
+                state.isWorkspaceMutationInFlight = true
                 let previousManualStatus = item.workspace.manualStatus
 
                 return updateWorkspace {
@@ -892,6 +1093,10 @@ public struct WorkspaceChat: Sendable {
                 }
 
             case .workspaceUnreadButtonTapped:
+                guard !state.isWorkspaceMutationInFlight else {
+                    return .none
+                }
+                state.isWorkspaceMutationInFlight = true
                 let item = state.workspaceWithRepository
                 let isUnread = (item.workspace.unread ?? 0) == 0
                 let previousUnread = item.workspace.unread
@@ -926,10 +1131,8 @@ public struct WorkspaceChat: Sendable {
 
             case .binding,
                  .chat,
-                 .closeSessionResponse,
                  .delegate,
-                 .destination,
-                 .renameSessionResponse:
+                 .destination:
                 return .none
 
             }
@@ -971,6 +1174,8 @@ public struct WorkspaceChat: Sendable {
             do {
                 if try await operation() == .sqliteFallback {
                     await send(.workspaceMutationUsedSQLiteFallback)
+                } else {
+                    await send(.workspaceMutationFinished)
                 }
             } catch let mutationError {
                 do {
@@ -1050,10 +1255,18 @@ public struct WorkspaceChat: Sendable {
 
     private func observeSessions(
         workspaceID: String,
-        isCloudHosted: Bool
+        isCloudHosted: Bool,
+        canonicalWorkspaceID: Workspace.ID
     ) -> Effect<Action> {
         if isCloudHosted {
-            return observeCloudSessions(workspaceID: workspaceID)
+            return observeCloudSessions(
+                remoteWorkspaceID: workspaceID,
+                canonicalWorkspaceID: canonicalWorkspaceID
+            )
+                .cancellable(
+                    id: CancelID.sessionObservation,
+                    cancelInFlight: true
+                )
         }
         return .run { send in
             await StreamObservation.observe {
@@ -1075,28 +1288,63 @@ public struct WorkspaceChat: Sendable {
                 await send(.loadSessionsResponse(.failure(error)))
             }
         }
+        .cancellable(id: CancelID.sessionObservation, cancelInFlight: true)
     }
 
     private func observeCloudSessions(
-        workspaceID: String
+        remoteWorkspaceID: String,
+        canonicalWorkspaceID: Workspace.ID
     ) -> Effect<Action> {
-        .run { send in
-            do {
-                for try await snapshot in cloudAPIClient.observeSessions(
-                    workspaceID: workspaceID
-                ) {
+        .merge(
+            .run { send in
+                do {
+                    for try await snapshot in cloudAPIClient.observeSessions(
+                        workspaceID: remoteWorkspaceID
+                    ) {
+                        let sessions = try await database.write { database in
+                            try CloudChatPersistence.persist(
+                                snapshot,
+                                in: database
+                            )
+                        }
+                        await send(.loadSessionsResponse(.success(sessions)))
+                        await send(.sessionSnapshotPersisted)
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    await send(.loadSessionsResponse(.failure(error)))
+                }
+            },
+            .run { send in
+                await StreamObservation.observe(
+                    retrying: {
+                        desktopClient.observeSessions(
+                            workspaceID: remoteWorkspaceID
+                        )
+                    },
+                    retryDelays: [.seconds(10)]
+                ) { desktopSessions in
                     let sessions = try await database.write { database in
-                        try CloudChatPersistence.persist(snapshot, in: database)
+                        try CloudChatPersistence.reconcileSessionVisibility(
+                            from: desktopSessions,
+                            canonicalWorkspaceID: canonicalWorkspaceID,
+                            remoteWorkspaceID: remoteWorkspaceID,
+                            in: database
+                        )
+                    }
+                    guard !sessions.isEmpty else {
+                        return
                     }
                     await send(.loadSessionsResponse(.success(sessions)))
                     await send(.sessionSnapshotPersisted)
+                } onFailure: { error in
+                    Logger.chat.error(
+                        "Failed to reconcile Cloud session visibility: \(error)"
+                    )
                 }
-            } catch is CancellationError {
-                return
-            } catch {
-                await send(.loadSessionsResponse(.failure(error)))
             }
-        }
+        )
     }
 
     private func observeMutationOutcomes(
@@ -1107,6 +1355,10 @@ public struct WorkspaceChat: Sendable {
                 .removeDuplicates()
                 .map(Action.mutationOutcomesUpdated)
         }
+    }
+
+    private enum CancelID: Hashable {
+        case sessionObservation
     }
 
     private func mutationSessionID(

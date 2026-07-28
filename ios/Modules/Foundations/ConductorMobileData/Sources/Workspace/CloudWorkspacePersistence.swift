@@ -71,6 +71,68 @@ public enum CloudWorkspacePersistence {
         )
     }
 
+    /// Persists the desktop relay snapshot while retaining any Cloud canonical identities.
+    ///
+    /// A Cloud-created workspace can reach the phone through both sources: the Cloud mutation
+    /// response names it immediately, and the desktop relay later observes the same remote UUID.
+    /// Mapping that UUID back onto the Cloud row keeps the shared list and mobile-only state from
+    /// briefly containing two representations of the same workspace.
+    public static func persistDesktopSnapshot(
+        _ snapshot: WorkspaceListSnapshot,
+        in database: Database
+    ) throws {
+        try Repository
+            .upsert { snapshot.repositories }
+            .execute(database)
+
+        let canonicalIDsByRemoteID = Dictionary(
+            try CloudWorkspaceMetadata.all
+                .fetchAll(database)
+                .map { ($0.remoteWorkspaceID, $0.workspaceID) },
+            uniquingKeysWith: { existing, _ in existing }
+        )
+        let workspaces = snapshot.workspaces.map { item in
+            let remoteWorkspaceID = item.workspace.id
+            let canonicalWorkspaceID =
+                canonicalIDsByRemoteID[remoteWorkspaceID]
+                ?? remoteWorkspaceID
+            return (
+                remoteWorkspaceID: remoteWorkspaceID,
+                workspace: item.workspace.replacingID(
+                    with: canonicalWorkspaceID
+                ),
+                isWorking: item.isWorking,
+                pullRequest: snapshot.pullRequests[remoteWorkspaceID]
+            )
+        }
+
+        try persistDesktopWorkspaces(
+            workspaces.map(\.workspace),
+            in: database
+        )
+
+        // The desktop snapshot is authoritative for this source-specific table.
+        try MobileWorkspaceState.delete().execute(database)
+        try MobileWorkspaceState
+            .upsert {
+                workspaces.map {
+                    MobileWorkspaceState(
+                        workspaceID: $0.workspace.id,
+                        isWorking: $0.isWorking,
+                        pullRequest: $0.pullRequest
+                    )
+                }
+            }
+            .execute(database)
+
+        for workspace in workspaces
+        where workspace.remoteWorkspaceID != workspace.workspace.id {
+            try Workspace.find(workspace.remoteWorkspaceID)
+                .delete()
+                .execute(database)
+        }
+    }
+
     /// Maps API projects onto canonical repositories, preferring an existing repository with the
     /// same ID or normalized Git remote. This prevents duplicate project sections when desktop
     /// and Cloud observe the same repository.
@@ -314,6 +376,11 @@ public enum CloudWorkspacePersistence {
             }
             .fetchOne(database)
         let canonicalWorkspaceID = existingMetadata?.workspaceID ?? workspace.id
+        try consolidateDesktopWorkspace(
+            remoteWorkspaceID: workspace.id,
+            into: canonicalWorkspaceID,
+            in: database
+        )
         let existingWorkspace = try Workspace
             .find(canonicalWorkspaceID)
             .fetchOne(database)
@@ -489,6 +556,43 @@ public enum CloudWorkspacePersistence {
         }
     }
 
+    private static func consolidateDesktopWorkspace(
+        remoteWorkspaceID: Workspace.ID,
+        into canonicalWorkspaceID: Workspace.ID,
+        in database: Database
+    ) throws {
+        guard remoteWorkspaceID != canonicalWorkspaceID,
+              let desktopWorkspace = try Workspace
+                .find(remoteWorkspaceID)
+                .fetchOne(database) else {
+            return
+        }
+
+        try Workspace
+            .upsert {
+                desktopWorkspace.replacingID(with: canonicalWorkspaceID)
+            }
+            .execute(database)
+
+        if let mobileState = try MobileWorkspaceState
+            .find(remoteWorkspaceID)
+            .fetchOne(database) {
+            try MobileWorkspaceState
+                .upsert {
+                    MobileWorkspaceState(
+                        workspaceID: canonicalWorkspaceID,
+                        isWorking: mobileState.isWorking,
+                        pullRequest: mobileState.pullRequestSnapshot
+                    )
+                }
+                .execute(database)
+        }
+
+        try Workspace.find(remoteWorkspaceID)
+            .delete()
+            .execute(database)
+    }
+
     /// Removes ownership not seen in this completed snapshot. The metadata helper retains
     /// canonical workspaces that are still desktop-observed or have sessions.
     private static func removeStaleCloudRows(
@@ -534,5 +638,66 @@ public enum CloudWorkspacePersistence {
             return String(normalized.dropLast(4))
         }
         return normalized
+    }
+}
+
+private extension Workspace {
+    func replacingID(with id: ID) -> Self {
+        Self(
+            id: id,
+            activeSessionID: activeSessionID,
+            archiveCommit: archiveCommit,
+            assigneeUserID: assigneeUserID,
+            bigTerminalMode: bigTerminalMode,
+            branch: branch,
+            createdAt: createdAt,
+            creatorClientID: creatorClientID,
+            creatorUserID: creatorUserID,
+            derivedStatus: derivedStatus,
+            directoryName: directoryName,
+            hostingServerURL: hostingServerURL,
+            initializationFilesCopied: initializationFilesCopied,
+            initializationLogPath: initializationLogPath,
+            initializationParentBranch: initializationParentBranch,
+            intendedTargetBranch: intendedTargetBranch,
+            linkedDirectoryPaths: linkedDirectoryPaths,
+            linkedWorkspaceIDs: linkedWorkspaceIDs,
+            manualStatus: manualStatus,
+            notes: notes,
+            organizationID: organizationID,
+            permissionLevel: permissionLevel,
+            pinnedAt: pinnedAt,
+            placeholderBranchName: placeholderBranchName,
+            prDescription: prDescription,
+            prTitle: prTitle,
+            remoteFileSyncEnabled: remoteFileSyncEnabled,
+            repositoryID: repositoryID,
+            sandboxProvider: sandboxProvider,
+            secondaryDirectoryName: secondaryDirectoryName,
+            setupLogPath: setupLogPath,
+            state: state,
+            unread: unread,
+            updatedAt: updatedAt,
+            userSetBranchName: userSetBranchName,
+            userSetWorkspaceName: userSetWorkspaceName,
+            watcherUserIDs: watcherUserIDs,
+            workspaceName: workspaceName,
+            workspacePath: workspacePath
+        )
+    }
+}
+
+private extension MobileWorkspaceState {
+    var pullRequestSnapshot: PullRequestSnapshot? {
+        guard let pullRequestURL else {
+            return nil
+        }
+        return PullRequestSnapshot(
+            url: pullRequestURL,
+            isDraft: isPullRequestDraft,
+            isMerged: isPullRequestMerged,
+            mergeStateStatus: pullRequestMergeStateStatus,
+            checksStatus: pullRequestChecksStatus
+        )
     }
 }

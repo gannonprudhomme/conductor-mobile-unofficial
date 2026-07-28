@@ -767,9 +767,12 @@ struct ConductorSettingsTests {
 
     @Test("A same-account API key replacement is tested and persisted")
     func replaceCloudCredential() async throws {
+        let cancelledConfigurations = LockIsolated<[String]>([])
         let isDismissed = LockIsolated(false)
         let testedKeys = LockIsolated<[String]>([])
         let savedKeys = LockIsolated<[String]>([])
+        let (savePermission, savePermissionContinuation) =
+            AsyncStream<Void>.makeStream()
         let database = try appDatabase()
 
         await withDependencies {
@@ -781,6 +784,14 @@ struct ConductorSettingsTests {
             }
             $0.cloudCredentialClient.saveAPIKey = { apiKey in
                 savedKeys.withValue { $0.append(apiKey) }
+                for await _ in savePermission {
+                    break
+                }
+            }
+            $0.cloudMutationRunner.cancelAndAwait = { accountID, generation in
+                cancelledConfigurations.withValue {
+                    $0.append("\(accountID):\(generation)")
+                }
             }
             $0.dismiss = DismissEffect {
                 isDismissed.setValue(true)
@@ -812,6 +823,8 @@ struct ConductorSettingsTests {
                 $0.testedCloudAccountID = "synthetic-user::"
                 $0.cloudOperation = .saving
             }
+            savePermissionContinuation.yield()
+            savePermissionContinuation.finish()
             await store.receive(\.cloudSaveResult) {
                 $0.$cloudConfiguration.withLock {
                     $0 = CloudConfiguration(
@@ -825,8 +838,19 @@ struct ConductorSettingsTests {
                 $0.cloudOperation = nil
             }
 
+            expectNoDifference(
+                cancelledConfigurations.value,
+                ["synthetic-user:::\(UUID(99))"]
+            )
             expectNoDifference(testedKeys.value, ["replacement-key"])
             expectNoDifference(savedKeys.value, ["replacement-key"])
+            expectNoDifference(
+                store.state.cloudConfiguration,
+                CloudConfiguration(
+                    accountID: "synthetic-user::",
+                    credentialGeneration: UUID(0)
+                )
+            )
             #expect(store.state.isCloudCredentialConfigured)
             #expect(isDismissed.value)
         }
@@ -889,6 +913,7 @@ struct ConductorSettingsTests {
 
     @Test("Deleting a cloud credential leaves local pairing configured")
     func deleteCloudCredential() async throws {
+        let cancelledConfigurations = LockIsolated<[String]>([])
         let deleteCount = LockIsolated(0)
         let database = try appDatabase()
 
@@ -898,10 +923,18 @@ struct ConductorSettingsTests {
             $0.cloudCredentialClient.deleteAPIKey = {
                 deleteCount.withValue { $0 += 1 }
             }
+            $0.cloudMutationRunner.cancelAndAwait = { accountID, generation in
+                cancelledConfigurations.withValue {
+                    $0.append("\(accountID):\(generation)")
+                }
+            }
         } operation: {
             let state = ConductorSettings.State()
             state.$cloudConfiguration.withLock {
-                $0 = CloudConfiguration(accountID: "account")
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(101)
+                )
             }
             state.$storedServerAddress.withLock { $0 = "paired-mac" }
             let store = TestStore(initialState: state) {
@@ -919,6 +952,10 @@ struct ConductorSettingsTests {
             }
 
             #expect(deleteCount.value == 1)
+            expectNoDifference(
+                cancelledConfigurations.value,
+                ["account:\(UUID(101))"]
+            )
             expectNoDifference(store.state.storedServerAddress, "paired-mac")
         }
     }

@@ -49,6 +49,9 @@ public struct Chat: Sendable {
         @Shared(.desktopConnectionStatus)
         var connectionStatus//: DesktopClient.ConnectionStatus = .connecting
 
+        @Shared(.cloudConfiguration)
+        var cloudConfiguration
+
         @Shared(.mobileModelSettingsOverride)
         var mobileModelSettingsOverride
 
@@ -264,6 +267,7 @@ public struct Chat: Sendable {
                 && lhs.queuedMessages == rhs.queuedMessages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
+                && lhs.cloudConfiguration == rhs.cloudConfiguration
                 && lhs.mobileModelSettingsOverride == rhs.mobileModelSettingsOverride
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
                 && lhs.pendingSends == rhs.pendingSends
@@ -299,6 +303,7 @@ public struct Chat: Sendable {
 
     public enum Action: BindableAction {
         case binding(BindingAction<State>)
+        case cloudConfigurationChanged(CloudConfiguration?)
         case task
         case modelSettingsFetched(DesktopClient.ModelSettings)
         case fastModeButtonTapped
@@ -306,7 +311,10 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             messages: [Message]
         )
-        case loadMessagesFailed(any Error)
+        case loadMessagesFailed(
+            sessionID: Session.ID,
+            error: any Error
+        )
         case initialPromptHandoffsUpdated([InitialPromptHandoff])
         case initialPromptConflictDetected(UUID)
         case initialPromptConflictDraftPrepared(UUID, String, String)
@@ -362,12 +370,19 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
+                let cloudConfiguration = state.$cloudConfiguration
                 let messageObservation: Effect<Action> = .merge(
                     observeMessages(state),
                     observePersistedMessages(state)
                 )
                 guard state.source == .desktop else {
                     return .merge(
+                        .publisher {
+                            cloudConfiguration.publisher
+                                .removeDuplicates()
+                                .dropFirst()
+                                .map(Action.cloudConfigurationChanged)
+                        },
                         messageObservation,
                         observeInitialPromptHandoffs(state),
                         observePendingSends(state),
@@ -390,6 +405,15 @@ public struct Chat: Sendable {
                     },
                     messageObservation
                 )
+
+            case let .cloudConfigurationChanged(configuration):
+                guard state.source == .cloud else {
+                    return .none
+                }
+                guard configuration != nil else {
+                    return .cancel(id: CancelID.messageObservation)
+                }
+                return observeMessages(state)
 
             case let .modelSettingsFetched(settings):
                 let settings = state.mobileModelSettingsOverride ?? settings
@@ -987,7 +1011,10 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case .loadMessagesFailed:
+            case let .loadMessagesFailed(sessionID, _):
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
                 return .none
 
             case .binding,
@@ -1033,9 +1060,15 @@ public struct Chat: Sendable {
                 }
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
-                await send(.loadMessagesFailed(error))
+                await send(
+                    .loadMessagesFailed(
+                        sessionID: sessionID,
+                        error: error
+                    )
+                )
             }
         }
+        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
     }
 
     private func observeCloudMessages(_ state: State) -> Effect<Action> {
@@ -1086,9 +1119,15 @@ public struct Chat: Sendable {
                 return
             } catch {
                 Logger.chat.error("Failed to load Cloud messages: \(error)")
-                await send(.loadMessagesFailed(error))
+                await send(
+                    .loadMessagesFailed(
+                        sessionID: sessionID,
+                        error: error
+                    )
+                )
             }
         }
+        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
     }
 
     private func observePersistedMessages(_ state: State) -> Effect<Action> {
@@ -1228,6 +1267,9 @@ public struct Chat: Sendable {
         return remoteSessionID
     }
 
+    private enum CancelID: Hashable {
+        case messageObservation
+    }
 }
 
 public enum InitialPromptConflictChoice: Equatable, Sendable {
@@ -1242,6 +1284,7 @@ private enum CloudChatRoutingError: LocalizedError {
     var errorDescription: String? {
         "This Cloud chat has not finished loading. Try again shortly."
     }
+
 }
 
 private actor MessagePersistencePipeline {

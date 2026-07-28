@@ -211,6 +211,141 @@ struct CloudWorkspacePersistenceTests {
         #expect(desktopThenCloud.repositoryID == "project-1")
     }
 
+    @Test("Desktop relay reuses the canonical Cloud workspace identity")
+    func desktopRelayReusesCloudIdentity() throws {
+        let database = try appDatabase()
+        let accountID = "account-1"
+        let remoteWorkspaceID = "E8E0E15A-9066-43FC-AB85-9A98C375F789"
+        let canonicalWorkspaceID = CloudCanonicalID.workspace(
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID
+        )
+        let repository = Repository.preview(id: "project-1")
+        let cloudWorkspace = Workspace.preview(
+            id: canonicalWorkspaceID,
+            repositoryID: repository.id
+        )
+        let desktopWorkspace = Workspace.preview(
+            id: remoteWorkspaceID.lowercased(),
+            branch: "conductor/desktop-observed",
+            repositoryID: repository.id
+        )
+        let pullRequest = PullRequestSnapshot(
+            url: "https://example.test/pull/1",
+            isDraft: true,
+            isMerged: false
+        )
+
+        try database.write { db in
+            try Repository.insert { repository }.execute(db)
+            try Workspace.insert { cloudWorkspace }.execute(db)
+            try CloudWorkspaceMetadata
+                .insert {
+                    CloudWorkspaceMetadata(
+                        workspaceID: canonicalWorkspaceID,
+                        accountID: accountID,
+                        remoteWorkspaceID: remoteWorkspaceID.lowercased(),
+                        lastSeenGeneration: "provisional"
+                    )
+                }
+                .execute(db)
+
+            try CloudWorkspacePersistence.persistDesktopSnapshot(
+                WorkspaceListSnapshot(
+                    repositories: [repository],
+                    workspaces: [
+                        WorkspaceSnapshot(
+                            workspace: desktopWorkspace,
+                            isWorking: true
+                        ),
+                    ],
+                    pullRequests: [
+                        desktopWorkspace.id: pullRequest,
+                    ]
+                ),
+                in: db
+            )
+        }
+
+        try database.read { db in
+            let workspaces = try Workspace.all.fetchAll(db)
+            let mobileStates = try MobileWorkspaceState.all.fetchAll(db)
+            let metadata = try CloudWorkspaceMetadata.all.fetchAll(db)
+
+            #expect(workspaces.map(\.id) == [canonicalWorkspaceID])
+            #expect(
+                workspaces.first?.branch == "conductor/desktop-observed"
+            )
+            #expect(mobileStates.map(\.workspaceID) == [canonicalWorkspaceID])
+            #expect(mobileStates.first?.pullRequestURL == pullRequest.url)
+            #expect(metadata.map(\.workspaceID) == [canonicalWorkspaceID])
+        }
+    }
+
+    @Test("Cloud refresh removes a late raw desktop workspace duplicate")
+    func cloudRefreshConsolidatesDesktopWorkspace() throws {
+        let database = try appDatabase()
+        let accountID = "account-1"
+        let remoteWorkspaceID = "remote-workspace"
+        let canonicalWorkspaceID = CloudCanonicalID.workspace(
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID
+        )
+        let repository = Repository.preview(id: "project-1")
+        let cloudWorkspace = Workspace.preview(
+            id: canonicalWorkspaceID,
+            repositoryID: repository.id
+        )
+        let desktopWorkspace = Workspace.preview(
+            id: remoteWorkspaceID,
+            branch: "conductor/desktop-observed",
+            repositoryID: repository.id
+        )
+
+        try database.write { db in
+            try Repository.insert { repository }.execute(db)
+            try Workspace
+                .insert { [cloudWorkspace, desktopWorkspace] }
+                .execute(db)
+            try CloudWorkspaceMetadata
+                .insert {
+                    CloudWorkspaceMetadata(
+                        workspaceID: canonicalWorkspaceID,
+                        accountID: accountID,
+                        remoteWorkspaceID: remoteWorkspaceID,
+                        lastSeenGeneration: "provisional"
+                    )
+                }
+                .execute(db)
+            try MobileWorkspaceState
+                .insert {
+                    MobileWorkspaceState(
+                        workspaceID: remoteWorkspaceID,
+                        isWorking: true
+                    )
+                }
+                .execute(db)
+
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(workspaceIDs: [remoteWorkspaceID]),
+                in: db
+            )
+        }
+
+        try database.read { db in
+            let workspaces = try Workspace.all.fetchAll(db)
+            let mobileStates = try MobileWorkspaceState.all.fetchAll(db)
+            let metadata = try CloudWorkspaceMetadata.all.fetchAll(db)
+
+            #expect(workspaces.map(\.id) == [canonicalWorkspaceID])
+            #expect(
+                workspaces.first?.branch == "conductor/desktop-observed"
+            )
+            #expect(mobileStates.map(\.workspaceID) == [canonicalWorkspaceID])
+            #expect(metadata.map(\.workspaceID) == [canonicalWorkspaceID])
+        }
+    }
+
     @Test("Cloud refresh consolidates duplicate repositories into the desktop row")
     func consolidatesDuplicateRepositories() throws {
         let database = try appDatabase()

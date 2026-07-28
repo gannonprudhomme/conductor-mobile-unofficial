@@ -197,6 +197,21 @@ public enum CloudOwnershipCleanup {
                 .fetchCount(database) > 0
             if !hasDesktopOwnership, !hasSessions {
                 try Workspace.find(workspaceID).delete().execute(database)
+            } else {
+                // Retaining the Desktop row must not retain the Cloud source
+                // classification after its Cloud ownership metadata is removed.
+                let workspace = try Workspace
+                    .find(workspaceID)
+                    .fetchOne(database)
+                if workspace?.hostingServerURL
+                    == Workspace.conductorCloudHostingServerURL {
+                    try Workspace
+                        .find(workspaceID)
+                        .update {
+                            $0.hostingServerURL = #bind(nil as String?)
+                        }
+                        .execute(database)
+                }
             }
         }
 

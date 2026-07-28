@@ -12,6 +12,62 @@ import SharedConductorData
 import Testing
 
 struct CloudChatPersistenceTests {
+    @Test("UUID session IDs reconcile across API casing")
+    func uuidSessionIDCaseReconciliation() throws {
+        let database = try appDatabase()
+        let uppercaseSessionID = "F427FF06-F941-4C3E-B214-104592EC27E8"
+        let lowercaseSessionID = uppercaseSessionID.lowercased()
+
+        try database.write { db in
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: "account-a",
+                    sessionIDs: [uppercaseSessionID]
+                ),
+                in: db
+            )
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: "account-a",
+                    sessionIDs: [lowercaseSessionID]
+                ),
+                in: db
+            )
+        }
+
+        let sessions = try database.read { db in
+            try CloudSessionMetadata
+                .sessions(workspaceID: "workspace", isHidden: false)
+                .fetchAll(db)
+        }
+        #expect(sessions.count == 1)
+        #expect(
+            sessions[0].id
+                == CloudCanonicalID.session(
+                    accountID: "account-a",
+                    remoteSessionID: lowercaseSessionID
+                )
+        )
+        #expect(
+            CloudCanonicalID.session(
+                accountID: "account-a",
+                remoteSessionID: uppercaseSessionID
+            ) == CloudCanonicalID.session(
+                accountID: "account-a",
+                remoteSessionID: lowercaseSessionID
+            )
+        )
+        #expect(
+            CloudCanonicalID.session(
+                accountID: "account-a",
+                remoteSessionID: "CaseSensitive"
+            ) != CloudCanonicalID.session(
+                accountID: "account-a",
+                remoteSessionID: "casesensitive"
+            )
+        )
+    }
+
     @Test("Cloud sessions remain isolated and query in API order")
     func sessionIsolationAndOrder() throws {
         let database = try appDatabase()

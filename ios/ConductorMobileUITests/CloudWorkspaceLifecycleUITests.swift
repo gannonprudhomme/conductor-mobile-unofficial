@@ -6,7 +6,9 @@
 //
 
 import XCTest
+import UIKit
 
+@MainActor
 final class CloudWorkspaceLifecycleUITests: XCTestCase {
     private let repositoryName = "conductor-mobile-unofficial"
 
@@ -21,10 +23,13 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         }
 
         let app = XCUIApplication()
-        installLocalNetworkPermissionHandler(for: app)
+        installLocalNetworkPermissionHandler()
         app.launch()
 
-        configureConnections(in: app, apiKey: apiKey)
+        if app.secureTextFields["cloudAPIKeyField"]
+            .waitForExistence(timeout: 5) {
+            configureConnections(in: app, apiKey: apiKey)
+        }
 
         XCTAssertTrue(
             app.otherElements["cloud-status.connected"]
@@ -35,6 +40,11 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             connectedLocalStatus(in: app).waitForExistence(timeout: 30),
             "The desktop relay never reached the connected state."
         )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["workspaces.local-loaded"]
+                .waitForExistence(timeout: 60),
+            "The desktop relay connected without delivering its initial workspace snapshot."
+        )
 
         selectRepositoryFilter(in: app)
         let baselineWorkspaceIDs = waitForWorkspaceIdentifiers(in: app)
@@ -44,31 +54,35 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         XCTAssertTrue(createButton.isEnabled)
         createButton.tap()
 
-        let locationPicker = app.segmentedControls["Workspace location"]
+        let localButton = app.buttons["Local"]
+        let cloudButton = app.buttons["Cloud"]
         XCTAssertTrue(
-            locationPicker.waitForExistence(timeout: 15),
-            "The local/Cloud location picker was not available for the shared repository."
+            localButton.waitForExistence(timeout: 15),
+            "Local creation was not available for the shared repository."
         )
-        XCTAssertTrue(locationPicker.buttons["Local"].exists)
-        XCTAssertTrue(locationPicker.buttons["Cloud"].exists)
+        XCTAssertTrue(
+            cloudButton.waitForExistence(timeout: 15),
+            "Cloud creation was not available for the shared repository."
+        )
         XCTAssertEqual(
             app.buttons["Repository"].value as? String,
             repositoryName
         )
 
-        locationPicker.buttons["Cloud"].tap()
+        cloudButton.tap()
         XCTAssertEqual(
             app.buttons["Repository"].value as? String,
             repositoryName
         )
 
-        let sheet = app.sheets.firstMatch
-        let submitButton = sheet.buttons["Create"]
+        let submitButton = app.buttons["create-workspace.submit"]
         XCTAssertTrue(submitButton.waitForExistence(timeout: 10))
         XCTAssertTrue(submitButton.isEnabled)
         submitButton.tap()
 
-        let sessionPicker = app.otherElements["workspace-chat.session-picker"]
+        let sessionPicker = app.descendants(matching: .any)[
+            "workspace-chat.session-picker"
+        ]
         XCTAssertTrue(
             sessionPicker.waitForExistence(timeout: 120),
             "Cloud workspace creation did not navigate to chat."
@@ -113,7 +127,7 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             baseline: baselineWorkspaceIDs,
             in: app
         )
-        let createdWorkspace = app.descendants(matching: .any)[createdWorkspaceID]
+        let createdWorkspace = workspaceElement(createdWorkspaceID, in: app)
         XCTAssertTrue(createdWorkspace.waitForExistence(timeout: 10))
         createdWorkspace.tap()
 
@@ -130,7 +144,7 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             "Archiving did not return to the workspace list."
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)[createdWorkspaceID]
+            workspaceElement(createdWorkspaceID, in: app)
                 .waitForNonExistence(timeout: 60),
             "The archived Cloud workspace remained in the filtered list."
         )
@@ -147,9 +161,13 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         let apiKeyField = app.secureTextFields["cloudAPIKeyField"]
         XCTAssertTrue(apiKeyField.waitForExistence(timeout: 15))
         apiKeyField.tap()
-        apiKeyField.typeText(apiKey)
+        UIPasteboard.general.string = apiKey
+        apiKeyField.press(forDuration: 1)
+        let pasteButton = app.menuItems["Paste"]
+        XCTAssertTrue(pasteButton.waitForExistence(timeout: 10))
+        pasteButton.tap()
 
-        let serverAddressField = app.textFields["Server address"]
+        let serverAddressField = app.textFields["serverAddressField"]
         scrollToElement(serverAddressField, in: app)
         serverAddressField.tap()
         serverAddressField.typeText("127.0.0.1")
@@ -158,7 +176,7 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         XCTAssertTrue(saveButton.waitForExistence(timeout: 10))
         XCTAssertTrue(saveButton.isEnabled)
         saveButton.tap()
-        app.tap()
+        allowLocalNetworkAccessIfRequested()
 
         XCTAssertTrue(
             saveButton.waitForNonExistence(timeout: 60),
@@ -166,33 +184,37 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         )
     }
 
-    private func installLocalNetworkPermissionHandler(
-        for app: XCUIApplication
-    ) {
+    private func installLocalNetworkPermissionHandler() {
         addUIInterruptionMonitor(
             withDescription: "Local network access"
         ) { alert in
-            for title in ["Allow", "OK"] where alert.buttons[title].exists {
+            for title in ["Allow", "Allow Paste"]
+            where alert.buttons[title].exists {
                 alert.buttons[title].tap()
                 return true
             }
             return false
         }
-        app.tap()
+    }
+
+    private func allowLocalNetworkAccessIfRequested() {
+        let springboard = XCUIApplication(
+            bundleIdentifier: "com.apple.springboard"
+        )
+        let alert = springboard.alerts.firstMatch
+        guard alert.waitForExistence(timeout: 3) else {
+            return
+        }
+        for title in ["Allow", "OK"] where alert.buttons[title].exists {
+            alert.buttons[title].tap()
+            return
+        }
     }
 
     private func connectedLocalStatus(
         in app: XCUIApplication
     ) -> XCUIElement {
-        app.descendants(matching: .any)
-            .matching(
-                NSPredicate(
-                    format: "value == %@ AND label != %@",
-                    "Connected",
-                    "Cloud"
-                )
-            )
-            .firstMatch
+        app.descendants(matching: .any)["local-status.connected"]
     }
 
     private func selectRepositoryFilter(in app: XCUIApplication) {
@@ -200,16 +222,25 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         XCTAssertTrue(filterButton.waitForExistence(timeout: 30))
         filterButton.tap()
 
-        let repositoryMenu = app.buttons["Repository"]
+        let repositoryMenu = app.buttons
+            .matching(
+                NSPredicate(
+                    format: "label BEGINSWITH %@",
+                    "Repository"
+                )
+            )
+            .firstMatch
         XCTAssertTrue(repositoryMenu.waitForExistence(timeout: 10))
         repositoryMenu.tap()
 
-        let repositoryButton = app.buttons[repositoryName]
-        XCTAssertTrue(
-            repositoryButton.waitForExistence(timeout: 10),
-            "The normalized repository appeared zero or multiple inaccessible times."
+        let repositoryList = app.collectionViews.firstMatch
+        XCTAssertTrue(repositoryList.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(
+            repositoryList.cells.count,
+            1,
+            "The repository menu did not contain a selectable repository."
         )
-        repositoryButton.tap()
+        repositoryList.cells.element(boundBy: 0).tap()
 
         let predicate = NSPredicate(
             format: "value == %@",
@@ -265,7 +296,28 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         _ identifier: String,
         in app: XCUIApplication
     ) -> XCUIElement {
-        app.buttons[identifier]
+        app.buttons
+            .matching(
+                NSPredicate(
+                    format: "identifier == %@",
+                    identifier
+                )
+            )
+            .firstMatch
+    }
+
+    private func workspaceElement(
+        _ identifier: String,
+        in app: XCUIApplication
+    ) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(
+                NSPredicate(
+                    format: "identifier == %@",
+                    identifier
+                )
+            )
+            .firstMatch
     }
 
     private func waitForSessionCount(

@@ -68,7 +68,11 @@ public enum CloudCanonicalID {
     }
 
     private static func component(_ value: String) -> String {
-        Data(value.utf8)
+        let normalizedValue = UUID(uuidString: value)?
+            .uuidString
+            .lowercased()
+            ?? value
+        return Data(normalizedValue.utf8)
             .base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "+", with: "-")

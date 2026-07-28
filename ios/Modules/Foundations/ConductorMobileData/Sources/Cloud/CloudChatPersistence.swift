@@ -169,6 +169,42 @@ public enum CloudChatPersistence {
         return canonicalSessions
     }
 
+    /// Applies Desktop-only visibility changes to Cloud canonical session rows.
+    ///
+    /// Raw Desktop identifiers are used only for matching and are never persisted as duplicates.
+    public static func reconcileSessionVisibility(
+        from desktopSessions: [Session],
+        canonicalWorkspaceID: Workspace.ID,
+        remoteWorkspaceID: Workspace.ID,
+        in database: Database
+    ) throws -> [Session] {
+        let desktopSessionsByID = Dictionary(
+            uniqueKeysWithValues: desktopSessions
+                .filter { $0.workspaceID == remoteWorkspaceID }
+                .map { ($0.id, $0) }
+        )
+        let metadata = try CloudSessionMetadata
+            .where { $0.workspaceID.eq(canonicalWorkspaceID) }
+            .order(by: \.listOrder)
+            .fetchAll(database)
+
+        var canonicalSessions: [Session] = []
+        for item in metadata {
+            guard var canonicalSession = try Session
+                .find(item.canonicalSessionID)
+                .fetchOne(database) else {
+                continue
+            }
+            if let desktopSession = desktopSessionsByID[item.cloudSessionID],
+               canonicalSession.isHidden != desktopSession.isHidden {
+                canonicalSession.isHidden = desktopSession.isHidden
+                try Session.upsert { canonicalSession }.execute(database)
+            }
+            canonicalSessions.append(canonicalSession)
+        }
+        return canonicalSessions
+    }
+
     public static func persist(
         _ update: CloudTranscriptUpdate,
         in database: Database

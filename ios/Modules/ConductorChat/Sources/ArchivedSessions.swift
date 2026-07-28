@@ -26,22 +26,48 @@ public struct ArchivedSessions: Sendable {
 
         public init(
             workspaceID: String,
+            source: WorkspaceSource = .desktop,
             sessions: [Session],
             activeSessions: [Session],
             mutationRoute: WorkspaceMutationRoute? = .desktop
         ) {
             self.mutationRoute = mutationRoute
-            self._activeSessions = FetchAll(
-                wrappedValue: activeSessions,
-                Session.where { $0.workspaceID.eq(workspaceID).and(!$0.isHidden) }
-            )
-            self._sessions = FetchAll(
-                wrappedValue: sessions,
-                Session
-                    .where { $0.workspaceID.eq(workspaceID).and($0.isHidden) }
-                    .order { $0.updatedAt.desc() },
-                animation: .default
-            )
+            self._activeSessions = if source == .cloud {
+                FetchAll(
+                    wrappedValue: activeSessions,
+                    CloudSessionMetadata.sessions(
+                        workspaceID: workspaceID,
+                        isHidden: false
+                    )
+                )
+            } else {
+                FetchAll(
+                    wrappedValue: activeSessions,
+                    Session.where {
+                        $0.workspaceID.eq(workspaceID).and(!$0.isHidden)
+                    }
+                )
+            }
+            self._sessions = if source == .cloud {
+                FetchAll(
+                    wrappedValue: sessions,
+                    CloudSessionMetadata.sessions(
+                        workspaceID: workspaceID,
+                        isHidden: true
+                    ),
+                    animation: .default
+                )
+            } else {
+                FetchAll(
+                    wrappedValue: sessions,
+                    Session
+                        .where {
+                            $0.workspaceID.eq(workspaceID).and($0.isHidden)
+                        }
+                        .order { $0.updatedAt.desc() },
+                    animation: .default
+                )
+            }
         }
 
         var canRestoreMoreSessions: Bool {

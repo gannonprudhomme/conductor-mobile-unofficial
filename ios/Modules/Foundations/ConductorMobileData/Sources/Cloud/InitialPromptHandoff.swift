@@ -50,7 +50,7 @@ public struct InitialPromptHandoff: Equatable, Identifiable, Sendable {
         canonicalSessionID: String,
         remoteSessionID: String,
         originalPrompt: String,
-        stableRemoteMessageID: String = UUID().uuidString,
+        stableRemoteMessageID: String = UUID().uuidString.lowercased(),
         sendAttemptID: UUID? = nil,
         installedDraftText: String? = nil,
         state: State = .ready,

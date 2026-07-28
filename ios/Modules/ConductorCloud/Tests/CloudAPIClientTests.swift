@@ -731,6 +731,80 @@ struct CloudAPIClientTests {
         _ = try? await observation.value
     }
 
+    @Test("A newly created session retries a transient not-found transcript")
+    func newSessionTranscriptRetriesNotFound() async throws {
+        let clock = TestClock()
+        let messageRequestCount = LockIsolated(0)
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.date.now = Date(timeIntervalSince1970: 0)
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let requestCount = messageRequestCount.withValue {
+                        $0 += 1
+                        return $0
+                    }
+                    if requestCount == 1 {
+                        return try testResponse(
+                            #"""
+                            {
+                              "code": "NOT_FOUND",
+                              "userMessage": "Session not found",
+                              "retryable": false
+                            }
+                            """#,
+                            for: request,
+                            statusCode: 404
+                        )
+                    }
+                    return try testResponse(
+                        page(data: "", offset: 0, hasMore: false),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { messageRequestCount.value == 1 }
+        await clock.advance(by: .seconds(1))
+        await waitForCloudCondition { updates.value.count == 1 }
+        #expect(messageRequestCount.value == 2)
+        #expect(updates.value.first?.kind == .complete)
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
     @Test("Complete transcript pages use offsets without cursors")
     func completeTranscriptPagination() async throws {
         let clock = TestClock()

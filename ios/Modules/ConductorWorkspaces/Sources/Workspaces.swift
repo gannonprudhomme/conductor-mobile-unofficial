@@ -948,26 +948,10 @@ public struct Workspaces: Sendable {
                 desktopClient.observeWorkspaces()
             } onValue: { snapshot in
                 try await database.write { db in
-                    try Repository
-                        .upsert { snapshot.repositories }
-                        .execute(db)
-                    try CloudWorkspacePersistence.persistDesktopWorkspaces(
-                        snapshot.workspaces.map(\.workspace),
+                    try CloudWorkspacePersistence.persistDesktopSnapshot(
+                        snapshot,
                         in: db
                     )
-
-                    // The desktop snapshot is authoritative for this source-specific table.
-                    try MobileWorkspaceState.delete().execute(db)
-                    try MobileWorkspaceState.upsert {
-                        snapshot.workspaces.map {
-                            MobileWorkspaceState(
-                                workspaceID: $0.workspace.id,
-                                isWorking: $0.isWorking,
-                                pullRequest: snapshot.pullRequests[$0.workspace.id]
-                            )
-                        }
-                    }
-                    .execute(db)
                 }
 
                 if isAwaitingInitialResponse {
@@ -1189,6 +1173,11 @@ public struct WorkspacesView: View {
 
         }
         .contentMargins(.top, 0)
+        .accessibilityIdentifier(
+            store.hasLocalConfiguration && !store.isLoadingWorkspaces
+                ? "workspaces.local-loaded"
+                : "workspaces"
+        )
         .listStyle(.plain)
         .animation(.default, value: store.sections)
         .listSectionSpacing(0)
@@ -1429,8 +1418,22 @@ public struct WorkspacesView: View {
                 }
                 .labelStyle(.conductorExtraSmall)
                 .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier(accessibilityIdentifier)
                 .accessibilityLabel(displayName)
                 .accessibilityValue(accessibilityValue)
+            }
+
+            private var accessibilityIdentifier: String {
+                switch status {
+                case .connected:
+                    "local-status.connected"
+
+                case .connecting:
+                    "local-status.connecting"
+
+                case .disconnected:
+                    "local-status.disconnected"
+                }
             }
 
             private var accessibilityValue: String {

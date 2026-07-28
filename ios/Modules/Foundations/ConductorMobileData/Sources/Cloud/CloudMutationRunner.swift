@@ -23,6 +23,11 @@ public struct CloudMutationRunner: Sendable {
 }
 
 extension CloudMutationRunner: DependencyKey {
+    public static let testValue = Self(
+        cancelAndAwait: { _, _ in },
+        start: { }
+    )
+
     public static var liveValue: Self {
         Self(
             cancelAndAwait: { accountID, credentialGeneration in
@@ -503,7 +508,13 @@ private actor LiveCloudMutationRunner {
                 expectedAccountID: attempt.accountID,
                 request: request
             )
-            guard response.id == request.sessionID else {
+            guard CloudCanonicalID.session(
+                accountID: attempt.accountID,
+                remoteSessionID: response.id
+            ) == CloudCanonicalID.session(
+                accountID: attempt.accountID,
+                remoteSessionID: request.sessionID
+            ) else {
                 throw CloudAPIClientError.invalidResponse
             }
 
