@@ -323,7 +323,7 @@ struct ChatTextField: View {
                 Circle()
                     .stroke(
                         Color.theme(.textSecondary).opacity(0.3),
-                        lineWidth: 3
+                        lineWidth: 2.5
                     )
 
                 if usage.fraction > 0 {
@@ -331,7 +331,7 @@ struct ChatTextField: View {
                         .trim(from: 0, to: CGFloat(usage.fraction))
                         .stroke(
                             Color.theme(.textSecondary),
-                            style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
                         )
                         .rotationEffect(.degrees(-90))
                 }
