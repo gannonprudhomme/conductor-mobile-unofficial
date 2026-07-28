@@ -955,8 +955,16 @@ struct ChatView: View {
                     statusLayout: statusLayout,
                     queuedMessagesStore: queuedMessagesStore
                 )
-                .frame(height: proxy.size.height, alignment: .bottom)
-                .clipped()
+                .fixedSize(
+                    horizontal: false,
+                    vertical: !queuedMessagesStore.isExpanded
+                )
+                .frame(
+                    height: queuedMessagesStore.isExpanded
+                        ? proxy.size.height
+                        : nil,
+                    alignment: .bottom
+                )
             }
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
         }
@@ -984,33 +992,15 @@ struct ChatView: View {
     ) -> some View {
         VStack(spacing: Self.overlaySpacing) {
             statusLayout {
-                if !store.isCloudHosted,
-                   store.connectionStatus != .connected {
-                    reconnecting
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                if shouldShowScrollDownButton || shouldShowReconnecting {
+                    controlRow(isExpanded: queuedMessagesStore.isExpanded)
                 }
 
-                if shouldShowScrollDownButton {
-                    scrollDownButton
-                        .padding(.leading, QueuedMessagesPresentation.horizontalPadding)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                if !queuedMessagesStore.displayedMessages.isEmpty {
-                    QueuedMessagesView(
-                        store: queuedMessagesStore,
-                        firstRowFrameChanged: firstQueuedRowFrameChanged
+                queuedMessagesView(queuedMessagesStore)
+                    .fixedSize(
+                        horizontal: !queuedMessagesStore.isExpanded,
+                        vertical: false
                     )
-                    .id(store.session.id)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .onGeometryChange(for: CGFloat.self) { geometry in
-                        geometry.size.height
-                    } action: { height in
-                        queuedMessagesHeight = height
-                    }
-                }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
 
@@ -1042,6 +1032,69 @@ struct ChatView: View {
         )
     }
 
+    private func controlRow(isExpanded: Bool) -> some View {
+        HStack(spacing: 0) {
+            Group {
+                if shouldShowScrollDownButton {
+                    scrollDownButton
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else {
+                    Color.clear
+                        .frame(height: 0)
+                }
+            }
+            .frame(
+                maxWidth: isExpanded ? .infinity : nil,
+                alignment: .leading
+            )
+
+            Group {
+                if shouldShowReconnecting {
+                    reconnecting
+                        .transition(.opacity)
+                } else {
+                    Color.clear
+                        .frame(height: 0)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Color.clear
+                .frame(maxWidth: isExpanded ? .infinity : 0)
+                .frame(height: 0)
+        }
+        .padding(
+            EdgeInsets(
+                top: 0,
+                leading: QueuedMessagesPresentation.horizontalPadding,
+                bottom: 0,
+                trailing: isExpanded
+                    ? QueuedMessagesPresentation.horizontalPadding
+                    : 0
+            )
+        )
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func queuedMessagesView(
+        _ queuedMessagesStore: StoreOf<QueuedMessages>
+    ) -> some View {
+        if !queuedMessagesStore.displayedMessages.isEmpty {
+            QueuedMessagesView(
+                store: queuedMessagesStore,
+                firstRowFrameChanged: firstQueuedRowFrameChanged
+            )
+            .id(store.session.id)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.size.height
+            } action: { height in
+                queuedMessagesHeight = height
+            }
+        }
+    }
+
     private var reconnecting: some View {
         Label {
             Text("Reconnecting")
@@ -1060,6 +1113,10 @@ struct ChatView: View {
         } action: { size in
             reconnectingSize = size
         }
+    }
+
+    private var shouldShowReconnecting: Bool {
+        !store.isCloudHosted && store.connectionStatus != .connected
     }
 
     private var scrollDownButton: some View {
@@ -1129,27 +1186,24 @@ struct ChatView: View {
         } else {
             CGFloat.zero
         }
-        let connectionHeight = if store.isCloudHosted
-            || store.connectionStatus == .connected {
-            CGFloat.zero
-        } else {
+        let connectionHeight = if shouldShowReconnecting {
             reconnectingSize.height
+        } else {
+            CGFloat.zero
         }
 
+        let controlHeight = max(buttonHeight, connectionHeight)
         let statusHeight = if queuedMessagesStore.isExpanded {
-            buttonHeight
+            controlHeight
                 + queueHeight
                 + (
-                    buttonHeight > 0 && queueHeight > 0
+                    controlHeight > 0 && queueHeight > 0
                         ? Self.overlaySpacing
                         : 0
                 )
         } else {
-            max(buttonHeight, queueHeight)
+            max(max(buttonHeight, queueHeight), connectionHeight)
         }
-        let connectionSpacing = connectionHeight > 0
-            ? Self.overlaySpacing
-            : 0
         let statusSpacing = statusHeight > 0
             ? Self.overlaySpacing
             : 0
@@ -1159,7 +1213,6 @@ struct ChatView: View {
 
         return safeAreaBottom + composerHeight
             + statusSpacing + statusHeight
-            + connectionSpacing + connectionHeight
             + contentSpacing
     }
 

@@ -502,7 +502,7 @@ struct ChatCollectionViewTests {
         #expect(!coordinator.needsScrollToBottom)
     }
 
-    @Test("The scroll-down request animates toward the concrete last item")
+    @Test("The scroll-down request uses native animation toward the concrete last item")
     func scrollDownRequestAnimates() {
         #expect(
             ChatCollectionView.boundedBottomAnimationStartOffsetY(
@@ -544,6 +544,7 @@ struct ChatCollectionViewTests {
 
         #expect(collectionView.scrollToItemCalls.last?.position == .bottom)
         #expect(collectionView.scrollToItemCalls.last?.animated == false)
+        #expect(collectionView.contentOffsetCalls.contains { $0.animated })
     }
 
     @Test("Scroll events report crossings of the one-viewport visibility threshold")
@@ -603,8 +604,8 @@ struct ChatCollectionViewTests {
         #expect(visibilityChanges == [true, false])
     }
 
-    @Test("The scroll-down button waits out and overrides active momentum")
-    func scrollDownButtonOverridesMomentum() async {
+    @Test("The scroll-down button immediately overrides active momentum")
+    func scrollDownButtonOverridesMomentum() {
         let collectionView = TestCollectionView()
         let coordinator = ChatCollectionView.Coordinator()
         coordinator.connect(to: collectionView)
@@ -635,13 +636,9 @@ struct ChatCollectionViewTests {
             turnSummaryTapped: { _ in },
             in: collectionView
         )
-        collectionView.isDeceleratingForTests = false
-        for _ in 0..<3 {
-            await Task.yield()
-        }
 
         #expect(collectionView.stopScrollingCount == 1)
-        #expect(!collectionView.isDecelerating)
+        #expect(collectionView.isDecelerating)
         #expect(collectionView.scrollToItemCalls.last?.position == .bottom)
         #expect(collectionView.scrollToItemCalls.last?.animated == false)
     }

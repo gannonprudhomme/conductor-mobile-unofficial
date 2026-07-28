@@ -835,7 +835,15 @@ struct ChatTests {
                 deleting: [queuedMessage.id]
             )
         )
-        await store.receive(\.messagesUpdated)
+        while store.state.rows?.contains(where: { row in
+            guard case .humanMessage(let message) = row.content else {
+                return false
+            }
+            return message.id == updatedLateMessage.id
+                && message.content == updatedLateMessage.content
+        }) != true {
+            await store.receive(\.messagesUpdated)
+        }
         try expectHumanPresentationCaches(
             store.state,
             turnID: "turn-1",

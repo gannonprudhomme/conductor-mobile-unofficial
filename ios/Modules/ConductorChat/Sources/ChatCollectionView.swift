@@ -531,20 +531,8 @@ extension ChatCollectionView {
         /// A drag, inset change, immediate transition, or disconnect clears it before it can run.
         private var shouldAnimateNextBottomCorrection = false
 
-        /// Lets a button request replace inertial scrolling before UIKit clears `isDecelerating`.
-        private var shouldInterruptDecelerationForScrollToBottom = false
-
-        /// Keeps an explicit button request pending until UIKit has fully cleared inertial motion.
-        private var isWaitingForScrollInterruption = false
-
-        /// Cancels stale interruption waits when a newer request, drag, or disconnect takes over.
-        private var scrollInterruptionTask: Task<Void, Never>?
-
-        /// Suppresses ordinary layout feedback while a button-owned bottom jump is settling.
-        private var isExplicitBottomScrollActive = false
-
-        /// Owns the capped post-animation settle loop for a self-sizing transcript.
-        private var explicitBottomSettleTask: Task<Void, Never>?
+        /// The button request that owns the viewport until its native scroll reaches the bottom.
+        private var explicitBottomScrollRequest: Int?
 
         /// Protects reconciliation from stale diffable apply completions.
         private var snapshotApplicationState = SnapshotApplicationState()
@@ -626,6 +614,7 @@ extension ChatCollectionView {
         /// Invalidating the generation prevents an in-flight snapshot completion from touching a
         /// dismantled collection view.
         func disconnect() {
+            cancelExplicitBottomScroll()
             if let collectionView {
                 collectionView.panGestureRecognizer.removeTarget(
                     self,
@@ -652,13 +641,6 @@ extension ChatCollectionView {
             isAnimatingContentInset = false
             contentInsetAnimationGeneration &+= 1
             shouldAnimateNextBottomCorrection = false
-            shouldInterruptDecelerationForScrollToBottom = false
-            isWaitingForScrollInterruption = false
-            scrollInterruptionTask?.cancel()
-            scrollInterruptionTask = nil
-            isExplicitBottomScrollActive = false
-            explicitBottomSettleTask?.cancel()
-            explicitBottomSettleTask = nil
             initialScrollItemID = nil
             scrollDownButtonVisibilityChanged = { _ in }
             isScrollDownButtonVisible = false
@@ -699,17 +681,11 @@ extension ChatCollectionView {
             let shouldScrollToBottom = self.scrollToBottomRequest != scrollToBottomRequest
             let isScrollDownButtonRequest = self.animatedScrollToBottomRequest
                 != animatedScrollToBottomRequest
-            let shouldWaitForScrollInterruption = shouldScrollToBottom
-                && isScrollDownButtonRequest
-                && collectionView.isDecelerating
-                && !collectionView.isTracking
-                && !collectionView.isDragging
             if shouldScrollToBottom, isScrollDownButtonRequest {
-                explicitBottomSettleTask?.cancel()
-                explicitBottomSettleTask = nil
-                isExplicitBottomScrollActive = true
-                shouldInterruptDecelerationForScrollToBottom = true
-                stopDecelerationForScrollDownRequest(in: collectionView)
+                beginExplicitBottomScroll(
+                    request: animatedScrollToBottomRequest,
+                    in: collectionView
+                )
             }
             let shouldAnimateScrollRequest = shouldScrollToBottom
                 && isScrollDownButtonRequest
@@ -723,15 +699,14 @@ extension ChatCollectionView {
             self.scrollToBottomRequest = scrollToBottomRequest
             self.animatedScrollToBottomRequest = animatedScrollToBottomRequest
             if shouldScrollToBottom {
-                stopNativeScrollAnimation(in: collectionView)
+                if !isScrollDownButtonRequest {
+                    stopNativeScrollAnimation(in: collectionView)
+                }
                 shouldAnimateNextBottomCorrection = shouldAnimateScrollRequest
                 scrollPolicy.scrollToBottomRequested()
                 needsScrollToBottom = true
                 shouldConsumeScrollToBottomRequest = isScrollDownButtonRequest
                 viewportAnchor = nil
-            }
-            if shouldWaitForScrollInterruption {
-                scheduleScrollAfterInterruption(in: collectionView)
             }
 
             let previousRows = renderedRows
@@ -1017,19 +992,13 @@ extension ChatCollectionView {
 
         /// Cancels native bottom-follow when the user begins dragging.
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-            isWaitingForScrollInterruption = false
-            scrollInterruptionTask?.cancel()
-            scrollInterruptionTask = nil
-            isExplicitBottomScrollActive = false
-            explicitBottomSettleTask?.cancel()
-            explicitBottomSettleTask = nil
+            cancelExplicitBottomScroll()
             if let collectionView = scrollView as? UICollectionView {
                 stopNativeScrollAnimation(in: collectionView)
             }
             initialScrollItemID = nil
             needsScrollToBottom = false
             shouldConsumeScrollToBottomRequest = false
-            shouldInterruptDecelerationForScrollToBottom = false
             viewportAnchor = nil
         }
 
@@ -1077,9 +1046,12 @@ extension ChatCollectionView {
 
         /// Reconciles final geometry after UIKit completes an animated bottom correction.
         func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-            if isExplicitBottomScrollActive,
+            if let request = explicitBottomScrollRequest,
                let collectionView = scrollView as? UICollectionView {
-                scheduleExplicitBottomSettle(in: collectionView)
+                finishExplicitBottomScroll(
+                    request: request,
+                    in: collectionView
+                )
                 return
             }
 
@@ -1109,6 +1081,9 @@ extension ChatCollectionView {
             // Keep the correction pending until tracking, dragging, and deceleration are all false.
             guard !isInteracting(with: collectionView) else {
                 needsScrollCorrection = true
+                return
+            }
+            guard !isExplicitBottomScrollActive else {
                 return
             }
 
@@ -1157,19 +1132,17 @@ extension ChatCollectionView {
             in collectionView: UICollectionView,
             shouldLayoutIfNeeded: Bool = false
         ) {
-            guard !isWaitingForScrollInterruption else {
+            guard !isExplicitBottomScrollActive || needsScrollToBottom else {
                 needsScrollCorrection = true
                 return
             }
 
-            let shouldAllowDecelerationInterruption =
-                shouldInterruptDecelerationForScrollToBottom
             guard !snapshotApplicationState.isPending,
                   !isAnimatingContentInset,
                   !isInteracting(
                       with: collectionView,
                       shouldAllowDecelerationInterruption:
-                          shouldAllowDecelerationInterruption
+                          isExplicitBottomScrollActive
                   ) else {
                 needsScrollCorrection = true
                 return
@@ -1197,13 +1170,12 @@ extension ChatCollectionView {
             correctScrollPosition(
                 in: collectionView,
                 shouldAllowDecelerationInterruption:
-                    shouldAllowDecelerationInterruption
+                    isExplicitBottomScrollActive
             )
 
             if shouldConsumeScrollToBottomRequest {
                 needsScrollToBottom = false
                 shouldConsumeScrollToBottomRequest = false
-                shouldInterruptDecelerationForScrollToBottom = false
             }
 
             // Keep the initial target until UIKit confirms that it is both visible and bottom-pinned.
@@ -1238,10 +1210,20 @@ extension ChatCollectionView {
             }
 
             if scrollPolicy.isFollowingBottom, scrollPolicy.hasDisplayedContent {
+                let shouldAnimate = shouldAnimateNextBottomCorrection
+                shouldAnimateNextBottomCorrection = false
+                if isExplicitBottomScrollActive {
+                    scrollExplicitlyToBottom(
+                        animated: shouldAnimate,
+                        in: collectionView
+                    )
+                    return
+                }
+
                 // Layout can change repeatedly during a native animation. Do not replace that
                 // animation unless a newer row update supplied a fresh one-shot animation intent.
                 if collectionView.isScrollAnimating,
-                   !shouldAnimateNextBottomCorrection {
+                   !shouldAnimate {
                     return
                 }
 
@@ -1253,8 +1235,6 @@ extension ChatCollectionView {
 
                 // Consume before setting the offset so delegate/layout reentrancy cannot reuse the
                 // request for a second animation.
-                let shouldAnimate = shouldAnimateNextBottomCorrection
-                shouldAnimateNextBottomCorrection = false
                 if shouldAnimate,
                    animateFinalViewportToLastItem(in: collectionView) {
                     return
@@ -1264,9 +1244,6 @@ extension ChatCollectionView {
                     animated: false,
                     in: collectionView
                 )
-                if isExplicitBottomScrollActive {
-                    scheduleExplicitBottomSettle(in: collectionView)
-                }
             } else if let viewportAnchor {
                 // Viewport preservation is always immediate: the user should not see compensation
                 // for rows inserted, removed, expanded, or resized outside the viewport.
@@ -1278,6 +1255,9 @@ extension ChatCollectionView {
         /// Clears the one-shot intent and stops an active programmatic content-offset animation.
         private func stopNativeScrollAnimation(in collectionView: UICollectionView) {
             shouldAnimateNextBottomCorrection = false
+            guard !isExplicitBottomScrollActive else {
+                return
+            }
             if collectionView.isScrollAnimating {
                 performCoordinatorOffsetChange {
                     collectionView.stopScrollingAndZooming()
@@ -1285,54 +1265,98 @@ extension ChatCollectionView {
             }
         }
 
-        /// Stops inertial scrolling so an explicit button request can begin immediately.
-        private func stopDecelerationForScrollDownRequest(
+        /// Whether the button currently owns all viewport correction.
+        private var isExplicitBottomScrollActive: Bool {
+            explicitBottomScrollRequest != nil
+        }
+
+        /// Replaces native inertia immediately and makes the button the viewport owner.
+        private func beginExplicitBottomScroll(
+            request: Int,
             in collectionView: UICollectionView
         ) {
-            guard collectionView.isDecelerating,
-                  !collectionView.isTracking,
-                  !collectionView.isDragging else {
-                return
-            }
-
+            let interruptedOffset = collectionView.contentOffset
+            cancelExplicitBottomScroll()
+            explicitBottomScrollRequest = request
             performCoordinatorOffsetChange {
                 collectionView.stopScrollingAndZooming()
+                collectionView.setContentOffset(interruptedOffset, animated: false)
             }
         }
 
-        /// Waits for UIKit's stopped deceleration and spring animations before moving the viewport.
-        private func scheduleScrollAfterInterruption(
+        /// Stops only the button-owned animation; ordinary follow behavior remains independent.
+        private func cancelExplicitBottomScroll() {
+            explicitBottomScrollRequest = nil
+        }
+
+        /// Resolves the real bottom, then lets UIKit animate the final laid-out viewport.
+        private func scrollExplicitlyToBottom(
+            animated: Bool,
             in collectionView: UICollectionView
         ) {
-            scrollInterruptionTask?.cancel()
-            isWaitingForScrollInterruption = true
-            scrollInterruptionTask = Task { @MainActor [weak self, weak collectionView] in
-                guard let self, let collectionView else {
-                    return
-                }
+            guard let request = explicitBottomScrollRequest else {
+                return
+            }
+            guard animated,
+                  let bottomOffsetY = prepareFinalViewport(in: collectionView),
+                  abs(collectionView.contentOffset.y - bottomOffsetY) > 0.5 else {
+                finishExplicitBottomScroll(
+                    request: request,
+                    in: collectionView
+                )
+                return
+            }
 
-                for _ in 0..<30 {
-                    guard !Task.isCancelled else {
-                        return
-                    }
-                    guard collectionView.isTracking
-                        || collectionView.isDragging
-                        || collectionView.isDecelerating
-                        || collectionView.isScrollAnimating else {
-                        break
-                    }
-                    try? await Task.sleep(for: .milliseconds(16))
-                }
+            setContentOffsetY(
+                bottomOffsetY,
+                animated: true,
+                in: collectionView
+            )
+        }
 
-                guard !Task.isCancelled,
-                      needsScrollToBottom else {
-                    return
+        /// Performs one final concrete-item correction after the bounded animation completes.
+        func finishExplicitBottomScroll(
+            request: Int?,
+            in collectionView: UICollectionView
+        ) {
+            guard let request,
+                  explicitBottomScrollRequest == request else {
+                return
+            }
+
+            positionAtConcreteBottom(in: collectionView)
+            explicitBottomScrollRequest = nil
+            needsScrollCorrection = false
+            updateBottomFollowState(for: collectionView)
+            updateScrollDownButtonVisibility(
+                for: collectionView,
+                shouldUpdateDuringAnimation: true
+            )
+        }
+
+        /// Resolves the concrete final item and exact inset-adjusted bottom synchronously.
+        private func positionAtConcreteBottom(
+            in collectionView: UICollectionView
+        ) {
+            performCoordinatorOffsetChange {
+                if let indexPath = lastItemIndexPath() {
+                    collectionView.scrollToItem(
+                        at: indexPath,
+                        at: .bottom,
+                        animated: false
+                    )
                 }
-                isWaitingForScrollInterruption = false
-                scrollInterruptionTask = nil
-                reconcileScrollPosition(
-                    in: collectionView,
-                    shouldLayoutIfNeeded: true
+                collectionView.layoutIfNeeded()
+                collectionView.setContentOffset(
+                    CGPoint(
+                        x: collectionView.contentOffset.x,
+                        y: ChatCollectionView.bottomOffsetY(
+                            contentHeight: collectionView.contentSize.height,
+                            boundsHeight: collectionView.bounds.height,
+                            adjustedContentInset: collectionView.adjustedContentInset
+                        )
+                    ),
+                    animated: false
                 )
             }
         }
@@ -1368,8 +1392,24 @@ extension ChatCollectionView {
         private func animateFinalViewportToLastItem(
             in collectionView: UICollectionView
         ) -> Bool {
-            guard let indexPath = lastItemIndexPath() else {
+            guard let bottomOffsetY = prepareFinalViewport(in: collectionView) else {
                 return false
+            }
+
+            setContentOffsetY(
+                bottomOffsetY,
+                animated: true,
+                in: collectionView
+            )
+            return true
+        }
+
+        /// Jumps to the concrete final item and returns the resolved bottom for a bounded animation.
+        private func prepareFinalViewport(
+            in collectionView: UICollectionView
+        ) -> CGFloat? {
+            guard let indexPath = lastItemIndexPath() else {
+                return nil
             }
 
             let previousOffsetY = collectionView.contentOffset.y
@@ -1400,17 +1440,11 @@ extension ChatCollectionView {
                     )
             }
 
-            let bottomOffsetY = ChatCollectionView.bottomOffsetY(
+            return ChatCollectionView.bottomOffsetY(
                 contentHeight: collectionView.contentSize.height,
                 boundsHeight: collectionView.bounds.height,
                 adjustedContentInset: collectionView.adjustedContentInset
             )
-            setContentOffsetY(
-                bottomOffsetY,
-                animated: true,
-                in: collectionView
-            )
-            return true
         }
 
         /// Returns the current final item's stable diffable index path.
@@ -1420,74 +1454,6 @@ extension ChatCollectionView {
                 return nil
             }
             return dataSource.indexPath(for: itemID)
-        }
-
-        /// Lets self-sizing settle without feeding each layout pass back into another correction.
-        private func scheduleExplicitBottomSettle(
-            in collectionView: UICollectionView
-        ) {
-            explicitBottomSettleTask?.cancel()
-            explicitBottomSettleTask = Task { @MainActor [weak self, weak collectionView] in
-                guard let self, let collectionView else {
-                    return
-                }
-
-                for _ in 0..<8 {
-                    guard !Task.isCancelled,
-                          !isInteracting(with: collectionView) else {
-                        return
-                    }
-                    try? await Task.sleep(for: .milliseconds(32))
-                    guard let indexPath = lastItemIndexPath() else {
-                        break
-                    }
-
-                    performCoordinatorOffsetChange {
-                        collectionView.scrollToItem(
-                            at: indexPath,
-                            at: .bottom,
-                            animated: false
-                        )
-                    }
-                    try? await Task.sleep(for: .milliseconds(32))
-
-                    let bottomOffsetY = ChatCollectionView.bottomOffsetY(
-                        contentHeight: collectionView.contentSize.height,
-                        boundsHeight: collectionView.bounds.height,
-                        adjustedContentInset: collectionView.adjustedContentInset
-                    )
-                    performCoordinatorOffsetChange {
-                        collectionView.setContentOffset(
-                            CGPoint(
-                                x: collectionView.contentOffset.x,
-                                y: bottomOffsetY
-                            ),
-                            animated: false
-                        )
-                    }
-                    try? await Task.sleep(for: .milliseconds(32))
-
-                    if ChatCollectionView.isBottomPinned(
-                        contentHeight: collectionView.contentSize.height,
-                        boundsHeight: collectionView.bounds.height,
-                        contentOffsetY: collectionView.contentOffset.y,
-                        adjustedContentInset: collectionView.adjustedContentInset
-                    ) {
-                        break
-                    }
-                }
-
-                guard !Task.isCancelled else {
-                    return
-                }
-                isExplicitBottomScrollActive = false
-                explicitBottomSettleTask = nil
-                updateBottomFollowState(for: collectionView)
-                updateScrollDownButtonVisibility(
-                    for: collectionView,
-                    shouldUpdateDuringAnimation: true
-                )
-            }
         }
 
         /// Captures visible row candidates and their exact intra-viewport offsets before an update.
