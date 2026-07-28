@@ -7,13 +7,14 @@
 
 import Combine
 import ComposableArchitecture
-import SharedConductorData
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
 import Logging
 import SQLiteData
+import SharedConductorData
 import SwiftUI
 import UIKit
 
@@ -87,6 +88,7 @@ public struct WorkspaceChat: Sendable {
             self.chat = session.map {
                 Chat.State(
                     session: $0,
+                    isCloudHosted: workspace.isCloudHosted,
                     selectedModel: selectedModel,
                     selectedReasoningEffort: selectedReasoningEffort,
                     shouldFocusMessageField: shouldFocusMessageField
@@ -96,6 +98,10 @@ public struct WorkspaceChat: Sendable {
 
         public var workspace: Workspace {
             workspaceWithRepository.workspace
+        }
+
+        var isCloudHosted: Bool {
+            workspace.isCloudHosted
         }
 
         var canRenameBranch: Bool {
@@ -163,6 +169,7 @@ public struct WorkspaceChat: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
@@ -184,7 +191,9 @@ public struct WorkspaceChat: Sendable {
                             .dropFirst()
                             .map(Action.activeSessionIDChanged)
                     },
-                    observeSessions(workspaceID: state.workspace.id)
+                    state.isCloudHosted
+                        ? observeCloudSessions(workspaceID: state.workspace.id)
+                        : observeDesktopSessions(workspaceID: state.workspace.id)
                 )
 
             case let .activeSessionIDChanged(activeSessionID):
@@ -199,10 +208,16 @@ public struct WorkspaceChat: Sendable {
                       state.chat?.sessionID != activeSessionID else {
                     return .none
                 }
-                state.chat = Chat.State(session: activeSession)
+                state.chat = Chat.State(
+                    session: activeSession,
+                    isCloudHosted: state.isCloudHosted
+                )
                 return .none
 
             case .archiveWorkspaceButtonTapped:
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 return .run { [workspaceID = state.workspace.id] send in
                     await send(
                         .archiveWorkspaceResponse(
@@ -224,6 +239,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .archivedSessionsButtonTapped:
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 state.destination = .archivedSessions(
                     ArchivedSessions.State(
                         workspaceID: state.workspace.id,
@@ -234,12 +252,15 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .renameBranchButtonTapped:
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 state.branchNameDraft = state.workspace.branch ?? ""
                 state.destination = .renameBranch
                 return .none
 
             case .renameBranchSubmitted:
-                guard state.canRenameBranch else {
+                guard !state.isCloudHosted, state.canRenameBranch else {
                     return .none
                 }
 
@@ -275,6 +296,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .closeSessionButtonTapped(session):
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 return .run { [workspaceID = state.workspace.id] send in
                     await send(
                         .closeSessionResponse(
@@ -334,7 +358,8 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .createSessionButtonTapped:
-                guard !state.isQueuedMessageEditLocked else {
+                guard !state.isCloudHosted,
+                      !state.isQueuedMessageEditLocked else {
                     return .none
                 }
                 guard state.activeSessions.count < 5 else {
@@ -367,6 +392,7 @@ public struct WorkspaceChat: Sendable {
                    state.chat?.sessionID != session.id {
                     state.chat = Chat.State(
                         session: session,
+                        isCloudHosted: state.isCloudHosted,
                         shouldFocusMessageField: true
                     )
                 }
@@ -391,6 +417,7 @@ public struct WorkspaceChat: Sendable {
                     if !state.isQueuedMessageEditLocked {
                         state.chat = Chat.State(
                             session: createdSession,
+                            isCloudHosted: state.isCloudHosted,
                             shouldFocusMessageField: true
                         )
                     }
@@ -403,13 +430,26 @@ public struct WorkspaceChat: Sendable {
                     currentChat: state.chat,
                     workspaceActiveSessionID: state.workspace.activeSessionID,
                     hasUserSelectedSession: state.hasUserSelectedSession,
-                    sessionIDAwaitingObservation: state.sessionIDAwaitingObservation
+                    sessionIDAwaitingObservation: state.sessionIDAwaitingObservation,
+                    isCloudHosted: state.isCloudHosted
                 )
                 state.isLoadingSessions = false
                 return .none
 
             case let .loadSessionsResponse(.failure(error)):
                 Logger.chat.error("Failed to load sessions: \(error)")
+                if state.isCloudHosted {
+                    state.isLoadingSessions = false
+                    state.destination = .alert(
+                        (error as? CloudAPIClientError)?
+                            .isAuthenticationFailure == true
+                            ? .cloudAuthenticationFailed
+                            : .failedToLoadCloudContent(
+                                message: error.localizedDescription
+                            )
+                    )
+                    return .none
+                }
                 guard !DesktopClientError.isConnectionFailure(error) else {
                     return .none
                 }
@@ -420,13 +460,18 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .renameSessionButtonTapped(session):
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 state.renamingSession = session
                 state.sessionTitleDraft = session.title ?? ""
                 state.destination = .renameSession
                 return .none
 
             case .renameSessionSubmitted:
-                guard state.canRenameSession, let session = state.renamingSession else {
+                guard !state.isCloudHosted,
+                      state.canRenameSession,
+                      let session = state.renamingSession else {
                     return .none
                 }
                 let title = state.sessionTitleDraft.trimmingCharacters(
@@ -474,6 +519,17 @@ public struct WorkspaceChat: Sendable {
                 )
 
             case let .chat(.loadMessagesFailed(error)):
+                if state.isCloudHosted {
+                    state.destination = .alert(
+                        (error as? CloudAPIClientError)?
+                            .isAuthenticationFailure == true
+                            ? .cloudAuthenticationFailed
+                            : .failedToLoadCloudContent(
+                                message: error.localizedDescription
+                            )
+                    )
+                    return .none
+                }
                 guard !DesktopClientError.isConnectionFailure(error) else {
                     return .none
                 }
@@ -599,7 +655,10 @@ public struct WorkspaceChat: Sendable {
                 guard state.chat?.sessionID != session.id else {
                     return .none
                 }
-                state.chat = Chat.State(session: session)
+                state.chat = Chat.State(
+                    session: session,
+                    isCloudHosted: state.isCloudHosted
+                )
                 return .none
 
             case let .workspaceMutationFailed(error):
@@ -613,6 +672,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .workspacePinnedButtonTapped:
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 let item = state.workspaceWithRepository
                 let isPinned = item.workspace.pinnedAt == nil
                 let previousPinnedAt = item.workspace.pinnedAt
@@ -646,6 +708,9 @@ public struct WorkspaceChat: Sendable {
                 }
 
             case let .workspaceStatusButtonTapped(status):
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 let item = state.workspaceWithRepository
                 guard item.workspace.status != status else {
                     return .none
@@ -680,6 +745,9 @@ public struct WorkspaceChat: Sendable {
                 }
 
             case .workspaceUnreadButtonTapped:
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 let item = state.workspaceWithRepository
                 let isUnread = (item.workspace.unread ?? 0) == 0
                 let previousUnread = item.workspace.unread
@@ -768,7 +836,8 @@ public struct WorkspaceChat: Sendable {
         currentChat: Chat.State?,
         workspaceActiveSessionID: Session.ID?,
         hasUserSelectedSession: Bool,
-        sessionIDAwaitingObservation: Session.ID?
+        sessionIDAwaitingObservation: Session.ID?,
+        isCloudHosted: Bool
     ) -> Chat.State? {
         if currentChat?.queuedMessages.isEditStartInFlight == true
             || currentChat?.queuedMessages.isEditing == true {
@@ -795,11 +864,18 @@ public struct WorkspaceChat: Sendable {
             guard !canReuseCurrentChat else {
                 return currentChat
             }
-            return session.map { Chat.State(session: $0) }
+            return session.map {
+                Chat.State(
+                    session: $0,
+                    isCloudHosted: isCloudHosted
+                )
+            }
         }
     }
 
-    private func observeSessions(workspaceID: String) -> Effect<Action> {
+    private func observeDesktopSessions(
+        workspaceID: String
+    ) -> Effect<Action> {
         .run { send in
             await StreamObservation.observe {
                 desktopClient.observeSessions(workspaceID: workspaceID)
@@ -822,12 +898,53 @@ public struct WorkspaceChat: Sendable {
         }
     }
 
+    private func observeCloudSessions(
+        workspaceID: String
+    ) -> Effect<Action> {
+        .run { send in
+            await StreamObservation.observe(
+                retrying: {
+                    cloudAPIClient.observeSessions(workspaceID)
+                },
+                retryDelays: [
+                    .seconds(1),
+                    .seconds(2),
+                    .seconds(4),
+                    .seconds(8),
+                    .seconds(16),
+                    .seconds(30),
+                ],
+                shouldRetry: CloudAPIClientError.shouldRetryObservation
+            ) { snapshot in
+                try await database.write { database in
+                    try CloudSessionPersistence.persist(
+                        snapshot,
+                        in: database
+                    )
+                }
+                let sessions = try await database.read { database in
+                    try Session
+                        .where { $0.workspaceID.eq(workspaceID) }
+                        .order(by: \.createdAt)
+                        .fetchAll(database)
+                }
+                await send(.loadSessionsResponse(.success(sessions)))
+                await send(.sessionSnapshotPersisted)
+            } onFailure: { error in
+                await send(.loadSessionsResponse(.failure(error)))
+            }
+        }
+    }
+
     private func markWorkspaceReadIfNeeded(
         _ state: State,
         selectedSession: Session?
     ) -> Effect<Action> {
-        guard (state.workspace.unread ?? 0) > 0
-              || (selectedSession?.unreadCount ?? 0) > 0 else {
+        guard !state.isCloudHosted,
+              (
+                  (state.workspace.unread ?? 0) > 0
+                      || (selectedSession?.unreadCount ?? 0) > 0
+              ) else {
             return .none
         }
 
@@ -875,6 +992,27 @@ private enum ConciseTranscriptCopyError: LocalizedError {
 extension WorkspaceChat.Destination.State: Equatable { }
 
 extension AlertState where Action == WorkspaceChat.Destination.Alert {
+    static var cloudAuthenticationFailed: Self {
+        AlertState {
+            TextState("Cloud authentication failed")
+        } message: {
+            TextState(
+                "The saved Conductor Cloud credential is no longer authorized. "
+                    + "Cached sessions and messages remain available."
+            )
+        }
+    }
+
+    static func failedToLoadCloudContent(message: String) -> Self {
+        AlertState {
+            TextState("Cloud content unavailable")
+        } message: {
+            TextState(
+                "\(message)\n\nCached sessions and messages remain available."
+            )
+        }
+    }
+
     static var maximumTabsReached: Self {
         AlertState {
             TextState("Maximum of 5 tabs allowed")
@@ -1068,13 +1206,16 @@ public struct WorkspaceChatView: View {
         }
         .navigationBarBackButtonHidden(store.isQueuedMessageEditLocked)
         .toolbar {
-            toolbarMenu
+            if !store.isCloudHosted {
+                toolbarMenu
+            }
         }
         .safeAreaBar(edge: .top) {
             SessionPicker(
                 sessions: store.activeSessions,
                 selectedSessionID: store.chat?.sessionID,
                 isCreatingSession: store.isCreatingSession,
+                isReadOnly: store.isCloudHosted,
                 animatesSessionChanges: store.hasPersistedInitialSessionSnapshot,
                 height: sessionPickerHeight
             ) { session in
@@ -1325,6 +1466,7 @@ public struct WorkspaceChatView: View {
         let sessions: [Session]
         let selectedSessionID: Session.ID?
         let isCreatingSession: Bool
+        let isReadOnly: Bool
         let animatesSessionChanges: Bool
         let height: CGFloat
         let action: @MainActor (Session) -> Void
@@ -1340,7 +1482,8 @@ public struct WorkspaceChatView: View {
                     ForEach(sessions) { session in
                         SessionButton(
                             session: session,
-                            isSelected: session.id == selectedSessionID
+                            isSelected: session.id == selectedSessionID,
+                            isReadOnly: isReadOnly
                         ) {
                             action(session)
                         } rename: {
@@ -1355,12 +1498,14 @@ public struct WorkspaceChatView: View {
                         .padding(.leading, session.id == sessions.first?.id ? 16 : 0)
                     }
 
-                    NewSessionButton(
-                        isCreatingSession: isCreatingSession,
-                        action: createSession
-                    )
-                    .padding(.leading, sessions.isEmpty ? 16 : 0)
-                    .padding(.trailing, 16)
+                    if !isReadOnly {
+                        NewSessionButton(
+                            isCreatingSession: isCreatingSession,
+                            action: createSession
+                        )
+                        .padding(.leading, sessions.isEmpty ? 16 : 0)
+                        .padding(.trailing, 16)
+                    }
                 }
                 .scrollTargetLayout()
                 .animation(
@@ -1431,6 +1576,7 @@ public struct WorkspaceChatView: View {
     private struct SessionButton: View {
         let session: Session
         let isSelected: Bool
+        let isReadOnly: Bool
         let action: @MainActor () -> Void
         let rename: @MainActor () -> Void
         let copyConciseTranscript: @MainActor () -> Void
@@ -1470,13 +1616,15 @@ public struct WorkspaceChatView: View {
             )
             .accessibilityIdentifier("workspace-chat.session.\(session.id)")
             .contextMenu {
-                Button {
-                    rename()
-                } label: {
-                    Label {
-                        Text("Rename chat")
-                    } icon: {
-                        ColoredMenuImage(Lucide.pencil)
+                if !isReadOnly {
+                    Button {
+                        rename()
+                    } label: {
+                        Label {
+                            Text("Rename chat")
+                        } icon: {
+                            ColoredMenuImage(Lucide.pencil)
+                        }
                     }
                 }
 
@@ -1490,13 +1638,18 @@ public struct WorkspaceChatView: View {
                     }
                 }
 
-                Button(role: .destructive) {
-                    close()
-                } label: {
-                    Label {
-                        Text("Close tab")
-                    } icon: {
-                        ColoredMenuImage(Lucide.x, color: .theme(.destructive))
+                if !isReadOnly {
+                    Button(role: .destructive) {
+                        close()
+                    } label: {
+                        Label {
+                            Text("Close tab")
+                        } icon: {
+                            ColoredMenuImage(
+                                Lucide.x,
+                                color: .theme(.destructive)
+                            )
+                        }
                     }
                 }
             }

@@ -9,7 +9,7 @@ import XCTest
 
 final class CloudConnectAndBrowseUITests: XCTestCase {
     @MainActor
-    func testUnifiedRowsAndSettingsAreInteractive() {
+    func testCloudWorkspacesOpenReadOnlySessionsAndTranscripts() {
         let app = launch(fixture: "cloud-connect-and-browse")
 
         XCTAssertTrue(app.staticTexts["Conductor"].waitForExistence(timeout: 10))
@@ -28,29 +28,88 @@ final class CloudConnectAndBrowseUITests: XCTestCase {
             element("Working", in: app).waitForExistence(timeout: 10)
         )
 
-        let cloudOnlyRow = element("workspace-row.cloud-only", in: app)
+        let cloudOnlyRow = element("workspaces.workspace.cloud-only", in: app)
         XCTAssertTrue(cloudOnlyRow.waitForExistence(timeout: 10))
-        XCTAssertFalse(
-            app.buttons.matching(identifier: "workspace-row.cloud-only")
-                .firstMatch.exists
-        )
-        XCTAssertTrue(app.staticTexts["Conductor"].exists)
-
-        let draftRow = element("workspace-row.local-draft", in: app)
-        XCTAssertTrue(draftRow.waitForExistence(timeout: 10))
-        draftRow.tap()
+        cloudOnlyRow.tap()
         XCTAssertTrue(
-            app.staticTexts["Local draft fixture"].waitForExistence(timeout: 5)
+            app.staticTexts["Cloud only fixture"].waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(
+            element("workspace-chat.session.cloud-session-working", in: app)
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(
+            element("workspace-chat.session.cloud-session-idle", in: app)
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(
+            app.staticTexts["Inspect the Cloud workspace."]
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(app.staticTexts["I will inspect it now."].exists)
+        XCTAssertTrue(app.staticTexts["git status --short"].exists)
+        XCTAssertTrue(app.staticTexts["Working tree clean"].exists)
+        XCTAssertTrue(app.staticTexts["Synthetic Cloud fixture error"].exists)
+        XCTAssertTrue(
+            element("chat.cloud-read-only", in: app)
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(element("workspace-chat.new-session", in: app).exists)
+        XCTAssertFalse(element("chat.send", in: app).exists)
+        XCTAssertFalse(app.buttons["Workspace actions"].exists)
+
+        element("workspace-chat.session.cloud-session-idle", in: app).tap()
+        XCTAssertTrue(
+            app.staticTexts["Cached Cloud transcript"]
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(app.staticTexts["This session came from the Cloud API."].exists)
+        XCTAssertTrue(element("chat.cloud-read-only", in: app).exists)
+
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(cloudOnlyRow.waitForExistence(timeout: 5))
+        cloudOnlyRow.tap()
+        XCTAssertTrue(
+            app.staticTexts["Inspect the Cloud workspace."]
+                .waitForExistence(timeout: 10)
         )
         app.navigationBars.buttons.element(boundBy: 0).tap()
 
-        let workingRow = element("workspace-row.local-working", in: app)
+        let enrichedRow = element("workspaces.workspace.local-draft", in: app)
+        XCTAssertTrue(enrichedRow.waitForExistence(timeout: 5))
+        enrichedRow.tap()
+        XCTAssertTrue(
+            element("workspace-chat.session.enriched-cloud-session", in: app)
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(
+            app.staticTexts["Cached Cloud transcript"]
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(element("chat.cloud-read-only", in: app).exists)
+        XCTAssertFalse(element("workspace-chat.new-session", in: app).exists)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+
+        let workingRow = element("workspaces.workspace.local-working", in: app)
         XCTAssertTrue(workingRow.waitForExistence(timeout: 5))
         workingRow.tap()
         XCTAssertTrue(
             app.staticTexts["Local working fixture"].waitForExistence(timeout: 5)
         )
+        XCTAssertTrue(
+            app.staticTexts["Local controls remain available."]
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(element("workspace-chat.new-session", in: app).exists)
+        XCTAssertTrue(element("chat.send", in: app).exists)
+        XCTAssertTrue(app.buttons["Workspace actions"].exists)
+        XCTAssertFalse(element("chat.cloud-read-only", in: app).exists)
         app.navigationBars.buttons.element(boundBy: 0).tap()
+    }
+
+    @MainActor
+    func testCloudAndLocalSettingsAreInteractive() {
+        let app = launch(fixture: "cloud-connect-and-browse")
 
         app.buttons["Settings"].tap()
         let cloudHeader = app.staticTexts["Conductor Cloud"]
@@ -88,7 +147,7 @@ final class CloudConnectAndBrowseUITests: XCTestCase {
         )
         XCTAssertTrue(element("Cloud", in: loadingApp).exists)
         XCTAssertTrue(
-            element("workspace-row.cloud-only", in: loadingApp)
+            element("workspaces.workspace.cloud-only", in: loadingApp)
                 .waitForExistence(timeout: 10)
         )
         XCTAssertFalse(element("MacBook Pro", in: loadingApp).exists)
@@ -117,7 +176,7 @@ final class CloudConnectAndBrowseUITests: XCTestCase {
         XCTAssertFalse(element("cloud-status.failed", in: app).exists)
         XCTAssertFalse(element("Cloud", in: app).exists)
 
-        let draftRow = element("workspace-row.local-draft", in: app)
+        let draftRow = element("workspaces.workspace.local-draft", in: app)
         XCTAssertTrue(draftRow.waitForExistence(timeout: 10))
         draftRow.tap()
         XCTAssertTrue(

@@ -64,30 +64,41 @@ struct WorkspaceRow: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier(accessibilityIdentifier)
             .contextMenu {
-                contextMenu
+                if isCloudHosted {
+                    Button {
+                        action(.open)
+                    } label: {
+                        Label("Open", systemImage: "arrow.right")
+                    }
+                } else {
+                    contextMenu
+                }
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button {
-                    action(.toggleUnread)
-                } label: {
-                    Label(
-                        isUnread ? "Mark as read" : "Mark as unread",
-                        systemImage: isUnread ? "envelope.open" : "envelope"
-                    )
+                if !isCloudHosted {
+                    Button {
+                        action(.toggleUnread)
+                    } label: {
+                        Label(
+                            isUnread ? "Mark as read" : "Mark as unread",
+                            systemImage: isUnread ? "envelope.open" : "envelope"
+                        )
+                    }
+                    .tint(.theme(.planBorder))
                 }
-                .tint(.theme(.planBorder))
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button(role: .destructive) {
-                    action(.archive)
-                } label: {
-                    Label("Archive", systemImage: "archivebox")
+                if !isCloudHosted {
+                    Button(role: .destructive) {
+                        action(.archive)
+                    } label: {
+                        Label("Archive", systemImage: "archivebox")
+                    }
                 }
             }
         } else {
             rowLabel
                 .accessibilityIdentifier(accessibilityIdentifier)
-                .accessibilityHint("Cloud workspace details are not available in this version.")
         }
     }
 

@@ -308,6 +308,65 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Create cloud session metadata") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_session_metadata" (
+              "session_id" TEXT PRIMARY KEY
+                REFERENCES "sessions" ("id") ON DELETE CASCADE,
+              "workspace_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "last_seen_generation" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_session_metadata_workspace_id"
+            ON "cloud_session_metadata" ("workspace_id");
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_session_metadata_account_id"
+            ON "cloud_session_metadata" ("account_id");
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create cloud message metadata") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_message_metadata" (
+              "message_id" TEXT PRIMARY KEY
+                REFERENCES "session_messages" ("id") ON DELETE CASCADE,
+              "session_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "source_message_id" TEXT NOT NULL,
+              "last_seen_generation" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_message_metadata_session_id"
+            ON "cloud_message_metadata" ("session_id");
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_message_metadata_account_id"
+            ON "cloud_message_metadata" ("account_id");
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }

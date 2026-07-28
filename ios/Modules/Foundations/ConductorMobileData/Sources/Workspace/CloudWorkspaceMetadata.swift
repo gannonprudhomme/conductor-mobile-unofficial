@@ -51,6 +51,13 @@ extension CloudWorkspaceMetadata {
         from database: Database
     ) throws {
         for item in metadata {
+            let sessionMetadata = try CloudSessionMetadata
+                .where { $0.workspaceID.eq(item.workspaceID) }
+                .fetchAll(database)
+            try CloudSessionPersistence.removeOwnedSessions(
+                sessionMetadata,
+                from: database
+            )
             try Self.find(item.id).delete().execute(database)
 
             let hasDesktopObservation = try MobileWorkspaceState

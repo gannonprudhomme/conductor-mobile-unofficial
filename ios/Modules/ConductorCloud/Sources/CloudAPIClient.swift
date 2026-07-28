@@ -13,6 +13,20 @@ import Foundation
 public struct CloudAPIClient: Sendable {
     /// `GET /me`
     public var getIdentity: @Sendable () async throws -> CloudIdentity
+    /// `GET /v0/workspaces/{workspaceID}`
+    public var getWorkspace: @Sendable (
+        _ workspaceID: CloudWorkspace.ID
+    ) async throws -> CloudWorkspace
+    public var observeSessions: @Sendable (
+        _ workspaceID: CloudWorkspace.ID
+    ) -> AsyncThrowingStream<CloudSessionSnapshot, any Error> = { _ in
+        .finished()
+    }
+    public var observeTranscript: @Sendable (
+        _ sessionID: CloudSession.ID
+    ) -> AsyncThrowingStream<CloudTranscriptSnapshot, any Error> = { _ in
+        .finished()
+    }
     public var observeWorkspaces: @Sendable () -> AsyncThrowingStream<
         CloudWorkspaceSnapshot,
         any Error
@@ -110,6 +124,25 @@ extension CloudAPIClient: DependencyKey {
                 path: ["me"],
                 apiKey: try await requiredAPIKey(from: apiKey)
             )
+        } getWorkspace: { workspaceID in
+            try await request(
+                CloudWorkspace.self,
+                baseURL: baseURL,
+                path: ["v0", "workspaces", workspaceID],
+                apiKey: try await requiredAPIKey(from: apiKey)
+            )
+        } observeSessions: { workspaceID in
+            sessionStream(
+                workspaceID: workspaceID,
+                baseURL: baseURL,
+                apiKey: apiKey
+            )
+        } observeTranscript: { sessionID in
+            transcriptStream(
+                sessionID: sessionID,
+                baseURL: baseURL,
+                apiKey: apiKey
+            )
         } observeWorkspaces: {
             workspaceStream(baseURL: baseURL, apiKey: apiKey)
         } validateIdentity: { candidateAPIKey in
@@ -119,6 +152,240 @@ extension CloudAPIClient: DependencyKey {
                 path: ["me"],
                 apiKey: candidateAPIKey
             )
+        }
+    }
+
+    private static func sessionStream(
+        workspaceID: CloudWorkspace.ID,
+        baseURL: URL,
+        apiKey: @escaping @Sendable () async throws -> String
+    ) -> AsyncThrowingStream<CloudSessionSnapshot, any Error> {
+        AsyncThrowingStream { continuation in
+            let observation = Task {
+                do {
+                    @Dependency(\.continuousClock) var clock
+
+                    var cycleIndex = 0
+                    var identity: CloudIdentity?
+                    var previousSnapshot: CloudSessionSnapshot?
+                    var sessions: [CloudSession] = []
+                    var statuses: [
+                        CloudSession.ID: CloudSessionStatusResponse
+                    ] = [:]
+                    var workspace: CloudWorkspace?
+
+                    while !Task.isCancelled {
+                        let cycleAPIKey = try await requiredAPIKey(from: apiKey)
+                        let cycleIdentity: CloudIdentity
+                        if let identity {
+                            cycleIdentity = identity
+                        } else {
+                            let loadedIdentity = try await request(
+                                CloudIdentity.self,
+                                baseURL: baseURL,
+                                path: ["me"],
+                                apiKey: cycleAPIKey
+                            )
+                            identity = loadedIdentity
+                            cycleIdentity = loadedIdentity
+                        }
+
+                        let shouldRefreshSessionList = workspace == nil
+                            || cycleIndex >= 4
+                        if shouldRefreshSessionList {
+                            async let loadedWorkspace = request(
+                                CloudWorkspace.self,
+                                baseURL: baseURL,
+                                path: ["v0", "workspaces", workspaceID],
+                                apiKey: cycleAPIKey
+                            )
+                            async let loadedSessions = allPages(
+                                pageSize: 100
+                            ) { limit, offset in
+                                try await request(
+                                    CloudPage<CloudSession>.self,
+                                    baseURL: baseURL,
+                                    path: [
+                                        "v0",
+                                        "workspaces",
+                                        workspaceID,
+                                        "sessions",
+                                    ],
+                                    queryItems: [
+                                        URLQueryItem(
+                                            name: "limit",
+                                            value: String(limit)
+                                        ),
+                                        URLQueryItem(
+                                            name: "offset",
+                                            value: String(offset)
+                                        ),
+                                    ],
+                                    apiKey: cycleAPIKey
+                                )
+                            }
+                            workspace = try await loadedWorkspace
+                            sessions = try await loadedSessions
+                            let sessionIDs = Set(sessions.map(\.id))
+                            statuses = statuses.filter {
+                                sessionIDs.contains($0.key)
+                            }
+                        }
+
+                        let statusIDs = sessions.compactMap { session in
+                            guard let status = statuses[session.id] else {
+                                return session.id
+                            }
+                            return status.status.requiresFrequentRefresh
+                                || shouldRefreshSessionList
+                                ? session.id
+                                : nil
+                        }
+                        let refreshedStatuses = try await fetchSessionStatuses(
+                            sessionIDs: statusIDs,
+                            workspaceID: workspaceID,
+                            baseURL: baseURL,
+                            apiKey: cycleAPIKey
+                        )
+                        statuses.merge(refreshedStatuses) { _, refreshed in
+                            refreshed
+                        }
+
+                        guard let workspace else {
+                            throw CloudAPIClientError.invalidResponse
+                        }
+                        let snapshot = CloudSessionSnapshot(
+                            accountID: cycleIdentity.cacheID,
+                            workspace: workspace,
+                            sessions: sessions,
+                            statuses: statuses
+                        )
+                        if snapshot != previousSnapshot {
+                            continuation.yield(snapshot)
+                            previousSnapshot = snapshot
+                        }
+
+                        cycleIndex = shouldRefreshSessionList
+                            ? 0
+                            : cycleIndex + 1
+                        try await clock.sleep(for: .milliseconds(2_500))
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                observation.cancel()
+            }
+        }
+    }
+
+    private static func transcriptStream(
+        sessionID: CloudSession.ID,
+        baseURL: URL,
+        apiKey: @escaping @Sendable () async throws -> String
+    ) -> AsyncThrowingStream<CloudTranscriptSnapshot, any Error> {
+        AsyncThrowingStream { continuation in
+            let observation = Task {
+                do {
+                    @Dependency(\.continuousClock) var clock
+
+                    let initialAPIKey = try await requiredAPIKey(from: apiKey)
+                    let identity = try await request(
+                        CloudIdentity.self,
+                        baseURL: baseURL,
+                        path: ["me"],
+                        apiKey: initialAPIKey
+                    )
+                    async let initialStatus = sessionStatus(
+                        sessionID: sessionID,
+                        baseURL: baseURL,
+                        apiKey: initialAPIKey
+                    )
+                    async let initialMessages = allTranscriptPages(
+                        sessionID: sessionID,
+                        baseURL: baseURL,
+                        apiKey: initialAPIKey
+                    )
+                    var status = try await initialStatus
+                    var previouslyYieldedStatus = status
+                    let normalizedInitialMessages = CloudTranscriptMessage
+                        .normalized(try await initialMessages)
+                    var cursor = normalizedInitialMessages.last?.id
+                    continuation.yield(
+                        CloudTranscriptSnapshot(
+                            accountID: identity.cacheID,
+                            sessionID: sessionID,
+                            status: status,
+                            messages: normalizedInitialMessages,
+                            isFullSnapshot: true
+                        )
+                    )
+
+                    var cycleIndex = 0
+                    while !Task.isCancelled {
+                        try await clock.sleep(
+                            for: status.status.requiresFrequentRefresh
+                                ? .milliseconds(2_500)
+                                : .seconds(10)
+                        )
+                        let cycleAPIKey = try await requiredAPIKey(from: apiKey)
+                        let shouldReloadFullTranscript = cycleIndex >= 12
+                            || cursor == nil
+                        async let refreshedStatus = sessionStatus(
+                            sessionID: sessionID,
+                            baseURL: baseURL,
+                            apiKey: cycleAPIKey
+                        )
+                        let refreshedMessages: [CloudTranscriptMessage]
+                        if shouldReloadFullTranscript {
+                            refreshedMessages = try await allTranscriptPages(
+                                sessionID: sessionID,
+                                baseURL: baseURL,
+                                apiKey: cycleAPIKey
+                            )
+                        } else {
+                            refreshedMessages = try await transcriptMessages(
+                                after: cursor,
+                                sessionID: sessionID,
+                                baseURL: baseURL,
+                                apiKey: cycleAPIKey
+                            )
+                        }
+                        status = try await refreshedStatus
+                        let normalizedMessages = CloudTranscriptMessage
+                            .normalized(refreshedMessages)
+                        cursor = normalizedMessages.last?.id ?? cursor
+                        let snapshot = CloudTranscriptSnapshot(
+                            accountID: identity.cacheID,
+                            sessionID: sessionID,
+                            status: status,
+                            messages: normalizedMessages,
+                            isFullSnapshot: shouldReloadFullTranscript
+                        )
+                        if !normalizedMessages.isEmpty
+                            || shouldReloadFullTranscript
+                            || status != previouslyYieldedStatus {
+                            continuation.yield(snapshot)
+                            previouslyYieldedStatus = status
+                        }
+                        cycleIndex = shouldReloadFullTranscript
+                            ? 0
+                            : cycleIndex + 1
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                observation.cancel()
+            }
         }
     }
 
@@ -341,6 +608,144 @@ extension CloudAPIClient: DependencyKey {
         return statuses
     }
 
+    private static func fetchSessionStatuses(
+        sessionIDs: [CloudSession.ID],
+        workspaceID: CloudWorkspace.ID,
+        baseURL: URL,
+        apiKey: String
+    ) async throws -> [
+        CloudSession.ID: CloudSessionStatusResponse
+    ] {
+        var statuses: [
+            CloudSession.ID: CloudSessionStatusResponse
+        ] = [:]
+
+        for batchStart in stride(from: 0, to: sessionIDs.count, by: 8) {
+            try Task.checkCancellation()
+            let batchEnd = min(batchStart + 8, sessionIDs.count)
+            let batch = sessionIDs[batchStart..<batchEnd]
+            let batchStatuses = try await withThrowingTaskGroup(
+                of: (
+                    CloudSession.ID,
+                    CloudSessionStatusResponse
+                )?.self
+            ) { group in
+                for sessionID in batch {
+                    group.addTask {
+                        do {
+                            let status = try await sessionStatus(
+                                sessionID: sessionID,
+                                baseURL: baseURL,
+                                apiKey: apiKey
+                            )
+                            guard status.workspaceID == workspaceID else {
+                                throw CloudAPIClientError.invalidResponse
+                            }
+                            return (sessionID, status)
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch let error as CloudAPIClientError
+                            where error.isAuthenticationFailure {
+                            throw error
+                        } catch {
+                            try Task.checkCancellation()
+                            return nil
+                        }
+                    }
+                }
+
+                var batchStatuses: [
+                    CloudSession.ID: CloudSessionStatusResponse
+                ] = [:]
+                for try await result in group {
+                    guard let (sessionID, status) = result else {
+                        continue
+                    }
+                    batchStatuses[sessionID] = status
+                }
+                return batchStatuses
+            }
+            statuses.merge(batchStatuses) { _, refreshed in refreshed }
+        }
+
+        return statuses
+    }
+
+    private static func sessionStatus(
+        sessionID: CloudSession.ID,
+        baseURL: URL,
+        apiKey: String
+    ) async throws -> CloudSessionStatusResponse {
+        let status = try await request(
+            CloudSessionStatusResponse.self,
+            baseURL: baseURL,
+            path: ["v0", "sessions", sessionID, "status"],
+            apiKey: apiKey
+        )
+        guard status.sessionID == sessionID else {
+            throw CloudAPIClientError.invalidResponse
+        }
+        return status
+    }
+
+    private static func allTranscriptPages(
+        sessionID: CloudSession.ID,
+        baseURL: URL,
+        apiKey: String
+    ) async throws -> [CloudTranscriptMessage] {
+        try await allPages(pageSize: 100) { limit, offset in
+            try await request(
+                CloudPage<CloudTranscriptMessage>.self,
+                baseURL: baseURL,
+                path: ["v0", "sessions", sessionID, "messages"],
+                queryItems: [
+                    URLQueryItem(name: "limit", value: String(limit)),
+                    URLQueryItem(name: "offset", value: String(offset)),
+                ],
+                apiKey: apiKey
+            )
+        }
+    }
+
+    private static func transcriptMessages(
+        after cursor: CloudTranscriptMessage.ID?,
+        sessionID: CloudSession.ID,
+        baseURL: URL,
+        apiKey: String
+    ) async throws -> [CloudTranscriptMessage] {
+        guard var cursor else {
+            return try await allTranscriptPages(
+                sessionID: sessionID,
+                baseURL: baseURL,
+                apiKey: apiKey
+            )
+        }
+        var messages: [CloudTranscriptMessage] = []
+
+        while true {
+            try Task.checkCancellation()
+            let page = try await request(
+                CloudPage<CloudTranscriptMessage>.self,
+                baseURL: baseURL,
+                path: ["v0", "sessions", sessionID, "messages"],
+                queryItems: [
+                    URLQueryItem(name: "limit", value: "100"),
+                    URLQueryItem(name: "after", value: cursor),
+                ],
+                apiKey: apiKey
+            )
+            messages.append(contentsOf: page.data)
+            guard page.hasMore else {
+                return messages
+            }
+            guard let nextCursor = page.data.last?.id,
+                  nextCursor != cursor else {
+                throw CloudAPIClientError.invalidResponse
+            }
+            cursor = nextCursor
+        }
+    }
+
     private static func requiredAPIKey(
         from loadAPIKey: @escaping @Sendable () async throws -> String
     ) async throws -> String {
@@ -425,6 +830,21 @@ private extension CloudWorkspaceStatusResponse.Status {
             false
 
         case .initializing, .updating:
+            true
+
+        default:
+            true
+        }
+    }
+}
+
+private extension CloudSessionStatusResponse.Status {
+    var requiresFrequentRefresh: Bool {
+        switch self {
+        case .idle, .error:
+            false
+
+        case .working:
             true
 
         default:

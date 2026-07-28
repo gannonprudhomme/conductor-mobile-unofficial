@@ -467,6 +467,9 @@ public struct Workspaces: Sendable {
                 return .none
 
             case let .workspaceArchiveButtonTapped(item):
+                guard !item.workspace.isCloudHosted else {
+                    return .none
+                }
                 return .run { send in
                     do {
                         try await desktopClient.archiveWorkspace(workspaceID: item.id)
@@ -489,6 +492,9 @@ public struct Workspaces: Sendable {
                 return .none
 
             case let .workspacePinnedButtonTapped(item):
+                guard !item.workspace.isCloudHosted else {
+                    return .none
+                }
                 let isPinned = item.workspace.pinnedAt == nil
                 let previousPinnedAt = item.workspace.pinnedAt
                 let pinnedAt = isPinned ? now.ISO8601Format() : nil
@@ -521,7 +527,8 @@ public struct Workspaces: Sendable {
                 }
 
             case let .workspaceStatusButtonTapped(item, status):
-                guard item.workspace.status != status else {
+                guard !item.workspace.isCloudHosted,
+                      item.workspace.status != status else {
                     return .none
                 }
                 let previousManualStatus = item.workspace.manualStatus
@@ -554,6 +561,9 @@ public struct Workspaces: Sendable {
                 }
 
             case let .workspaceUnreadButtonTapped(item):
+                guard !item.workspace.isCloudHosted else {
+                    return .none
+                }
                 let isUnread = (item.workspace.unread ?? 0) == 0
                 let previousUnread = item.workspace.unread
                 let unread = isUnread ? 1 : 0
@@ -1341,12 +1351,8 @@ public struct WorkspacesView: View {
         private func rowAction(
             for item: WorkspaceWithRepository
         ) -> (@MainActor (WorkspaceRowAction) -> Void)? {
-            if item.isCloudOnly {
-                return nil
-            } else {
-                return { workspaceRowAction in
-                    action(item, workspaceRowAction)
-                }
+            { workspaceRowAction in
+                action(item, workspaceRowAction)
             }
         }
     }

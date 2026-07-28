@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Foundation
@@ -19,6 +20,60 @@ import UIKit
 
 @MainActor
 struct ChatTests {
+    @Test("Cloud chat task and mutation actions never use desktop chat endpoints")
+    func cloudRoutingIsReadOnly() async throws {
+        let cloudObservations = LockIsolated(0)
+        let desktopCalls = LockIsolated(0)
+        let session = try makeSession(status: "working")
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.cloudAPIClient.observeTranscript = { _ in
+                    cloudObservations.withValue { $0 += 1 }
+                    return AsyncThrowingStream { _ in }
+                }
+                $0.desktopClient.fetchModelSettings = {
+                    desktopCalls.withValue { $0 += 1 }
+                    return .conductorDefaults
+                }
+                $0.desktopClient.observeMessages = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return AsyncThrowingStream { _ in }
+                }
+                $0.desktopClient.sendMessage = {
+                    _, _, _, _, _, _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return nil
+                }
+                $0.desktopClient.stopSession = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return nil
+                }
+            }
+            store.exhaustivity = .off
+            store.state.$messageDraft.withLock { $0 = "Do not send" }
+
+            let task = await store.send(.task)
+            while cloudObservations.value == 0 {
+                await Task.yield()
+            }
+            await store.send(.sendButtonTapped(.steer))
+            await store.send(.stopButtonTapped)
+
+            #expect(desktopCalls.value == 0)
+            await task.cancel()
+        }
+    }
+
     @Test("The rendered message field edits the chat draft")
     func messageFieldEditsDraft() async throws {
         try await withDependencies {

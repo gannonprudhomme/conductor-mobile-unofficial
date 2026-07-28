@@ -155,9 +155,12 @@ struct MainTests {
         }
     }
 
-    @Test("A Cloud-only workspace cannot navigate to unsupported chat")
-    func cloudOnlyWorkspaceDoesNotPushChat() async throws {
-        let workspace = Workspace.preview(id: "cloud-workspace")
+    @Test("A Cloud-hosted workspace pushes the shared chat feature")
+    func cloudWorkspacePushesChat() async throws {
+        let workspace = Workspace.preview(
+            id: "cloud-workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
         let item = WorkspaceWithRepository(
             workspace: workspace,
             repository: .preview(),
@@ -175,8 +178,13 @@ struct MainTests {
                 Main()
             }
 
-            await store.send(.workspaces(.workspaceTapped(item)))
-            #expect(store.state.path.isEmpty)
+            await store.send(.workspaces(.workspaceTapped(item))) {
+                $0.path.append(
+                    .workspaceChat(
+                        WorkspaceChat.State(workspaceWithRepository: item)
+                    )
+                )
+            }
         }
     }
 

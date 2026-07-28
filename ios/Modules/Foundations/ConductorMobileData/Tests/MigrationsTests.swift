@@ -23,6 +23,12 @@ struct MigrationsTests {
         let cloudWorkspaceMetadata = try database.read { db in
             try CloudWorkspaceMetadata.fetchCount(db)
         }
+        let cloudSessionMetadata = try database.read { db in
+            try CloudSessionMetadata.fetchCount(db)
+        }
+        let cloudMessageMetadata = try database.read { db in
+            try CloudMessageMetadata.fetchCount(db)
+        }
         let sessions = try database.read { db in
             try Session.fetchCount(db)
         }
@@ -63,10 +69,24 @@ struct MigrationsTests {
                 sql: "SELECT name FROM pragma_table_info('cloud_workspace_metadata')"
             )
         }
+        let cloudSessionMetadataColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('cloud_session_metadata')"
+            )
+        }
+        let cloudMessageMetadataColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('cloud_message_metadata')"
+            )
+        }
 
         #expect(workspaces == 0)
         #expect(mobileWorkspaceStates == 0)
         #expect(cloudWorkspaceMetadata == 0)
+        #expect(cloudSessionMetadata == 0)
+        #expect(cloudMessageMetadata == 0)
         #expect(sessions == 0)
         #expect(persistedUntitledSession?.title == nil)
         #expect(repositories == 0)
@@ -84,6 +104,25 @@ struct MigrationsTests {
         #expect(
             cloudWorkspaceMetadataColumns
                 == ["workspace_id", "account_id", "last_seen_generation"]
+        )
+        #expect(
+            cloudSessionMetadataColumns
+                == [
+                    "session_id",
+                    "workspace_id",
+                    "account_id",
+                    "last_seen_generation",
+                ]
+        )
+        #expect(
+            cloudMessageMetadataColumns
+                == [
+                    "message_id",
+                    "session_id",
+                    "account_id",
+                    "source_message_id",
+                    "last_seen_generation",
+                ]
         )
     }
 }

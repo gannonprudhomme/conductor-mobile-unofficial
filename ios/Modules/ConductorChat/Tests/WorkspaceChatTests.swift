@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import Foundation
 import SharedConductorData
@@ -15,6 +16,175 @@ import Testing
 
 @MainActor
 struct WorkspaceChatTests {
+    @Test("Cloud-hosted workspaces use Cloud sessions and reject desktop mutations")
+    func cloudSessionRoutingIsReadOnly() async throws {
+        let workspace = Workspace.preview(
+            id: "cloud-workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: nil
+        )
+        let cloudSession = CloudSession(
+            id: "cloud-session",
+            deepLink: CloudAPIClient.productionBaseURL,
+            name: "Cloud session",
+            model: Session.Model.gpt_5_6_sol.rawValue
+        )
+        let cloudObservations = LockIsolated(0)
+        let desktopCalls = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.insert { workspace }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: item
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.cloudAPIClient.observeSessions = { _ in
+                    cloudObservations.withValue { $0 += 1 }
+                    return AsyncThrowingStream { continuation in
+                        continuation.yield(
+                            CloudSessionSnapshot(
+                                accountID: "account",
+                                workspace: CloudWorkspace(
+                                    id: workspace.id,
+                                    name: "Cloud workspace",
+                                    createdAt: workspace.createdAt
+                                ),
+                                sessions: [cloudSession],
+                                statuses: [
+                                    cloudSession.id: CloudSessionStatusResponse(
+                                        workspaceID: workspace.id,
+                                        sessionID: cloudSession.id,
+                                        status: .idle,
+                                        updatedAt: workspace.updatedAt
+                                    ),
+                                ]
+                            )
+                        )
+                    }
+                }
+                $0.desktopClient.observeSessions = { _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return AsyncThrowingStream { _ in }
+                }
+                $0.desktopClient.archiveWorkspace = { _ in
+                    desktopCalls.withValue { $0 += 1 }
+                }
+                $0.desktopClient.closeSession = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                }
+                $0.desktopClient.createSession = { _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return .preview()
+                }
+                $0.desktopClient.renameSession = { _, _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                }
+                $0.desktopClient.renameWorkspaceBranch = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                }
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { _, _ in
+                    desktopCalls.withValue { $0 += 1 }
+                    return .hook
+                }
+            }
+            store.exhaustivity = .off
+
+            let task = await store.send(.task)
+            while cloudObservations.value == 0 {
+                await Task.yield()
+            }
+            await store.send(.archiveWorkspaceButtonTapped)
+            await store.send(.closeSessionButtonTapped(.preview()))
+            await store.send(.createSessionButtonTapped)
+            await store.send(.renameBranchButtonTapped)
+            await store.send(.renameSessionButtonTapped(.preview()))
+            await store.send(.workspacePinnedButtonTapped)
+            await store.send(.workspaceStatusButtonTapped(.done))
+            await store.send(.workspaceUnreadButtonTapped)
+
+            #expect(desktopCalls.value == 0)
+            await task.cancel()
+        }
+    }
+
+    @Test("Cloud authentication failures keep cached sessions visible")
+    func cloudAuthenticationFailureKeepsCachedSessions() async throws {
+        let workspace = Workspace.preview(
+            id: "cloud-workspace",
+            activeSessionID: "cached-session",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let cachedSession = try makeSession(
+            id: "cached-session",
+            workspaceID: workspace.id
+        )
+        let desktopObservations = LockIsolated(0)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.insert { workspace }.execute(database)
+                try Session.insert { cachedSession }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.cloudAPIClient.observeSessions = { _ in
+                    AsyncThrowingStream { continuation in
+                        continuation.finish(
+                            throwing: CloudAPIClientError.requestFailed(
+                                statusCode: 401,
+                                error: nil
+                            )
+                        )
+                    }
+                }
+                $0.desktopClient.observeSessions = { _ in
+                    desktopObservations.withValue { $0 += 1 }
+                    return AsyncThrowingStream { _ in }
+                }
+            }
+
+            #expect(store.state.activeSessions.map(\.id) == [cachedSession.id])
+            #expect(store.state.chat?.sessionID == cachedSession.id)
+            let task = await store.send(.task)
+            await store.receive(\.loadSessionsResponse.failure) {
+                $0.isLoadingSessions = false
+                $0.destination = .alert(.cloudAuthenticationFailed)
+            }
+            #expect(store.state.activeSessions.map(\.id) == [cachedSession.id])
+            #expect(store.state.chat?.sessionID == cachedSession.id)
+            #expect(desktopObservations.value == 0)
+            await task.cancel()
+        }
+    }
+
     @Test("Loading unread sessions marks their workspace as read")
     func loadingUnreadSessionsMarksWorkspaceAsRead() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active", unread: 1)

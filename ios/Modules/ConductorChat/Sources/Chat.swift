@@ -7,6 +7,7 @@
 
 import Combine
 import ComposableArchitecture
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
@@ -36,6 +37,7 @@ public struct Chat: Sendable {
         @FetchOne var session: Session
         var queuedMessages: QueuedMessages.State
         var isFastModeEnabled: Bool
+        var isCloudHosted: Bool
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
@@ -92,14 +94,19 @@ public struct Chat: Sendable {
         init(
             session: Session,
             messages: [Message] = [],
+            isCloudHosted: Bool = false,
             selectedModel: Session.Model? = nil,
             selectedReasoningEffort: Session.ReasoningEffort? = nil,
             shouldFocusMessageField: Bool = false
         ) {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
+            self.isCloudHosted = isCloudHosted
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
-            self.queuedMessages = QueuedMessages.State(session: session)
+            self.queuedMessages = QueuedMessages.State(
+                session: session,
+                isReadOnly: isCloudHosted
+            )
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -148,6 +155,7 @@ public struct Chat: Sendable {
                 && lhs.connectionStatus == rhs.connectionStatus
                 && lhs.mobileModelSettingsOverride == rhs.mobileModelSettingsOverride
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
+                && lhs.isCloudHosted == rhs.isCloudHosted
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -210,6 +218,7 @@ public struct Chat: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.desktopClient) var desktopClient
     private let messagePersistence = MessagePersistencePipeline()
 
@@ -225,6 +234,12 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
+                guard !state.isCloudHosted else {
+                    return .merge(
+                        observeCloudMessages(state),
+                        observePersistedMessages(state)
+                    )
+                }
                 return .merge(
                     .run { send in
                         guard let settings = try? await desktopClient.fetchModelSettings() else {
@@ -351,6 +366,9 @@ public struct Chat: Sendable {
                 return .none
 
             case let .sendButtonTapped(mode):
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 let message = state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !message.isEmpty, !state.isMessageSendInFlight else {
                     return .none
@@ -426,6 +444,9 @@ public struct Chat: Sendable {
                 }
 
             case .stopButtonTapped:
+                guard !state.isCloudHosted else {
+                    return .none
+                }
                 guard state.session.status == .working, !state.isStopInFlight else {
                     return .none
                 }
@@ -464,6 +485,10 @@ public struct Chat: Sendable {
                 return .none
 
             case .loadMessagesFailed:
+                if state.isCloudHosted {
+                    state.isLoadingMessages = false
+                    state.isMessageSnapshotEmpty = state.messages.isEmpty
+                }
                 return .none
 
             case .binding, .queuedMessages:
@@ -502,6 +527,63 @@ public struct Chat: Sendable {
                 }
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
+                await send(.loadMessagesFailed(error))
+            }
+        }
+    }
+
+    private func observeCloudMessages(_ state: State) -> Effect<Action> {
+        .run {
+            [
+                initiallyIsLoadingMessages = state.isLoadingMessages,
+                sessionID = state.session.id,
+            ] send in
+            var isAwaitingInitialResponse = initiallyIsLoadingMessages
+            await StreamObservation.observe(
+                retrying: {
+                    cloudAPIClient.observeTranscript(sessionID)
+                },
+                retryDelays: [
+                    .seconds(1),
+                    .seconds(2),
+                    .seconds(4),
+                    .seconds(8),
+                    .seconds(16),
+                    .seconds(30),
+                ],
+                shouldRetry: CloudAPIClientError.shouldRetryObservation
+            ) { snapshot in
+                let messages = try await database.write { database in
+                    try CloudMessagePersistence.persist(
+                        snapshot,
+                        in: database
+                    )
+                }
+                if isAwaitingInitialResponse, snapshot.isFullSnapshot {
+                    isAwaitingInitialResponse = false
+                    let persistedMessages = try await database.read { database in
+                        try Message
+                            .where { $0.sessionID.eq(sessionID) }
+                            .order {
+                                (
+                                    $0.sentAt.asc(nulls: .last),
+                                    $0.createdAt,
+                                    $0.id
+                                )
+                            }
+                            .fetchAll(database)
+                    }
+                    await send(
+                        .initialMessagesResponse(
+                            sessionID: sessionID,
+                            messages: persistedMessages.isEmpty
+                                ? messages
+                                : persistedMessages
+                        )
+                    )
+                }
+            } onFailure: { error in
+                Logger.chat.error("Failed to load Cloud messages: \(error)")
                 await send(.loadMessagesFailed(error))
             }
         }
@@ -753,33 +835,41 @@ struct ChatView: View {
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> some View {
         VStack(spacing: 8) {
-            statusLayout {
-                if store.connectionStatus != .connected {
-                    reconnecting
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                if !queuedMessagesStore.displayedMessages.isEmpty {
-                    QueuedMessagesView(
-                        store: queuedMessagesStore,
-                        firstRowFrameChanged: firstQueuedRowFrameChanged
-                    )
-                    .id(store.session.id)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            if store.isCloudHosted {
+                readOnlyCloudBanner
                     .onGeometryChange(for: CGFloat.self) { geometry in
                         geometry.size.height
                     } action: { height in
-                        queuedMessagesHeight = height
+                        composerHeight = height
+                    }
+            } else {
+                statusLayout {
+                    if store.connectionStatus != .connected {
+                        reconnecting
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    if !queuedMessagesStore.displayedMessages.isEmpty {
+                        QueuedMessagesView(
+                            store: queuedMessagesStore,
+                            firstRowFrameChanged: firstQueuedRowFrameChanged
+                        )
+                        .id(store.session.id)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            geometry.size.height
+                        } action: { height in
+                            queuedMessagesHeight = height
+                        }
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .trailing)
 
-            ChatComposer(
-                store: store,
-                queuedMessagesStore: queuedMessagesStore
-            )
+                ChatComposer(
+                    store: store,
+                    queuedMessagesStore: queuedMessagesStore
+                )
                 .layoutPriority(1)
                 .onGeometryChange(for: CGFloat.self) { geometry in
                     geometry.size.height
@@ -794,6 +884,7 @@ struct ChatView: View {
                         composerHeight = height
                     }
                 }
+            }
         }
         .animation(.default, value: store.connectionStatus)
         .animation(.default, value: queuedMessagesStore.displayedMessages)
@@ -801,6 +892,20 @@ struct ChatView: View {
             QueuedMessagesPresentation.disclosureAnimation,
             value: queuedMessagesStore.isEditing
         )
+    }
+
+    private var readOnlyCloudBanner: some View {
+        Text("Cloud conversation · Read-only")
+            .font(.theme(.small))
+            .foregroundStyle(.theme(.textSecondary))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(.theme(.background).opacity(0.95))
+            .overlay(alignment: .top) {
+                Divider()
+                    .overlay(.theme(.border))
+            }
+            .accessibilityIdentifier("chat.cloud-read-only")
     }
 
     private var reconnecting: some View {
@@ -848,6 +953,10 @@ struct ChatView: View {
         safeAreaBottom: CGFloat,
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> CGFloat {
+        guard !store.isCloudHosted else {
+            return safeAreaBottom + composerHeight
+        }
+
         let spacing: CGFloat = 8
 
         let queueHeight = if queuedMessagesStore.displayedMessages.isEmpty {

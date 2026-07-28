@@ -261,6 +261,48 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Cloud-hosted rows never call desktop mutation endpoints")
+    func cloudHostedRowsAreReadOnly() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let workspace = Workspace.preview(
+                id: "cloud-workspace",
+                hostingServerURL: Workspace.conductorCloudHostingServerURL,
+                unread: 1
+            )
+            let item = WorkspaceWithRepository(workspace: workspace)
+            let desktopMutationCount = LockIsolated(0)
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.desktopClient.archiveWorkspace = { _ in
+                    desktopMutationCount.withValue { $0 += 1 }
+                }
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    desktopMutationCount.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { _, _ in
+                    desktopMutationCount.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { _, _ in
+                    desktopMutationCount.withValue { $0 += 1 }
+                    return .hook
+                }
+            }
+
+            await store.send(.workspaceArchiveButtonTapped(item))
+            await store.send(.workspacePinnedButtonTapped(item))
+            await store.send(.workspaceStatusButtonTapped(item, .done))
+            await store.send(.workspaceUnreadButtonTapped(item))
+
+            #expect(desktopMutationCount.value == 0)
+        }
+    }
+
     @Test("Cloud reachability failures use concise alert copy")
     func cloudReachabilityAlertCopy() {
         let offlineFailure = Workspaces.CloudFailure.offline(

@@ -132,9 +132,6 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceTapped(item)):
-                    guard !item.isCloudOnly else {
-                        return .none
-                    }
                     state.path.append(
                         .workspaceChat(
                             WorkspaceChat.State(workspaceWithRepository: item)

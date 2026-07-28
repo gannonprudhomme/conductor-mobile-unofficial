@@ -68,6 +68,7 @@ public struct QueuedMessages: Sendable {
         var isEditInFlight = false
         var isEditStartInFlight = false
         var isExpanded = false
+        var isReadOnly: Bool
         var messageActionInFlightID: Message.ID?
         var isReorderInFlight = false
         var isResumeInFlight = false
@@ -104,7 +105,11 @@ public struct QueuedMessages: Sendable {
             session.id
         }
 
-        init(session: Session) {
+        init(
+            session: Session,
+            isReadOnly: Bool = false
+        ) {
+            self.isReadOnly = isReadOnly
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -185,6 +190,10 @@ public struct QueuedMessages: Sendable {
         BindingReducer()
 
         Reduce { state, action in
+            guard !state.isReadOnly else {
+                return .none
+            }
+
             switch action {
             case .task:
                 return observeMessages(state)

@@ -49,7 +49,29 @@ public enum CloudUITestScenario: String, Sendable {
         dependencies.cloudAPIClient.observeWorkspaces = {
             self.cloudObservation
         }
+        dependencies.cloudAPIClient.observeSessions = { workspaceID in
+            self.cloudSessionObservation(workspaceID: workspaceID)
+        }
+        dependencies.cloudAPIClient.observeTranscript = { sessionID in
+            self.cloudTranscriptObservation(sessionID: sessionID)
+        }
         dependencies.desktopClient.checkConnection = { _ in }
+        dependencies.desktopClient.fetchModelSettings = {
+            DesktopClient.ModelSettings(
+                defaultModel: .gpt_5_6_sol,
+                defaultReasoningEffort: .low,
+                isFastModeEnabled: false
+            )
+        }
+        dependencies.desktopClient.observeMessages = { workspaceID, sessionID in
+            self.desktopMessageObservation(
+                workspaceID: workspaceID,
+                sessionID: sessionID
+            )
+        }
+        dependencies.desktopClient.observeSessions = { workspaceID in
+            self.desktopSessionObservation(workspaceID: workspaceID)
+        }
         dependencies.desktopClient.observeWorkspaces = {
             self.desktopObservation
         }
@@ -170,6 +192,100 @@ public enum CloudUITestScenario: String, Sendable {
         }
     }
 
+    private func cloudSessionObservation(
+        workspaceID: Workspace.ID
+    ) -> AsyncThrowingStream<CloudSessionSnapshot, any Error> {
+        AsyncThrowingStream { continuation in
+            guard let workspace = fixtureCloudSnapshot.workspaces.first(where: {
+                $0.id == workspaceID
+            })?.workspace else {
+                continuation.finish(throwing: FixtureError.unexpectedCloudWorkspace)
+                return
+            }
+            let sessions = cloudSessions(workspaceID: workspaceID)
+            continuation.yield(
+                CloudSessionSnapshot(
+                    accountID: fixtureIdentity.cacheID,
+                    workspace: workspace,
+                    sessions: sessions,
+                    statuses: Dictionary(
+                        uniqueKeysWithValues: sessions.map {
+                            (
+                                $0.id,
+                                cloudSessionStatus(
+                                    sessionID: $0.id,
+                                    workspaceID: workspaceID
+                                )
+                            )
+                        }
+                    )
+                )
+            )
+        }
+    }
+
+    private func cloudTranscriptObservation(
+        sessionID: Session.ID
+    ) -> AsyncThrowingStream<CloudTranscriptSnapshot, any Error> {
+        AsyncThrowingStream { continuation in
+            guard let workspaceID = cloudWorkspaceID(sessionID: sessionID) else {
+                continuation.finish(throwing: FixtureError.unexpectedCloudSession)
+                return
+            }
+            continuation.yield(
+                CloudTranscriptSnapshot(
+                    accountID: fixtureIdentity.cacheID,
+                    sessionID: sessionID,
+                    status: cloudSessionStatus(
+                        sessionID: sessionID,
+                        workspaceID: workspaceID
+                    ),
+                    messages: cloudTranscript(sessionID: sessionID),
+                    isFullSnapshot: true
+                )
+            )
+        }
+    }
+
+    private func desktopSessionObservation(
+        workspaceID: Workspace.ID
+    ) -> AsyncThrowingStream<[Session], any Error> {
+        AsyncThrowingStream { continuation in
+            guard let workspace = fixtureWorkspace(workspaceID),
+                  !workspace.isCloudHosted else {
+                continuation.finish(throwing: FixtureError.desktopCloudFallback)
+                return
+            }
+            continuation.yield([localSession(workspaceID: workspaceID)])
+        }
+    }
+
+    private func desktopMessageObservation(
+        workspaceID: Workspace.ID,
+        sessionID: Session.ID
+    ) -> AsyncThrowingStream<MessageSyncEvent, any Error> {
+        AsyncThrowingStream { continuation in
+            guard let workspace = fixtureWorkspace(workspaceID),
+                  !workspace.isCloudHosted,
+                  sessionID == localSession(workspaceID: workspaceID).id else {
+                continuation.finish(throwing: FixtureError.desktopCloudFallback)
+                return
+            }
+            continuation.yield(
+                .snapshot([
+                    Message(
+                        id: "local-user-message",
+                        sessionID: sessionID,
+                        role: .user,
+                        content: "Local controls remain available.",
+                        createdAt: fixtureDate,
+                        sentAt: fixtureDate
+                    ),
+                ])
+            )
+        }
+    }
+
     private var fixtureRows: FixtureRows {
         let date = Date(timeIntervalSince1970: 1_783_555_200)
         let repository = Repository(
@@ -206,9 +322,6 @@ public enum CloudUITestScenario: String, Sendable {
             id: "local-working",
             createdAt: date,
             derivedStatus: Workspace.Status.inProgress.rawValue,
-            hostingServerURL: hasCloudConnection
-                ? Workspace.conductorCloudHostingServerURL
-                : nil,
             repositoryID: repository.id,
             state: .ready,
             updatedAt: date.addingTimeInterval(1),
@@ -224,7 +337,7 @@ public enum CloudUITestScenario: String, Sendable {
                 : [localDraftWorkspace, localWorkingWorkspace]
             : [cloudOnlyWorkspace]
         let cloudMetadata = hasCloudConnection
-            ? workspaces.map {
+            ? workspaces.filter(\.isCloudHosted).map {
                 CloudWorkspaceMetadata(
                     workspaceID: $0.id,
                     accountID: fixtureIdentity.cacheID,
@@ -265,20 +378,228 @@ public enum CloudUITestScenario: String, Sendable {
         self == .cloudConnectAndBrowse || self == .localOnly
     }
 
+    private var fixtureDate: Date {
+        Date(timeIntervalSince1970: 1_783_555_200)
+    }
+
+    private func localSession(
+        workspaceID: Workspace.ID
+    ) -> Session {
+        Session(
+            id: "local-session-\(workspaceID)",
+            workspaceID: workspaceID,
+            title: "Local session",
+            agentType: .codex,
+            isHidden: false,
+            createdAt: fixtureDate.ISO8601Format(),
+            updatedAt: fixtureDate.ISO8601Format(),
+            lastUserMessageAt: fixtureDate.ISO8601Format(),
+            status: .idle,
+            model: .gpt_5_6_sol,
+            unreadCount: 0,
+            freshlyCompacted: 0,
+            contextTokenCount: 0
+        )
+    }
+
+    private func fixtureWorkspace(
+        _ workspaceID: Workspace.ID
+    ) -> Workspace? {
+        fixtureRows.workspaces.first { $0.id == workspaceID }
+    }
+
+    private func cloudSessions(
+        workspaceID: Workspace.ID
+    ) -> [CloudSession] {
+        let sessionIDs: [Session.ID]
+        switch workspaceID {
+        case "cloud-only":
+            sessionIDs = ["cloud-session-working", "cloud-session-idle"]
+        case "local-draft":
+            sessionIDs = ["enriched-cloud-session"]
+        default:
+            sessionIDs = []
+        }
+
+        return sessionIDs.map { sessionID in
+            CloudSession(
+                id: sessionID,
+                deepLink: URL(
+                    string: "https://conductor.build/sessions/\(sessionID)"
+                ) ?? CloudAPIClient.productionBaseURL,
+                name: sessionID == "cloud-session-working"
+                    ? "Working session"
+                    : sessionID == "cloud-session-idle"
+                        ? "Idle session"
+                        : "Cloud-enriched session",
+                model: Session.Model.gpt_5_6_sol.rawValue,
+                effort: Session.ReasoningEffort.low.rawValue,
+                fastMode: false
+            )
+        }
+    }
+
+    private func cloudWorkspaceID(
+        sessionID: Session.ID
+    ) -> Workspace.ID? {
+        fixtureCloudSnapshot.workspaces.first { item in
+            cloudSessions(workspaceID: item.id).contains {
+                $0.id == sessionID
+            }
+        }?.id
+    }
+
+    private func cloudSessionStatus(
+        sessionID: Session.ID,
+        workspaceID: Workspace.ID
+    ) -> CloudSessionStatusResponse {
+        CloudSessionStatusResponse(
+            workspaceID: workspaceID,
+            sessionID: sessionID,
+            status: sessionID == "cloud-session-working"
+                ? .working
+                : .idle,
+            updatedAt: fixtureDate
+        )
+    }
+
+    private func cloudTranscript(
+        sessionID: Session.ID
+    ) -> [CloudTranscriptMessage] {
+        guard sessionID == "cloud-session-working" else {
+            return [
+                CloudTranscriptMessage(
+                    id: "\(sessionID)-user",
+                    sessionID: sessionID,
+                    sessionIndex: 1,
+                    type: .init(rawValue: "event"),
+                    content: .object([
+                        "type": .string("userMessage"),
+                        "message": .string("Cached Cloud transcript"),
+                        "turnId": .string("\(sessionID)-turn"),
+                    ]),
+                    receivedAt: fixtureDate
+                ),
+                agentTranscriptMessage(
+                    id: "\(sessionID)-assistant",
+                    sessionID: sessionID,
+                    sessionIndex: 2,
+                    event: [
+                        "type": .string("item.completed"),
+                        "item": .object([
+                            "id": .string("\(sessionID)-assistant-item"),
+                            "type": .string("agentMessage"),
+                            "text": .string("This session came from the Cloud API."),
+                        ]),
+                    ]
+                ),
+            ]
+        }
+
+        return [
+            CloudTranscriptMessage(
+                id: "cloud-user",
+                sessionID: sessionID,
+                sessionIndex: 1,
+                type: .init(rawValue: "event"),
+                content: .object([
+                    "type": .string("userMessage"),
+                    "message": .string("Inspect the Cloud workspace."),
+                    "turnId": .string("cloud-turn"),
+                ]),
+                receivedAt: fixtureDate
+            ),
+            agentTranscriptMessage(
+                id: "cloud-assistant",
+                sessionID: sessionID,
+                sessionIndex: 2,
+                event: [
+                    "type": .string("item.completed"),
+                    "item": .object([
+                        "id": .string("assistant-item"),
+                        "type": .string("agentMessage"),
+                        "text": .string("I will inspect it now."),
+                    ]),
+                ]
+            ),
+            agentTranscriptMessage(
+                id: "cloud-command-start",
+                sessionID: sessionID,
+                sessionIndex: 3,
+                event: [
+                    "type": .string("item.started"),
+                    "item": .object([
+                        "id": .string("command-item"),
+                        "type": .string("commandExecution"),
+                        "command": .string("git status --short"),
+                    ]),
+                ]
+            ),
+            agentTranscriptMessage(
+                id: "cloud-command-result",
+                sessionID: sessionID,
+                sessionIndex: 4,
+                event: [
+                    "type": .string("item.completed"),
+                    "item": .object([
+                        "id": .string("command-item"),
+                        "type": .string("commandExecution"),
+                        "status": .string("completed"),
+                        "exitCode": .integer(0),
+                        "aggregatedOutput": .string("Working tree clean"),
+                    ]),
+                ]
+            ),
+            agentTranscriptMessage(
+                id: "cloud-error",
+                sessionID: sessionID,
+                sessionIndex: 5,
+                event: [
+                    "type": .string("turn.failed"),
+                    "message": .string("Synthetic Cloud fixture error"),
+                ]
+            ),
+        ]
+    }
+
+    private func agentTranscriptMessage(
+        id: CloudTranscriptMessage.ID,
+        sessionID: Session.ID,
+        sessionIndex: Double,
+        event: [String: CloudJSONValue]
+    ) -> CloudTranscriptMessage {
+        CloudTranscriptMessage(
+            id: id,
+            sessionID: sessionID,
+            sessionIndex: sessionIndex,
+            type: .init(rawValue: "event"),
+            content: .object([
+                "type": .string("agent"),
+                "turnId": .string("cloud-turn"),
+                "rawPayload": .object([
+                    "event": .object(event),
+                ]),
+            ]),
+            receivedAt: fixtureDate.addingTimeInterval(sessionIndex)
+        )
+    }
+
     private var fixtureCloudSnapshot: CloudWorkspaceSnapshot {
         let project = CloudProject(
             id: "fixture-project",
             name: "Cloud fixtures",
             gitRemote: "https://github.com/example/fixtures.git"
         )
-        let workspaces = fixtureRows.workspaces.map {
+        let workspaces = fixtureRows.workspaces
+            .filter(\.isCloudHosted)
+            .map {
             CloudWorkspace(
                 id: $0.id,
                 name: $0.workspaceName ?? $0.id,
                 createdAt: $0.createdAt,
                 lastActivityAt: $0.updatedAt
             )
-        }
+            }
         return CloudWorkspaceSnapshot(
             accountID: fixtureIdentity.cacheID,
             projects: [project],
@@ -313,6 +634,12 @@ public enum CloudUITestScenario: String, Sendable {
         var mobileStates: [MobileWorkspaceState]
         var repositories: [Repository]
         var workspaces: [Workspace]
+    }
+
+    private enum FixtureError: Error {
+        case desktopCloudFallback
+        case unexpectedCloudSession
+        case unexpectedCloudWorkspace
     }
 }
 #endif

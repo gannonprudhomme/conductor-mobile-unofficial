@@ -153,6 +153,190 @@ public struct CloudWorkspace: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Session item from `GET /v0/workspaces/{workspaceID}/sessions`.
+public struct CloudSession: Decodable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let deepLink: URL
+    public let name: String?
+    public let model: String?
+    public let resolvedModel: String?
+    public let effort: String?
+    public let fastMode: Bool?
+    public let archivedAt: Date?
+
+    public init(
+        id: String,
+        deepLink: URL,
+        name: String? = nil,
+        model: String? = nil,
+        resolvedModel: String? = nil,
+        effort: String? = nil,
+        fastMode: Bool? = nil,
+        archivedAt: Date? = nil
+    ) {
+        self.id = id
+        self.deepLink = deepLink
+        self.name = name
+        self.model = model
+        self.resolvedModel = resolvedModel
+        self.effort = effort
+        self.fastMode = fastMode
+        self.archivedAt = archivedAt
+    }
+}
+
+/// Response from `GET /v0/sessions/{sessionID}/status`.
+public struct CloudSessionStatusResponse: Decodable, Equatable, Sendable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let status: Status
+    public let updatedAt: Date
+    public let errorMessage: String?
+    public let lastError: String?
+    public let lastErrorAt: Date?
+
+    public init(
+        workspaceID: String,
+        sessionID: String,
+        status: Status,
+        updatedAt: Date,
+        errorMessage: String? = nil,
+        lastError: String? = nil,
+        lastErrorAt: Date? = nil
+    ) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.status = status
+        self.updatedAt = updatedAt
+        self.errorMessage = errorMessage
+        self.lastError = lastError
+        self.lastErrorAt = lastErrorAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspaceId"
+        case sessionID = "sessionId"
+        case status
+        case updatedAt
+        case errorMessage
+        case lastError
+        case lastErrorAt
+    }
+
+    public struct Status: Codable, Hashable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let idle = Self(rawValue: "idle")
+        public static let working = Self(rawValue: "working")
+        public static let error = Self(rawValue: "error")
+    }
+}
+
+/// Transcript item from `GET /v0/sessions/{sessionID}/messages`.
+public struct CloudTranscriptMessage: Decodable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let sessionID: String
+    public let sessionIndex: Double
+    public let type: MessageType
+    public let content: CloudJSONValue
+    public let receivedAt: Date
+
+    public init(
+        id: String,
+        sessionID: String,
+        sessionIndex: Double,
+        type: MessageType,
+        content: CloudJSONValue,
+        receivedAt: Date
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.sessionIndex = sessionIndex
+        self.type = type
+        self.content = content
+        self.receivedAt = receivedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case sessionID = "sessionId"
+        case sessionIndex
+        case type
+        case content
+        case receivedAt
+    }
+
+    public struct MessageType: Codable, Hashable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+    }
+
+    public static func normalized(_ messages: [Self]) -> [Self] {
+        let newestByID = messages.reduce(into: [String: Self]()) { result, message in
+            result[message.id] = message
+        }
+        return newestByID.values.sorted {
+            if $0.sessionIndex != $1.sessionIndex {
+                $0.sessionIndex < $1.sessionIndex
+            } else if $0.receivedAt != $1.receivedAt {
+                $0.receivedAt < $1.receivedAt
+            } else {
+                $0.id < $1.id
+            }
+        }
+    }
+}
+
+/// One canonicalizable session observation result.
+public struct CloudSessionSnapshot: Equatable, Sendable {
+    public let accountID: String
+    public let workspace: CloudWorkspace
+    public let sessions: [CloudSession]
+    public let statuses: [CloudSession.ID: CloudSessionStatusResponse]
+
+    public init(
+        accountID: String,
+        workspace: CloudWorkspace,
+        sessions: [CloudSession],
+        statuses: [CloudSession.ID: CloudSessionStatusResponse]
+    ) {
+        self.accountID = accountID
+        self.workspace = workspace
+        self.sessions = sessions
+        self.statuses = statuses
+    }
+}
+
+/// A complete or incremental transcript observation result.
+public struct CloudTranscriptSnapshot: Equatable, Sendable {
+    public let accountID: String
+    public let sessionID: CloudSession.ID
+    public let status: CloudSessionStatusResponse
+    public let messages: [CloudTranscriptMessage]
+    public let isFullSnapshot: Bool
+
+    public init(
+        accountID: String,
+        sessionID: CloudSession.ID,
+        status: CloudSessionStatusResponse,
+        messages: [CloudTranscriptMessage],
+        isFullSnapshot: Bool
+    ) {
+        self.accountID = accountID
+        self.sessionID = sessionID
+        self.status = status
+        self.messages = messages
+        self.isFullSnapshot = isFullSnapshot
+    }
+}
+
 /// Response from `GET /v0/workspaces/{workspaceID}/status`.
 public struct CloudWorkspaceStatusResponse: Decodable, Equatable, Sendable {
     public let workspaceID: String
@@ -274,3 +458,5 @@ public struct CloudStructuredError: Decodable, Equatable, Sendable {
         }
     }
 }
+
+public typealias CloudJSONValue = CloudStructuredError.JSONValue
