@@ -56,36 +56,54 @@ struct ToolCallRowView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                HStack(spacing: 8) {
-                    Label {
-                        if let description, !description.isEmpty {
-                            Text(verbatim: description)
-                        } else {
-                            Text("Run local command")
-                        }
-                    } icon: {
-                        HStack(spacing: 2) {
-                            LucideIcon(Lucide.laptop, style: .small)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        CommandLabel(description: description)
+                            .fixedSize(horizontal: true, vertical: false)
 
-                            LucideIcon(Lucide.terminal, style: .small)
-                        }
+                        Text(command)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .font(.theme(.codeSmall))
+                            .padding(EdgeInsets(vertical: 4, horizontal: 6))
+                            .frame(
+                                minWidth: 80,
+                                idealWidth: 80,
+                                maxWidth: .infinity,
+                                alignment: .leading
+                            )
+                            .background(
+                                Color.theme(.muted),
+                                in: .rect(cornerRadius: 6)
+                            )
                     }
-                    .lineLimit(1)
-                    .labelStyle(.conductorSmall)
-                    .font(.theme(.small))
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(1)
 
-                    Text(command)
+                    CommandLabel(description: description)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .font(.theme(.codeSmall))
-                        .padding(EdgeInsets(vertical: 4, horizontal: 6))
-                        .background(
-                            Color.theme(.muted),
-                            in: .rect(cornerRadius: 6)
-                        )
                 }
+            }
+        }
+
+        private struct CommandLabel: View {
+            let description: String?
+
+            var body: some View {
+                Label {
+                    if let description, !description.isEmpty {
+                        Text(verbatim: description)
+                    } else {
+                        Text("Run local command")
+                    }
+                } icon: {
+                    HStack(spacing: 2) {
+                        LucideIcon(Lucide.laptop, style: .small)
+
+                        LucideIcon(Lucide.terminal, style: .small)
+                    }
+                }
+                .labelStyle(.conductorSmall)
+                .font(.theme(.small))
             }
         }
     }
@@ -344,6 +362,15 @@ private func diffableLines(in string: String) -> [Substring] {
                         command: "mise -C ios run test",
                         description: "Run iOS tests on your Mac",
                         reason: "Xcode is available only on your Mac."
+                    )
+                )
+
+                ToolCallRowView(
+                    toolCall: .runLocalCommand(
+                        toolUseID: "tool-long-local-command",
+                        command: "sed -n '80,180p' shared/SharedConductorData/Sources/Cloud.swift",
+                        description: "Read Cloud stream and checkpoint implementation",
+                        reason: nil
                     )
                 )
                 
