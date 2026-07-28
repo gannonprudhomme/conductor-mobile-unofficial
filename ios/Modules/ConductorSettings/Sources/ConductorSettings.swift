@@ -690,11 +690,7 @@ public struct ConductorSettingsView: View {
             Section {
                 cloudConnectionRow
                     .listRowBackground(Color.clear)
-
-                if store.isCloudCredentialConfigured {
-                    deleteCloudCredentialRow
-                        .listRowBackground(Color.clear)
-                }
+                    .listRowSeparator(.hidden, edges: .bottom)
             } header: {
                 Text("Conductor Cloud")
                     .font(.theme(.heading).weight(.medium))
@@ -709,7 +705,7 @@ public struct ConductorSettingsView: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden, edges: .bottom)
             } header: {
-                Text("Connection") // font 2xl (24 px)
+                Text("Conductor Local") // font 2xl (24 px)
                     .font(.theme(.heading).weight(.medium)) // need 500
                     .foregroundStyle(.theme(.textPrimary))
             }
@@ -781,7 +777,7 @@ public struct ConductorSettingsView: View {
         .background(.theme(.background))
         .themedNavigationTitle("Settings", alignment: .center)
         .toolbar {
-            if !store.isServerAddressMissing {
+            if !store.requiresConnectionConfiguration {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(role: .close) {
                         if store.hasChanges {
@@ -921,13 +917,9 @@ public struct ConductorSettingsView: View {
                     }
                 }
 
-                Text(
-                    store.isCloudCredentialConfigured
-                        ? "A key is saved securely in Keychain. Enter a new key to replace it, or test the saved key."
-                        : "Create a beta API key in Conductor Cloud, then test it or save settings."
-                )
-                .font(.theme(.small))
-                .foregroundStyle(.theme(.textSecondary))
+                Text("Enter your API key. The key is stored in the Keychain")
+                    .font(.theme(.small))
+                    .foregroundStyle(.theme(.textSecondary))
             }
             .padding(.leading, 2)
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -963,35 +955,6 @@ public struct ConductorSettingsView: View {
                 testCloudConnectionButton
             }
             .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var deleteCloudCredentialRow: some View {
-        HStack(spacing: 8) {
-            Text("Delete API key")
-                .font(.theme(.small).weight(.medium))
-                .foregroundStyle(.theme(.textPrimary))
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button(role: .destructive) {
-                store.send(.deleteCloudCredentialButtonTapped)
-            } label: {
-                Label {
-                    Text("Delete")
-                } icon: {
-                    LucideIcon(Lucide.trash2, style: .small)
-                }
-                .labelStyle(.conductorSmall)
-                .font(.theme(.small))
-                .foregroundStyle(.theme(.destructive))
-                .padding(EdgeInsets(vertical: 8, horizontal: 12))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(.theme(.destructiveBorder))
-                }
-            }
-            .buttonStyle(.spring)
-            .disabled(store.isCloudOperationInFlight)
         }
     }
 

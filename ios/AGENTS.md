@@ -15,3 +15,9 @@ Before iOS work, use every repo-local skill matching the task:
 Use all matching skills together when a change crosses concerns. Continue to
 follow the repository-wide product, collaboration, and Conductor integration
 guidance in the root `AGENTS.md`.
+
+## Conductor Cloud API
+
+The Conductor API base URL is `https://api.conductor.build/v0`. Fetch the
+current OpenAPI contract from `https://api.conductor.build/v0/openapi.json`
+before changing the Cloud client, including its accepted agent and model IDs.
