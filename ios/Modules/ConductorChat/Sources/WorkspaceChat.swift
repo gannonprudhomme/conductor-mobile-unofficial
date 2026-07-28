@@ -1854,6 +1854,8 @@ public struct WorkspaceChatView: View {
                     .tint(isSelected ? .theme(.highlight) : Color.clear)
             )
             .accessibilityIdentifier("workspace-chat.session.\(session.id)")
+            .accessibilityValue(isSelected ? "Selected" : "Not selected")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
             .disabled(session.status.rawValue == "creating")
             .contextMenu {
                 if canRename {
