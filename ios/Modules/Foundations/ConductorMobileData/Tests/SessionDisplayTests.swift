@@ -60,7 +60,7 @@ struct SessionDisplayTests {
             (rawValue: "fable-5", displayName: "Fable 5"),
             (rawValue: "opus", displayName: "Opus"),
             (rawValue: "opus-1m", displayName: "Opus 1M"),
-            (rawValue: "opus-5", displayName: "Opus 5"),
+            (rawValue: "opus-5-1m", displayName: "Opus 5"),
             (rawValue: "opus-4-8-1m", displayName: "Opus 4.8 1M"),
             (rawValue: "opus-4-7-1m", displayName: "Opus 4.7 1M"),
             (rawValue: "opus-4-6-1m", displayName: "Opus 4.6 1M"),

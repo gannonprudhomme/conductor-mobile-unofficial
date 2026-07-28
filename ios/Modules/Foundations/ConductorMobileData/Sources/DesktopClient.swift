@@ -98,7 +98,7 @@ public struct DesktopClient: Sendable {
 
     public struct ModelSettings: Codable, Equatable, Sendable {
         public static let conductorDefaults = Self(
-            defaultModel: .opus5,
+            defaultModel: .opus5_1M,
             defaultReasoningEffort: .high,
             isFastModeEnabled: false
         )

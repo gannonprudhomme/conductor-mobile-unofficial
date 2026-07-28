@@ -187,7 +187,7 @@ struct CreateWorkspaceTests {
             let state = CreateWorkspace.State(repositories: [.preview()])
 
             #expect(state.agentType == .claude)
-            #expect(state.selectedModel == .opus5)
+            #expect(state.selectedModel == .opus5_1M)
             #expect(state.selectedReasoningEffort == .high)
             #expect(!state.isFastModeEnabled)
         }

@@ -106,7 +106,7 @@ extension Session {
         public static let fable5 = Self(rawValue: "fable-5")
         public static let opus = Self(rawValue: "opus")
         public static let opus_1M = Self(rawValue: "opus-1m")
-        public static let opus5 = Self(rawValue: "opus-5")
+        public static let opus5_1M = Self(rawValue: "opus-5-1m")
         public static let opus4_8_1M = Self(rawValue: "opus-4-8-1m")
         public static let opus4_7_1M = Self(rawValue: "opus-4-7-1m")
         public static let opus4_6_1M = Self(rawValue: "opus-4-6-1m")
@@ -123,7 +123,7 @@ extension Session {
 
         public static let claudeModels: [Self] = [
             .fable5,
-            .opus5,
+            .opus5_1M,
             .opus4_8_1M,
             .opus4_7_1M,
             .opus4_6_1M,
@@ -243,7 +243,7 @@ extension Session {
 extension Session.Model {
     public var availableClaudeReasoningEfforts: [Session.ReasoningEffort] {
         switch self {
-        case .fable5, .opus5, .opus4_8_1M, .opus4_7_1M, .sonnet5_1M:
+        case .fable5, .opus5_1M, .opus4_8_1M, .opus4_7_1M, .sonnet5_1M:
             [.low, .medium, .high, .extraHigh, .max, .ultracode]
         case .opus4_6_1M, .sonnet_4_6_1M, .sonnet_4_6:
             [.low, .medium, .high, .max]

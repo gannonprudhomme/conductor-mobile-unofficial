@@ -40,7 +40,7 @@ struct DesktopClientTests {
         expectNoDifference(
             DesktopClient.ModelSettings.conductorDefaults,
             DesktopClient.ModelSettings(
-                defaultModel: .opus5,
+                defaultModel: .opus5_1M,
                 defaultReasoningEffort: .high,
                 isFastModeEnabled: false
             )
