@@ -8,6 +8,7 @@
 import ComposableArchitecture
 import ConductorDesign
 import ConductorMobileData
+import Foundation
 import LucideIcons
 import SharedConductorData
 import Sharing
@@ -137,7 +138,8 @@ public struct CreateWorkspace: Sendable {
         case createWorkspaceSucceeded(
             CreatedWorkspace,
             selectedModel: Session.Model,
-            selectedReasoningEffort: Session.ReasoningEffort?
+            selectedReasoningEffort: Session.ReasoningEffort?,
+            initialPrompt: WorkspaceCreationResult.InitialPrompt?
         )
         case modelSettingsFetched(DesktopClient.ModelSettings)
         case modeSelected(Mode)
@@ -202,6 +204,8 @@ public struct CreateWorkspace: Sendable {
                     )
                 }
                 let workspaceID = state.workspaceID ?? uuid().uuidString.lowercased()
+                let prompt = state.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                let promptMessageID = prompt.isEmpty ? nil : uuid()
                 state.isCreateAPIInFlight = true
                 state.workspaceID = workspaceID
                 return .run {
@@ -209,7 +213,8 @@ public struct CreateWorkspace: Sendable {
                         agentType = state.agentType,
                         isFastModeEnabled = state.isFastModeEnabled,
                         model = state.selectedModel,
-                        prompt = state.prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                        prompt,
+                        promptMessageID,
                         repositoryID = state.selectedRepositoryID,
                         reasoningEffort = state.selectedReasoningEffort,
                         workspaceID,
@@ -226,31 +231,45 @@ public struct CreateWorkspace: Sendable {
                             try Workspace.upsert { createdWorkspace.workspace }.execute(database)
                             try Session.upsert { createdWorkspace.session }.execute(database)
                         }
-                        let message: Message? = if prompt.isEmpty {
-                            nil
-                        } else {
-                            try await desktopClient.sendMessage(
-                                workspaceID: createdWorkspace.workspace.id,
-                                sessionID: createdWorkspace.session.id,
-                                message: prompt,
-                                model: model,
-                                isFastModeEnabled: isFastModeEnabled,
-                                mode: .steer,
-                                reasoningEffort: reasoningEffort
-                            )
-                        }
-                        if let message {
-                            try await database.write { database in
-                                try Message.upsert { message }.execute(database)
+                        let initialPrompt: WorkspaceCreationResult.InitialPrompt?
+                        if let promptMessageID {
+                            let result: MessageDeliveryResult
+                            do {
+                                result = try await desktopClient.sendMessage(
+                                    workspaceID: createdWorkspace.workspace.id,
+                                    sessionID: createdWorkspace.session.id,
+                                    message: prompt,
+                                    model: model,
+                                    isFastModeEnabled: isFastModeEnabled,
+                                    mode: .sent,
+                                    reasoningEffort: reasoningEffort,
+                                    attemptID: promptMessageID
+                                )
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch {
+                                result = .unknown(
+                                    reason: "Prompt delivery could not be determined."
+                                )
                             }
+                            initialPrompt = WorkspaceCreationResult.InitialPrompt(
+                                attemptID: promptMessageID,
+                                content: prompt,
+                                deliveryResult: result
+                            )
+                        } else {
+                            initialPrompt = nil
                         }
                         await send(
                             .createWorkspaceSucceeded(
                                 createdWorkspace,
                                 selectedModel: model,
-                                selectedReasoningEffort: reasoningEffort
+                                selectedReasoningEffort: reasoningEffort,
+                                initialPrompt: initialPrompt
                             )
                         )
+                    } catch is CancellationError {
+                        return
                     } catch {
                         await send(.createWorkspaceFailed(error.localizedDescription))
                     }
@@ -284,7 +303,8 @@ public struct CreateWorkspace: Sendable {
             case let .createWorkspaceSucceeded(
                 createdWorkspace,
                 selectedModel,
-                selectedReasoningEffort
+                selectedReasoningEffort,
+                initialPrompt
             ):
                 state.isCreateAPIInFlight = false
                 state.$prompt.withLock { $0 = "" }
@@ -295,6 +315,7 @@ public struct CreateWorkspace: Sendable {
                     .delegate(
                         .workspaceCreated(
                             WorkspaceCreationResult(
+                                initialPrompt: initialPrompt,
                                 selectedModel: selectedModel,
                                 selectedReasoningEffort: selectedReasoningEffort,
                                 workspace: WorkspaceWithRepository(
@@ -381,12 +402,14 @@ public struct CloudWorkspaceCreationForm: Equatable, Sendable {
 
 public struct WorkspaceCreationResult: Equatable, Sendable {
     public let completionID: UUID?
+    public let initialPrompt: InitialPrompt?
     public let selectedModel: Session.Model
     public let selectedReasoningEffort: Session.ReasoningEffort?
     public let selectedSessionID: Session.ID?
     public let workspace: WorkspaceWithRepository
 
     public init(
+        initialPrompt: InitialPrompt? = nil,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort? = nil,
         workspace: WorkspaceWithRepository,
@@ -394,10 +417,27 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
         completionID: UUID? = nil
     ) {
         self.completionID = completionID
+        self.initialPrompt = initialPrompt
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.selectedSessionID = selectedSessionID
         self.workspace = workspace
+    }
+
+    public struct InitialPrompt: Equatable, Sendable {
+        public let attemptID: UUID
+        public let content: String
+        public let deliveryResult: MessageDeliveryResult
+
+        public init(
+            attemptID: UUID,
+            content: String,
+            deliveryResult: MessageDeliveryResult
+        ) {
+            self.attemptID = attemptID
+            self.content = content
+            self.deliveryResult = deliveryResult
+        }
     }
 }
 

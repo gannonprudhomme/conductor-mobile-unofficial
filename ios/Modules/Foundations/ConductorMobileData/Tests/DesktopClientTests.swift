@@ -201,21 +201,27 @@ struct DesktopClientTests {
     }
 
     @Test("Commands reject a missing desktop server address")
-    func commandsWithoutServerAddress() async {
-        await withDependencies {
+    func commandsWithoutServerAddress() async throws {
+        try await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
-            await #expect(throws: DesktopClientError.invalidServerAddress) {
-                try await DesktopClient.liveValue.sendMessage(
-                    workspaceID: "workspace-1",
-                    sessionID: "session-1",
-                    message: "Run the tests.",
-                    model: .gpt_5_6_terra,
-                    isFastModeEnabled: false,
-                    mode: .steer,
-                    reasoningEffort: .medium
+            let delivery = try await DesktopClient.liveValue.sendMessage(
+                workspaceID: "workspace-1",
+                sessionID: "session-1",
+                message: "Run the tests.",
+                model: .gpt_5_6_terra,
+                isFastModeEnabled: false,
+                mode: .sent,
+                reasoningEffort: .medium,
+                attemptID: UUID()
+            )
+            expectNoDifference(
+                delivery,
+                .rejected(
+                    reason: "The message request could not be created: "
+                        + "Enter a valid desktop server address."
                 )
-            }
+            )
             await #expect(throws: DesktopClientError.invalidServerAddress) {
                 try await DesktopClient.liveValue.createSession(workspaceID: "workspace-1")
             }
@@ -483,15 +489,10 @@ struct DesktopClientTests {
         #expect(object["resume_queue"] as? Bool == true)
     }
 
-    @Test("Sending a message returns the canonical database row")
+    @Test("Sending a message returns its correlated delivery result")
     func sendMessage() async throws {
-        let message = Message(
-            id: "message-1",
-            sessionID: "session-1",
-            role: .user,
-            content: "Run the tests.",
-            createdAt: Date(timeIntervalSince1970: 1_783_555_200),
-            turnID: "turn-1"
+        let attemptID = try #require(
+            UUID(uuidString: "00000000-0000-0000-0000-000000000045")
         )
         let recordedRequest = LockIsolated<URLRequest?>(nil)
         DesktopClientURLProtocol.handler.setValue { request in
@@ -503,7 +504,12 @@ struct DesktopClientTests {
                     httpVersion: nil,
                     headerFields: nil
                 )!,
-                try JSONEncoder.conductor.encode(message)
+                try JSONEncoder.conductor.encode(
+                    MessageSendResponse(
+                        attemptID: attemptID,
+                        result: .accepted(messageID: "message-1")
+                    )
+                )
             )
         }
         defer { DesktopClientURLProtocol.handler.setValue(nil) }
@@ -525,12 +531,13 @@ struct DesktopClientTests {
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
                 isFastModeEnabled: true,
-                mode: .queue,
-                reasoningEffort: .max
+                mode: .queued,
+                reasoningEffort: .max,
+                attemptID: attemptID
             )
         }
 
-        expectNoDifference(response, message)
+        expectNoDifference(response, .accepted(messageID: "message-1"))
         let request = try #require(recordedRequest.value)
         expectNoDifference(
             request.url?.path,
@@ -545,10 +552,11 @@ struct DesktopClientTests {
         #expect(object["fast_mode"] as? Bool == true)
         #expect(object["mode"] as? String == "queued")
         #expect(object["reasoning_effort"] as? String == "max")
-        #expect(object.count == 5)
+        #expect(object["attemptId"] as? String == attemptID.uuidString)
+        #expect(object.count == 6)
     }
 
-    @Test("Sending supports a legacy no-content response")
+    @Test("Sending reports an unconfirmed no-content response")
     func sendMessageLegacyResponse() async throws {
         DesktopClientURLProtocol.handler.setValue { request in
             (
@@ -580,12 +588,191 @@ struct DesktopClientTests {
                 message: "Run the tests.",
                 model: .gpt_5_6_terra,
                 isFastModeEnabled: false,
-                mode: .steer,
-                reasoningEffort: nil
+                mode: .sent,
+                reasoningEffort: nil,
+                attemptID: UUID()
             )
         }
 
-        #expect(response == nil)
+        expectNoDifference(
+            response,
+            .unknown(reason: "Delivery could not be determined.")
+        )
+    }
+
+    @Test("A 400 message response preserves the rejection reason")
+    func sendMessageRejection() async throws {
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 400,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data("Model is unavailable.".utf8)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let response = try await sendMessageResponse()
+        expectNoDifference(response, .rejected(reason: "Model is unavailable."))
+    }
+
+    @Test("A non-400 error response leaves delivery unconfirmed")
+    func sendMessageServerFailure() async throws {
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 503,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data("Unavailable".utf8)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let response = try await sendMessageResponse()
+        expectNoDifference(
+            response,
+            .unknown(reason: "Delivery could not be determined.")
+        )
+    }
+
+    @Test("A malformed success response leaves delivery unconfirmed")
+    func sendMessageMalformedResponse() async throws {
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(#"{"attemptId":"not-a-uuid"}"#.utf8)
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let response = try await sendMessageResponse()
+        expectNoDifference(
+            response,
+            .unknown(reason: "Delivery could not be determined.")
+        )
+    }
+
+    @Test("A receipt for another attempt leaves delivery unconfirmed")
+    func sendMessageMismatchedAttempt() async throws {
+        let attemptID = UUID(57)
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                try JSONEncoder.conductor.encode(
+                    MessageSendResponse(
+                        attemptID: UUID(58),
+                        result: .accepted(messageID: "message-id")
+                    )
+                )
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let response = try await sendMessageResponse(attemptID: attemptID)
+        expectNoDifference(
+            response,
+            .unknown(reason: "Delivery could not be determined.")
+        )
+    }
+
+    @Test("A non-HTTP response leaves delivery unconfirmed")
+    func sendMessageNonHTTPResponse() async throws {
+        DesktopClientURLProtocol.handler.setValue { request in
+            (
+                URLResponse(
+                    url: try #require(request.url),
+                    mimeType: "application/json",
+                    expectedContentLength: 0,
+                    textEncodingName: nil
+                ),
+                Data()
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let response = try await sendMessageResponse()
+        expectNoDifference(
+            response,
+            .unknown(reason: "Delivery could not be determined.")
+        )
+    }
+
+    @Test("A transport failure leaves delivery unconfirmed")
+    func sendMessageTransportFailure() async throws {
+        DesktopClientURLProtocol.handler.setValue { _ in
+            throw URLError(.networkConnectionLost)
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let response = try await sendMessageResponse()
+        expectNoDifference(
+            response,
+            .unknown(reason: "Delivery could not be determined.")
+        )
+    }
+
+    @Test("Canceling a send propagates cancellation")
+    func sendMessageCancellation() async throws {
+        DesktopClientURLProtocol.isWaitingForCancellation.setValue(true)
+        DesktopClientURLProtocol.didStartRequest.setValue(false)
+        defer {
+            DesktopClientURLProtocol.isWaitingForCancellation.setValue(false)
+            DesktopClientURLProtocol.didStartRequest.setValue(false)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let task = Task {
+            try await withDependencies {
+                $0.defaultFileStorage = .inMemory
+                $0.urlSession = urlSession
+            } operation: {
+                @Shared(.desktopServerAddress) var desktopServerAddress
+                $desktopServerAddress.withLock { $0 = "my-mac" }
+                return try await DesktopClient.liveValue.sendMessage(
+                    workspaceID: "workspace-1",
+                    sessionID: "session-1",
+                    message: "Run the tests.",
+                    model: .gpt_5_6_terra,
+                    isFastModeEnabled: false,
+                    mode: .sent,
+                    reasoningEffort: nil,
+                    attemptID: UUID()
+                )
+            }
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while !DesktopClientURLProtocol.didStartRequest.value,
+              clock.now < deadline {
+            await Task.yield()
+        }
+        #expect(DesktopClientURLProtocol.didStartRequest.value)
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
     }
 
     @Test("Stopping a session returns its canonical database row")
@@ -996,9 +1183,11 @@ struct DesktopClientTests {
 }
 
 private final class DesktopClientURLProtocol: URLProtocol, @unchecked Sendable {
+    static let didStartRequest = LockIsolated(false)
     static let handler = LockIsolated<
-        (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?
+        (@Sendable (URLRequest) throws -> (URLResponse, Data))?
     >(nil)
+    static let isWaitingForCancellation = LockIsolated(false)
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -1009,6 +1198,10 @@ private final class DesktopClientURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func startLoading() {
+        if Self.isWaitingForCancellation.value {
+            Self.didStartRequest.setValue(true)
+            return
+        }
         do {
             let handler = try #require(Self.handler.value)
             let (response, data) = try handler(request)
@@ -1021,6 +1214,33 @@ private final class DesktopClientURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() { }
+}
+
+private func sendMessageResponse(
+    attemptID: UUID = UUID()
+) async throws -> MessageDeliveryResult {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [DesktopClientURLProtocol.self]
+    let urlSession = URLSession(configuration: configuration)
+    defer { urlSession.invalidateAndCancel() }
+
+    return try await withDependencies {
+        $0.defaultFileStorage = .inMemory
+        $0.urlSession = urlSession
+    } operation: {
+        @Shared(.desktopServerAddress) var desktopServerAddress
+        $desktopServerAddress.withLock { $0 = "my-mac" }
+        return try await DesktopClient.liveValue.sendMessage(
+            workspaceID: "workspace-1",
+            sessionID: "session-1",
+            message: "Run the tests.",
+            model: .gpt_5_6_terra,
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: nil,
+            attemptID: attemptID
+        )
+    }
 }
 
 private extension URLRequest {

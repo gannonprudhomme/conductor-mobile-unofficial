@@ -260,16 +260,17 @@ extension WorkspaceMutationClient: DependencyKey {
 
                 switch route {
                 case .desktop:
-                    let response = try await desktopClient.sendMessage(
+                    _ = try await desktopClient.sendMessage(
                         workspaceID: canonicalWorkspaceID,
                         sessionID: canonicalSessionID,
                         message: message,
                         model: model,
                         isFastModeEnabled: isFastModeEnabled,
                         mode: mode,
-                        reasoningEffort: reasoningEffort
+                        reasoningEffort: reasoningEffort,
+                        attemptID: UUID()
                     )
-                    return .desktop(message: response)
+                    return .desktop(message: nil)
 
                 case let .cloud(accountID, remoteWorkspaceID):
                     return try await persistSend(

@@ -95,6 +95,7 @@ public struct Workspaces: Sendable {
         public var cloudObservationStatus: CloudObservationStatus
         var cloudFailureSuppressionDeadline: Date?
         var hasPresentedCloudFailureAlert = false
+        var presentedCloudFailure: CloudFailure?
         var isLoadingWorkspaces: Bool
         var sections: [WorkspaceSection] = []
 
@@ -439,6 +440,7 @@ public struct Workspaces: Sendable {
                 state.cloudFailureSuppressionDeadline = now
                     .addingTimeInterval(5)
                 state.hasPresentedCloudFailureAlert = false
+                state.presentedCloudFailure = nil
                 if state.isCloudCredentialConfigured {
                     state.cloudObservationStatus = .loading
                 }
@@ -462,9 +464,11 @@ public struct Workspaces: Sendable {
                 // Cancelling an observation can race with its final failure action. Keep offline
                 // failures suppressed until the next active phase replaces this deadline.
                 state.cloudFailureSuppressionDeadline = .distantFuture
-                if state.destination?.alert != nil {
+                if let presentedCloudFailure = state.presentedCloudFailure,
+                   state.destination?.alert == .cloudObservationFailed(presentedCloudFailure) {
                     state.destination = nil
                 }
+                state.presentedCloudFailure = nil
                 if state.isCloudCredentialConfigured {
                     state.cloudObservationStatus = .loading
                 }
@@ -480,6 +484,7 @@ public struct Workspaces: Sendable {
             case let .cloudConfigurationChanged(configuration):
                 state.cloudFailureSuppressionDeadline = nil
                 state.hasPresentedCloudFailureAlert = false
+                state.presentedCloudFailure = nil
                 guard configuration != nil else {
                     state.cloudObservationStatus = .disconnected
                     return .merge(
@@ -507,6 +512,7 @@ public struct Workspaces: Sendable {
                     return .none
                 }
                 state.hasPresentedCloudFailureAlert = true
+                state.presentedCloudFailure = failure
                 state.destination = .alert(.cloudObservationFailed(failure))
                 return .none
 
@@ -514,6 +520,7 @@ public struct Workspaces: Sendable {
                 state.cloudFailureSuppressionDeadline = nil
                 state.cloudObservationStatus = .connected
                 state.hasPresentedCloudFailureAlert = false
+                state.presentedCloudFailure = nil
                 return .none
 
             case let .desktopConfigurationChanged(serverAddress):
@@ -1235,6 +1242,7 @@ public struct WorkspacesView: View {
 
             ToolbarItem(placement: .bottomBar) {
                 WorkspaceFilterMenu(store: store)
+                    .equatable()
             }
 
             ToolbarSpacer(.flexible, placement: .bottomBar)
@@ -1695,15 +1703,37 @@ public struct WorkspacesView: View {
         }
     }
 
-    private struct WorkspaceFilterMenu: View {
+    private struct WorkspaceFilterMenu: Equatable, View {
         @Bindable var store: StoreOf<Workspaces>
 
+        let grouping: WorkspaceWithRepository.Grouping
+        let repositories: [Repository]
+        let selectedRepositoryID: Repository.ID?
+        let sort: WorkspaceWithRepository.Sort
+
+        init(store: StoreOf<Workspaces>) {
+            self.store = store
+            grouping = store.grouping
+            repositories = store.repositories
+            selectedRepositoryID = store.selectedRepositoryID
+            sort = store.sort
+        }
+
         private var selectedRepositoryName: String? {
-            guard let selectedRepositoryID = store.selectedRepositoryID else {
+            guard let selectedRepositoryID else {
                 return nil
             }
-            return store.repositories.first { $0.id == selectedRepositoryID }?.displayName
+            return repositories.first { $0.id == selectedRepositoryID }?.displayName
                 ?? selectedRepositoryID
+        }
+
+        // Workspace observation updates recreate this view even when menu content is unchanged.
+        // Replacing an open system menu resets its scroll position.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.grouping == rhs.grouping
+                && lhs.repositories == rhs.repositories
+                && lhs.selectedRepositoryID == rhs.selectedRepositoryID
+                && lhs.sort == rhs.sort
         }
 
         var body: some View {
@@ -1712,12 +1742,18 @@ public struct WorkspacesView: View {
             Menu {
                 Menu {
                     RepositoryPicker(
-                        store.repositories,
+                        repositories,
                         selection: Binding(
-                            get: { store.selectedRepositoryID },
-                            set: { store.send(.repositoryFilterButtonTapped($0), animation: .default) }
+                            get: { selectedRepositoryID },
+                            set: {
+                                store.send(
+                                    .repositoryFilterButtonTapped($0),
+                                    animation: .default
+                                )
+                            }
                         )
                     )
+                    .equatable()
                 } label: {
                     Text("Repository")
                     if let repositoryName {
@@ -1740,7 +1776,7 @@ public struct WorkspacesView: View {
                     ConductorMenuPicker(
                         WorkspaceWithRepository.Sort.allCases,
                         selection: Binding(
-                            get: { store.sort },
+                            get: { sort },
                             set: { store.send(.sortButtonTapped($0)) }
                         )
                     ) { sort in

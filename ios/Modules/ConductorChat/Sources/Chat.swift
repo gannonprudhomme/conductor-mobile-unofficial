@@ -63,12 +63,13 @@ public struct Chat: Sendable {
         @FetchAll var pendingSends: [CloudPendingMutation]
         @FetchOne var session: Session
         var queuedMessages: QueuedMessages.State
+        var displayedSessionStatus: Session.Status
         var isFastModeEnabled: Bool
         var mutationRoute: WorkspaceMutationRoute?
         var source: WorkspaceSource
+        var isCloudMessageSendInFlight = false
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
-        var isMessageSendInFlight = false
         var isStopInFlight = false
         var hasObservedSessionFastModeChange = false
         var hasObservedSessionModelChange = false
@@ -76,15 +77,21 @@ public struct Chat: Sendable {
         var hasUserSelectedFastMode = false
         var hasUserSelectedModel = false
         var hasUserSelectedReasoningEffort = false
+        var animatedScrollToBottomRequest = 0
         var scrollToBottomRequest = 0
         var shouldFocusMessageField = false
 
-        /// POST-confirmed message rows retained so a slower first WebSocket snapshot cannot hide them.
-        var confirmedMessagesAwaitingInitialSnapshot: [Message] = []
         var expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID> = []
         var reportedContextWindowTokenLimits: [Session.Model: Int] = [:]
+        var messageIDToBubbleID: [Message.ID: UUID] = [:]
+        var optimisticMessages: [WorkspaceChat.OptimisticMessage] = []
         var selectedModel: Session.Model
         var selectedReasoningEffort: Session.ReasoningEffort?
+        var workCycle = WorkCycle.idle(
+            attemptID: nil,
+            baselineTurnID: nil,
+            correlatedTurnID: nil
+        )
 
         /// The turns + parsed rows (e.g. `Message.content` -> `AgentEvent`)
         ///
@@ -98,7 +105,10 @@ public struct Chat: Sendable {
         var rows: [DisplayedChatRowWithPadding]? = nil
 
         var shouldShowEmptyChat: Bool {
-            !isLoadingMessages && isMessageSnapshotEmpty && queuedMessages.messages.isEmpty
+            !isLoadingMessages
+                && isMessageSnapshotEmpty
+                && queuedMessages.messages.isEmpty
+                && !hasOptimisticMessages
         }
 
         var hasUnresolvedSend: Bool {
@@ -118,7 +128,13 @@ public struct Chat: Sendable {
         }
 
         var allowsAgentSwitching: Bool {
-            shouldShowEmptyChat && !isMessageSendInFlight
+            !isLoadingMessages
+                && isMessageSnapshotEmpty
+                && queuedMessages.messages.isEmpty
+                && !isMessageSendInFlight
+                && !optimisticMessages.contains {
+                    $0.mode == .sent && $0.status != .rejected
+                }
         }
 
         var availableReasoningEfforts: [Session.ReasoningEffort] {
@@ -137,15 +153,239 @@ public struct Chat: Sendable {
             )
         }
 
-        mutating func updateRows(sessionStatus: Session.Status) {
-            guard let turns else {
-                rows = nil
+        var hasOptimisticMessages: Bool {
+            optimisticMessages.contains { $0.mode == .sent }
+        }
+
+        var isMessageSendInFlight: Bool {
+            isCloudMessageSendInFlight
+                || optimisticMessages.contains { message in
+                    message.status == .sending
+                }
+        }
+
+        mutating func beginSendCycle(attemptID: UUID) {
+            workCycle = switch workCycle {
+            case .idle:
+                .idle(
+                    attemptID: attemptID,
+                    baselineTurnID: turns?.last?.id,
+                    correlatedTurnID: nil
+                )
+            case .working:
+                .working(
+                    attemptID: attemptID,
+                    baselineTurnID: turns?.last?.id,
+                    correlatedTurnID: nil
+                )
+            }
+        }
+
+        mutating func endSendCycle(attemptID: UUID) {
+            workCycle = switch workCycle {
+            case let .idle(activeAttemptID, baselineTurnID, _)
+                where activeAttemptID == attemptID:
+                .idle(
+                    attemptID: nil,
+                    baselineTurnID: baselineTurnID,
+                    correlatedTurnID: nil
+                )
+            case let .working(activeAttemptID, baselineTurnID, _)
+                where activeAttemptID == attemptID:
+                .working(
+                    attemptID: nil,
+                    baselineTurnID: baselineTurnID,
+                    correlatedTurnID: nil
+                )
+            case .idle, .working:
+                workCycle
+            }
+        }
+
+        mutating func initializeIdleBaseline() {
+            guard case let .idle(attemptID, nil, correlatedTurnID) = workCycle else {
                 return
             }
+            workCycle = .idle(
+                attemptID: attemptID,
+                baselineTurnID: turns?.last?.id,
+                correlatedTurnID: correlatedTurnID
+            )
+        }
 
-            rows = turns.flattenedChatRows(
-                activeTurnID: sessionStatus == .working ? turns.last?.id : nil,
-                expandedSummaryIDs: expandedSummaryIDs
+        mutating func observeCorrelatedTurn(
+            _ turnID: Turn.ID,
+            attemptID: UUID
+        ) {
+            workCycle = switch workCycle {
+            case let .idle(activeAttemptID, baselineTurnID, _)
+                where activeAttemptID == attemptID:
+                .idle(
+                    attemptID: activeAttemptID,
+                    baselineTurnID: baselineTurnID,
+                    correlatedTurnID: turnID
+                )
+            case let .working(activeAttemptID, baselineTurnID, _)
+                where activeAttemptID == attemptID:
+                .working(
+                    attemptID: activeAttemptID,
+                    baselineTurnID: baselineTurnID,
+                    correlatedTurnID: turnID
+                )
+            case let .idle(nil, _, correlatedTurnID):
+                .idle(
+                    attemptID: nil,
+                    baselineTurnID: turnID,
+                    correlatedTurnID: correlatedTurnID
+                )
+            case .idle, .working:
+                workCycle
+            }
+        }
+
+        mutating func sessionStatusChanged(_ sessionStatus: Session.Status) {
+            let turns = turns ?? []
+            workCycle = if sessionStatus == .working {
+                switch workCycle {
+                case let .idle(
+                    attemptID,
+                    baselineTurnID,
+                    correlatedTurnID
+                ):
+                    .working(
+                        attemptID: attemptID,
+                        baselineTurnID: baselineTurnID,
+                        correlatedTurnID: correlatedTurnID
+                    )
+                case .working:
+                    workCycle
+                }
+            } else {
+                .idle(
+                    attemptID: nil,
+                    baselineTurnID: turns.last?.id,
+                    correlatedTurnID: nil
+                )
+            }
+            displayedSessionStatus = sessionStatus
+            updateRows()
+        }
+
+        mutating func updateRows() {
+            let turns = turns ?? []
+            let isSessionWorking = displayedSessionStatus == .working
+            let pendingOptimisticMessage = optimisticMessages.last {
+                $0.mode == .sent && $0.status == .sending
+            }
+            let activeTurnID: Turn.ID? = switch workCycle {
+            case .idle:
+                nil
+            case let .working(_, baselineTurnID, correlatedTurnID):
+                if let correlatedTurnID,
+                   turns.contains(where: { $0.id == correlatedTurnID }) {
+                    correlatedTurnID
+                } else if turns.last?.id != baselineTurnID {
+                    turns.last?.id
+                } else {
+                    nil
+                }
+            }
+            let optimisticRows = optimisticMessages
+                .filter { $0.mode == .sent }
+                .map { message -> (Turn.ID?, DisplayedChatRowWithPadding) in
+                    let status: DisplayedChatRow.OptimisticMessage.Status
+                    switch message.status {
+                    case .acceptedAwaitingObservation:
+                        status = .acceptedAwaitingObservation
+                    case .rejected:
+                        status = .rejected
+                    case .sending:
+                        status = .sending
+                    case .unconfirmed:
+                        status = .unconfirmed
+                    }
+                    return (
+                        message.previousTurnID,
+                        DisplayedChatRowWithPadding(
+                            content: .optimisticMessage(
+                                .init(
+                                    id: message.id,
+                                    content: message.content,
+                                    deliveryDetail: message.deliveryDetail,
+                                    status: status
+                                )
+                            ),
+                            topPadding: 24,
+                            bottomPadding: 12
+                        )
+                    )
+                }
+            var rows = optimisticRows
+                .filter { $0.0 == nil }
+                .map(\.1)
+            for turn in turns {
+                rows.append(
+                    contentsOf: [turn].flattenedChatRows(
+                        activeTurnID: activeTurnID,
+                        expandedSummaryIDs: expandedSummaryIDs
+                    )
+                )
+                rows.append(
+                    contentsOf: optimisticRows
+                        .filter { $0.0 == turn.id }
+                        .map(\.1)
+                )
+            }
+            let existingTurnIDs = Set(turns.map(\.id))
+            rows.append(
+                contentsOf: optimisticRows
+                    .filter { previousTurnID, _ in
+                        previousTurnID.map { !existingTurnIDs.contains($0) } == true
+                    }
+                    .map(\.1)
+            )
+            if let progressIndex = rows.indices.last(where: {
+                if case .turnInProgress = rows[$0].content {
+                    true
+                } else {
+                    false
+                }
+            }), progressIndex != rows.index(before: rows.endIndex) {
+                let progress = rows.remove(at: progressIndex)
+                rows.append(progress)
+            }
+            if isSessionWorking, activeTurnID == nil {
+                let progressID = pendingOptimisticMessage?.id.uuidString
+                    ?? "\(sessionID):pending"
+                rows.append(
+                    DisplayedChatRowWithPadding(
+                        content: .turnInProgress(
+                            .init(
+                                id: progressID,
+                                startedAt: session.updatedDate
+                                    ?? turns.last?.startedAt
+                                    ?? .now
+                            )
+                        ),
+                        topPadding: 0,
+                        bottomPadding: 0
+                    )
+                )
+            }
+
+            self.rows = rows
+        }
+
+        enum WorkCycle: Equatable {
+            case idle(
+                attemptID: UUID?,
+                baselineTurnID: Turn.ID?,
+                correlatedTurnID: Turn.ID?
+            )
+            case working(
+                attemptID: UUID?,
+                baselineTurnID: Turn.ID?,
+                correlatedTurnID: Turn.ID?
             )
         }
 
@@ -169,6 +409,20 @@ public struct Chat: Sendable {
         ) {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
+            self.displayedSessionStatus = session.status
+            self.workCycle = if session.status == .working {
+                .working(
+                    attemptID: nil,
+                    baselineTurnID: nil,
+                    correlatedTurnID: nil
+                )
+            } else {
+                .idle(
+                    attemptID: nil,
+                    baselineTurnID: nil,
+                    correlatedTurnID: nil
+                )
+            }
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
             self.source = isCloudHosted ? .cloud : .desktop
             self.mutationRoute = mutationRoute
@@ -269,15 +523,16 @@ public struct Chat: Sendable {
                 && lhs.connectionStatus == rhs.connectionStatus
                 && lhs.cloudConfiguration == rhs.cloudConfiguration
                 && lhs.mobileModelSettingsOverride == rhs.mobileModelSettingsOverride
+                && lhs.displayedSessionStatus == rhs.displayedSessionStatus
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
                 && lhs.pendingSends == rhs.pendingSends
                 && lhs.initialPromptHandoffs == rhs.initialPromptHandoffs
                 && lhs.mutationRoute == rhs.mutationRoute
                 && lhs.source == rhs.source
                 && lhs.messageDraft == rhs.messageDraft
+                && lhs.isCloudMessageSendInFlight == rhs.isCloudMessageSendInFlight
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
-                && lhs.isMessageSendInFlight == rhs.isMessageSendInFlight
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.hasObservedSessionFastModeChange == rhs.hasObservedSessionFastModeChange
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
@@ -286,15 +541,17 @@ public struct Chat: Sendable {
                 && lhs.hasUserSelectedFastMode == rhs.hasUserSelectedFastMode
                 && lhs.hasUserSelectedModel == rhs.hasUserSelectedModel
                 && lhs.hasUserSelectedReasoningEffort == rhs.hasUserSelectedReasoningEffort
+                && lhs.animatedScrollToBottomRequest == rhs.animatedScrollToBottomRequest
                 && lhs.scrollToBottomRequest == rhs.scrollToBottomRequest
                 && lhs.shouldFocusMessageField == rhs.shouldFocusMessageField
-                && lhs.confirmedMessagesAwaitingInitialSnapshot
-                    == rhs.confirmedMessagesAwaitingInitialSnapshot
                 && lhs.expandedSummaryIDs == rhs.expandedSummaryIDs
                 && lhs.reportedContextWindowTokenLimits
                     == rhs.reportedContextWindowTokenLimits
+                && lhs.messageIDToBubbleID == rhs.messageIDToBubbleID
+                && lhs.optimisticMessages == rhs.optimisticMessages
                 && lhs.selectedModel == rhs.selectedModel
                 && lhs.selectedReasoningEffort == rhs.selectedReasoningEffort
+                && lhs.workCycle == rhs.workCycle
         }
 
         /// Read by ``WorkspaceChat`` to track the selected session.
@@ -350,6 +607,7 @@ public struct Chat: Sendable {
             result: Result<Void, any Error>
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
+        case scrollDownButtonTapped
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -754,14 +1012,23 @@ public struct Chat: Sendable {
                 state.reconcileSelectedReasoningEffort()
                 return .none
 
+            case .scrollDownButtonTapped:
+                state.animatedScrollToBottomRequest &+= 1
+                state.scrollToBottomRequest &+= 1
+                return .none
+
             case .messagesUpdated(let messages):
                 state.isMessageSnapshotEmpty = messages.isEmpty
                 state.turns = Turn.parse(
                     messages: messages,
-                    reusing: state.turns ?? []
+                    reusing: state.turns ?? [],
+                    messageIDToBubbleID: state.messageIDToBubbleID
                 )
                 state.updateReportedContextWindowTokenLimits()
-                state.updateRows(sessionStatus: state.session.status)
+                if state.isLoadingMessages {
+                    state.initializeIdleBaseline()
+                }
+                state.updateRows()
                 return .none
 
             case let .pendingSendsUpdated(attempts):
@@ -774,41 +1041,27 @@ public struct Chat: Sendable {
                 guard sessionID == state.sessionID else {
                     return .none
                 }
-                // A completed send can race with an older first WebSocket snapshot. Prefer the
-                // snapshot's copy when IDs overlap, and append only confirmed rows it omitted.
-                let responseMessageIDs = Set(messages.map(\.id))
-                let confirmedMessagesMissingFromSnapshot = state
-                    .confirmedMessagesAwaitingInitialSnapshot
-                    .filter { !responseMessageIDs.contains($0.id) }
-                // After the first snapshot, database observation owns subsequent updates.
-                state.confirmedMessagesAwaitingInitialSnapshot.removeAll()
-                let displayedMessages = messages + confirmedMessagesMissingFromSnapshot
                 let transcriptMessages = if state.isCloudHosted {
-                    displayedMessages
+                    messages
                 } else {
-                    displayedMessages
+                    messages
                         .filter(Self.isTranscriptMessage)
                         .sorted(by: Self.areMessagesInTranscriptOrder)
                 }
                 state.isMessageSnapshotEmpty = transcriptMessages.isEmpty
                 state.turns = Turn.parse(
                     messages: transcriptMessages,
-                    reusing: state.turns ?? []
+                    reusing: state.turns ?? [],
+                    messageIDToBubbleID: state.messageIDToBubbleID
                 )
                 state.updateReportedContextWindowTokenLimits()
-                state.updateRows(sessionStatus: state.session.status)
+                state.initializeIdleBaseline()
+                state.updateRows()
                 state.isLoadingMessages = false
                 return .none
 
-            case let .messageConfirmed(sessionID, message):
-                guard sessionID == state.sessionID, state.isLoadingMessages else {
-                    return .none
-                }
-                state.confirmedMessagesAwaitingInitialSnapshot.append(message)
-                return .none
-
             case .sessionStatusChanged(let status):
-                state.updateRows(sessionStatus: status)
+                state.sessionStatusChanged(status)
                 return .none
 
             case let .sessionModelChanged(model):
@@ -848,10 +1101,13 @@ public struct Chat: Sendable {
                 if state.expandedSummaryIDs.remove(summaryID) == nil {
                     state.expandedSummaryIDs.insert(summaryID)
                 }
-                state.updateRows(sessionStatus: state.session.status)
+                state.updateRows()
                 return .none
 
             case let .sendButtonTapped(mode):
+                guard state.source == .cloud else {
+                    return .none
+                }
                 let submittedDraft = state.messageDraft
                 let message = submittedDraft.trimmingCharacters(
                     in: .whitespacesAndNewlines
@@ -865,7 +1121,7 @@ public struct Chat: Sendable {
                     return .none
                 }
 
-                state.isMessageSendInFlight = true
+                state.isCloudMessageSendInFlight = true
                 state.scrollToBottomRequest &+= 1
                 return .run {
                     [
@@ -933,7 +1189,7 @@ public struct Chat: Sendable {
                     return .none
                 }
 
-                state.isMessageSendInFlight = false
+                state.isCloudMessageSendInFlight = false
                 switch result {
                 case .success(.desktop):
                     if state.messageDraft == submittedDraft {
@@ -1288,47 +1544,14 @@ private enum CloudChatRoutingError: LocalizedError {
 }
 
 private actor MessagePersistencePipeline {
-    private var confirmedMessagesBySession: [Session.ID: [Message]] = [:]
-
-    func confirm(
-        _ message: Message,
-        sessionID: Session.ID,
-        database: any DatabaseWriter
-    ) async throws {
-        storeConfirmedMessage(message, sessionID: sessionID)
-
-        let persistedMessage = try await database.write { database in
-            if let existingMessage = try Message.find(message.id).fetchOne(database) {
-                return existingMessage
-            }
-            try Message.insert { message }.execute(database)
-            return message
-        }
-        storeConfirmedMessage(persistedMessage, sessionID: sessionID)
-    }
-
     func apply(
         _ event: MessageSyncEvent,
         sessionID: Session.ID,
         database: any DatabaseWriter
     ) async throws -> MessageSyncEvent {
-        let persistedEvent: MessageSyncEvent
-        if event.isSnapshot {
-            let messageIDs = Set(event.messages.map(\.id))
-            let confirmedMessages = confirmedMessagesBySession.removeValue(
-                forKey: sessionID
-            ) ?? []
-            persistedEvent = .snapshot(
-                event.messages
-                    + confirmedMessages.filter { !messageIDs.contains($0.id) }
-            )
-        } else {
-            persistedEvent = event
-        }
-
         try await database.write { database in
-            if persistedEvent.isSnapshot {
-                let messageIDs = Set(persistedEvent.messages.map(\.id))
+            if event.isSnapshot {
+                let messageIDs = Set(event.messages.map(\.id))
                 let storedMessages = try Message
                     .where { $0.sessionID.eq(sessionID) }
                     .fetchAll(database)
@@ -1343,7 +1566,7 @@ private actor MessagePersistencePipeline {
                 }
             }
 
-            for messageID in persistedEvent.deletedMessageIDs {
+            for messageID in event.deletedMessageIDs {
                 try Message
                     .where {
                         $0.id.eq(messageID)
@@ -1353,36 +1576,23 @@ private actor MessagePersistencePipeline {
                     .execute(database)
             }
 
-            if !persistedEvent.messages.isEmpty {
-                try Message.upsert { persistedEvent.messages }
+            if !event.messages.isEmpty {
+                try Message.upsert { event.messages }
                     .execute(database)
             }
         }
-        return persistedEvent
-    }
-
-    private func storeConfirmedMessage(
-        _ message: Message,
-        sessionID: Session.ID
-    ) {
-        var messages = confirmedMessagesBySession[sessionID, default: []]
-        if let index = messages.firstIndex(where: { $0.id == message.id }) {
-            messages[index] = message
-        } else {
-            messages.append(message)
-        }
-        confirmedMessagesBySession[sessionID] = messages
+        return event
     }
 }
 
-private extension Dictionary where Key == Session.ID, Value == String {
+extension Dictionary where Key == Session.ID, Value == String {
     subscript(draftFor sessionID: Session.ID) -> String {
         get { self[sessionID, default: ""] }
         set { self[sessionID] = newValue.isEmpty ? nil : newValue }
     }
 }
 
-private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.Default {
+extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.Default {
     static var messageDrafts: Self {
         Self[
             .fileStorage(
@@ -1395,12 +1605,15 @@ private extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.D
 }
 
 struct ChatView: View {
-    private static let reconnectingQueueSpacing: CGFloat = 12
+    private static let overlaySpacing: CGFloat = 8
+    private static let scrollDownButtonContentSpacing: CGFloat = 16
 
     @Bindable var store: StoreOf<Chat>
     @State private var composerHeight: CGFloat = 0
     @State private var queuedMessagesHeight: CGFloat = 0
     @State private var reconnectingSize: CGSize = .zero
+    @State private var scrollDownButtonHeight: CGFloat = 0
+    @State private var shouldShowScrollDownButton = false
     let directoryName: String
     let firstQueuedRowFrameChanged: @MainActor (CGRect) -> Void
 
@@ -1422,9 +1635,8 @@ struct ChatView: View {
 
         GeometryReader { proxy in
             let statusLayout = if queuedMessagesStore.isExpanded {
-                AnyLayout(VStackLayout(spacing: 8))
+                AnyLayout(VStackLayout(spacing: Self.overlaySpacing))
             } else {
-                // AnyLayout(ZStackLayout(alignment: .trailing))
                 AnyLayout(HStackLayout(spacing: 0))
             }
 
@@ -1435,7 +1647,7 @@ struct ChatView: View {
                 )
             )
             .overlay {
-                if store.isLoadingMessages {
+                if store.isLoadingMessages && !store.hasOptimisticMessages {
                     ProgressView()
                         .progressViewStyle(.network)
                         .tint(.theme(.textSecondary))
@@ -1450,18 +1662,23 @@ struct ChatView: View {
                 Color.theme(.background)
                     .ignoresSafeArea()
             }
-            .overlay(alignment: .bottom) {
+            .safeAreaBar(edge: .bottom, spacing: 4) {
                 bottomOverlay(
                     statusLayout: statusLayout,
                     queuedMessagesStore: queuedMessagesStore
                 )
-                .frame(height: proxy.size.height, alignment: .bottom)
-                .clipped()
+                .fixedSize(
+                    horizontal: false,
+                    vertical: !queuedMessagesStore.isExpanded
+                )
             }
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
         }
         .onChange(of: store.session.status) { _, status in
-            store.send(.sessionStatusChanged(status))
+            store.send(
+                .sessionStatusChanged(status),
+                animation: .smooth(duration: 0.25)
+            )
         }
         .onChange(of: store.session.model) { _, model in
             store.send(.sessionModelChanged(model))
@@ -1482,29 +1699,17 @@ struct ChatView: View {
         statusLayout: AnyLayout,
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Self.overlaySpacing) {
             statusLayout {
-                if store.source == .desktop,
-                   store.connectionStatus != .connected {
-                    reconnecting
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                if shouldShowScrollDownButton || shouldShowReconnecting {
+                    controlRow(isExpanded: queuedMessagesStore.isExpanded)
                 }
 
-                if store.mutationRoute.capabilities.canManageQueue,
-                   !queuedMessagesStore.displayedMessages.isEmpty {
-                    QueuedMessagesView(
-                        store: queuedMessagesStore,
-                        firstRowFrameChanged: firstQueuedRowFrameChanged
+                queuedMessagesView(queuedMessagesStore)
+                    .fixedSize(
+                        horizontal: !queuedMessagesStore.isExpanded,
+                        vertical: false
                     )
-                    .id(store.session.id)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .onGeometryChange(for: CGFloat.self) { geometry in
-                        geometry.size.height
-                    } action: { height in
-                        queuedMessagesHeight = height
-                    }
-                }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
 
@@ -1528,11 +1733,76 @@ struct ChatView: View {
                 }
         }
         .animation(.default, value: store.connectionStatus)
+        .animation(.default, value: shouldShowScrollDownButton)
         .animation(.default, value: queuedMessagesStore.displayedMessages)
         .animation(
             QueuedMessagesPresentation.disclosureAnimation,
             value: queuedMessagesStore.isEditing
         )
+    }
+
+    private func controlRow(isExpanded: Bool) -> some View {
+        HStack(spacing: 0) {
+            Group {
+                if shouldShowScrollDownButton {
+                    scrollDownButton
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else {
+                    Color.clear
+                        .frame(height: 0)
+                }
+            }
+            .frame(
+                maxWidth: isExpanded ? .infinity : nil,
+                alignment: .leading
+            )
+
+            Group {
+                if shouldShowReconnecting {
+                    reconnecting
+                        .transition(.opacity)
+                } else {
+                    Color.clear
+                        .frame(height: 0)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Color.clear
+                .frame(maxWidth: isExpanded ? .infinity : 0)
+                .frame(height: 0)
+        }
+        .padding(
+            EdgeInsets(
+                top: 0,
+                leading: QueuedMessagesPresentation.horizontalPadding,
+                bottom: 0,
+                trailing: isExpanded
+                    ? QueuedMessagesPresentation.horizontalPadding
+                    : 0
+            )
+        )
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func queuedMessagesView(
+        _ queuedMessagesStore: StoreOf<QueuedMessages>
+    ) -> some View {
+        if store.mutationRoute.capabilities.canManageQueue,
+           !queuedMessagesStore.displayedMessages.isEmpty {
+            QueuedMessagesView(
+                store: queuedMessagesStore,
+                firstRowFrameChanged: firstQueuedRowFrameChanged
+            )
+            .id(store.session.id)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.size.height
+            } action: { height in
+                queuedMessagesHeight = height
+            }
+        }
     }
 
     private var reconnecting: some View {
@@ -1555,10 +1825,43 @@ struct ChatView: View {
         }
     }
 
+    private var shouldShowReconnecting: Bool {
+        !store.isCloudHosted && store.connectionStatus != .connected
+    }
+
+    private var scrollDownButton: some View {
+        Button {
+            store.send(.scrollDownButtonTapped)
+        } label: {
+            Label {
+                Text("Scroll down")
+            } icon: {
+                LucideIcon(Lucide.arrowDown, size: 20, relativeTo: .body)
+            }
+            .labelStyle(.iconOnly)
+            .padding(8)
+        }
+        .accessibilityLabel("Scroll down")
+        .accessibilityIdentifier("chat.scroll-down")
+        .tint(.theme(.foreground))
+        .glassEffect(
+            .clear
+                .tint(.theme(.background).opacity(0.75))
+                .interactive(),
+            in: .circle
+        )
+        .onGeometryChange(for: CGFloat.self) { geometry in
+            geometry.size.height
+        } action: { height in
+            scrollDownButtonHeight = height
+        }
+    }
+
     private func collectionView(bottomInset: CGFloat) -> some View {
         GeometryReader { proxy in
             ChatCollectionView(
                 rows: store.rows ?? [],
+                animatedScrollToBottomRequest: store.animatedScrollToBottomRequest,
                 scrollToBottomRequest: store.scrollToBottomRequest,
                 safeAreaInsets: EdgeInsets(
                     top: proxy.safeAreaInsets.top,
@@ -1567,6 +1870,9 @@ struct ChatView: View {
                     trailing: proxy.safeAreaInsets.trailing
                 ),
                 contentInsetAnimationDuration: QueuedMessagesPresentation.animationDuration,
+                scrollDownButtonVisibilityChanged: {
+                    shouldShowScrollDownButton = $0
+                },
                 turnSummaryTapped: {
                     store.send(.turnSummaryTapped($0), animation: .default)
                 }
@@ -1580,31 +1886,44 @@ struct ChatView: View {
         safeAreaBottom: CGFloat,
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> CGFloat {
-        let spacing: CGFloat = 8
-
         let queueHeight = if queuedMessagesStore.displayedMessages.isEmpty {
             CGFloat.zero
         } else {
             queuedMessagesHeight
         }
-        let connectionHeight = if store.source == .cloud
-            || store.connectionStatus == .connected {
+        let buttonHeight = if shouldShowScrollDownButton {
+            scrollDownButtonHeight
+        } else {
             CGFloat.zero
-        } else {
+        }
+        let connectionHeight = if shouldShowReconnecting {
             reconnectingSize.height
-        }
-
-        let statusHeight = if queuedMessagesStore.isExpanded,
-                              queueHeight > 0,
-                              connectionHeight > 0 {
-            connectionHeight + spacing + queueHeight
         } else {
-            max(connectionHeight, queueHeight)
+            CGFloat.zero
         }
 
-        return safeAreaBottom
-            + composerHeight
-            + (statusHeight > 0 ? spacing + statusHeight : 0)
+        let controlHeight = max(buttonHeight, connectionHeight)
+        let statusHeight = if queuedMessagesStore.isExpanded {
+            controlHeight
+                + queueHeight
+                + (
+                    controlHeight > 0 && queueHeight > 0
+                        ? Self.overlaySpacing
+                        : 0
+                )
+        } else {
+            max(max(buttonHeight, queueHeight), connectionHeight)
+        }
+        let statusSpacing = statusHeight > 0
+            ? Self.overlaySpacing
+            : 0
+        let contentSpacing = shouldShowScrollDownButton
+            ? Self.scrollDownButtonContentSpacing
+            : 0
+
+        return safeAreaBottom + composerHeight
+            + statusSpacing + statusHeight
+            + contentSpacing
     }
 
     private struct EmptyChatView: View {
@@ -1671,11 +1990,14 @@ private struct ChatComposer: View {
                 if queuedMessagesStore.isEditing {
                     queuedMessagesStore.send(.finishEditButtonTapped)
                 } else {
-                    store.send(.sendButtonTapped(.steer))
+                    store.send(
+                        .sendButtonTapped(.sent),
+                        animation: .smooth(duration: 0.25)
+                    )
                 }
             },
             onQueueTapped: {
-                store.send(.sendButtonTapped(.queue))
+                store.send(.sendButtonTapped(.queued))
             },
             onStopTapped: {
                 store.send(.stopButtonTapped)
