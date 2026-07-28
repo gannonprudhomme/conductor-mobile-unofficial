@@ -12,6 +12,13 @@ import IssueReporting
 import Testing
 
 struct WorkspaceDisplayTests {
+    @Test("A hosting server URL identifies locally observed cloud workspaces")
+    func cloudHosting() {
+        #expect(Workspace.preview(hostingServerURL: "https://cloud.test").isCloudHosted)
+        #expect(!Workspace.preview(hostingServerURL: "").isCloudHosted)
+        #expect(!Workspace.preview(hostingServerURL: nil).isCloudHosted)
+    }
+
     @Test("Workspace status titles preserve unknown values")
     func statusTitles() {
         #expect(Workspace.Status.done.title == "Done")

@@ -96,6 +96,20 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.SharedConductorDataTests
         PRODUCT_NAME: $(TARGET_NAME)
+  ConductorCloudTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/ConductorCloud/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorCloud
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorCloudTests
+        PRODUCT_NAME: $(TARGET_NAME)
   ConductorMobileDataTests:
     type: bundle.unit-test
     platform: iOS
@@ -105,6 +119,8 @@ targets:
     dependencies:
       - package: ConductorShared
         product: SharedConductorData
+      - package: ConductorModules
+        product: ConductorCloud
       - package: ConductorModules
         product: ConductorMobileData
     settings:
@@ -175,6 +191,8 @@ targets:
     sources:
       - path: Modules/ConductorSettings/Tests
     dependencies:
+      - package: ConductorShared
+        product: SharedConductorData
       - package: ConductorModules
         product: ConductorSettings
     settings:
@@ -207,6 +225,13 @@ schemes:
     test:
       targets:
         - ConductorChatTests
+  ConductorCloudTests:
+    build:
+      targets:
+        ConductorCloudTests: test
+    test:
+      targets:
+        - ConductorCloudTests
   SharedConductorDataTests:
     build:
       targets:

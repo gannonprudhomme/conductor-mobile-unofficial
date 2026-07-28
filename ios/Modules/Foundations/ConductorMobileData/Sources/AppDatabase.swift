@@ -201,6 +201,113 @@ public func appDatabase() throws -> any DatabaseWriter {
         .execute(db)
     }
 
+    migrator.registerMigration("Create cloud workspace metadata") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_workspace_metadata" (
+              "workspace_id" TEXT PRIMARY KEY
+                REFERENCES "workspaces" ("id") ON DELETE CASCADE,
+              "account_id" TEXT NOT NULL,
+              "last_seen_generation" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_workspace_metadata_account_id"
+            ON "cloud_workspace_metadata" ("account_id");
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Allow null session titles") { db in
+        try #sql(
+            """
+            CREATE TABLE "sessions_with_nullable_title" (
+              "id" TEXT PRIMARY KEY,
+              "workspace_id" TEXT NOT NULL,
+              "title" TEXT,
+              "agent_type" TEXT NOT NULL,
+              "is_hidden" INTEGER NOT NULL DEFAULT 0,
+              "created_at" TEXT NOT NULL,
+              "updated_at" TEXT NOT NULL,
+              "last_user_message_at" TEXT,
+              "status" TEXT NOT NULL,
+              "model" TEXT NOT NULL,
+              "codex_thinking_level" TEXT,
+              "fast_mode" INTEGER DEFAULT 0,
+              "claude_effort_level" TEXT,
+              "unread_count" INTEGER NOT NULL DEFAULT 0,
+              "freshly_compacted" INTEGER NOT NULL DEFAULT 0,
+              "context_token_count" INTEGER NOT NULL DEFAULT 0,
+              "queue_paused_at" TEXT
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            INSERT INTO "sessions_with_nullable_title" (
+              "id",
+              "workspace_id",
+              "title",
+              "agent_type",
+              "is_hidden",
+              "created_at",
+              "updated_at",
+              "last_user_message_at",
+              "status",
+              "model",
+              "codex_thinking_level",
+              "fast_mode",
+              "claude_effort_level",
+              "unread_count",
+              "freshly_compacted",
+              "context_token_count",
+              "queue_paused_at"
+            )
+            SELECT
+              "id",
+              "workspace_id",
+              "title",
+              "agent_type",
+              "is_hidden",
+              "created_at",
+              "updated_at",
+              "last_user_message_at",
+              "status",
+              "model",
+              "codex_thinking_level",
+              "fast_mode",
+              "claude_effort_level",
+              "unread_count",
+              "freshly_compacted",
+              "context_token_count",
+              "queue_paused_at"
+            FROM "sessions";
+            """
+        )
+        .execute(db)
+        try #sql("DROP TABLE \"sessions\"")
+            .execute(db)
+        try #sql(
+            """
+            ALTER TABLE "sessions_with_nullable_title"
+            RENAME TO "sessions";
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "sessions_workspace_id_updated_at"
+            ON "sessions" ("workspace_id", "updated_at" DESC);
+            """
+        )
+        .execute(db)
+    }
+
     try migrator.migrate(database)
     return database
 }

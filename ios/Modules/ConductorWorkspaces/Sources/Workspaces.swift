@@ -7,12 +7,13 @@
 
 import Combine
 import ComposableArchitecture
-import SharedConductorData
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
 import LucideIcons
 import Logging
+import SharedConductorData
 import Sharing
 import SQLiteData
 import SwiftUI
@@ -23,11 +24,17 @@ public struct Workspaces: Sendable {
     public struct State: Equatable {
         @Presents public var destination: Destination.State?
 
+        @Shared(.cloudConfiguration)
+        public var cloudConfiguration
+
         @Shared(.desktopConnectionStatus)
         public var connectionStatus
 
         @Shared(.desktopDisplayConfiguration)
         public var displayConfiguration
+
+        @Shared(.desktopServerAddress)
+        public var desktopServerAddress
 
         @FetchAll(
             Repository.all
@@ -35,6 +42,12 @@ public struct Workspaces: Sendable {
             animation: .default
         )
         public var repositories: [Repository] = []
+
+        @FetchAll(
+            Repository.availableForLocalWorkspaceCreation,
+            animation: .default
+        )
+        public var repositoriesAvailableForWorkspaceCreation: [Repository] = []
 
         @Shared(.collapsedWorkspaceSectionIDs)
         var collapsedSectionIDs
@@ -57,14 +70,30 @@ public struct Workspaces: Sendable {
         )
         public var workspaces: [WorkspaceWithRepository] = []
 
-        var isLoadingWorkspaces = true
+        public var cloudObservationStatus: CloudObservationStatus
+        var hasPresentedCloudFailureAlert = false
+        var isLoadingWorkspaces: Bool
         var sections: [WorkspaceSection] = []
+
+        public var isCloudCredentialConfigured: Bool {
+            cloudConfiguration != nil
+        }
+
+        var hasLocalConfiguration: Bool {
+            desktopServerAddress != nil
+        }
 
         var hasVisibleWorkspaces: Bool {
             sections.contains { !$0.items.isEmpty }
         }
 
         public init() {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            self.cloudObservationStatus = cloudConfiguration != nil
+                ? .loading
+                : .disconnected
+            self.isLoadingWorkspaces = desktopServerAddress != nil
             _workspaces = FetchAll(
                 WorkspaceWithRepository.all(
                     repositoryID: selectedRepositoryID,
@@ -73,7 +102,17 @@ public struct Workspaces: Sendable {
                 ),
                 animation: .default
             )
-            sections = Self.sections(groupedBy: grouping, workspaces: workspaces)
+            updateSections(from: workspaces)
+        }
+
+        mutating func updateSections(
+            from workspaces: [WorkspaceWithRepository],
+            groupedBy grouping: WorkspaceWithRepository.Grouping? = nil
+        ) {
+            sections = Self.sections(
+                groupedBy: grouping ?? self.grouping,
+                workspaces: workspaces
+            )
         }
 
         static func sections(
@@ -97,7 +136,7 @@ public struct Workspaces: Sendable {
 
                 groupedSections = unpinnedItems.reduce(into: initialSections) { sections, item in
                     let groupByType = WorkspaceSection.GroupByType.status(
-                        item.workspace.status
+                        item.status
                     )
                     if let index = sections.firstIndex(where: { $0.id == groupByType.id }) {
                         sections[index].items.append(item)
@@ -177,12 +216,62 @@ public struct Workspaces: Sendable {
         case alert(AlertState<Alert>)
         case createWorkspace(CreateWorkspace)
 
-        public enum Alert: Equatable {}
+        public enum Alert: Equatable {
+            case openSettings
+            case retryCloud
+        }
+    }
+
+    public enum CloudObservationStatus: Equatable, Sendable {
+        case connected
+        case disconnected
+        case failed
+        case loading
+    }
+
+    public enum CloudFailure: Equatable, Sendable {
+        case authentication(String)
+        case offline(String)
+        case other(String)
+
+        public var message: String {
+            switch self {
+            case let .authentication(message),
+                 let .offline(message),
+                 let .other(message):
+                message
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .authentication:
+                "Cloud authentication failed"
+
+            case .offline, .other:
+                "Unable to reach Cloud"
+            }
+        }
+
+        static func from(_ error: any Error) -> Self {
+            if let apiError = error as? CloudAPIClientError,
+               apiError.isAuthenticationFailure {
+                return .authentication(apiError.localizedDescription)
+            }
+            if error is URLError {
+                return .offline(error.localizedDescription)
+            }
+            return .other(error.localizedDescription)
+        }
     }
 
     public enum Action {
+        case cloudConfigurationChanged(CloudConfiguration?)
+        case cloudObservationFailed(CloudFailure)
+        case cloudSnapshotReceived
         case createButtonTapped
         case createWorkspaceSheetDismissed
+        case desktopConfigurationChanged(String?)
         case destination(PresentationAction<Destination.Action>)
         case groupingChanged(WorkspaceWithRepository.Grouping)
         case initialWorkspacesResponse
@@ -206,6 +295,7 @@ public struct Workspaces: Sendable {
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.continuousClock) var clock
+    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
 
@@ -216,11 +306,25 @@ public struct Workspaces: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
+                let cloudConfiguration = state.$cloudConfiguration
+                let desktopServerAddress = state.$desktopServerAddress
                 let grouping = state.$grouping
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
                 return .merge(
+                    .publisher {
+                        cloudConfiguration.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.cloudConfigurationChanged)
+                    },
+                    .publisher {
+                        desktopServerAddress.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.desktopConfigurationChanged)
+                    },
                     .publisher {
                         grouping.publisher
                             .removeDuplicates()
@@ -233,35 +337,78 @@ public struct Workspaces: Sendable {
                             .dropFirst()
                             .map(Action.workspacesChanged)
                     },
+                    state.isCloudCredentialConfigured
+                        ? observeCloudWorkspaces()
+                        : clearCachedCloudWorkspaces(),
+                    state.hasLocalConfiguration
+                        ? .merge(
+                            monitorConnection(),
+                            observeLocalWorkspaces(state)
+                        )
+                        : clearDesktopObservation()
+                )
+
+            case let .cloudConfigurationChanged(configuration):
+                state.hasPresentedCloudFailureAlert = false
+                guard configuration != nil else {
+                    state.cloudObservationStatus = .disconnected
+                    return .merge(
+                        .cancel(id: CancelID.cloudObservation),
+                        clearCachedCloudWorkspaces()
+                    )
+                }
+                state.cloudObservationStatus = .loading
+                return observeCloudWorkspaces()
+
+            case let .cloudObservationFailed(failure):
+                state.cloudObservationStatus = .failed
+                guard !state.hasPresentedCloudFailureAlert,
+                      state.destination == nil else {
+                    return .none
+                }
+                state.hasPresentedCloudFailureAlert = true
+                state.destination = .alert(.cloudObservationFailed(failure))
+                return .none
+
+            case .cloudSnapshotReceived:
+                state.cloudObservationStatus = .connected
+                state.hasPresentedCloudFailureAlert = false
+                return .none
+
+            case let .desktopConfigurationChanged(serverAddress):
+                state.isLoadingWorkspaces = serverAddress != nil
+                guard serverAddress != nil else {
+                    return .merge(
+                        .cancel(id: CancelID.desktopObservation),
+                        .cancel(id: CancelID.connectionMonitor),
+                        clearDesktopObservation()
+                    )
+                }
+                return .merge(
                     monitorConnection(),
-                    observeWorkspaces(state)
+                    observeLocalWorkspaces(state, clearsPreviousObservation: true)
                 )
 
             case let .groupingChanged(grouping):
-                state.sections = State.sections(
-                    groupedBy: grouping,
-                    workspaces: state.workspaces
-                )
+                state.updateSections(from: state.workspaces, groupedBy: grouping)
                 return reloadWorkspaces(state)
 
             case .createButtonTapped:
-                guard !state.repositories.isEmpty else {
+                let repositories = state.repositoriesAvailableForWorkspaceCreation
+                guard !repositories.isEmpty else {
                     return .none
                 }
 
                 state.destination = .createWorkspace(
                     CreateWorkspace.State(
-                        repositories: state.repositories,
+                        repositories: repositories,
                         selectedRepositoryIDFilter: state.selectedRepositoryID
                     )
                 )
                 return .none
 
             case .createWorkspaceSheetDismissed:
-                state.sections = State.sections(
-                    groupedBy: state.grouping,
-                    workspaces: state.deferredWorkspaces ?? state.workspaces
-                )
+                state.updateSections(from: state.deferredWorkspaces ?? state.workspaces)
                 state.deferredWorkspaces = nil
                 guard let creation = state.pendingWorkspaceCreation else {
                     return .none
@@ -278,6 +425,13 @@ public struct Workspaces: Sendable {
                 state.destination = nil
                 state.pendingWorkspaceCreation = creation
                 return .none
+
+            case .destination(.presented(.alert(.openSettings))):
+                return .send(.settingsButtonTapped)
+
+            case .destination(.presented(.alert(.retryCloud))):
+                state.cloudObservationStatus = .loading
+                return observeCloudWorkspaces()
 
             case .initialWorkspacesResponse:
                 state.isLoadingWorkspaces = false
@@ -309,10 +463,7 @@ public struct Workspaces: Sendable {
                     state.deferredWorkspaces = workspaces
                     return .none
                 }
-                state.sections = State.sections(
-                    groupedBy: state.grouping,
-                    workspaces: workspaces
-                )
+                state.updateSections(from: workspaces)
                 return .none
 
             case let .workspaceArchiveButtonTapped(item):
@@ -434,7 +585,10 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .destination, .settingsButtonTapped, .workspaceCreated, .workspaceTapped:
+            case .destination,
+                 .settingsButtonTapped,
+                 .workspaceCreated,
+                 .workspaceTapped:
                 return .none
             }
         }
@@ -493,10 +647,19 @@ public struct Workspaces: Sendable {
         }
     }
 
-    private func observeWorkspaces(_ state: State) -> Effect<Action> {
+    private func observeLocalWorkspaces(
+        _ state: State,
+        clearsPreviousObservation: Bool = false
+    ) -> Effect<Action> {
         .run { [initiallyIsLoadingWorkspaces = state.isLoadingWorkspaces] send in
             var isAwaitingInitialResponse = initiallyIsLoadingWorkspaces
-            await WebSocketHelpers.observe {
+            if clearsPreviousObservation {
+                try await database.write { db in
+                    try MobileWorkspaceState.delete().execute(db)
+                }
+            }
+
+            await StreamObservation.observe {
                 desktopClient.observeWorkspaces()
             } onValue: { snapshot in
                 try await database.write { db in
@@ -507,6 +670,8 @@ public struct Workspaces: Sendable {
                         .upsert { snapshot.workspaces.map(\.workspace) }
                         .execute(db)
 
+                    // The desktop snapshot is authoritative for this source-specific table.
+                    try MobileWorkspaceState.delete().execute(db)
                     try MobileWorkspaceState.upsert {
                         snapshot.workspaces.map {
                             MobileWorkspaceState(
@@ -524,7 +689,76 @@ public struct Workspaces: Sendable {
                     await send(.initialWorkspacesResponse)
                 }
             } onFailure: { error in
-                Logger.workspace.error("Failed to observe workspaces: \(error)")
+                Logger.workspace.error(
+                    "Failed to observe local workspaces: \(error)"
+                )
+                await send(.loadWorkspacesFailed(error))
+            }
+        }
+        .cancellable(id: CancelID.desktopObservation, cancelInFlight: true)
+    }
+
+    private func observeCloudWorkspaces() -> Effect<Action> {
+        .run { send in
+            await StreamObservation.observe(
+                retrying: {
+                    cloudAPIClient.observeWorkspaces()
+                },
+                retryDelays: [
+                    .seconds(1),
+                    .seconds(2),
+                    .seconds(4),
+                    .seconds(8),
+                    .seconds(16),
+                    .seconds(30),
+                ],
+                shouldRetry: { error in
+                    if CloudAPIClientError.isRequestCancellation(error) {
+                        return true
+                    }
+                    return CloudAPIClientError.shouldRetryObservation(
+                        after: error
+                    )
+                }
+            ) { snapshot in
+                try await database.write { db in
+                    try CloudWorkspacePersistence.persist(snapshot, in: db)
+                }
+                await send(.cloudSnapshotReceived)
+            } onFailure: { error in
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
+                    return
+                }
+                Logger.workspace.error(
+                    "Failed to observe Cloud workspaces: \(error)"
+                )
+                await send(.cloudObservationFailed(.from(error)))
+            }
+        }
+        .cancellable(id: CancelID.cloudObservation, cancelInFlight: true)
+    }
+
+    private func clearCachedCloudWorkspaces() -> Effect<Action> {
+        .run { send in
+            do {
+                try await database.write { db in
+                    try CloudWorkspaceMetadata.clearCachedRows(in: db)
+                }
+            } catch {
+                Logger.workspace.error("Failed to clear Cloud workspaces: \(error)")
+                await send(.loadWorkspacesFailed(error))
+            }
+        }
+    }
+
+    private func clearDesktopObservation() -> Effect<Action> {
+        .run { send in
+            do {
+                try await database.write { db in
+                    try MobileWorkspaceState.delete().execute(db)
+                }
+            } catch {
+                Logger.workspace.error("Failed to clear local observation: \(error)")
                 await send(.loadWorkspacesFailed(error))
             }
         }
@@ -537,12 +771,53 @@ public struct Workspaces: Sendable {
                 try await clock.sleep(for: .seconds(3))
             }
         }
+        .cancellable(id: CancelID.connectionMonitor, cancelInFlight: true)
+    }
+
+    private enum CancelID: Hashable {
+        case cloudObservation
+        case connectionMonitor
+        case desktopObservation
     }
 }
 
 extension Workspaces.Destination.State: Equatable {}
 
 extension AlertState where Action == Workspaces.Destination.Alert {
+    static func cloudObservationFailed(_ failure: Workspaces.CloudFailure) -> Self {
+        switch failure {
+        case .authentication:
+            AlertState {
+                TextState(failure.title)
+            } actions: {
+                ButtonState(action: .openSettings) {
+                    TextState("Open Settings")
+                }
+
+                ButtonState(role: .cancel) {
+                    TextState("Dismiss")
+                }
+            } message: {
+                TextState(failure.message)
+            }
+
+        case .offline, .other:
+            AlertState {
+                TextState(failure.title)
+            } actions: {
+                ButtonState(action: .retryCloud) {
+                    TextState("Retry")
+                }
+
+                ButtonState(role: .cancel) {
+                    TextState("Dismiss")
+                }
+            } message: {
+                TextState(failure.message)
+            }
+        }
+    }
+
     static func failedToLoadWorkspaces(error: any Error) -> Self {
         AlertState {
             TextState("Failed to load workspaces")
@@ -613,6 +888,7 @@ public struct WorkspacesView: View {
                     }
                 }
             }
+
         }
         .contentMargins(.top, 0)
         .listStyle(.plain)
@@ -623,28 +899,38 @@ public struct WorkspacesView: View {
         .scrollContentBackground(.hidden)
         .background(.theme(.background))
         .overlay {
-            if store.isLoadingWorkspaces {
+            if store.isLoadingWorkspaces
+                && store.hasLocalConfiguration
+                && !store.isCloudCredentialConfigured {
                 ProgressView()
                     .progressViewStyle(.network)
                     .tint(.theme(.textSecondary))
                     .frame(width: 32, height: 32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .background(.theme(.background))
-            } else if !store.hasVisibleWorkspaces {
+            } else if !store.hasVisibleWorkspaces
+                && store.cloudObservationStatus != .loading {
                 ContentUnavailableView(
                     "No Workspaces",
                     systemImage: "rectangle.stack",
-                    description: Text("Pair with Conductor on your Mac to see workspaces here.")
+                    description: Text(emptyDescription)
                 )
                 .foregroundStyle(.theme(.textPrimary))
                 .font(.theme(.body))
             }
         }
         .themedNavigationTitle("Conductor", alignment: .leading) {
-            ConnectionStatusSubtitle(
-                status: store.connectionStatus,
-                displayConfiguration: store.displayConfiguration
-            )
+            if store.isCloudCredentialConfigured || store.hasLocalConfiguration {
+                ConnectionStatusSubtitle(
+                    cloudStatus: store.isCloudCredentialConfigured
+                        ? store.cloudObservationStatus
+                        : nil,
+                    localStatus: store.hasLocalConfiguration
+                        ? store.connectionStatus
+                        : nil,
+                    localDisplayConfiguration: store.displayConfiguration
+                )
+            }
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -680,7 +966,7 @@ public struct WorkspacesView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.theme(.foreground))
                 .foregroundStyle(.theme(.background))
-                .disabled(store.repositories.isEmpty)
+                .disabled(store.repositoriesAvailableForWorkspaceCreation.isEmpty)
                 .accessibilityHint("Creates a new Conductor workspace")
                 .sheet(
                     item: $store.scope(
@@ -703,71 +989,212 @@ public struct WorkspacesView: View {
         .preferredColorScheme(.dark)
     }
 
+    private var emptyDescription: String {
+        switch (store.hasLocalConfiguration, store.isCloudCredentialConfigured) {
+        case (true, true):
+            "No workspaces are available from your Mac or Conductor Cloud."
+
+        case (true, false):
+            "Pair with Conductor on your Mac to see workspaces here."
+
+        case (false, true):
+            "No Conductor Cloud workspaces are available."
+
+        case (false, false):
+            "Configure a Mac connection or Conductor Cloud in Settings."
+        }
+    }
+
     private struct ConnectionStatusSubtitle: View {
-        let status: DesktopClient.ConnectionStatus
-        let displayConfiguration: DesktopClient.DisplayConfiguration?
-
-        @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
-        private var indicatorFrameSize = 12
-
-        @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
-        private var indicatorSize = 8
-
-        private var displayName: String {
-            displayConfiguration?.name ?? "MacBook Pro"
-        }
-
-        private var deviceIcon: DesktopClient.DeviceIcon {
-            displayConfiguration?.icon ?? .laptop
-        }
+        let cloudStatus: Workspaces.CloudObservationStatus?
+        let localStatus: DesktopClient.ConnectionStatus?
+        let localDisplayConfiguration: DesktopClient.DisplayConfiguration?
 
         var body: some View {
-            Label {
-                Text(displayName)
-                    .foregroundStyle(.theme(.textSecondary))
-                    .font(.theme(.small))
-                    .lineLimit(1)
-            } icon: {
-                HStack(spacing: 4) {
-                    indicator
+            HStack(spacing: 8) {
+                if let cloudStatus {
+                    CloudStatusLabel(status: cloudStatus)
+                }
 
-                    LucideIcon(deviceIcon.lucideImage, style: .small)
+                if cloudStatus != nil && localStatus != nil {
+                    Rectangle()
+                        .fill(.theme(.border))
+                        .frame(width: 1, height: 12)
+                        .accessibilityHidden(true)
+                }
+
+                if let localStatus {
+                    LocalStatusLabel(
+                        status: localStatus,
+                        displayConfiguration: localDisplayConfiguration
+                    )
                 }
             }
-            .labelStyle(.conductorExtraSmall)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(displayName)
-            .accessibilityValue(accessibilityValue)
         }
 
-        private var indicator: some View {
-            Group {
+        private struct CloudStatusLabel: View {
+            let status: Workspaces.CloudObservationStatus
+
+            var body: some View {
+                Label {
+                    Text("Cloud")
+                        .foregroundStyle(.theme(.textSecondary))
+                        .font(.theme(.small))
+                        .lineLimit(1)
+                } icon: {
+                    HStack(spacing: 4) {
+                        StatusIndicator(state: indicatorState)
+
+                        CloudWorkspaceIcon(
+                            size: 14,
+                            relativeTo: ThemeFontStyle.small.textStyle
+                        )
+                    }
+                }
+                .labelStyle(.conductorExtraSmall)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier(accessibilityIdentifier)
+                .accessibilityLabel("Cloud")
+                .accessibilityValue(accessibilityValue)
+            }
+
+            private var accessibilityIdentifier: String {
                 switch status {
-                case .connected, .disconnected:
-                    Circle()
-                        .fill(.theme(status == .connected ? .gitGreen : .gitRed))
-                        .frame(width: indicatorSize, height: indicatorSize)
+                case .connected:
+                    "cloud-status.connected"
+
+                case .disconnected:
+                    "cloud-status.disconnected"
+
+                case .failed:
+                    "cloud-status.failed"
+
+                case .loading:
+                    "cloud-status.loading"
+                }
+            }
+
+            private var accessibilityValue: String {
+                switch status {
+                case .connected:
+                    "Connected"
+
+                case .disconnected:
+                    "Disconnected"
+
+                case .failed:
+                    "Unavailable"
+
+                case .loading:
+                    "Loading workspaces"
+                }
+            }
+
+            private var indicatorState: StatusIndicator.State {
+                switch status {
+                case .connected:
+                    .connected
+
+                case .disconnected, .failed:
+                    .disconnected
+
+                case .loading:
+                    .loading
+                }
+            }
+        }
+
+        private struct LocalStatusLabel: View {
+            let status: DesktopClient.ConnectionStatus
+            let displayConfiguration: DesktopClient.DisplayConfiguration?
+
+            private var displayName: String {
+                displayConfiguration?.name ?? "MacBook Pro"
+            }
+
+            private var deviceIcon: DesktopClient.DeviceIcon {
+                displayConfiguration?.icon ?? .laptop
+            }
+
+            var body: some View {
+                Label {
+                    Text(displayName)
+                        .foregroundStyle(.theme(.textSecondary))
+                        .font(.theme(.small))
+                        .lineLimit(1)
+                } icon: {
+                    HStack(spacing: 4) {
+                        StatusIndicator(state: indicatorState)
+
+                        LucideIcon(deviceIcon.lucideImage, style: .small)
+                    }
+                }
+                .labelStyle(.conductorExtraSmall)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(displayName)
+                .accessibilityValue(accessibilityValue)
+            }
+
+            private var accessibilityValue: String {
+                switch status {
+                case .connected:
+                    "Connected"
 
                 case .connecting:
-                    ProgressView()
-                        .progressViewStyle(.network)
-                        .tint(.theme(.textSecondary))
-                        .controlSize(.mini)
+                    "Connecting"
+
+                case .disconnected:
+                    "Disconnected"
                 }
             }
-            .frame(width: indicatorFrameSize, height: indicatorFrameSize)
+
+            private var indicatorState: StatusIndicator.State {
+                switch status {
+                case .connected:
+                    .connected
+
+                case .connecting:
+                    .loading
+
+                case .disconnected:
+                    .disconnected
+                }
+            }
         }
 
-        private var accessibilityValue: String {
-            switch status {
-            case .connected:
-                "Connected"
+        private struct StatusIndicator: View {
+            let state: State
 
-            case .connecting:
-                "Connecting"
+            @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
+            private var frameSize = 12
 
-            case .disconnected:
-                "Disconnected"
+            @ScaledMetric(relativeTo: ThemeFontStyle.small.textStyle)
+            private var size = 8
+
+            var body: some View {
+                Group {
+                    switch state {
+                    case .connected, .disconnected:
+                        Circle()
+                            .fill(
+                                .theme(state == .connected ? .gitGreen : .gitRed)
+                            )
+                            .frame(width: size, height: size)
+
+                    case .loading:
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.textSecondary))
+                            .controlSize(.mini)
+                    }
+                }
+                .frame(width: frameSize, height: frameSize)
+            }
+
+            enum State: Equatable {
+                case connected
+                case disconnected
+                case loading
             }
         }
     }
@@ -899,16 +1326,27 @@ public struct WorkspacesView: View {
             ForEach(items) { item in
                 WorkspaceRow(
                     item: item,
-                    showsRepositoryIcon: showsRepositoryIcon
-                ) { rowAction in
-                    action(item, rowAction)
-                }
+                    showsRepositoryIcon: showsRepositoryIcon,
+                    action: rowAction(for: item)
+                )
                 .padding(.leading, isIndented ? 12 : 0)
                 .listRowInsets(
                     EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
                 )
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
+            }
+        }
+
+        private func rowAction(
+            for item: WorkspaceWithRepository
+        ) -> (@MainActor (WorkspaceRowAction) -> Void)? {
+            if item.isCloudOnly {
+                return nil
+            } else {
+                return { workspaceRowAction in
+                    action(item, workspaceRowAction)
+                }
             }
         }
     }

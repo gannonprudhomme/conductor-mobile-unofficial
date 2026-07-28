@@ -10,6 +10,8 @@ import ConductorFoundation
 import IssueReporting
 
 extension Workspace {
+    public static let conductorCloudHostingServerURL = "https://api.conductor.build"
+
     public var status: Status {
         guard let rawValue = manualStatus?.nilIfEmpty ?? derivedStatus?.nilIfEmpty
         else {
@@ -36,6 +38,10 @@ extension Workspace.Status {
 }
 
 extension Workspace {
+    public var isCloudHosted: Bool {
+        hostingServerURL?.isEmpty == false
+    }
+
     public var emptyChatDirectoryName: String {
         let workspaceNameDirectoryName = workspaceName?
             .split(whereSeparator: \.isWhitespace)

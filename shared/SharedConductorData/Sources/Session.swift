@@ -12,7 +12,7 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
     public let id: String
     @Column("workspace_id")
     public var workspaceID: String
-    public var title: String
+    public var title: String?
     @Column("agent_type")
     public var agentType: AgentType
     @Column("is_hidden")
@@ -45,7 +45,7 @@ public struct Session: Codable, Hashable, Identifiable, Sendable {
     public init(
         id: String,
         workspaceID: String,
-        title: String,
+        title: String?,
         agentType: AgentType,
         isHidden: Bool,
         createdAt: String,
