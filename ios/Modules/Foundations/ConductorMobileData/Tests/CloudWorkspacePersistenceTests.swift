@@ -211,6 +211,114 @@ struct CloudWorkspacePersistenceTests {
         #expect(desktopThenCloud.repositoryID == "project-1")
     }
 
+    @Test("Cloud refresh consolidates duplicate repositories into the desktop row")
+    func consolidatesDuplicateRepositories() throws {
+        let database = try appDatabase()
+        let localRepository = Repository.preview(
+            id: "local-repository",
+            name: "conductor-mobile-unofficial",
+            remoteURL:
+                "https://github.com/gannonprudhomme/conductor-mobile-unofficial",
+            rootPath: "/tmp/conductor-shared"
+        )
+        let personalCloudRepository = Repository.preview(
+            id: "personal-cloud-project",
+            name: "Conductor Mobile Unofficial",
+            remoteURL:
+                "git@github.com:gannonprudhomme/conductor-mobile-unofficial.git"
+        )
+        let organizationCloudRepository = Repository.preview(
+            id: "organization-cloud-project",
+            name: "Conductor Mobile Unofficial",
+            remoteURL:
+                "https://github.com/GannonPrudhomme/conductor-mobile-unofficial.git/"
+        )
+        let localWorkspace = Workspace.preview(
+            id: "local-workspace",
+            repositoryID: localRepository.id
+        )
+        let cloudWorkspace = Workspace.preview(
+            id: "legacy-cloud-workspace",
+            repositoryID: organizationCloudRepository.id
+        )
+
+        try database.write { db in
+            try Repository
+                .insert {
+                    [
+                        localRepository,
+                        personalCloudRepository,
+                        organizationCloudRepository,
+                    ]
+                }
+                .execute(db)
+            try Workspace
+                .insert { [localWorkspace, cloudWorkspace] }
+                .execute(db)
+            try MobileWorkspaceState
+                .insert {
+                    MobileWorkspaceState(
+                        workspaceID: localWorkspace.id,
+                        isWorking: false
+                    )
+                }
+                .execute(db)
+            try CloudProjectRepositoryMapping
+                .insert {
+                    [
+                        CloudProjectRepositoryMapping(
+                            accountID: "personal-account",
+                            cloudProjectID: "personal-project",
+                            canonicalRepositoryID: personalCloudRepository.id,
+                            projectName: personalCloudRepository.displayName,
+                            gitRemote: personalCloudRepository.remoteURL ?? "",
+                            refreshGeneration: "previous"
+                        ),
+                        CloudProjectRepositoryMapping(
+                            accountID: "organization-account",
+                            cloudProjectID: "project-1",
+                            canonicalRepositoryID:
+                                organizationCloudRepository.id,
+                            projectName:
+                                organizationCloudRepository.displayName,
+                            gitRemote:
+                                organizationCloudRepository.remoteURL ?? "",
+                            refreshGeneration: "previous"
+                        ),
+                    ]
+                }
+                .execute(db)
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(
+                    accountID: "organization-account",
+                    workspaceIDs: [],
+                    gitRemote:
+                        "https://github.com/gannonprudhomme/conductor-mobile-unofficial.git"
+                ),
+                in: db
+            )
+        }
+
+        try database.read { db in
+            let repositories = try Repository.all.fetchAll(db)
+            let workspaces = try Workspace.all.fetchAll(db)
+            let mapping = try CloudProjectRepositoryMapping.find(
+                CloudProjectRepositoryMapping.id(
+                    accountID: "organization-account",
+                    cloudProjectID: "project-1"
+                )
+            )
+            .fetchOne(db)
+
+            #expect(repositories.map(\.id) == [localRepository.id])
+            #expect(
+                Set(workspaces.compactMap(\.repositoryID))
+                    == [localRepository.id]
+            )
+            #expect(mapping?.canonicalRepositoryID == localRepository.id)
+        }
+    }
+
     @Test("Account replacement removes only stale API-owned rows")
     func replacesAccountAndReconcilesStaleRows() throws {
         let database = try appDatabase()
@@ -527,12 +635,13 @@ private func persistCloudChat(
 private func cloudSnapshot(
     accountID: String = "account-1",
     workspaceIDs: [CloudWorkspace.ID],
-    status: CloudWorkspaceStatusResponse.Status = .ready
+    status: CloudWorkspaceStatusResponse.Status = .ready,
+    gitRemote: String = "https://github.com/example/mobile.git"
 ) -> CloudWorkspaceSnapshot {
     let project = CloudProject(
         id: "project-1",
         name: "Mobile",
-        gitRemote: "https://github.com/example/mobile.git"
+        gitRemote: gitRemote
     )
     let workspaces = workspaceIDs.map { workspaceID in
         CloudWorkspace(

@@ -102,6 +102,64 @@ struct CloudChatPersistenceTests {
         )
     }
 
+    @Test("Canonical workspace snapshots remove sessions absent from the API")
+    func canonicalWorkspaceRemovesStaleSessions() throws {
+        let database = try appDatabase()
+        let accountID = "account"
+        let remoteWorkspaceID = "workspace"
+        let canonicalWorkspaceID = CloudCanonicalID.workspace(
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID
+        )
+        let workspace = Workspace.preview(id: canonicalWorkspaceID)
+
+        try database.write { db in
+            try Workspace.insert { workspace }.execute(db)
+            try CloudWorkspaceMetadata
+                .insert {
+                    CloudWorkspaceMetadata(
+                        workspaceID: canonicalWorkspaceID,
+                        accountID: accountID,
+                        remoteWorkspaceID: remoteWorkspaceID,
+                        lastSeenGeneration: "generation"
+                    )
+                }
+                .execute(db)
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: accountID,
+                    sessionIDs: ["kept", "stale"]
+                ),
+                in: db
+            )
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: accountID,
+                    sessionIDs: ["kept"]
+                ),
+                in: db
+            )
+        }
+
+        let sessions = try database.read { db in
+            try CloudSessionMetadata
+                .sessions(
+                    workspaceID: canonicalWorkspaceID,
+                    isHidden: false
+                )
+                .fetchAll(db)
+        }
+        #expect(
+            sessions.map(\.id)
+                == [
+                    CloudCanonicalID.session(
+                        accountID: accountID,
+                        remoteSessionID: "kept"
+                    ),
+                ]
+        )
+    }
+
     @Test("Complete transcript reconciliation replaces and deletes event parts")
     func completeTranscriptReconciliation() throws {
         let database = try appDatabase()

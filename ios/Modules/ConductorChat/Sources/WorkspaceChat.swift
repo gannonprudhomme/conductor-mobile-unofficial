@@ -158,6 +158,11 @@ public struct WorkspaceChat: Sendable {
             return !title.isEmpty && title != renamingSession?.title
         }
 
+        var sessionObservationWorkspaceID: Workspace.ID {
+            workspaceWithRepository.cloudMetadata?.remoteWorkspaceID
+                ?? workspace.id
+        }
+
         var isQueuedMessageEditLocked: Bool {
             chat?.queuedMessages.isEditStartInFlight == true
                 || chat?.queuedMessages.isEditing == true
@@ -246,7 +251,7 @@ public struct WorkspaceChat: Sendable {
                             .map(Action.activeSessionIDChanged)
                     },
                     observeSessions(
-                        workspaceID: state.workspace.id,
+                        workspaceID: state.sessionObservationWorkspaceID,
                         isCloudHosted: state.source == .cloud
                     ),
                 ]

@@ -2196,6 +2196,82 @@ struct WorkspaceChatTests {
             #expect(secondConnectionCancelled.value)
         }
     }
+
+    @Test("Cloud session observation uses the remote workspace ID")
+    func cloudSessionObservationUsesRemoteWorkspaceID() async throws {
+        let accountID = "account"
+        let remoteWorkspaceID = "remote-workspace"
+        let canonicalWorkspaceID = CloudCanonicalID.workspace(
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID
+        )
+        let workspace = try makeWorkspace(
+            activeSessionID: nil,
+            id: canonicalWorkspaceID
+        )
+        let metadata = CloudWorkspaceMetadata(
+            workspaceID: canonicalWorkspaceID,
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID,
+            lastSeenGeneration: "generation"
+        )
+        let (stream, continuation) = AsyncThrowingStream<
+            CloudWorkspaceSessionSnapshot,
+            any Error
+        >.makeStream()
+        let snapshot = CloudWorkspaceSessionSnapshot(
+            accountID: accountID,
+            workspace: CloudWorkspace(
+                id: remoteWorkspaceID,
+                name: "Cloud workspace",
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            sessions: [],
+            statuses: [:]
+        )
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.insert { workspace }.execute(db)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(db)
+            }
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: accountID)
+            }
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil,
+                        cloudMetadata: metadata
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.cloudAPIClient.observeSessions = { workspaceID in
+                    #expect(workspaceID == remoteWorkspaceID)
+                    return stream
+                }
+            }
+
+            let task = await store.send(.task)
+            await store.receive(\.mutationOutcomesUpdated)
+            continuation.yield(snapshot)
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
+            }
+            await store.receive(\.sessionSnapshotPersisted) {
+                $0.hasPersistedInitialSessionSnapshot = true
+            }
+            continuation.finish()
+            await task.cancel()
+        }
+    }
 }
 
 private func makeSession(
@@ -2258,6 +2334,7 @@ private func cloudSessionSnapshot(
 private func makeWorkspace(
     activeSessionID: String? = nil,
     branch: String? = nil,
+    id: String = "workspace-1",
     unread: Int = 0,
     status: Workspace.Status? = nil
 ) throws -> Workspace {
@@ -2269,7 +2346,7 @@ private func makeWorkspace(
         from: Data(
             """
             {
-              "id": "workspace-1",
+              "id": "\(id)",
               "active_session_id": \(activeSession),
               "branch": \(branch),
               "derived_status": \(derivedStatus),

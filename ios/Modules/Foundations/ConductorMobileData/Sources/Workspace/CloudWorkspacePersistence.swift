@@ -80,6 +80,7 @@ public enum CloudWorkspacePersistence {
         in database: Database
     ) throws -> [CloudProject.ID: Repository.ID] {
         var repositories = try Repository.all.fetchAll(database)
+        let desktopRepositoryIDs = try desktopRepositoryIDs(in: database)
         let mappings = try CloudProjectRepositoryMapping
             .where { $0.accountID.eq(snapshot.accountID) }
             .fetchAll(database)
@@ -87,22 +88,29 @@ public enum CloudWorkspacePersistence {
 
         for project in snapshot.projects {
             let repository: Repository
-            if let mapping = mappings.first(where: {
-                $0.cloudProjectID == project.id
-            }),
-               let existingRepository = repositories.first(where: {
-                   $0.id == mapping.canonicalRepositoryID
-               }) {
-                try fillMissingRepositoryDetails(
-                    from: project,
-                    in: existingRepository,
-                    database: database
-                )
-                repository = existingRepository
-            } else if let existingRepository = matchingRepository(
+            let matchingRepositories = matchingRepositories(
                 for: project,
                 in: repositories
+            )
+            if let existingRepository = preferredRepository(
+                for: project,
+                matchingRepositories: matchingRepositories,
+                mappings: mappings,
+                desktopRepositoryIDs: desktopRepositoryIDs
             ) {
+                try consolidateRepositories(
+                    matchingRepositories,
+                    into: existingRepository,
+                    in: database
+                )
+                let duplicateRepositoryIDs = Set(
+                    matchingRepositories
+                        .map(\.id)
+                        .filter { $0 != existingRepository.id }
+                )
+                repositories.removeAll {
+                    duplicateRepositoryIDs.contains($0.id)
+                }
                 try fillMissingRepositoryDetails(
                     from: project,
                     in: existingRepository,
@@ -134,18 +142,95 @@ public enum CloudWorkspacePersistence {
         return repositoryIDs
     }
 
-    private static func matchingRepository(
+    private static func desktopRepositoryIDs(
+        in database: Database
+    ) throws -> Set<Repository.ID> {
+        let desktopWorkspaceIDs = Set(
+            try MobileWorkspaceState.all
+                .fetchAll(database)
+                .map(\.workspaceID)
+        )
+        return Set(
+            try Workspace.all
+                .fetchAll(database)
+                .filter { desktopWorkspaceIDs.contains($0.id) }
+                .compactMap(\.repositoryID)
+        )
+    }
+
+    private static func matchingRepositories(
         for project: CloudProject,
         in repositories: [Repository]
-    ) -> Repository? {
+    ) -> [Repository] {
         let normalizedRemote = normalizedGitRemote(project.gitRemote)
-        return repositories.first {
+        return repositories.filter {
             $0.id == project.id
                 || (
                     !normalizedRemote.isEmpty
                         && $0.remoteURL.map(normalizedGitRemote)
                             == normalizedRemote
                 )
+        }
+    }
+
+    private static func preferredRepository(
+        for project: CloudProject,
+        matchingRepositories: [Repository],
+        mappings: [CloudProjectRepositoryMapping],
+        desktopRepositoryIDs: Set<Repository.ID>
+    ) -> Repository? {
+        let desktopRepositories = matchingRepositories
+            .filter { desktopRepositoryIDs.contains($0.id) }
+            .sorted(by: isPreferredRepository)
+        if let desktopRepository = desktopRepositories.first {
+            return desktopRepository
+        }
+        if let mapping = mappings.first(where: {
+            $0.cloudProjectID == project.id
+        }),
+           let mappedRepository = matchingRepositories.first(where: {
+               $0.id == mapping.canonicalRepositoryID
+           }) {
+            return mappedRepository
+        }
+        return matchingRepositories.first(where: { $0.id == project.id })
+            ?? matchingRepositories.sorted(by: isPreferredRepository).first
+    }
+
+    private static func isPreferredRepository(
+        _ lhs: Repository,
+        _ rhs: Repository
+    ) -> Bool {
+        let lhsHasRootPath = lhs.rootPath?.isEmpty == false
+        let rhsHasRootPath = rhs.rootPath?.isEmpty == false
+        if lhsHasRootPath != rhsHasRootPath {
+            return lhsHasRootPath
+        }
+        return lhs.id < rhs.id
+    }
+
+    private static func consolidateRepositories(
+        _ repositories: [Repository],
+        into canonicalRepository: Repository,
+        in database: Database
+    ) throws {
+        for repository in repositories
+        where repository.id != canonicalRepository.id {
+            try Workspace
+                .where { $0.repositoryID.eq(repository.id) }
+                .update {
+                    $0.repositoryID = #bind(canonicalRepository.id)
+                }
+                .execute(database)
+            try CloudProjectRepositoryMapping
+                .where { $0.canonicalRepositoryID.eq(repository.id) }
+                .update {
+                    $0.canonicalRepositoryID = #bind(canonicalRepository.id)
+                }
+                .execute(database)
+            try Repository.find(repository.id)
+                .delete()
+                .execute(database)
         }
     }
 

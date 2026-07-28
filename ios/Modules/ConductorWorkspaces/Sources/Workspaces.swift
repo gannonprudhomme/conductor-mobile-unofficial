@@ -137,10 +137,17 @@ public struct Workspaces: Sendable {
         public init() {
             @Shared(.cloudConfiguration) var cloudConfiguration
             @Shared(.desktopServerAddress) var desktopServerAddress
+            @Shared(.selectedRepositoryID) var selectedRepositoryID
             self.cloudObservationStatus = cloudConfiguration != nil
                 ? .loading
                 : .disconnected
             self.isLoadingWorkspaces = desktopServerAddress != nil
+            if let selectedRepositoryID,
+               !repositories.contains(where: {
+                   $0.id == selectedRepositoryID
+               }) {
+                $selectedRepositoryID.withLock { $0 = nil }
+            }
             _workspaces = FetchAll(
                 WorkspaceWithRepository.all(
                     repositoryID: selectedRepositoryID,
@@ -332,6 +339,7 @@ public struct Workspaces: Sendable {
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
         case repositoryFilterButtonTapped(String?)
+        case repositoriesChanged([Repository])
         case sortButtonTapped(WorkspaceWithRepository.Sort)
         /// Note: `MainView` handles this action so we can keep this module decoupled from `ConductorSettings`
         case settingsButtonTapped
@@ -366,6 +374,7 @@ public struct Workspaces: Sendable {
                 let desktopServerAddress = state.$desktopServerAddress
                 let grouping = state.$grouping
                 let mutationOutcomes = state.$cloudMutationOutcomes
+                let repositories = state.$repositories
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
@@ -393,6 +402,12 @@ public struct Workspaces: Sendable {
                             .removeDuplicates()
                             .dropFirst()
                             .map(Action.cloudMutationOutcomesChanged)
+                    },
+                    .publisher {
+                        repositories.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.repositoriesChanged)
                     },
                     .publisher {
                         workspaces.publisher
@@ -682,6 +697,16 @@ public struct Workspaces: Sendable {
 
             case let .repositoryFilterButtonTapped(repositoryID):
                 state.$selectedRepositoryID.withLock { $0 = repositoryID }
+                return reloadWorkspaces(state)
+
+            case let .repositoriesChanged(repositories):
+                guard let selectedRepositoryID = state.selectedRepositoryID,
+                      !repositories.contains(where: {
+                          $0.id == selectedRepositoryID
+                      }) else {
+                    return .none
+                }
+                state.$selectedRepositoryID.withLock { $0 = nil }
                 return reloadWorkspaces(state)
 
             case let .sortButtonTapped(sort):

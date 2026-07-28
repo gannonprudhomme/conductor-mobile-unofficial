@@ -156,7 +156,7 @@ public enum CloudChatPersistence {
 
         let staleMetadata = try CloudSessionMetadata
             .where {
-                $0.workspaceID.eq(snapshot.workspace.id)
+                $0.workspaceID.eq(canonicalWorkspaceID)
                     && $0.accountID.eq(snapshot.accountID)
                     && $0.refreshGeneration.neq(generation)
             }
