@@ -20,6 +20,8 @@ struct ChatTextField: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
     let contextWindowUsage: ContextWindowUsage?
+    let allowsQueue: Bool
+    let showsConfigurationControls: Bool
     let isFastModeEnabled: Bool
     let isEditingQueuedMessage: Bool
     let isSendInFlight: Bool
@@ -38,6 +40,8 @@ struct ChatTextField: View {
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool,
         contextWindowUsage: ContextWindowUsage? = nil,
+        allowsQueue: Bool = true,
+        showsConfigurationControls: Bool = true,
         isFastModeEnabled: Bool,
         isEditingQueuedMessage: Bool = false,
         isSendInFlight: Bool,
@@ -58,6 +62,8 @@ struct ChatTextField: View {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
         self.contextWindowUsage = contextWindowUsage
+        self.allowsQueue = allowsQueue
+        self.showsConfigurationControls = showsConfigurationControls
         self.isFastModeEnabled = isFastModeEnabled
         self.isEditingQueuedMessage = isEditingQueuedMessage
         self.isSendInFlight = isSendInFlight
@@ -139,18 +145,26 @@ struct ChatTextField: View {
 
     private var bottomRowButtons: some View {
         HStack(spacing: 8) {
-            ModelAndFastModeControls(
-                agentType: agentType,
-                allowsAgentSwitching: allowsAgentSwitching,
-                availableReasoningEfforts: availableReasoningEfforts,
-                isFastModeEnabled: isFastModeEnabled,
-                isFastModeButtonDisabled: isAnyActionInFlight,
-                selectedModel: selectedModel,
-                selectedReasoningEffort: selectedReasoningEffort,
-                onFastModeTapped: onFastModeTapped,
-                onSelectReasoningEffort: onSelectReasoningEffort,
-                onSelectModel: { selectedModel = $0 }
-            )
+            Group {
+                if showsConfigurationControls {
+                    ModelAndFastModeControls(
+                        agentType: agentType,
+                        allowsAgentSwitching: allowsAgentSwitching,
+                        availableReasoningEfforts: availableReasoningEfforts,
+                        isFastModeEnabled: isFastModeEnabled,
+                        isFastModeButtonDisabled: isAnyActionInFlight,
+                        selectedModel: selectedModel,
+                        selectedReasoningEffort: selectedReasoningEffort,
+                        onFastModeTapped: onFastModeTapped,
+                        onSelectReasoningEffort: onSelectReasoningEffort,
+                        onSelectModel: { selectedModel = $0 }
+                    )
+                } else {
+                    Text(selectedModel.rawValue)
+                        .font(.theme(.small))
+                        .foregroundStyle(.theme(.textSecondary))
+                }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
@@ -172,6 +186,7 @@ struct ChatTextField: View {
                     || isSendInFlight {
                     SendButton(
                         isEditingQueuedMessage: isEditingQueuedMessage,
+                        allowsQueue: allowsQueue,
                         isEnabled: hasSendableText && !isAnyActionInFlight,
                         isInFlight: isSendInFlight,
                         primaryAction: onSendTapped,
@@ -196,6 +211,7 @@ struct ChatTextField: View {
 
     private struct SendButton: View {
         let isEditingQueuedMessage: Bool
+        let allowsQueue: Bool
         let isEnabled: Bool
         let isInFlight: Bool
         let primaryAction: @MainActor () -> Void
@@ -203,7 +219,7 @@ struct ChatTextField: View {
 
         var body: some View {
             Group {
-                if isEditingQueuedMessage || !isEnabled {
+                if isEditingQueuedMessage || !isEnabled || !allowsQueue {
                     Button(action: primaryAction) {
                         label
                     }

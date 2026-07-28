@@ -400,6 +400,174 @@ func appDatabaseMigrator() -> DatabaseMigrator {
             ADD COLUMN "transcript_projection_version" INTEGER NOT NULL DEFAULT 0;
             """
         )
+            .execute(db)
+    }
+
+    migrator.registerMigration("Add Cloud remote IDs and transcript refresh") { db in
+        try #sql(
+            """
+            ALTER TABLE "cloud_workspace_metadata"
+            ADD COLUMN "remote_workspace_id" TEXT;
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            UPDATE "cloud_workspace_metadata"
+            SET "remote_workspace_id" = "workspace_id";
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            ALTER TABLE "cloud_session_metadata"
+            ADD COLUMN "last_full_transcript_refresh_at" TEXT;
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create Cloud mutation ledger") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_pending_mutations" (
+              "attempt_id" TEXT PRIMARY KEY,
+              "account_id" TEXT NOT NULL,
+              "credential_generation" TEXT NOT NULL,
+              "operation" TEXT NOT NULL,
+              "resource_kind" TEXT NOT NULL,
+              "request_version" INTEGER NOT NULL,
+              "request_payload" BLOB NOT NULL,
+              "rollback_payload" BLOB,
+              "canonical_workspace_id" TEXT,
+              "remote_workspace_id" TEXT,
+              "canonical_session_id" TEXT,
+              "remote_session_id" TEXT,
+              "canonical_message_id" TEXT,
+              "stable_remote_message_id" TEXT,
+              "state" TEXT NOT NULL,
+              "dispatch_started_at" TEXT,
+              "created_at" TEXT NOT NULL,
+              "last_transition_at" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_pending_mutations_state_created"
+            ON "cloud_pending_mutations" ("state", "created_at");
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_pending_mutations_account_generation"
+            ON "cloud_pending_mutations" (
+              "account_id",
+              "credential_generation"
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE TABLE "cloud_mutation_outcomes" (
+              "outcome_id" TEXT PRIMARY KEY,
+              "attempt_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "credential_generation" TEXT NOT NULL,
+              "owning_feature" TEXT NOT NULL,
+              "kind" TEXT NOT NULL,
+              "version" INTEGER NOT NULL,
+              "payload" BLOB NOT NULL,
+              "created_at" TEXT NOT NULL,
+              "consumed_at" TEXT
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_mutation_outcomes_owner_consumed"
+            ON "cloud_mutation_outcomes" (
+              "owning_feature",
+              "consumed_at"
+            );
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create Cloud project repository mappings") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_project_repository_mappings" (
+              "id" TEXT PRIMARY KEY,
+              "account_id" TEXT NOT NULL,
+              "cloud_project_id" TEXT NOT NULL,
+              "canonical_repository_id" TEXT NOT NULL
+                REFERENCES "repos" ("id"),
+              "project_name" TEXT NOT NULL,
+              "git_remote" TEXT NOT NULL,
+              "refresh_generation" TEXT NOT NULL,
+              UNIQUE ("account_id", "cloud_project_id")
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_project_repository_mappings_account_generation"
+            ON "cloud_project_repository_mappings" (
+              "account_id",
+              "refresh_generation"
+            );
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create initial prompt handoffs") { db in
+        try #sql(
+            """
+            CREATE TABLE "initial_prompt_handoffs" (
+              "handoff_id" TEXT PRIMARY KEY,
+              "creation_attempt_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "credential_generation" TEXT NOT NULL,
+              "canonical_workspace_id" TEXT NOT NULL,
+              "remote_workspace_id" TEXT NOT NULL,
+              "canonical_session_id" TEXT NOT NULL,
+              "remote_session_id" TEXT NOT NULL,
+              "original_prompt" TEXT NOT NULL,
+              "stable_remote_message_id" TEXT NOT NULL,
+              "send_attempt_id" TEXT,
+              "installed_draft_text" TEXT,
+              "state" TEXT NOT NULL,
+              "created_at" TEXT NOT NULL,
+              "last_transition_at" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "initial_prompt_handoffs_session_state"
+            ON "initial_prompt_handoffs" (
+              "canonical_session_id",
+              "state"
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE UNIQUE INDEX "initial_prompt_handoffs_send_attempt"
+            ON "initial_prompt_handoffs" ("send_attempt_id")
+            WHERE "send_attempt_id" IS NOT NULL;
+            """
+        )
         .execute(db)
     }
 

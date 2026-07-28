@@ -12,125 +12,6 @@ import SharedConductorData
 import Testing
 
 struct CloudChatPersistenceTests {
-    @Test("Desktop visibility wins when Cloud omits archive state")
-    func desktopVisibilityWinsWithoutCloudArchiveState() throws {
-        let database = try appDatabase()
-        let desktopSessions = [
-            Session.preview(
-                id: "active",
-                workspaceID: "workspace",
-                isHidden: false
-            ),
-            Session.preview(
-                id: "archived",
-                workspaceID: "workspace",
-                isHidden: true
-            ),
-        ]
-
-        try database.write { database in
-            try Session.upsert { desktopSessions }.execute(database)
-            _ = try CloudChatPersistence.persist(
-                snapshot(
-                    accountID: "account",
-                    sessionIDs: desktopSessions.map(\.id)
-                ),
-                in: database
-            )
-        }
-
-        let activeSessions = try database.read { database in
-            try CloudSessionMetadata
-                .sessions(workspaceID: "workspace", isHidden: false)
-                .fetchAll(database)
-        }
-        let archivedSessions = try database.read { database in
-            try CloudSessionMetadata
-                .sessions(workspaceID: "workspace", isHidden: true)
-                .fetchAll(database)
-        }
-
-        #expect(activeSessions.map(\.title) == ["active"])
-        #expect(archivedSessions.map(\.title) == ["archived"])
-    }
-
-    @Test("Desktop visibility updates survive later Cloud refreshes")
-    func desktopVisibilityUpdatesSurviveCloudRefresh() throws {
-        let database = try appDatabase()
-        let cloudSnapshot = snapshot(
-            accountID: "account",
-            sessionIDs: ["active", "archived"]
-        )
-        let archivedDesktopSession = Session.preview(
-            id: "archived",
-            workspaceID: "workspace",
-            isHidden: true
-        )
-
-        let reconciledSessions = try database.write { database in
-            _ = try CloudChatPersistence.persist(cloudSnapshot, in: database)
-            _ = try CloudChatPersistence.reconcileSessionVisibility(
-                from: [archivedDesktopSession],
-                workspaceID: "workspace",
-                in: database
-            )
-            return try CloudChatPersistence.persist(cloudSnapshot, in: database)
-        }
-
-        #expect(reconciledSessions.map(\.title) == ["active", "archived"])
-        #expect(reconciledSessions.map(\.isHidden) == [false, true])
-    }
-
-    @Test("Desktop reconciliation changes only Cloud visibility")
-    func desktopReconciliationChangesOnlyVisibility() throws {
-        let database = try appDatabase()
-        let cloudSession = try database.write { database in
-            try #require(
-                CloudChatPersistence.persist(
-                    snapshot(
-                        accountID: "account",
-                        sessionIDs: ["session"]
-                    ),
-                    in: database
-                )
-                .first
-            )
-        }
-        let desktopSession = Session.preview(
-            id: "session",
-            workspaceID: "workspace",
-            title: "Desktop title",
-            agentType: .claude,
-            isHidden: true,
-            createdAt: "2001-01-01T00:00:00.000Z",
-            updatedAt: "2002-01-01T00:00:00.000Z",
-            lastUserMessageAt: "2003-01-01T00:00:00.000Z",
-            status: .working,
-            model: .opus,
-            unreadCount: 99,
-            freshlyCompacted: 1,
-            contextTokenCount: 123,
-            codexThinkingLevel: nil,
-            isFastModeEnabled: true,
-            claudeEffortLevel: .ultra
-        )
-
-        let reconciledSession = try database.write { database in
-            try #require(
-                CloudChatPersistence.reconcileSessionVisibility(
-                    from: [desktopSession],
-                    workspaceID: "workspace",
-                    in: database
-                )
-                .first
-            )
-        }
-        var expectedSession = cloudSession
-        expectedSession.isHidden = true
-
-        #expect(reconciledSession == expectedSession)
-    }
-
     @Test("Cloud sessions remain isolated and query in API order")
     func sessionIsolationAndOrder() throws {
         let database = try appDatabase()
@@ -218,194 +99,6 @@ struct CloudChatPersistenceTests {
                     remoteSessionID: "same"
                 )
             )
-        )
-    }
-
-    @Test("Stale-session cleanup deletes canonical transcript bodies")
-    func staleSessionCleanupDeletesMessages() throws {
-        let database = try appDatabase()
-        let desktopMessage = Message(
-            id: "desktop-message",
-            sessionID: "desktop-session",
-            role: .user,
-            content: "Desktop",
-            createdAt: .distantPast
-        )
-        let cloudMessageID = CloudCanonicalID.message(
-            accountID: "account",
-            remoteSessionID: "stale",
-            eventID: "cloud-event",
-            partOrder: 0
-        )
-
-        try database.write { db in
-            try Message.insert { desktopMessage }.execute(db)
-            _ = try CloudChatPersistence.persist(
-                snapshot(
-                    accountID: "account",
-                    sessionIDs: ["kept", "stale"]
-                ),
-                in: db
-            )
-            _ = try CloudChatPersistence.persist(
-                transcript(
-                    sessionID: "stale",
-                    messages: [
-                        userEvent(
-                            id: "cloud-event",
-                            sessionID: "stale",
-                            index: 1,
-                            text: "Cloud"
-                        ),
-                    ]
-                ),
-                in: db
-            )
-            _ = try CloudChatPersistence.persist(
-                snapshot(accountID: "account", sessionIDs: ["kept"]),
-                in: db
-            )
-        }
-
-        let storedMessages = try database.read { db in
-            (
-                try Message.find(cloudMessageID).fetchOne(db),
-                try Message.find(desktopMessage.id).fetchOne(db)
-            )
-        }
-        #expect(storedMessages.0 == nil)
-        #expect(storedMessages.1 == desktopMessage)
-    }
-
-    @Test("Logout cleanup deletes Cloud transcripts and preserves Desktop messages")
-    func logoutDeletesCloudMessages() throws {
-        let database = try appDatabase()
-        let desktopMessage = Message(
-            id: "desktop-message",
-            sessionID: "desktop-session",
-            role: .user,
-            content: "Desktop",
-            createdAt: .distantPast
-        )
-        let cloudMessageID = CloudCanonicalID.message(
-            accountID: "account",
-            remoteSessionID: "session",
-            eventID: "cloud-event",
-            partOrder: 0
-        )
-
-        try database.write { db in
-            try Message.insert { desktopMessage }.execute(db)
-            _ = try CloudChatPersistence.persist(
-                snapshot(accountID: "account", sessionIDs: ["session"]),
-                in: db
-            )
-            _ = try CloudChatPersistence.persist(
-                transcript(
-                    messages: [
-                        userEvent(
-                            id: "cloud-event",
-                            index: 1,
-                            text: "Cloud"
-                        ),
-                    ]
-                ),
-                in: db
-            )
-            try CloudChatPersistence.clearCachedRows(in: db)
-        }
-
-        let storedMessages = try database.read { db in
-            (
-                try Message.find(cloudMessageID).fetchOne(db),
-                try Message.find(desktopMessage.id).fetchOne(db)
-            )
-        }
-        #expect(storedMessages.0 == nil)
-        #expect(storedMessages.1 == desktopMessage)
-    }
-
-    @Test("A failed fresh status refresh preserves the durable known status")
-    func missingStatusPreservesDurableStatus() throws {
-        let database = try appDatabase()
-        let knownSnapshot = snapshot(
-            accountID: "account",
-            sessionIDs: ["session"]
-        )
-        let missingStatusSnapshot = CloudWorkspaceSessionSnapshot(
-            accountID: knownSnapshot.accountID,
-            workspace: knownSnapshot.workspace,
-            sessions: knownSnapshot.sessions,
-            statuses: [:]
-        )
-
-        let session = try database.write { db in
-            _ = try CloudChatPersistence.persist(knownSnapshot, in: db)
-            _ = try CloudChatPersistence.persist(missingStatusSnapshot, in: db)
-            return try #require(
-                try Session
-                    .find(
-                        CloudCanonicalID.session(
-                            accountID: "account",
-                            remoteSessionID: "session"
-                        )
-                    )
-                    .fetchOne(db)
-            )
-        }
-
-        #expect(session.status == .idle)
-    }
-
-    @Test("Contract models infer agents and preserve raw effort without agent")
-    func modelInferencePreservesEffort() throws {
-        let database = try appDatabase()
-        let date = Date(timeIntervalSince1970: 100)
-        let cloudSessions = [
-            CloudSession(
-                id: "claude",
-                deepLink: URL(string: "https://app.conductor.build")!,
-                model: "opus-4-8",
-                effort: "future-claude"
-            ),
-            CloudSession(
-                id: "codex",
-                deepLink: URL(string: "https://app.conductor.build")!,
-                resolvedModel: "gpt-5.2-codex",
-                effort: "future-codex"
-            ),
-            CloudSession(
-                id: "resolved-codex",
-                deepLink: URL(string: "https://app.conductor.build")!,
-                model: "default",
-                resolvedModel: "gpt-5.2-codex",
-                effort: "future-resolved-codex"
-            ),
-        ]
-        let snapshot = CloudWorkspaceSessionSnapshot(
-            accountID: "account",
-            workspace: CloudWorkspace(
-                id: "workspace",
-                name: "Cloud workspace",
-                createdAt: date
-            ),
-            sessions: cloudSessions,
-            statuses: [:]
-        )
-
-        let sessions = try database.write { db in
-            try CloudChatPersistence.persist(snapshot, in: db)
-        }
-
-        #expect(sessions[0].agentType == .claude)
-        #expect(sessions[0].claudeEffortLevel?.rawValue == "future-claude")
-        #expect(sessions[1].agentType == .codex)
-        #expect(sessions[1].codexThinkingLevel?.rawValue == "future-codex")
-        #expect(sessions[2].model.rawValue == "default")
-        #expect(sessions[2].agentType == .codex)
-        #expect(
-            sessions[2].codexThinkingLevel?.rawValue
-                == "future-resolved-codex"
         )
     }
 
@@ -521,14 +214,10 @@ struct CloudChatPersistenceTests {
             )
         }
         #expect(cache.messages.map(\.content) == ["Cached"])
-        #expect(
-            cache.checkpoint
-                == CloudTranscriptCheckpoint(
-                    accountID: "account",
-                    remoteSessionID: "session",
-                    rawCursor: "committed"
-                )
-        )
+        #expect(cache.checkpoint?.accountID == "account")
+        #expect(cache.checkpoint?.remoteSessionID == "session")
+        #expect(cache.checkpoint?.rawCursor == "committed")
+        #expect(cache.checkpoint?.lastFullTranscriptRefreshAt != nil)
     }
 
     @Test("Projection mismatch keeps cached rows but withholds the checkpoint")
@@ -727,13 +416,11 @@ private func snapshot(
 }
 
 private func transcript(
-    accountID: String = "account",
-    sessionID: String = "session",
     messages: [CloudTranscriptMessage]
 ) -> CloudTranscriptUpdate {
     CloudTranscriptUpdate(
-        accountID: accountID,
-        sessionID: sessionID,
+        accountID: "account",
+        sessionID: "session",
         messages: messages,
         kind: .complete,
         rawCursor: messages.last?.id
@@ -742,13 +429,12 @@ private func transcript(
 
 private func userEvent(
     id: String,
-    sessionID: String = "session",
     index: Double,
     text: String
 ) -> CloudTranscriptMessage {
     CloudTranscriptMessage(
         id: id,
-        sessionID: sessionID,
+        sessionID: "session",
         sessionIndex: index,
         type: .init(rawValue: "userMessage"),
         content: .object([

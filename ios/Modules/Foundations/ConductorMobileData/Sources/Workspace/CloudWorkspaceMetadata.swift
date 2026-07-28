@@ -15,16 +15,20 @@ public struct CloudWorkspaceMetadata: Equatable, Identifiable, Sendable {
     public let workspaceID: Workspace.ID
     @Column("account_id")
     public var accountID: String
+    @Column("remote_workspace_id")
+    public var remoteWorkspaceID: String
     @Column("last_seen_generation")
     public var lastSeenGeneration: String
 
     public init(
         workspaceID: Workspace.ID,
         accountID: String,
+        remoteWorkspaceID: String? = nil,
         lastSeenGeneration: String
     ) {
         self.workspaceID = workspaceID
         self.accountID = accountID
+        self.remoteWorkspaceID = remoteWorkspaceID ?? workspaceID
         self.lastSeenGeneration = lastSeenGeneration
     }
 
@@ -36,10 +40,6 @@ extension CloudWorkspaceMetadata {
         in database: Database,
         keepingAccountID: String? = nil
     ) throws {
-        try CloudChatPersistence.clearCachedRows(
-            in: database,
-            keepingAccountID: keepingAccountID
-        )
         let metadata = if let keepingAccountID {
             try Self
                 .where { $0.accountID.neq(keepingAccountID) }
@@ -47,44 +47,24 @@ extension CloudWorkspaceMetadata {
         } else {
             try Self.all.fetchAll(database)
         }
-        try removeCachedRows(metadata, from: database)
+        let accountIDs = Set(metadata.map(\.accountID))
+        for accountID in accountIDs {
+            try CloudOwnershipCleanup.perform(
+                scope: .account(accountID),
+                reason: .credentialRemoval,
+                in: database
+            )
+        }
     }
 
     public static func removeCachedRows(
         _ metadata: [Self],
         from database: Database
     ) throws {
-        for item in metadata {
-            try CloudChatPersistence.removeCachedRows(
-                workspaceID: item.workspaceID,
-                accountID: item.accountID,
-                in: database
-            )
-            try Self.find(item.id).delete().execute(database)
-
-            let hasDesktopObservation = try MobileWorkspaceState
-                .find(item.workspaceID)
-                .fetchOne(database) != nil
-            let hasSessions = try Session
-                .where { $0.workspaceID.eq(item.workspaceID) }
-                .fetchCount(database) > 0
-            guard !hasDesktopObservation, !hasSessions else {
-                let workspace = try Workspace
-                    .find(item.workspaceID)
-                    .fetchOne(database)
-                if workspace?.hostingServerURL
-                    == Workspace.conductorCloudHostingServerURL {
-                    try Workspace
-                        .find(item.workspaceID)
-                        .update {
-                            $0.hostingServerURL = #bind(nil as String?)
-                        }
-                        .execute(database)
-                }
-                continue
-            }
-
-            try Workspace.find(item.workspaceID).delete().execute(database)
-        }
+        try CloudOwnershipCleanup.perform(
+            scope: .workspaces(Set(metadata.map(\.workspaceID))),
+            reason: .authoritativeSnapshot,
+            in: database
+        )
     }
 }

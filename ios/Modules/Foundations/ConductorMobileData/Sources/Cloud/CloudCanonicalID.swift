@@ -9,6 +9,13 @@ import Foundation
 import SharedConductorData
 
 public enum CloudCanonicalID {
+    public static func workspace(
+        accountID: String,
+        remoteWorkspaceID: String
+    ) -> Workspace.ID {
+        "cloud-workspace:\(component(accountID)):\(component(remoteWorkspaceID))"
+    }
+
     public static func session(
         accountID: String,
         remoteSessionID: String

@@ -49,19 +49,20 @@ public struct Chat: Sendable {
         @Shared(.desktopConnectionStatus)
         var connectionStatus//: DesktopClient.ConnectionStatus = .connecting
 
-        @Shared(.cloudConfiguration)
-        var cloudConfiguration
-
         @Shared(.mobileModelSettingsOverride)
         var mobileModelSettingsOverride
 
         @Shared var messageDraft: String
 
         @FetchAll var messages: [Message]
+        @FetchAll var initialPromptHandoffs: [InitialPromptHandoff]
+        @FetchAll var mutationOutcomes: [CloudMutationOutcome]
+        @FetchAll var pendingSends: [CloudPendingMutation]
         @FetchOne var session: Session
         var queuedMessages: QueuedMessages.State
         var isFastModeEnabled: Bool
-        var isCloudHosted: Bool
+        var mutationRoute: WorkspaceMutationRoute?
+        var source: WorkspaceSource
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
@@ -95,6 +96,22 @@ public struct Chat: Sendable {
 
         var shouldShowEmptyChat: Bool {
             !isLoadingMessages && isMessageSnapshotEmpty && queuedMessages.messages.isEmpty
+        }
+
+        var hasUnresolvedSend: Bool {
+            pendingSends.contains {
+                $0.mutationState != .acknowledged
+            }
+        }
+
+        var hasUnresolvedInitialPrompt: Bool {
+            initialPromptHandoffs.contains {
+                $0.handoffState == .ready || $0.handoffState == .linked
+            }
+        }
+
+        var isCloudHosted: Bool {
+            source == .cloud
         }
 
         var allowsAgentSwitching: Bool {
@@ -142,6 +159,7 @@ public struct Chat: Sendable {
             session: Session,
             messages: [Message] = [],
             isCloudHosted: Bool = false,
+            mutationRoute: WorkspaceMutationRoute? = nil,
             selectedModel: Session.Model? = nil,
             selectedReasoningEffort: Session.ReasoningEffort? = nil,
             shouldFocusMessageField: Bool = false
@@ -149,8 +167,14 @@ public struct Chat: Sendable {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
-            self.isCloudHosted = isCloudHosted
-            self.queuedMessages = QueuedMessages.State(session: session)
+            self.source = isCloudHosted ? .cloud : .desktop
+            self.mutationRoute = mutationRoute
+                ?? (isCloudHosted ? nil : .desktop)
+            self.queuedMessages = QueuedMessages.State(
+                session: session,
+                mutationRoute: mutationRoute
+                    ?? (isCloudHosted ? nil : .desktop)
+            )
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -178,6 +202,42 @@ public struct Chat: Sendable {
                         }
                 )
             }
+            self._pendingSends = FetchAll(
+                wrappedValue: [],
+                CloudPendingMutation
+                    .where {
+                        $0.canonicalSessionID.eq(session.id)
+                            && $0.operation.eq(
+                                CloudPendingMutation.Operation.sendMessage
+                                    .rawValue
+                            )
+                    }
+                    .order(by: \.createdAt)
+            )
+            self._initialPromptHandoffs = FetchAll(
+                wrappedValue: [],
+                InitialPromptHandoff
+                    .where {
+                        $0.canonicalSessionID.eq(session.id)
+                            && $0.state.neq(
+                                InitialPromptHandoff.State.resolved.rawValue
+                            )
+                    }
+                    .order(by: \.createdAt)
+            )
+            self._mutationOutcomes = FetchAll(
+                wrappedValue: [],
+                CloudMutationOutcome
+                    .where {
+                        $0.owningFeature.eq(
+                            CloudMutationOutcome.OwningFeature
+                                .chat(sessionID: session.id)
+                                .rawValue
+                        )
+                            && $0.consumedAt.is(nil)
+                    }
+                    .order(by: \.createdAt)
+            )
             self.hasUserSelectedModel = selectedModel != nil
             self.hasUserSelectedReasoningEffort = selectedReasoningEffort != nil
             self.selectedModel = selectedModel ?? session.model
@@ -204,10 +264,12 @@ public struct Chat: Sendable {
                 && lhs.queuedMessages == rhs.queuedMessages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
-                && lhs.cloudConfiguration == rhs.cloudConfiguration
                 && lhs.mobileModelSettingsOverride == rhs.mobileModelSettingsOverride
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
-                && lhs.isCloudHosted == rhs.isCloudHosted
+                && lhs.pendingSends == rhs.pendingSends
+                && lhs.initialPromptHandoffs == rhs.initialPromptHandoffs
+                && lhs.mutationRoute == rhs.mutationRoute
+                && lhs.source == rhs.source
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -237,7 +299,6 @@ public struct Chat: Sendable {
 
     public enum Action: BindableAction {
         case binding(BindingAction<State>)
-        case cloudConfigurationChanged(CloudConfiguration?)
         case task
         case modelSettingsFetched(DesktopClient.ModelSettings)
         case fastModeButtonTapped
@@ -245,11 +306,18 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             messages: [Message]
         )
-        case loadMessagesFailed(
-            sessionID: Session.ID,
-            error: any Error
-        )
+        case loadMessagesFailed(any Error)
+        case initialPromptHandoffsUpdated([InitialPromptHandoff])
+        case initialPromptConflictDetected(UUID)
+        case initialPromptConflictDraftPrepared(UUID, String, String)
+        case initialPromptRejectionConflictDetected(UUID)
+        case initialPromptDraftPrepared(UUID, String)
+        case initialPromptDraftInstalled(UUID, String)
+        case resolveInitialPromptConflict(UUID, InitialPromptConflictChoice)
+        case mutationOutcomesUpdated([CloudMutationOutcome])
+        case cloudMutationRejected(CloudMutationRejectionPayload)
         case messagesUpdated([Message])
+        case pendingSendsUpdated([CloudPendingMutation])
         /// Sent after POST returns its persisted row, before writing it locally. The message
         /// appears when that write is observed; this buffers it against an older first snapshot.
         case messageConfirmed(
@@ -258,10 +326,11 @@ public struct Chat: Sendable {
         )
         case queuedMessages(QueuedMessages.Action)
         case reasoningEffortSelected(Session.ReasoningEffort)
-        case sendButtonTapped(DesktopClient.MessageMode)
+        case sendButtonTapped(MessageSendMode)
         case sendMessageResponse(
             sessionID: Session.ID,
-            result: Result<String, any Error>
+            submittedDraft: String,
+            result: Result<WorkspaceMutationResult, any Error>
         )
         case sessionModelChanged(Session.Model)
         case sessionFastModeChanged(Bool)
@@ -278,6 +347,7 @@ public struct Chat: Sendable {
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.workspaceMutationClient) var workspaceMutationClient
     private let messagePersistence = MessagePersistencePipeline()
 
     init() { }
@@ -292,7 +362,25 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
-                let cloudConfiguration = state.$cloudConfiguration
+                let messageObservation: Effect<Action> = .merge(
+                    observeMessages(state),
+                    observePersistedMessages(state)
+                )
+                guard state.source == .desktop else {
+                    return .merge(
+                        messageObservation,
+                        observeInitialPromptHandoffs(state),
+                        observePendingSends(state),
+                        observeMutationOutcomes(state),
+                        state.initialPromptHandoffs.isEmpty
+                            ? .none
+                            : .send(
+                                .initialPromptHandoffsUpdated(
+                                    state.initialPromptHandoffs
+                                )
+                            )
+                    )
+                }
                 return .merge(
                     .run { send in
                         guard let settings = try? await desktopClient.fetchModelSettings() else {
@@ -300,24 +388,8 @@ public struct Chat: Sendable {
                         }
                         await send(.modelSettingsFetched(settings))
                     },
-                    .publisher {
-                        cloudConfiguration.publisher
-                            .removeDuplicates()
-                            .dropFirst()
-                            .map(Action.cloudConfigurationChanged)
-                    },
-                    observeMessages(state),
-                    observePersistedMessages(state)
+                    messageObservation
                 )
-
-            case let .cloudConfigurationChanged(configuration):
-                guard state.isCloudHosted else {
-                    return .none
-                }
-                guard configuration != nil else {
-                    return .cancel(id: CancelID.messageObservation)
-                }
-                return observeMessages(state)
 
             case let .modelSettingsFetched(settings):
                 let settings = state.mobileModelSettingsOverride ?? settings
@@ -343,6 +415,316 @@ public struct Chat: Sendable {
                 }
                 return .none
 
+            case let .mutationOutcomesUpdated(outcomes):
+                guard let outcome = outcomes.first,
+                      outcome.kind
+                        == CloudMutationOutcome.Kind.rejectedMutation.rawValue,
+                      let rejection = try? outcome.decodedPayload(
+                        as: CloudMutationRejectionPayload.self
+                      ) else {
+                    return .none
+                }
+                if let handoff = state.initialPromptHandoffs.first(where: {
+                    $0.sendAttemptID == outcome.attemptID
+                        && $0.handoffState == .linked
+                }),
+                   let installedDraft = handoff.installedDraftText,
+                   state.messageDraft.isEmpty
+                    || state.messageDraft == installedDraft {
+                    state.$messageDraft.withLock { $0 = installedDraft }
+                    return .merge(
+                        .send(.cloudMutationRejected(rejection)),
+                        .run { [handoffID = handoff.handoffID, outcomeID = outcome.outcomeID] _ in
+                            try await database.write { database in
+                                try InitialPromptHandoff
+                                    .find(handoffID)
+                                    .update {
+                                        $0.state = #bind(
+                                            InitialPromptHandoff.State.manual.rawValue
+                                        )
+                                        $0.lastTransitionAt = #bind(Date())
+                                    }
+                                    .execute(database)
+                                try CloudMutationOutcome
+                                    .find(outcomeID)
+                                    .update {
+                                        $0.consumedAt = #bind(Date())
+                                    }
+                                    .execute(database)
+                            }
+                        }
+                    )
+                }
+                if let handoff = state.initialPromptHandoffs.first(where: {
+                    $0.sendAttemptID == outcome.attemptID
+                        && $0.handoffState == .linked
+                }) {
+                    return .send(
+                        .initialPromptRejectionConflictDetected(
+                            handoff.handoffID
+                        )
+                    )
+                }
+                return .merge(
+                    .send(.cloudMutationRejected(rejection)),
+                    .run { [outcomeID = outcome.outcomeID] _ in
+                        try await database.write { database in
+                            try CloudMutationOutcome
+                                .find(outcomeID)
+                                .update {
+                                    $0.consumedAt = #bind(Date())
+                                }
+                                .execute(database)
+                        }
+                    }
+                )
+
+            case let .initialPromptHandoffsUpdated(handoffs):
+                guard let handoff = handoffs.first(where: {
+                    $0.handoffState == .ready
+                }) else {
+                    return .none
+                }
+                if let installedDraft = handoff.installedDraftText {
+                    guard state.messageDraft.isEmpty
+                        || state.messageDraft == installedDraft else {
+                        return .none
+                    }
+                    return .send(
+                        .initialPromptDraftPrepared(
+                            handoff.handoffID,
+                            installedDraft
+                        )
+                    )
+                }
+                guard state.messageDraft.isEmpty
+                    || state.messageDraft == handoff.originalPrompt else {
+                    return .send(
+                        .initialPromptConflictDetected(handoff.handoffID)
+                    )
+                }
+                let installedDraft = handoff.originalPrompt
+                return .run { [handoffID = handoff.handoffID] send in
+                    try await database.write { database in
+                        guard let stored = try InitialPromptHandoff
+                            .find(handoffID)
+                            .fetchOne(database),
+                              stored.handoffState == .ready,
+                              stored.installedDraftText == nil else {
+                            return
+                        }
+                        try InitialPromptHandoff
+                            .find(handoffID)
+                            .update {
+                                $0.installedDraftText = #bind(installedDraft)
+                                $0.lastTransitionAt = #bind(Date())
+                            }
+                            .execute(database)
+                    }
+                    await send(
+                        .initialPromptDraftPrepared(
+                            handoffID,
+                            installedDraft
+                        )
+                    )
+                }
+
+            case let .resolveInitialPromptConflict(handoffID, choice):
+                guard let handoff = state.initialPromptHandoffs.first(
+                    where: { $0.handoffID == handoffID }
+                ) else {
+                    return .none
+                }
+                if handoff.handoffState == .linked,
+                   let sendAttemptID = handoff.sendAttemptID,
+                   let outcome = state.mutationOutcomes.first(where: {
+                       $0.attemptID == sendAttemptID
+                   }),
+                   let rejection = try? outcome.decodedPayload(
+                       as: CloudMutationRejectionPayload.self
+                   ) {
+                    let installedDraft = handoff.installedDraftText
+                        ?? handoff.originalPrompt
+                    let resolvedDraft = switch choice {
+                    case .replace:
+                        installedDraft
+                    case .append:
+                        state.messageDraft
+                            + (
+                                state.messageDraft.hasSuffix("\n")
+                                    ? "\n"
+                                    : "\n\n"
+                            )
+                            + installedDraft
+                    case .discard:
+                        state.messageDraft
+                    }
+                    state.$messageDraft.withLock { $0 = resolvedDraft }
+                    return .merge(
+                        .send(.cloudMutationRejected(rejection)),
+                        .run {
+                            [
+                                handoffID,
+                                outcomeID = outcome.outcomeID,
+                            ] _ in
+                            try await database.write { database in
+                                try InitialPromptHandoff
+                                    .find(handoffID)
+                                    .update {
+                                        $0.state = #bind(
+                                            InitialPromptHandoff.State.manual
+                                                .rawValue
+                                        )
+                                        $0.lastTransitionAt = #bind(Date())
+                                    }
+                                    .execute(database)
+                                try CloudMutationOutcome
+                                    .find(outcomeID)
+                                    .update {
+                                        $0.consumedAt = #bind(Date())
+                                    }
+                                    .execute(database)
+                            }
+                        }
+                    )
+                }
+                guard handoff.handoffState == .ready else {
+                    return .none
+                }
+                if choice == .discard {
+                    return .run { _ in
+                        try await database.write { database in
+                            try InitialPromptHandoff
+                                .find(handoffID)
+                                .update {
+                                    $0.state = #bind(
+                                        InitialPromptHandoff.State.resolved
+                                            .rawValue
+                                    )
+                                    $0.lastTransitionAt = #bind(Date())
+                                }
+                                .execute(database)
+                        }
+                    }
+                }
+                let installedDraft = switch choice {
+                case .replace:
+                    handoff.originalPrompt
+                case .append:
+                    state.messageDraft
+                        + (state.messageDraft.hasSuffix("\n") ? "\n" : "\n\n")
+                        + handoff.originalPrompt
+                case .discard:
+                    handoff.originalPrompt
+                }
+                let previousDraft = state.messageDraft
+                return .run { send in
+                    try await database.write { database in
+                        guard let stored = try InitialPromptHandoff
+                            .find(handoffID)
+                            .fetchOne(database),
+                              stored.handoffState == .ready else {
+                            return
+                        }
+                        try InitialPromptHandoff
+                            .find(handoffID)
+                            .update {
+                                $0.installedDraftText = #bind(installedDraft)
+                                $0.lastTransitionAt = #bind(Date())
+                            }
+                            .execute(database)
+                    }
+                    await send(
+                        .initialPromptConflictDraftPrepared(
+                            handoffID,
+                            installedDraft,
+                            previousDraft
+                        )
+                    )
+                }
+
+            case let .initialPromptConflictDraftPrepared(
+                handoffID,
+                draft,
+                previousDraft
+            ):
+                guard state.messageDraft == previousDraft else {
+                    return .none
+                }
+                state.$messageDraft.withLock { $0 = draft }
+                return .send(.initialPromptDraftInstalled(handoffID, draft))
+
+            case let .initialPromptDraftPrepared(handoffID, draft):
+                guard state.messageDraft.isEmpty
+                    || state.messageDraft == draft else {
+                    return .none
+                }
+                state.$messageDraft.withLock { $0 = draft }
+                return .send(.initialPromptDraftInstalled(handoffID, draft))
+
+            case let .initialPromptDraftInstalled(handoffID, draft):
+                guard state.messageDraft == draft,
+                      case let .cloud(accountID, remoteWorkspaceID) =
+                        state.mutationRoute else {
+                    return .none
+                }
+                return .run {
+                    [
+                        accountID,
+                        handoffID,
+                        remoteWorkspaceID,
+                        sessionID = state.session.id,
+                    ] _ in
+                    try await database.write { database in
+                        guard let handoff = try InitialPromptHandoff
+                            .find(handoffID)
+                            .fetchOne(database),
+                              handoff.handoffState == .ready,
+                              handoff.installedDraftText == draft,
+                              handoff.accountID == accountID,
+                              handoff.remoteWorkspaceID == remoteWorkspaceID,
+                              handoff.canonicalSessionID == sessionID else {
+                            return
+                        }
+                        let attemptID = UUID()
+                        let rollback = try JSONEncoder.cloudMutation.encode(
+                            CloudSendDraftRollback(submittedDraft: draft)
+                        )
+                        let attempt = try CloudPendingMutation(
+                            attemptID: attemptID,
+                            accountID: accountID,
+                            credentialGeneration:
+                                handoff.credentialGeneration,
+                            operation: .sendMessage,
+                            resourceKind: .message,
+                            request: CloudSendMessageRequest(
+                                messageID: handoff.stableRemoteMessageID,
+                                message: handoff.originalPrompt
+                            ),
+                            rollbackPayload: rollback,
+                            canonicalWorkspaceID:
+                                handoff.canonicalWorkspaceID,
+                            remoteWorkspaceID: handoff.remoteWorkspaceID,
+                            canonicalSessionID: handoff.canonicalSessionID,
+                            remoteSessionID: handoff.remoteSessionID,
+                            stableRemoteMessageID:
+                                handoff.stableRemoteMessageID
+                        )
+                        try CloudPendingMutation.insert { attempt }
+                            .execute(database)
+                        try InitialPromptHandoff
+                            .find(handoffID)
+                            .update {
+                                $0.sendAttemptID = #bind(attemptID)
+                                $0.state = #bind(
+                                    InitialPromptHandoff.State.linked.rawValue
+                                )
+                                $0.lastTransitionAt = #bind(Date())
+                            }
+                            .execute(database)
+                    }
+                }
+
             case .binding(\.selectedModel):
                 state.hasUserSelectedModel = true
                 state.reconcileSelectedReasoningEffort()
@@ -357,6 +739,12 @@ public struct Chat: Sendable {
                 state.updateReportedContextWindowTokenLimits()
                 state.updateRows(sessionStatus: state.session.status)
                 return .none
+
+            case let .pendingSendsUpdated(attempts):
+                return finalizePendingSends(
+                    attempts,
+                    state: &state
+                )
 
             case let .initialMessagesResponse(sessionID, messages):
                 guard sessionID == state.sessionID else {
@@ -440,8 +828,16 @@ public struct Chat: Sendable {
                 return .none
 
             case let .sendButtonTapped(mode):
-                let message = state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !message.isEmpty, !state.isMessageSendInFlight else {
+                let submittedDraft = state.messageDraft
+                let message = submittedDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                guard !message.isEmpty,
+                      !state.isMessageSendInFlight,
+                      !state.hasUnresolvedSend,
+                      !state.hasUnresolvedInitialPrompt,
+                      let mutationRoute = state.mutationRoute,
+                      mutationRoute.capabilities.canSend else {
                     return .none
                 }
 
@@ -452,56 +848,61 @@ public struct Chat: Sendable {
                         model = state.selectedModel,
                         reasoningEffort = state.selectedReasoningEffort,
                         isFastModeEnabled = state.isFastModeEnabled,
-                        isCloudHosted = state.isCloudHosted,
+                        mutationRoute,
                         sessionID = state.session.id,
                         workspaceID = state.session.workspaceID,
+                        submittedDraft,
                     ] send in
                     let result = await Result {
-                        let mutationSessionID = try await mutationSessionID(
+                        let mutationResult = try await workspaceMutationClient
+                            .sendMessage(
+                            route: mutationRoute,
+                            canonicalWorkspaceID: workspaceID,
                             canonicalSessionID: sessionID,
-                            isCloudHosted: isCloudHosted
-                        )
-                        if let canonicalMessage = try await desktopClient.sendMessage(
-                            workspaceID: workspaceID,
-                            sessionID: mutationSessionID,
+                            submittedDraft: submittedDraft,
                             message: message,
                             model: model,
                             isFastModeEnabled: isFastModeEnabled,
                             mode: mode,
                             reasoningEffort: reasoningEffort
-                        ) {
-                            if !isCloudHosted {
-                                do {
-                                    try await messagePersistence.confirm(
-                                        canonicalMessage,
-                                        sessionID: sessionID,
-                                        database: database
-                                    )
-                                } catch {
-                                    Logger.chat.error(
-                                        "Failed to reconcile sent message: \(error)"
-                                    )
-                                }
-                                await send(
-                                    .messageConfirmed(
-                                        sessionID: sessionID,
-                                        message: canonicalMessage
-                                    )
+                        )
+                        if case let .desktop(canonicalMessage?) =
+                            mutationResult {
+                            do {
+                                try await messagePersistence.confirm(
+                                    canonicalMessage,
+                                    sessionID: sessionID,
+                                    database: database
+                                )
+                            } catch {
+                                Logger.chat.error(
+                                    "Failed to reconcile sent message: \(error)"
                                 )
                             }
+                            await send(
+                                .messageConfirmed(
+                                    sessionID: sessionID,
+                                    message: canonicalMessage
+                                )
+                            )
                         }
-                        return message
+                        return mutationResult
                     }
 
                     await send(
                         .sendMessageResponse(
                             sessionID: sessionID,
+                            submittedDraft: submittedDraft,
                             result: result
                         )
                     )
                 }
 
-            case let .sendMessageResponse(sessionID, result):
+            case let .sendMessageResponse(
+                sessionID,
+                submittedDraft,
+                result
+            ):
                 // Send requests intentionally survive session navigation, so a late response
                 // must not mutate the chat that replaced the request's originating session.
                 guard sessionID == state.sessionID else {
@@ -510,11 +911,35 @@ public struct Chat: Sendable {
 
                 state.isMessageSendInFlight = false
                 switch result {
-                case let .success(message):
-                    if state.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines) == message {
+                case .success(.desktop):
+                    if state.messageDraft == submittedDraft {
                         state.$messageDraft.withLock { $0 = "" }
                     }
                     return .none
+
+                case .success(.cloud):
+                    let manualHandoffIDs = state.initialPromptHandoffs
+                        .filter { $0.handoffState == .manual }
+                        .map(\.handoffID)
+                    guard !manualHandoffIDs.isEmpty else {
+                        return .none
+                    }
+                    return .run { _ in
+                        try await database.write { database in
+                            for handoffID in manualHandoffIDs {
+                                try InitialPromptHandoff
+                                    .find(handoffID)
+                                    .update {
+                                        $0.state = #bind(
+                                            InitialPromptHandoff.State.resolved
+                                                .rawValue
+                                        )
+                                        $0.lastTransitionAt = #bind(Date())
+                                    }
+                                    .execute(database)
+                            }
+                        }
+                    }
 
                 case .failure:
                     // Send errors are displayed by the parent ``WorkspaceChat``.
@@ -522,36 +947,26 @@ public struct Chat: Sendable {
                 }
 
             case .stopButtonTapped:
-                guard state.session.status == .working, !state.isStopInFlight else {
+                guard state.session.status == .working,
+                      !state.isStopInFlight,
+                      let mutationRoute = state.mutationRoute,
+                      mutationRoute.capabilities.canCancel else {
                     return .none
                 }
 
                 state.isStopInFlight = true
                 return .run {
                     [
-                        isCloudHosted = state.isCloudHosted,
+                        mutationRoute,
                         sessionID = state.session.id,
                         workspaceID = state.session.workspaceID,
                     ] send in
                     let result = await Result {
-                        let mutationSessionID = try await mutationSessionID(
-                            canonicalSessionID: sessionID,
-                            isCloudHosted: isCloudHosted
+                        _ = try await workspaceMutationClient.cancelSession(
+                            route: mutationRoute,
+                            canonicalWorkspaceID: workspaceID,
+                            canonicalSessionID: sessionID
                         )
-                        if let canonicalSession = try await desktopClient.stopSession(
-                            workspaceID: workspaceID,
-                            sessionID: mutationSessionID
-                        ) {
-                            if !isCloudHosted {
-                                do {
-                                    try await reconcileSession(canonicalSession)
-                                } catch {
-                                    Logger.chat.error(
-                                        "Failed to reconcile stopped session: \(error)"
-                                    )
-                                }
-                            }
-                        }
                     }
 
                     await send(
@@ -572,20 +987,21 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case let .loadMessagesFailed(sessionID, _):
-                guard sessionID == state.sessionID else {
-                    return .none
-                }
+            case .loadMessagesFailed:
                 return .none
 
-            case .binding, .queuedMessages:
+            case .binding,
+                 .cloudMutationRejected,
+                 .initialPromptConflictDetected,
+                 .initialPromptRejectionConflictDetected,
+                 .queuedMessages:
                 return .none
             }
         }
     }
 
     private func observeMessages(_ state: State) -> Effect<Action> {
-        if state.isCloudHosted {
+        if state.source == .cloud {
             return observeCloudMessages(state)
         }
         return .run {
@@ -617,15 +1033,9 @@ public struct Chat: Sendable {
                 }
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
-                await send(
-                    .loadMessagesFailed(
-                        sessionID: sessionID,
-                        error: error
-                    )
-                )
+                await send(.loadMessagesFailed(error))
             }
         }
-        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
     }
 
     private func observeCloudMessages(_ state: State) -> Effect<Action> {
@@ -633,7 +1043,6 @@ public struct Chat: Sendable {
             [
                 initiallyIsLoadingMessages = state.isLoadingMessages,
                 sessionID = state.session.id,
-                workspaceID = state.session.workspaceID,
             ] send in
             var isAwaitingInitialResponse = initiallyIsLoadingMessages
             do {
@@ -654,7 +1063,6 @@ public struct Chat: Sendable {
                 }
                 let updates = cloudAPIClient.observeTranscript(
                     sessionID: cache.remoteSessionID,
-                    workspaceID: workspaceID,
                     checkpoint: cache.checkpoint
                 )
                 for try await update in updates {
@@ -674,20 +1082,13 @@ public struct Chat: Sendable {
                         )
                     }
                 }
+            } catch is CancellationError {
+                return
             } catch {
-                guard !CloudAPIClientError.isRequestCancellation(error) else {
-                    return
-                }
                 Logger.chat.error("Failed to load Cloud messages: \(error)")
-                await send(
-                    .loadMessagesFailed(
-                        sessionID: sessionID,
-                        error: error
-                    )
-                )
+                await send(.loadMessagesFailed(error))
             }
         }
-        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
     }
 
     private func observePersistedMessages(_ state: State) -> Effect<Action> {
@@ -695,6 +1096,69 @@ public struct Chat: Sendable {
             state.$messages.publisher
                 .removeDuplicates()
                 .map(Action.messagesUpdated)
+        }
+    }
+
+    private func observePendingSends(_ state: State) -> Effect<Action> {
+        .publisher {
+            state.$pendingSends.publisher
+                .removeDuplicates()
+                .map(Action.pendingSendsUpdated)
+        }
+    }
+
+    private func observeInitialPromptHandoffs(
+        _ state: State
+    ) -> Effect<Action> {
+        .publisher {
+            state.$initialPromptHandoffs.publisher
+                .removeDuplicates()
+                .dropFirst()
+                .map(Action.initialPromptHandoffsUpdated)
+        }
+    }
+
+    private func observeMutationOutcomes(_ state: State) -> Effect<Action> {
+        .publisher {
+            state.$mutationOutcomes.publisher
+                .removeDuplicates()
+                .map(Action.mutationOutcomesUpdated)
+        }
+    }
+
+    private func finalizePendingSends(
+        _ attempts: [CloudPendingMutation],
+        state: inout State
+    ) -> Effect<Action> {
+        var acknowledgedAttemptIDs: [UUID] = []
+        for attempt in attempts
+        where attempt.mutationState == .accepted
+            || attempt.mutationState == .acknowledged {
+            if let rollback: CloudSendDraftRollback = try? attempt.rollback(
+                as: CloudSendDraftRollback.self
+            ), state.messageDraft == rollback.submittedDraft {
+                state.$messageDraft.withLock { $0 = "" }
+            }
+            if attempt.mutationState == .acknowledged {
+                acknowledgedAttemptIDs.append(attempt.attemptID)
+            }
+        }
+        guard !acknowledgedAttemptIDs.isEmpty else {
+            return .none
+        }
+        return .run { [acknowledgedAttemptIDs, database] _ in
+            try await database.write { database in
+                for attemptID in acknowledgedAttemptIDs {
+                    try InitialPromptHandoff
+                        .where { $0.sendAttemptID.eq(attemptID) }
+                        .delete()
+                        .execute(database)
+                    try CloudPendingMutation
+                        .find(attemptID)
+                        .delete()
+                        .execute(database)
+                }
+            }
         }
     }
 
@@ -764,9 +1228,12 @@ public struct Chat: Sendable {
         return remoteSessionID
     }
 
-    private enum CancelID: Hashable {
-        case messageObservation
-    }
+}
+
+public enum InitialPromptConflictChoice: Equatable, Sendable {
+    case replace
+    case append
+    case discard
 }
 
 private enum CloudChatRoutingError: LocalizedError {
@@ -974,14 +1441,15 @@ struct ChatView: View {
     ) -> some View {
         VStack(spacing: 8) {
             statusLayout {
-                if !store.isCloudHosted,
+                if store.source == .desktop,
                    store.connectionStatus != .connected {
                     reconnecting
                         .frame(maxWidth: .infinity, alignment: .center)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                if !queuedMessagesStore.displayedMessages.isEmpty {
+                if store.mutationRoute.capabilities.canManageQueue,
+                   !queuedMessagesStore.displayedMessages.isEmpty {
                     QueuedMessagesView(
                         store: queuedMessagesStore,
                         firstRowFrameChanged: firstQueuedRowFrameChanged
@@ -1076,7 +1544,7 @@ struct ChatView: View {
         } else {
             queuedMessagesHeight
         }
-        let connectionHeight = if store.isCloudHosted
+        let connectionHeight = if store.source == .cloud
             || store.connectionStatus == .connected {
             CGFloat.zero
         } else {
@@ -1126,14 +1594,18 @@ private struct ChatComposer: View {
         let isSendInFlight: Bool = if queuedMessagesStore.isEditing {
             queuedMessagesStore.isEditInFlight
         } else {
-            store.isMessageSendInFlight
+            store.isMessageSendInFlight || store.hasUnresolvedSend
         }
 
         ChatTextField(
             text: composerText,
             agentType: store.session.agentType,
-            allowsAgentSwitching: store.allowsAgentSwitching,
+            allowsAgentSwitching: store.mutationRoute.capabilities
+                .canConfigureMessages && store.allowsAgentSwitching,
             contextWindowUsage: store.contextWindowUsage,
+            allowsQueue: store.mutationRoute.capabilities.canManageQueue,
+            showsConfigurationControls: store.mutationRoute.capabilities
+                .canConfigureMessages,
             isFastModeEnabled: store.isFastModeEnabled,
             isEditingQueuedMessage: queuedMessagesStore.isEditing,
             isSendInFlight: isSendInFlight,

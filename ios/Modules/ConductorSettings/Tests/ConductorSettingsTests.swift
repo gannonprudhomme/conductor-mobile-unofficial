@@ -726,6 +726,7 @@ struct ConductorSettingsTests {
             $0.dismiss = DismissEffect {
                 isDismissed.setValue(true)
             }
+            $0.uuid = .incrementing
         } operation: {
             let state = ConductorSettings.State()
             let store = TestStore(initialState: state) {
@@ -749,7 +750,7 @@ struct ConductorSettingsTests {
                 $0.$cloudConfiguration.withLock {
                     $0 = CloudConfiguration(
                         accountID: "synthetic-user::",
-                        credentialRevision: 1
+                        credentialGeneration: UUID(0)
                     )
                 }
                 $0.cloudAPIKey = ""
@@ -769,7 +770,6 @@ struct ConductorSettingsTests {
         let isDismissed = LockIsolated(false)
         let testedKeys = LockIsolated<[String]>([])
         let savedKeys = LockIsolated<[String]>([])
-        let (savePermission, savePermissionContinuation) = AsyncStream<Void>.makeStream()
         let database = try appDatabase()
 
         await withDependencies {
@@ -781,17 +781,18 @@ struct ConductorSettingsTests {
             }
             $0.cloudCredentialClient.saveAPIKey = { apiKey in
                 savedKeys.withValue { $0.append(apiKey) }
-                for await _ in savePermission {
-                    break
-                }
             }
             $0.dismiss = DismissEffect {
                 isDismissed.setValue(true)
             }
+            $0.uuid = .incrementing
         } operation: {
             let state = ConductorSettings.State()
             state.$cloudConfiguration.withLock {
-                $0 = CloudConfiguration(accountID: "synthetic-user::")
+                $0 = CloudConfiguration(
+                    accountID: "synthetic-user::",
+                    credentialGeneration: UUID(99)
+                )
             }
             let store = TestStore(initialState: state) {
                 ConductorSettings()
@@ -811,13 +812,11 @@ struct ConductorSettingsTests {
                 $0.testedCloudAccountID = "synthetic-user::"
                 $0.cloudOperation = .saving
             }
-            savePermissionContinuation.yield()
-            savePermissionContinuation.finish()
             await store.receive(\.cloudSaveResult) {
                 $0.$cloudConfiguration.withLock {
                     $0 = CloudConfiguration(
                         accountID: "synthetic-user::",
-                        credentialRevision: 1
+                        credentialGeneration: UUID(0)
                     )
                 }
                 $0.cloudAPIKey = ""
@@ -850,6 +849,7 @@ struct ConductorSettingsTests {
                 savedKeys.withValue { $0.append(apiKey) }
             }
             $0.dismiss = DismissEffect { }
+            $0.uuid = .incrementing
         } operation: {
             let store = TestStore(initialState: ConductorSettings.State()) {
                 ConductorSettings()
@@ -873,7 +873,7 @@ struct ConductorSettingsTests {
                 $0.$cloudConfiguration.withLock {
                     $0 = CloudConfiguration(
                         accountID: "synthetic-user::",
-                        credentialRevision: 1
+                        credentialGeneration: UUID(0)
                     )
                 }
                 $0.cloudAPIKey = ""
@@ -930,6 +930,7 @@ struct ConductorSettingsTests {
             $0.cloudWorkspaceCacheClient.clear = { _ in
                 throw CleanupError.failed
             }
+            $0.uuid = .incrementing
         } operation: {
             var state = ConductorSettings.State()
             state.cloudOperation = .saving
@@ -940,13 +941,14 @@ struct ConductorSettingsTests {
             await store.send(
                 .cloudSaveResult(
                     accountID: "new-account",
+                    didReplaceCredential: true,
                     result: .success(())
                 )
             ) {
                 $0.$cloudConfiguration.withLock {
                     $0 = CloudConfiguration(
                         accountID: "new-account",
-                        credentialRevision: 1
+                        credentialGeneration: UUID(0)
                     )
                 }
             }
@@ -960,7 +962,7 @@ struct ConductorSettingsTests {
                 store.state.cloudConfiguration
                     == CloudConfiguration(
                         accountID: "new-account",
-                        credentialRevision: 1
+                        credentialGeneration: UUID(0)
                     )
             )
         }

@@ -71,6 +71,7 @@ public struct QueuedMessages: Sendable {
         var messageActionInFlightID: Message.ID?
         var isReorderInFlight = false
         var isResumeInFlight = false
+        var mutationRoute: WorkspaceMutationRoute?
         var pendingMessageIDs: [Message.ID]?
         var shouldResumeAfterEditing = false
 
@@ -104,7 +105,11 @@ public struct QueuedMessages: Sendable {
             session.id
         }
 
-        init(session: Session) {
+        init(
+            session: Session,
+            mutationRoute: WorkspaceMutationRoute? = .desktop
+        ) {
+            self.mutationRoute = mutationRoute
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),

@@ -1806,6 +1806,7 @@ struct WorkspaceChatTests {
                 .chat(
                     .sendMessageResponse(
                         sessionID: activeSession.id,
+                        submittedDraft: "message",
                         result: .failure(TestError())
                     )
                 )
@@ -2088,6 +2089,7 @@ struct WorkspaceChatTests {
                 .chat(
                     .sendMessageResponse(
                         sessionID: activeSession.id,
+                        submittedDraft: "message",
                         result: .failure(error)
                     )
                 )

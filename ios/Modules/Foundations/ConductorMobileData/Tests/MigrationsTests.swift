@@ -30,6 +30,18 @@ struct MigrationsTests {
         let cloudMessageMetadata = try database.read { db in
             try CloudMessageMetadata.fetchCount(db)
         }
+        let cloudPendingMutations = try database.read { db in
+            try CloudPendingMutation.fetchCount(db)
+        }
+        let cloudMutationOutcomes = try database.read { db in
+            try CloudMutationOutcome.fetchCount(db)
+        }
+        let cloudProjectMappings = try database.read { db in
+            try CloudProjectRepositoryMapping.fetchCount(db)
+        }
+        let initialPromptHandoffs = try database.read { db in
+            try InitialPromptHandoff.fetchCount(db)
+        }
         let sessions = try database.read { db in
             try Session.fetchCount(db)
         }
@@ -101,6 +113,10 @@ struct MigrationsTests {
         #expect(cloudWorkspaceMetadata == 0)
         #expect(cloudSessionMetadata == 0)
         #expect(cloudMessageMetadata == 0)
+        #expect(cloudPendingMutations == 0)
+        #expect(cloudMutationOutcomes == 0)
+        #expect(cloudProjectMappings == 0)
+        #expect(initialPromptHandoffs == 0)
         #expect(sessions == 0)
         #expect(persistedUntitledSession?.title == nil)
         #expect(repositories == 0)
@@ -117,18 +133,24 @@ struct MigrationsTests {
         #expect(sessionColumns.contains("claude_effort_level"))
         #expect(
             cloudWorkspaceMetadataColumns
-                == ["workspace_id", "account_id", "last_seen_generation"]
+                == [
+                    "workspace_id",
+                    "account_id",
+                    "last_seen_generation",
+                    "remote_workspace_id",
+                ]
         )
         #expect(
             Array(cloudSessionMetadataColumns.suffix(3)) == [
-                "transcript_cursor",
                 "has_complete_transcript",
                 "transcript_projection_version",
+                "last_full_transcript_refresh_at",
             ]
         )
         #expect(cloudSessionMetadataDefaults.transcriptCursor == nil)
         #expect(!cloudSessionMetadataDefaults.hasCompleteTranscript)
         #expect(cloudSessionMetadataDefaults.transcriptProjectionVersion == 0)
+        #expect(cloudSessionMetadataDefaults.lastFullTranscriptRefreshAt == nil)
     }
 
     @Test("Checkpoint migration defaults existing Cloud session metadata")
@@ -140,7 +162,23 @@ struct MigrationsTests {
             upTo: "Create cloud chat metadata"
         )
         let session = Session.preview(id: "canonical-session")
+        let workspace = Workspace.preview(id: "canonical-workspace")
         try database.write { db in
+            try Workspace.insert { workspace }.execute(db)
+            try db.execute(
+                sql: """
+                INSERT INTO "cloud_workspace_metadata" (
+                  "workspace_id",
+                  "account_id",
+                  "last_seen_generation"
+                ) VALUES (?, ?, ?)
+                """,
+                arguments: [
+                    workspace.id,
+                    "account",
+                    "generation",
+                ]
+            )
             try Session.insert { session }.execute(db)
             try db.execute(
                 sql: """
@@ -171,8 +209,15 @@ struct MigrationsTests {
                 try CloudSessionMetadata.find(session.id).fetchOne(db)
             )
         }
+        let workspaceMetadata = try database.read { db in
+            try #require(
+                try CloudWorkspaceMetadata.find(workspace.id).fetchOne(db)
+            )
+        }
         #expect(metadata.transcriptCursor == nil)
         #expect(!metadata.hasCompleteTranscript)
         #expect(metadata.transcriptProjectionVersion == 0)
+        #expect(metadata.lastFullTranscriptRefreshAt == nil)
+        #expect(workspaceMetadata.remoteWorkspaceID == workspace.id)
     }
 }

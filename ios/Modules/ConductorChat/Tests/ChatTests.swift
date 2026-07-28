@@ -181,7 +181,8 @@ struct ChatTests {
                         transcriptCursor: nil,
                         hasCompleteTranscript: true,
                         transcriptProjectionVersion: CloudTranscriptAdapter
-                            .projectionVersion
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
                     )
                 }
                 .execute(db)
@@ -206,18 +207,15 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = {
-                    remoteSessionID,
-                    workspaceID,
-                    checkpoint in
+                $0.cloudAPIClient.observeTranscript = { remoteSessionID, checkpoint in
                     #expect(remoteSessionID == "remote-session")
-                    #expect(workspaceID == session.workspaceID)
                     #expect(
                         checkpoint
                             == CloudTranscriptCheckpoint(
                                 accountID: "account",
                                 remoteSessionID: "remote-session",
-                                rawCursor: nil
+                                rawCursor: nil,
+                                lastFullTranscriptRefreshAt: .distantFuture
                             )
                     )
                     return AsyncThrowingStream { _ in }
@@ -231,89 +229,6 @@ struct ChatTests {
                 $0.isLoadingMessages = false
             }
             await task.cancel()
-        }
-    }
-
-    @Test("A same-account credential revision restarts transcript observation")
-    func credentialRevisionRestartsTranscriptObservation() async throws {
-        let database = try appDatabase()
-        let sessionID = CloudCanonicalID.session(
-            accountID: "account",
-            remoteSessionID: "remote-session"
-        )
-        let session = Session.preview(id: sessionID)
-        try await database.write { db in
-            try Session.insert { session }.execute(db)
-            try CloudSessionMetadata.insert {
-                CloudSessionMetadata(
-                    canonicalSessionID: sessionID,
-                    cloudSessionID: "remote-session",
-                    workspaceID: session.workspaceID,
-                    accountID: "account",
-                    listOrder: 0,
-                    refreshGeneration: "generation"
-                )
-            }
-            .execute(db)
-        }
-
-        await withDependencies {
-            $0.defaultDatabase = database
-        } operation: {
-            @Shared(.cloudConfiguration) var cloudConfiguration
-            $cloudConfiguration.withLock {
-                $0 = CloudConfiguration(
-                    accountID: "account",
-                    credentialRevision: 1
-                )
-            }
-            let connectionCount = LockIsolated(0)
-            let (stream, continuation) = AsyncThrowingStream<
-                CloudTranscriptUpdate,
-                any Error
-            >.makeStream()
-            let store = TestStore(
-                initialState: Chat.State(
-                    session: session,
-                    isCloudHosted: true
-                )
-            ) {
-                Chat()
-            } withDependencies: {
-                $0.defaultDatabase = database
-                $0.cloudAPIClient.observeTranscript = { _, _, _ in
-                    connectionCount.withValue { $0 += 1 }
-                    return stream
-                }
-                $0.desktopClient.fetchModelSettings = {
-                    DesktopClient.ModelSettings(
-                        defaultModel: session.model,
-                        defaultReasoningEffort:
-                            session.model.defaultReasoningEffort,
-                        isFastModeEnabled: false
-                    )
-                }
-            }
-            store.exhaustivity = .off(showSkippedAssertions: false)
-
-            let task = await store.send(.task)
-            for _ in 0..<1_000 where connectionCount.value < 1 {
-                await Task.yield()
-            }
-            $cloudConfiguration.withLock {
-                $0 = CloudConfiguration(
-                    accountID: "account",
-                    credentialRevision: 2
-                )
-            }
-            await store.receive(\.cloudConfigurationChanged)
-            for _ in 0..<10_000 where connectionCount.value < 2 {
-                await Task.yield()
-            }
-            #expect(connectionCount.value == 2)
-
-            await task.cancel()
-            continuation.finish()
         }
     }
 
@@ -363,12 +278,8 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = {
-                    remoteSessionID,
-                    workspaceID,
-                    checkpoint in
+                $0.cloudAPIClient.observeTranscript = { remoteSessionID, checkpoint in
                     #expect(remoteSessionID == "remote-session")
-                    #expect(workspaceID == session.workspaceID)
                     #expect(checkpoint == nil)
                     return AsyncThrowingStream { continuation in
                         continuation.yield(
@@ -426,7 +337,8 @@ struct ChatTests {
                         transcriptCursor: "committed",
                         hasCompleteTranscript: true,
                         transcriptProjectionVersion: CloudTranscriptAdapter
-                            .projectionVersion
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
                     )
                 }
                 .execute(db)
@@ -455,7 +367,7 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = { _, _, _ in stream }
+                $0.cloudAPIClient.observeTranscript = { _, _ in stream }
             }
             store.exhaustivity = .off
 

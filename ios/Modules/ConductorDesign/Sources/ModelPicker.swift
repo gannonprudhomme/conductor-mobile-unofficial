@@ -13,9 +13,11 @@ import SwiftUI
 public struct ModelAndFastModeControls: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let allowedModels: Set<Session.Model>?
     let availableReasoningEfforts: [Session.ReasoningEffort]
     let isFastModeEnabled: Bool
     let isFastModeButtonDisabled: Bool
+    let showsFastMode: Bool
     let selectedModel: Session.Model
     let selectedReasoningEffort: Session.ReasoningEffort?
     let onFastModeTapped: @MainActor () -> Void
@@ -25,9 +27,11 @@ public struct ModelAndFastModeControls: View {
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        allowedModels: Set<Session.Model>? = nil,
         availableReasoningEfforts: [Session.ReasoningEffort],
         isFastModeEnabled: Bool,
         isFastModeButtonDisabled: Bool = false,
+        showsFastMode: Bool = true,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort?,
         onFastModeTapped: @escaping @MainActor () -> Void,
@@ -36,9 +40,11 @@ public struct ModelAndFastModeControls: View {
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.allowedModels = allowedModels
         self.availableReasoningEfforts = availableReasoningEfforts
         self.isFastModeEnabled = isFastModeEnabled
         self.isFastModeButtonDisabled = isFastModeButtonDisabled
+        self.showsFastMode = showsFastMode
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.onFastModeTapped = onFastModeTapped
@@ -52,12 +58,14 @@ public struct ModelAndFastModeControls: View {
                 ModelPicker(
                     agentType: agentType,
                     allowsAgentSwitching: allowsAgentSwitching,
+                    allowedModels: allowedModels,
                     selectedModel: selectedModel,
                     onSelect: onSelectModel
                 )
                 .equatable()
 
-                Button(action: onFastModeTapped) {
+                if showsFastMode {
+                    Button(action: onFastModeTapped) {
                     Label {
                         Text("Fast mode")
                     } icon: {
@@ -74,11 +82,12 @@ public struct ModelAndFastModeControls: View {
                         in: .circle
                     )
                     .animation(.interactiveSpring, value: isFastModeEnabled)
+                    }
+                    .buttonStyle(.spring)
+                    .disabled(isFastModeButtonDisabled)
+                    .accessibilityLabel("Fast mode")
+                    .accessibilityValue(isFastModeEnabled ? "On" : "Off")
                 }
-                .buttonStyle(.spring)
-                .disabled(isFastModeButtonDisabled)
-                .accessibilityLabel("Fast mode")
-                .accessibilityValue(isFastModeEnabled ? "On" : "Off")
 
                 if !availableReasoningEfforts.isEmpty {
                     ReasoningEffortControl(
@@ -100,6 +109,7 @@ public struct ModelAndFastModeControls: View {
 public struct ModelMenu<SourceLabel: View>: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let allowedModels: Set<Session.Model>?
     let selectedModel: Session.Model
     let onSelect: @MainActor (Session.Model) -> Void
     let label: (Session.Model, Session.AgentType) -> SourceLabel
@@ -107,12 +117,14 @@ public struct ModelMenu<SourceLabel: View>: View {
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        allowedModels: Set<Session.Model>? = nil,
         selectedModel: Session.Model,
         onSelect: @escaping @MainActor (Session.Model) -> Void,
         @ViewBuilder label: @escaping (Session.Model, Session.AgentType) -> SourceLabel
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.allowedModels = allowedModels
         self.selectedModel = selectedModel
         self.onSelect = onSelect
         self.label = label
@@ -144,6 +156,9 @@ public struct ModelMenu<SourceLabel: View>: View {
 
     private func models(for sectionAgentType: Session.AgentType) -> [Session.Model] {
         var models = Session.Model.models(for: sectionAgentType)
+        if let allowedModels {
+            models = models.filter(allowedModels.contains)
+        }
         if sectionAgentType == agentType, !models.contains(selectedModel) {
             models.insert(selectedModel, at: 0)
         }
@@ -204,17 +219,20 @@ public struct ModelMenu<SourceLabel: View>: View {
 public struct ModelPicker: Equatable, View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let allowedModels: Set<Session.Model>?
     let selectedModel: Session.Model
     let onSelect: @MainActor (Session.Model) -> Void
 
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        allowedModels: Set<Session.Model>? = nil,
         selectedModel: Session.Model,
         onSelect: @escaping @MainActor (Session.Model) -> Void
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.allowedModels = allowedModels
         self.selectedModel = selectedModel
         self.onSelect = onSelect
     }
@@ -224,6 +242,7 @@ public struct ModelPicker: Equatable, View {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.agentType == rhs.agentType
             && lhs.allowsAgentSwitching == rhs.allowsAgentSwitching
+            && lhs.allowedModels == rhs.allowedModels
             && lhs.selectedModel == rhs.selectedModel
     }
 
@@ -231,6 +250,7 @@ public struct ModelPicker: Equatable, View {
         ModelMenu(
             agentType: agentType,
             allowsAgentSwitching: allowsAgentSwitching,
+            allowedModels: allowedModels,
             selectedModel: selectedModel,
             onSelect: onSelect
         ) { model, agentType in

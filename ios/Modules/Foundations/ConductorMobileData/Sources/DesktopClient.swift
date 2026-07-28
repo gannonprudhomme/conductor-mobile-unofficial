@@ -11,6 +11,17 @@ import Foundation
 import SharedConductorData
 import Sharing
 
+public struct MessageSendMode: Codable, Equatable, RawRepresentable, Sendable {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let queue = Self(rawValue: "queued")
+    public static let steer = Self(rawValue: "sent")
+}
+
 @DependencyClient
 public struct DesktopClient: Sendable {
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
@@ -60,7 +71,7 @@ public struct DesktopClient: Sendable {
         _ message: String,
         _ model: Session.Model,
         _ isFastModeEnabled: Bool,
-        _ mode: MessageMode,
+        _ mode: MessageSendMode,
         _ reasoningEffort: Session.ReasoningEffort?
     ) async throws -> Message?
     public var setWorkspacePinned: @Sendable (_ workspaceID: String, _ isPinned: Bool) async throws -> UIHookMutationPath
@@ -79,11 +90,6 @@ public struct DesktopClient: Sendable {
         case desktop
         case laptop
         case server
-    }
-
-    public enum MessageMode: String, Codable, Equatable, Sendable {
-        case queue = "queued"
-        case steer = "sent"
     }
 
     public struct DisplayConfiguration: Codable, Equatable, Sendable {
@@ -486,7 +492,7 @@ extension DesktopClient: DependencyKey {
         let message: String
         let model: String
         let isFastModeEnabled: Bool
-        let mode: MessageMode
+        let mode: MessageSendMode
         let reasoningEffort: Session.ReasoningEffort?
 
         private enum CodingKeys: String, CodingKey {

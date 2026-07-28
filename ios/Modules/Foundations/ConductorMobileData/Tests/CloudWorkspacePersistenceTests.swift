@@ -13,6 +13,42 @@ import SQLiteData
 import Testing
 
 struct CloudWorkspacePersistenceTests {
+    @Test("Cloud snapshots persist projects without workspaces")
+    func persistsEmptyProjects() throws {
+        let database = try appDatabase()
+        let project = CloudProject(
+            id: "empty-project",
+            name: "Empty",
+            gitRemote: "https://github.com/example/empty.git"
+        )
+
+        try database.write { database in
+            try CloudWorkspacePersistence.persist(
+                CloudWorkspaceSnapshot(
+                    accountID: "account-1",
+                    projects: [project],
+                    statuses: [:],
+                    workspaces: []
+                ),
+                in: database
+            )
+        }
+
+        try database.read { database in
+            let mapping = try CloudProjectRepositoryMapping.find(
+                CloudProjectRepositoryMapping.id(
+                    accountID: "account-1",
+                    cloudProjectID: project.id
+                )
+            )
+            .fetchOne(database)
+            let repository = try Repository.find(project.id).fetchOne(database)
+            #expect(mapping?.canonicalRepositoryID == repository?.id)
+            #expect(mapping?.projectName == "Empty")
+            #expect(repository?.remoteURL == project.gitRemote)
+        }
+    }
+
     @Test("Cloud snapshots create canonical rows with coarse state")
     func createsCanonicalRows() throws {
         let database = try appDatabase()

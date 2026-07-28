@@ -27,7 +27,6 @@ public struct Main: Sendable {
         @Shared(.cloudConfiguration)
         public var cloudConfiguration
 
-        var cachedWorkspaceChat: WorkspaceChat.State?
         public var path = StackState<Path.State>()
         @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
@@ -42,6 +41,8 @@ public struct Main: Sendable {
     public enum Action {
         case cloudCacheCleanupResult(Result<Void, any Error>)
         case cloudCredentialReconciliationResult(Result<String?, any Error>)
+        case cloudMutationRunnerResult(Result<Void, any Error>)
+        case cloudWorkspaceCompletionConsumed(Result<Void, any Error>)
         case path(StackActionOf<Path>)
         case settings(PresentationAction<ConductorSettings.Action>)
         case task
@@ -49,6 +50,7 @@ public struct Main: Sendable {
     }
 
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+    @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.defaultDatabase) var database
 
     public init() {
@@ -62,18 +64,47 @@ public struct Main: Sendable {
             Reduce { state, action in
                 switch action {
                 case .task:
-                    guard state.cloudConfiguration != nil else {
-                        return .send(.workspaces(.task))
-                    }
-                    return .run { [cloudCredentialClient] send in
+                    let startRunner: Effect<Action> = .run {
+                        [cloudMutationRunner] send in
                         await send(
-                            .cloudCredentialReconciliationResult(
+                            .cloudMutationRunnerResult(
                                 await Result {
-                                    try await cloudCredentialClient.loadAPIKey()
+                                    try await cloudMutationRunner.start()
                                 }
                             )
                         )
                     }
+                    guard state.cloudConfiguration != nil else {
+                        return .merge(
+                            startRunner,
+                            .send(.workspaces(.task))
+                        )
+                    }
+                    return .merge(
+                        startRunner,
+                        .run { [cloudCredentialClient] send in
+                            await send(
+                                .cloudCredentialReconciliationResult(
+                                    await Result {
+                                        try await cloudCredentialClient
+                                            .loadAPIKey()
+                                    }
+                                )
+                            )
+                        }
+                    )
+
+                case let .cloudMutationRunnerResult(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .cloudMutationRunnerResult(.success):
+                    return .none
+
+                case let .cloudWorkspaceCompletionConsumed(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .cloudWorkspaceCompletionConsumed(.success):
+                    return .none
 
                 case let .cloudCredentialReconciliationResult(result):
                     switch result {
@@ -86,9 +117,6 @@ public struct Main: Sendable {
 
                     case .success(nil):
                         state.$cloudConfiguration.withLock { $0 = nil }
-                        if state.cachedWorkspaceChat?.workspace.isCloudHosted == true {
-                            state.cachedWorkspaceChat = nil
-                        }
                         let settings = ConductorSettings.State()
                         if settings.requiresConnectionConfiguration {
                             state.settings = settings
@@ -116,14 +144,6 @@ public struct Main: Sendable {
                 case .cloudCacheCleanupResult(.success):
                     return .none
 
-                case .settings(
-                    .presented(.cloudCredentialDeleteResult(.success))
-                ):
-                    if state.cachedWorkspaceChat?.workspace.isCloudHosted == true {
-                        state.cachedWorkspaceChat = nil
-                    }
-                    return .none
-
                 // We handle the displaying of Settings in here so we can keep ConductorSettings + ConductorWorkspaces decoupled
                 // akin to how modules are decoupled for push navigation
                 case .workspaces(.settingsButtonTapped):
@@ -131,39 +151,52 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceCreated(creation)):
-                    state.path.append(
-                        .workspaceChat(
-                            WorkspaceChat.State(
-                                workspaceWithRepository: creation.workspace,
-                                selectedModel: creation.selectedModel,
-                                selectedReasoningEffort: creation.selectedReasoningEffort,
-                                shouldFocusMessageField: true
+                    let alreadyPresented = state.path.contains { destination in
+                        guard case let .workspaceChat(workspaceChat) = destination else {
+                            return false
+                        }
+                        return workspaceChat.workspace.id == creation.workspace.id
+                    }
+                    if !alreadyPresented {
+                        state.path.append(
+                            .workspaceChat(
+                                WorkspaceChat.State(
+                                    workspaceWithRepository: creation.workspace,
+                                    selectedSessionID: creation.selectedSessionID,
+                                    selectedModel: creation.selectedModel,
+                                    selectedReasoningEffort:
+                                        creation.selectedReasoningEffort,
+                                    shouldFocusMessageField: true
+                                )
                             )
                         )
-                    )
-                    return .none
-
-                case let .workspaces(.workspaceTapped(item)):
-                    let workspaceChat: WorkspaceChat.State
-                    if let cachedWorkspaceChat = state.cachedWorkspaceChat,
-                       cachedWorkspaceChat.workspace.id == item.id {
-                        workspaceChat = cachedWorkspaceChat
-                        state.cachedWorkspaceChat = nil
-                    } else {
-                        workspaceChat = WorkspaceChat.State(
-                            workspaceWithRepository: item
+                    }
+                    guard let completionID = creation.completionID else {
+                        return .none
+                    }
+                    return .run { send in
+                        await send(
+                            .cloudWorkspaceCompletionConsumed(
+                                await Result {
+                                    try await database.write { database in
+                                        try CloudMutationOutcome
+                                            .find(completionID)
+                                            .update {
+                                                $0.consumedAt = #bind(Date())
+                                            }
+                                            .execute(database)
+                                    }
+                                }
+                            )
                         )
                     }
-                    state.path.append(
-                        .workspaceChat(workspaceChat)
-                    )
-                    return .none
 
-                case let .path(.popFrom(id)):
-                    if case let .workspaceChat(workspaceChat) = state.path[id: id],
-                       workspaceChat.canRestoreWarmPresentation {
-                        state.cachedWorkspaceChat = workspaceChat
-                    }
+                case let .workspaces(.workspaceTapped(item)):
+                    state.path.append(
+                        .workspaceChat(
+                            WorkspaceChat.State(workspaceWithRepository: item)
+                        )
+                    )
                     return .none
 
                 case let .path(

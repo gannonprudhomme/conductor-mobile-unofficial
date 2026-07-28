@@ -10,23 +10,38 @@ import Sharing
 
 public struct CloudConfiguration: Codable, Equatable, Sendable {
     public var accountID: String
-    public var credentialRevision: Int
+    public var credentialGeneration: UUID
 
     public init(
         accountID: String,
-        credentialRevision: Int = 0
+        credentialGeneration: UUID = UUID()
     ) {
         self.accountID = accountID
-        self.credentialRevision = credentialRevision
+        self.credentialGeneration = credentialGeneration
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.accountID = try container.decode(String.self, forKey: .accountID)
-        self.credentialRevision = try container.decodeIfPresent(
-            Int.self,
-            forKey: .credentialRevision
-        ) ?? 0
+        accountID = try container.decode(String.self, forKey: .accountID)
+        credentialGeneration =
+            try container.decodeIfPresent(
+                UUID.self,
+                forKey: .credentialGeneration
+            ) ?? UUID()
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accountID, forKey: .accountID)
+        try container.encode(
+            credentialGeneration,
+            forKey: .credentialGeneration
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case accountID
+        case credentialGeneration
     }
 }
 

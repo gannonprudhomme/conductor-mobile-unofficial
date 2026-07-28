@@ -50,6 +50,7 @@ public enum CloudWorkspacePersistence {
         let generation = UUID().uuidString
         let repositoryIDs = try repositoryIDsByProjectID(
             for: snapshot,
+            generation: generation,
             in: database
         )
         try persistWorkspaces(
@@ -63,6 +64,11 @@ public enum CloudWorkspacePersistence {
             generation: generation,
             from: database
         )
+        try removeStaleProjectMappings(
+            currentAccountID: snapshot.accountID,
+            generation: generation,
+            from: database
+        )
     }
 
     /// Maps API projects onto canonical repositories, preferring an existing repository with the
@@ -70,22 +76,30 @@ public enum CloudWorkspacePersistence {
     /// and Cloud observe the same repository.
     private static func repositoryIDsByProjectID(
         for snapshot: CloudWorkspaceSnapshot,
+        generation: String,
         in database: Database
     ) throws -> [CloudProject.ID: Repository.ID] {
-        let projectIDsWithWorkspaces = Set(
-            snapshot.workspaces.compactMap { item in
-                snapshot.statuses[item.id]?.status == .deleted
-                    ? nil
-                    : item.project.id
-            }
-        )
         var repositories = try Repository.all.fetchAll(database)
+        let mappings = try CloudProjectRepositoryMapping
+            .where { $0.accountID.eq(snapshot.accountID) }
+            .fetchAll(database)
         var repositoryIDs: [CloudProject.ID: Repository.ID] = [:]
 
-        for project in snapshot.projects
-        where projectIDsWithWorkspaces.contains(project.id) {
+        for project in snapshot.projects {
             let repository: Repository
-            if let existingRepository = matchingRepository(
+            if let mapping = mappings.first(where: {
+                $0.cloudProjectID == project.id
+            }),
+               let existingRepository = repositories.first(where: {
+                   $0.id == mapping.canonicalRepositoryID
+               }) {
+                try fillMissingRepositoryDetails(
+                    from: project,
+                    in: existingRepository,
+                    database: database
+                )
+                repository = existingRepository
+            } else if let existingRepository = matchingRepository(
                 for: project,
                 in: repositories
             ) {
@@ -103,6 +117,18 @@ public enum CloudWorkspacePersistence {
                 repositories.append(repository)
             }
             repositoryIDs[project.id] = repository.id
+            try CloudProjectRepositoryMapping
+                .upsert {
+                    CloudProjectRepositoryMapping(
+                        accountID: snapshot.accountID,
+                        cloudProjectID: project.id,
+                        canonicalRepositoryID: repository.id,
+                        projectName: project.name,
+                        gitRemote: project.gitRemote,
+                        refreshGeneration: generation
+                    )
+                }
+                .execute(database)
         }
 
         return repositoryIDs
@@ -196,8 +222,15 @@ public enum CloudWorkspacePersistence {
         in database: Database
     ) throws {
         let workspace = item.workspace
+        let existingMetadata = try CloudWorkspaceMetadata
+            .where {
+                $0.accountID.eq(accountID)
+                    && $0.remoteWorkspaceID.eq(workspace.id)
+            }
+            .fetchOne(database)
+        let canonicalWorkspaceID = existingMetadata?.workspaceID ?? workspace.id
         let existingWorkspace = try Workspace
-            .find(workspace.id)
+            .find(canonicalWorkspaceID)
             .fetchOne(database)
 
         if let existingWorkspace {
@@ -211,6 +244,7 @@ public enum CloudWorkspacePersistence {
         } else {
             try insertAPIOnlyWorkspace(
                 workspace,
+                canonicalWorkspaceID: canonicalWorkspaceID,
                 status: status,
                 repositoryID: repositoryID,
                 in: database
@@ -219,14 +253,21 @@ public enum CloudWorkspacePersistence {
 
         try upsertCloudMetadata(
             for: item,
+            canonicalWorkspaceID: canonicalWorkspaceID,
             accountID: accountID,
             generation: generation,
+            in: database
+        )
+        try reconcileWorkspaceAttempts(
+            canonicalWorkspaceID: canonicalWorkspaceID,
+            isAuthoritativelyArchived: status?.status == .archived,
             in: database
         )
     }
 
     private static func insertAPIOnlyWorkspace(
         _ workspace: CloudWorkspace,
+        canonicalWorkspaceID: Workspace.ID,
         status: CloudWorkspaceStatusResponse?,
         repositoryID: Repository.ID,
         in database: Database
@@ -234,7 +275,7 @@ public enum CloudWorkspacePersistence {
         try Workspace
             .insert {
                 Workspace(
-                    id: workspace.id,
+                    id: canonicalWorkspaceID,
                     createdAt: workspace.createdAt,
                     creatorUserID: workspace.creatorID,
                     hostingServerURL: Workspace.conductorCloudHostingServerURL,
@@ -260,7 +301,7 @@ public enum CloudWorkspacePersistence {
             Workspace.State(rawValue: $0.status.rawValue)
         } ?? existingWorkspace.state
         try Workspace
-            .find(workspace.id)
+            .find(existingWorkspace.id)
             .update {
                 $0.createdAt = #bind(workspace.createdAt)
                 $0.creatorUserID = #bind(workspace.creatorID)
@@ -279,6 +320,7 @@ public enum CloudWorkspacePersistence {
 
     private static func upsertCloudMetadata(
         for item: CloudProjectWorkspace,
+        canonicalWorkspaceID: Workspace.ID,
         accountID: String,
         generation: String,
         in database: Database
@@ -286,13 +328,80 @@ public enum CloudWorkspacePersistence {
         let workspace = item.workspace
         try CloudWorkspaceMetadata
             .upsert {
-                CloudWorkspaceMetadata(
-                    workspaceID: workspace.id,
+                    CloudWorkspaceMetadata(
+                    workspaceID: canonicalWorkspaceID,
                     accountID: accountID,
+                    remoteWorkspaceID: workspace.id,
                     lastSeenGeneration: generation
                 )
             }
             .execute(database)
+    }
+
+    private static func reconcileWorkspaceAttempts(
+        canonicalWorkspaceID: Workspace.ID,
+        isAuthoritativelyArchived: Bool,
+        in database: Database
+    ) throws {
+        let attempts = try CloudPendingMutation
+            .where {
+                $0.canonicalWorkspaceID.eq(canonicalWorkspaceID)
+            }
+            .fetchAll(database)
+        for attempt in attempts {
+            switch attempt.mutationOperation {
+            case .archiveWorkspace:
+                if isAuthoritativelyArchived {
+                    try CloudPendingMutation.find(attempt.attemptID)
+                        .delete()
+                        .execute(database)
+                    try CloudOwnershipCleanup.perform(
+                        scope: .workspaces([canonicalWorkspaceID]),
+                        reason: .authoritativeSnapshot,
+                        in: database
+                    )
+                    continue
+                }
+                try Workspace.find(canonicalWorkspaceID)
+                    .update {
+                        $0.state = #bind(
+                            Workspace.State(rawValue: "archived")
+                        )
+                    }
+                    .execute(database)
+
+            case .createWorkspace:
+                _ = try CloudPendingMutation.compareAndSetState(
+                    attemptID: attempt.attemptID,
+                    from: attempt.mutationState,
+                    to: .acknowledged,
+                    at: Date(),
+                    in: database
+                )
+                let hasUnconsumedOutcome = try CloudMutationOutcome
+                    .where {
+                        $0.attemptID.eq(attempt.attemptID)
+                            && $0.consumedAt.is(nil)
+                    }
+                    .fetchCount(database) > 0
+                let hasUnresolvedHandoff = try InitialPromptHandoff
+                    .where {
+                        $0.creationAttemptID.eq(attempt.attemptID)
+                            && $0.state.neq(
+                                InitialPromptHandoff.State.resolved.rawValue
+                            )
+                    }
+                    .fetchCount(database) > 0
+                if !hasUnconsumedOutcome, !hasUnresolvedHandoff {
+                    try CloudPendingMutation.find(attempt.attemptID)
+                        .delete()
+                        .execute(database)
+                }
+
+            default:
+                break
+            }
+        }
     }
 
     /// Removes ownership not seen in this completed snapshot. The metadata helper retains
@@ -314,7 +423,21 @@ public enum CloudWorkspacePersistence {
         )
     }
 
-    private static func normalizedGitRemote(_ remote: String) -> String {
+    private static func removeStaleProjectMappings(
+        currentAccountID: String,
+        generation: String,
+        from database: Database
+    ) throws {
+        try CloudProjectRepositoryMapping
+            .where {
+                $0.accountID.neq(currentAccountID)
+                    || $0.refreshGeneration.neq(generation)
+            }
+            .delete()
+            .execute(database)
+    }
+
+    public static func normalizedGitRemote(_ remote: String) -> String {
         let normalized = remote
             .lowercased()
             .replacingOccurrences(
