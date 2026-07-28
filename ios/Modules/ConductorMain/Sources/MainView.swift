@@ -27,6 +27,7 @@ public struct Main: Sendable {
         @Shared(.cloudConfiguration)
         public var cloudConfiguration
 
+        var cachedWorkspaceChat: WorkspaceChat.State?
         public var path = StackState<Path.State>()
         @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
@@ -134,6 +135,9 @@ public struct Main: Sendable {
 
                     case .success(nil):
                         state.$cloudConfiguration.withLock { $0 = nil }
+                        if state.cachedWorkspaceChat?.workspace.isCloudHosted == true {
+                            state.cachedWorkspaceChat = nil
+                        }
                         let settings = ConductorSettings.State()
                         if settings.requiresConnectionConfiguration {
                             state.settings = settings
@@ -159,6 +163,14 @@ public struct Main: Sendable {
                     return .send(.workspaces(.loadWorkspacesFailed(error)))
 
                 case .cloudCacheCleanupResult(.success):
+                    return .none
+
+                case .settings(
+                    .presented(.cloudCredentialDeleteResult(.success))
+                ):
+                    if state.cachedWorkspaceChat?.workspace.isCloudHosted == true {
+                        state.cachedWorkspaceChat = nil
+                    }
                     return .none
 
                 // We handle the displaying of Settings in here so we can keep ConductorSettings + ConductorWorkspaces decoupled
@@ -215,11 +227,26 @@ public struct Main: Sendable {
                     }
 
                 case let .workspaces(.workspaceTapped(item)):
-                    state.path.append(
-                        .workspaceChat(
-                            WorkspaceChat.State(workspaceWithRepository: item)
+                    let workspaceChat: WorkspaceChat.State
+                    if let cachedWorkspaceChat = state.cachedWorkspaceChat,
+                       cachedWorkspaceChat.workspace.id == item.id {
+                        workspaceChat = cachedWorkspaceChat
+                        state.cachedWorkspaceChat = nil
+                    } else {
+                        workspaceChat = WorkspaceChat.State(
+                            workspaceWithRepository: item
                         )
+                    }
+                    state.path.append(
+                        .workspaceChat(workspaceChat)
                     )
+                    return .none
+
+                case let .path(.popFrom(id)):
+                    if case let .workspaceChat(workspaceChat) = state.path[id: id],
+                       workspaceChat.canRestoreWarmPresentation {
+                        state.cachedWorkspaceChat = workspaceChat
+                    }
                     return .none
 
                 case let .path(

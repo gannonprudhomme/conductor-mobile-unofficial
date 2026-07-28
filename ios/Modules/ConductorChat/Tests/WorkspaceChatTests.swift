@@ -2368,8 +2368,8 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("Cloud sends use the remote session ID")
-    func cloudSendUsesRemoteSessionID() async throws {
+    @Test("Cloud sends use the direct mutation route")
+    func cloudSendUsesDirectMutationRoute() async throws {
         let workspace = Workspace.preview(
             id: "workspace",
             activeSessionID: "canonical-session",
@@ -2379,13 +2379,20 @@ struct WorkspaceChatTests {
             id: "canonical-session",
             workspaceID: workspace.id
         )
-        let receivedSessionID = LockIsolated<String?>(nil)
+        let metadata = CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
+        let receivedRoute = LockIsolated<WorkspaceMutationRoute?>(nil)
 
         try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
                 try Workspace.upsert { workspace }.execute(database)
                 try Session.upsert { session }.execute(database)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(database)
                 try CloudSessionMetadata.insert {
                     CloudSessionMetadata(
                         canonicalSessionID: session.id,
@@ -2399,29 +2406,37 @@ struct WorkspaceChatTests {
                 .execute(database)
             }
         } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
             let store = TestStore(
                 initialState: WorkspaceChat.State(
                     workspaceWithRepository: .init(
                         workspace: workspace,
-                        repository: nil
+                        repository: nil,
+                        cloudMetadata: metadata
                     )
                 )
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = {
-                    workspaceID,
-                    sessionID,
+                $0.workspaceMutationClient.sendMessage = {
+                    route,
+                    canonicalWorkspaceID,
+                    canonicalSessionID,
+                    _,
+                    message,
                     _,
                     _,
-                    _,
-                    _,
-                    _,
+                    mode,
                     _ in
-                    #expect(workspaceID == workspace.id)
-                    receivedSessionID.setValue(sessionID)
-                    return .rejected(reason: "No.")
+                    #expect(canonicalWorkspaceID == workspace.id)
+                    #expect(canonicalSessionID == session.id)
+                    #expect(message == "Test")
+                    #expect(mode == .sent)
+                    receivedRoute.setValue(route)
+                    return .cloud(attemptID: UUID(0))
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2430,10 +2445,16 @@ struct WorkspaceChatTests {
             #expect(chat.isCloudHosted)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.sendMessageResponse)
             await store.finish()
 
-            #expect(receivedSessionID.value == "remote-session")
+            #expect(
+                receivedRoute.value
+                    == .cloud(
+                        accountID: "account",
+                        remoteWorkspaceID: "remote-workspace"
+                    )
+            )
         }
     }
 

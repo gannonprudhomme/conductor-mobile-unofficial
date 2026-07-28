@@ -583,12 +583,6 @@ public struct Chat: Sendable {
         case cloudMutationRejected(CloudMutationRejectionPayload)
         case messagesUpdated([Message])
         case pendingSendsUpdated([CloudPendingMutation])
-        /// Sent after POST returns its persisted row, before writing it locally. The message
-        /// appears when that write is observed; this buffers it against an older first snapshot.
-        case messageConfirmed(
-            sessionID: Session.ID,
-            message: Message
-        )
         case queuedMessages(QueuedMessages.Action)
         case reasoningEffortSelected(Session.ReasoningEffort)
         case sendButtonTapped(MessageSendMode)
@@ -698,67 +692,9 @@ public struct Chat: Sendable {
                 return .none
 
             case let .mutationOutcomesUpdated(outcomes):
-                guard let outcome = outcomes.first,
-                      outcome.kind
-                        == CloudMutationOutcome.Kind.rejectedMutation.rawValue,
-                      let rejection = try? outcome.decodedPayload(
-                        as: CloudMutationRejectionPayload.self
-                      ) else {
-                    return .none
-                }
-                if let handoff = state.initialPromptHandoffs.first(where: {
-                    $0.sendAttemptID == outcome.attemptID
-                        && $0.handoffState == .linked
-                }),
-                   let installedDraft = handoff.installedDraftText,
-                   state.messageDraft.isEmpty
-                    || state.messageDraft == installedDraft {
-                    state.$messageDraft.withLock { $0 = installedDraft }
-                    return .merge(
-                        .send(.cloudMutationRejected(rejection)),
-                        .run { [handoffID = handoff.handoffID, outcomeID = outcome.outcomeID] _ in
-                            try await database.write { database in
-                                try InitialPromptHandoff
-                                    .find(handoffID)
-                                    .update {
-                                        $0.state = #bind(
-                                            InitialPromptHandoff.State.manual.rawValue
-                                        )
-                                        $0.lastTransitionAt = #bind(Date())
-                                    }
-                                    .execute(database)
-                                try CloudMutationOutcome
-                                    .find(outcomeID)
-                                    .update {
-                                        $0.consumedAt = #bind(Date())
-                                    }
-                                    .execute(database)
-                            }
-                        }
-                    )
-                }
-                if let handoff = state.initialPromptHandoffs.first(where: {
-                    $0.sendAttemptID == outcome.attemptID
-                        && $0.handoffState == .linked
-                }) {
-                    return .send(
-                        .initialPromptRejectionConflictDetected(
-                            handoff.handoffID
-                        )
-                    )
-                }
-                return .merge(
-                    .send(.cloudMutationRejected(rejection)),
-                    .run { [outcomeID = outcome.outcomeID] _ in
-                        try await database.write { database in
-                            try CloudMutationOutcome
-                                .find(outcomeID)
-                                .update {
-                                    $0.consumedAt = #bind(Date())
-                                }
-                                .execute(database)
-                        }
-                    }
+                return handleMutationOutcomesUpdated(
+                    outcomes,
+                    state: &state
                 )
 
             case let .initialPromptHandoffsUpdated(handoffs):
@@ -1134,39 +1070,18 @@ public struct Chat: Sendable {
                         submittedDraft,
                     ] send in
                     let result = await Result {
-                        let mutationResult = try await workspaceMutationClient
+                        try await workspaceMutationClient
                             .sendMessage(
-                            route: mutationRoute,
-                            canonicalWorkspaceID: workspaceID,
-                            canonicalSessionID: sessionID,
-                            submittedDraft: submittedDraft,
-                            message: message,
-                            model: model,
-                            isFastModeEnabled: isFastModeEnabled,
-                            mode: mode,
-                            reasoningEffort: reasoningEffort
-                        )
-                        if case let .desktop(canonicalMessage?) =
-                            mutationResult {
-                            do {
-                                try await messagePersistence.confirm(
-                                    canonicalMessage,
-                                    sessionID: sessionID,
-                                    database: database
-                                )
-                            } catch {
-                                Logger.chat.error(
-                                    "Failed to reconcile sent message: \(error)"
-                                )
-                            }
-                            await send(
-                                .messageConfirmed(
-                                    sessionID: sessionID,
-                                    message: canonicalMessage
-                                )
+                                route: mutationRoute,
+                                canonicalWorkspaceID: workspaceID,
+                                canonicalSessionID: sessionID,
+                                submittedDraft: submittedDraft,
+                                message: message,
+                                model: model,
+                                isFastModeEnabled: isFastModeEnabled,
+                                mode: mode,
+                                reasoningEffort: reasoningEffort
                             )
-                        }
-                        return mutationResult
                     }
 
                     await send(
@@ -1281,6 +1196,78 @@ public struct Chat: Sendable {
                 return .none
             }
         }
+    }
+
+    private func handleMutationOutcomesUpdated(
+        _ outcomes: [CloudMutationOutcome],
+        state: inout State
+    ) -> Effect<Action> {
+        guard let outcome = outcomes.first,
+              outcome.kind
+                == CloudMutationOutcome.Kind.rejectedMutation.rawValue,
+              let rejection = try? outcome.decodedPayload(
+                as: CloudMutationRejectionPayload.self
+              ) else {
+            return .none
+        }
+        if let handoff = state.initialPromptHandoffs.first(where: {
+            $0.sendAttemptID == outcome.attemptID
+                && $0.handoffState == .linked
+        }),
+           let installedDraft = handoff.installedDraftText,
+           state.messageDraft.isEmpty
+            || state.messageDraft == installedDraft {
+            state.$messageDraft.withLock { $0 = installedDraft }
+            return .merge(
+                .send(.cloudMutationRejected(rejection)),
+                .run {
+                    [
+                        handoffID = handoff.handoffID,
+                        outcomeID = outcome.outcomeID,
+                    ] _ in
+                    try await database.write { database in
+                        try InitialPromptHandoff
+                            .find(handoffID)
+                            .update {
+                                $0.state = #bind(
+                                    InitialPromptHandoff.State.manual.rawValue
+                                )
+                                $0.lastTransitionAt = #bind(Date())
+                            }
+                            .execute(database)
+                        try CloudMutationOutcome
+                            .find(outcomeID)
+                            .update {
+                                $0.consumedAt = #bind(Date())
+                            }
+                            .execute(database)
+                    }
+                }
+            )
+        }
+        if let handoff = state.initialPromptHandoffs.first(where: {
+            $0.sendAttemptID == outcome.attemptID
+                && $0.handoffState == .linked
+        }) {
+            return .send(
+                .initialPromptRejectionConflictDetected(
+                    handoff.handoffID
+                )
+            )
+        }
+        return .merge(
+            .send(.cloudMutationRejected(rejection)),
+            .run { [outcomeID = outcome.outcomeID] _ in
+                try await database.write { database in
+                    try CloudMutationOutcome
+                        .find(outcomeID)
+                        .update {
+                            $0.consumedAt = #bind(Date())
+                        }
+                        .execute(database)
+                }
+            }
+        )
     }
 
     private func observeMessages(_ state: State) -> Effect<Action> {

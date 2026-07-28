@@ -195,6 +195,36 @@ public struct WorkspaceChat: Sendable {
             workspaceWithRepository.workspace
         }
 
+        public var canRestoreWarmPresentation: Bool {
+            guard let chat else {
+                return false
+            }
+            return (!workspace.isCloudHosted || cloudConfiguration != nil)
+                && !isLoadingSessions
+                && chat.session.status == .idle
+                && !isArchivingWorkspace
+                && !isClosingSession
+                && !isCreatingSession
+                && !isRenamingBranch
+                && !isRenamingSession
+                && !isWorkspaceMutationInFlight
+                && sessionIDsBeforeCreation == nil
+                && sessionIDAwaitingObservation == nil
+                && renamingSession == nil
+                && destination == nil
+                && !chat.isLoadingMessages
+                && !chat.isMessageSendInFlight
+                && !chat.isStopInFlight
+                && !chat.queuedMessages.isEditStartInFlight
+                && !chat.queuedMessages.isEditing
+                && !chat.queuedMessages.isEditInFlight
+                && chat.queuedMessages.messageActionInFlightID == nil
+                && !chat.queuedMessages.isReorderInFlight
+                && !chat.queuedMessages.isResumeInFlight
+                && chat.queuedMessages.pendingMessageIDs == nil
+                && chat.queuedMessages.isInteractionEnabled
+        }
+
         var canRenameBranch: Bool {
             let branch = branchNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             return !isRenamingBranch && !branch.isEmpty && branch != workspace.branch
