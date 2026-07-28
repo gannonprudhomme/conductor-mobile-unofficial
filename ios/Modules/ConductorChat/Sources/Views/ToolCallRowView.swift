@@ -14,21 +14,80 @@ struct ToolCallRowView: View {
     let toolCall: Turn.Row.AssistantMessage.ToolCall
     
     var body: some View {
-        LabeledContent {
-            detail
-        } label: {
-            Label {
-                if let title {
-                    Text(title)
+        if case let .runLocalCommand(_, command, description, reason) = toolCall {
+            RunLocalCommandRowView(
+                command: command,
+                description: description,
+                reason: reason
+            )
+        } else {
+            LabeledContent {
+                detail
+            } label: {
+                Label {
+                    if let title {
+                        Text(title)
+                    }
+                } icon: {
+                    LucideIcon(
+                        DisplayedChatRow.TurnSummary.ToolIcon(toolCall).image,
+                        style: .small
+                    )
                 }
-            } icon: {
-                LucideIcon(DisplayedChatRow.TurnSummary.ToolIcon(toolCall).image, style: .small)
+            }
+            .lineLimit(1)
+            .labelStyle(.conductorSmall)
+            .labeledContentStyle(ToolCallLabeledContentStyle())
+            .font(.theme(.small))
+        }
+    }
+
+    private struct RunLocalCommandRowView: View {
+        let command: String
+        let description: String?
+        let reason: String?
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 4) {
+                if let reason, !reason.isEmpty {
+                    Text(verbatim: reason)
+                        .font(.theme(.extraSmall))
+                        .foregroundStyle(.theme(.textSecondary))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 8) {
+                    Label {
+                        if let description, !description.isEmpty {
+                            Text(verbatim: description)
+                        } else {
+                            Text("Run local command")
+                        }
+                    } icon: {
+                        HStack(spacing: 2) {
+                            LucideIcon(Lucide.laptop, style: .small)
+
+                            LucideIcon(Lucide.terminal, style: .small)
+                        }
+                    }
+                    .lineLimit(1)
+                    .labelStyle(.conductorSmall)
+                    .font(.theme(.small))
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
+
+                    Text(command)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .font(.theme(.codeSmall))
+                        .padding(EdgeInsets(vertical: 4, horizontal: 6))
+                        .background(
+                            Color.theme(.muted),
+                            in: .rect(cornerRadius: 6)
+                        )
+                }
             }
         }
-        .lineLimit(1)
-        .labelStyle(.conductorSmall)
-        .labeledContentStyle(ToolCallLabeledContentStyle())
-        .font(.theme(.small))
     }
 
     struct ToolCallLabeledContentStyle: LabeledContentStyle {
@@ -59,7 +118,7 @@ struct ToolCallRowView: View {
         case .grep:
             // Entire thing is monospace?
             return nil
-        case .mcp:
+        case .runLocalCommand, .mcp:
             return nil
         case .unknown:
             return "UNKNOWN"
@@ -82,6 +141,8 @@ struct ToolCallRowView: View {
         case .listFiles(_, let path):
             somethingText(fileName(from: path ?? "."))
         case .bash(_, let command):
+            somethingText(command)
+        case .runLocalCommand(_, let command, _, _):
             somethingText(command)
         case .webSearch:
             EmptyView()
@@ -121,6 +182,8 @@ extension DisplayedChatRow.TurnSummary.ToolIcon {
             Lucide.fileQuestionMark
         case .terminal:
             Lucide.terminal
+        case .laptop:
+            Lucide.laptop
         case .globe:
             Lucide.globe
         case .search:
@@ -140,6 +203,8 @@ extension DisplayedChatRow.TurnSummary.ToolIcon {
             "other file tools"
         case .terminal:
             "terminal commands"
+        case .laptop:
+            "local computer commands"
         case .globe:
             "web searches"
         case .search:
@@ -270,6 +335,15 @@ private func diffableLines(in string: String) -> [Substring] {
                     toolCall: .bash(
                         toolUseID: "tool-bash",
                         command: "mise -C ios run test"
+                    )
+                )
+
+                ToolCallRowView(
+                    toolCall: .runLocalCommand(
+                        toolUseID: "tool-local-command",
+                        command: "mise -C ios run test",
+                        description: "Run iOS tests on your Mac",
+                        reason: "Xcode is available only on your Mac."
                     )
                 )
                 

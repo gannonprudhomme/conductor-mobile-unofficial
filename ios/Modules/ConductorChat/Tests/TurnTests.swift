@@ -1008,6 +1008,17 @@ struct TurnTests {
                         toolCall: .readFile(toolUseID: "read-2", filePath: "Three.swift")
                     )
                 ),
+                .assistantMessage(
+                    .toolCall(
+                        messageID: "local-command",
+                        toolCall: .runLocalCommand(
+                            toolUseID: "local-command",
+                            command: "swift test",
+                            description: "Run tests on your Mac",
+                            reason: "Use the Mac toolchain."
+                        )
+                    )
+                ),
                 .assistantMessage(.error(messageID: "error", message: "Recovered")),
                 .assistantMessage(
                     .text(
@@ -1032,9 +1043,9 @@ struct TurnTests {
             displayedRows.map(\.id),
             ["human:human", "summary:turn:human", "assistant:final:chunk:0"]
         )
-        #expect(summary.toolCallCount == 3)
+        #expect(summary.toolCallCount == 4)
         #expect(summary.messageCount == 2)
-        expectNoDifference(summary.toolIcons, [.fileText, .filePen])
+        expectNoDifference(summary.toolIcons, [.fileText, .filePen, .laptop])
     }
 
     @Test("Every specialized tool uses its observed input shape")
@@ -1094,6 +1105,16 @@ struct TurnTests {
                 )
             ),
             (
+                "run-local-command",
+                #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-local","name":"mcp__conductor__RunLocalCommand","input":{"command":"mise -C ios run test","cwd":"/tmp/conductor-shared","description":"Run iOS tests on your Mac","reason":"Xcode is available only on your Mac.","timeoutMs":120000}}]}}"#,
+                .runLocalCommand(
+                    toolUseID: "call-local",
+                    command: "mise -C ios run test",
+                    description: "Run iOS tests on your Mac",
+                    reason: "Xcode is available only on your Mac."
+                )
+            ),
+            (
                 "mcp",
                 #"{"type":"assistant","session_id":"019f4a14-8620-78f3-8790-12226f343678","message":{"role":"assistant","content":[{"type":"tool_use","id":"exec-b47bcc51-0a63-4ab3-9915-b82736764f03","name":"mcp__XcodeBuildMCP__screenshot","input":{}}]}}"#,
                 .mcp(
@@ -1122,6 +1143,15 @@ struct TurnTests {
             ("grep", "Grep", #"{"pattern":"TODO"}"#, ["pattern": .string("TODO")]),
             ("read", "Read", "{}", [:]),
             ("write", "Write", #"{"file_path":"File.swift"}"#, ["file_path": .string("File.swift")]),
+            (
+                "run-local-command",
+                "mcp__conductor__RunLocalCommand",
+                #"{"description":"Run tests on your Mac","reason":"Use the Mac toolchain."}"#,
+                [
+                    "description": .string("Run tests on your Mac"),
+                    "reason": .string("Use the Mac toolchain."),
+                ]
+            ),
             (
                 "edit",
                 "Edit",

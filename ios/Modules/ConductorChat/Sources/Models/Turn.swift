@@ -160,6 +160,12 @@ struct Turn: Identifiable {
                 /// `nil` `filePath` is just the current directory
                 case listFiles(toolUseID: String, path: String?)
                 case bash(toolUseID: String, command: String)
+                case runLocalCommand(
+                    toolUseID: String,
+                    command: String,
+                    description: String?,
+                    reason: String?
+                )
                 case webSearch(toolUseID: String)
                 case grep(toolUseID: String, pattern: String, path: String)
                 case mcp(toolUseID: String, name: String)
@@ -229,7 +235,18 @@ struct Turn: Identifiable {
                         
                         self = .editFile(toolUseID: toolUseID, filePath: filePath, oldString: oldString, newString: newString)
                         
-                        
+                    case "mcp__conductor__RunLocalCommand":
+                        guard let command = input.string(for: "command") else {
+                            self = unknown
+                            return
+                        }
+
+                        self = .runLocalCommand(
+                            toolUseID: toolUseID,
+                            command: command,
+                            description: input.string(for: "description"),
+                            reason: input.string(for: "reason")
+                        )
                     case let name where name.hasPrefix("mcp__"):
                         self = .mcp(toolUseID: toolUseID, name: name)
                         
@@ -463,6 +480,7 @@ enum DisplayedChatRow: Equatable, Identifiable {
             case globe
             case search
             case airplay
+            case laptop
 
             var id: Self { self }
 
@@ -476,6 +494,8 @@ enum DisplayedChatRow: Equatable, Identifiable {
                     .fileQuestionMark
                 case .bash:
                     .terminal
+                case .runLocalCommand:
+                    .laptop
                 case .webSearch:
                     .globe
                 case .grep:
