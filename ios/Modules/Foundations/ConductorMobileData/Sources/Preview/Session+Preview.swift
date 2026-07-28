@@ -12,7 +12,7 @@ extension Session {
     public static func preview(
         id: String = "session-1",
         workspaceID: String = "workspace-1",
-        title: String = "Session",
+        title: String? = "Session",
         agentType: AgentType = .codex,
         isHidden: Bool = false,
         createdAt: String = "2026-06-25T09:30:00.000Z",

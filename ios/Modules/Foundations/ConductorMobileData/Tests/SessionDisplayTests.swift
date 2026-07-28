@@ -42,6 +42,12 @@ struct SessionDisplayTests {
         #expect(session.updatedDate == Date(timeIntervalSince1970: 1_783_558_800))
     }
 
+    @Test("Sessions use a fallback display title for null and empty titles")
+    func fallbackDisplayTitle() {
+        #expect(Session.preview(title: nil).displayTitle == "Untitled Session")
+        #expect(Session.preview(title: "").displayTitle == "Untitled Session")
+    }
+
     @Test("Agent types use known display names and preserve unknown values")
     func agentTypeDisplayName() {
         #expect(Session.AgentType.codex.displayName == "Codex")

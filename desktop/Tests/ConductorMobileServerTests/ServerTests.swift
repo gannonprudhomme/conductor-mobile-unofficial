@@ -66,7 +66,7 @@ struct ServerTests {
                     INSERT INTO sessions (
                       id, workspace_id, title, agent_type, created_at, updated_at, status, model
                     ) VALUES (
-                      'session-1', 'workspace-iso', 'Working', 'codex',
+                      'session-1', 'workspace-iso', NULL, 'codex',
                       '2026-07-09 00:00:01', '2026-07-09 00:00:01', 'working', 'gpt-5'
                     );
 
@@ -205,6 +205,7 @@ struct ServerTests {
                         from: try #require(await iterator.next())
                     )
                     #expect(initial.map(\.id) == ["session-1"])
+                    #expect(initial.first?.title == nil)
 
                     try await writer.write { database in
                         try database.execute(

@@ -7,6 +7,7 @@
 
 import Combine
 import ComposableArchitecture
+import ConductorCloud
 import ConductorSettings
 import SharedConductorData
 import ConductorMobileData
@@ -21,8 +22,8 @@ import UIKit
 
 @MainActor
 struct MainTests {
-    @Test("A fresh install requires the server address in Settings")
-    func freshInstallRequiresServerAddress() throws {
+    @Test("A fresh install requires a local or cloud connection in Settings")
+    func freshInstallRequiresConnection() throws {
         try withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
@@ -30,6 +31,83 @@ struct MainTests {
             let state = Main.State()
 
             #expect(state.settings?.isServerAddressMissing == true)
+        }
+    }
+
+    @Test("A configured Cloud credential allows a cloud-only relaunch")
+    func cloudCredentialAllowsRelaunch() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let settings = ConductorSettings.State()
+            settings.$cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+
+            #expect(!settings.requiresConnectionConfiguration)
+            #expect(Main.State().settings == nil)
+        }
+    }
+
+    @Test("A configured desktop allows a local-only relaunch")
+    func desktopConfigurationAllowsRelaunch() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+
+            let settings = ConductorSettings.State()
+            #expect(!settings.requiresConnectionConfiguration)
+            #expect(Main.State().settings == nil)
+        }
+    }
+
+    @Test("Combined desktop and Cloud configuration allows relaunch")
+    func combinedConfigurationAllowsRelaunch() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+
+            let settings = ConductorSettings.State()
+            #expect(!settings.requiresConnectionConfiguration)
+            #expect(Main.State().settings == nil)
+        }
+    }
+
+    @Test("Root reconciliation clears configuration when Keychain is missing")
+    func missingCredentialIsReconciledAtRoot() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "stale-account")
+            }
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+            #expect(store.state.settings == nil)
+
+            await store.send(
+                .cloudCredentialReconciliationResult(
+                    .success(nil)
+                )
+            ) {
+                $0.$cloudConfiguration.withLock { $0 = nil }
+                $0.settings = ConductorSettings.State()
+            }
         }
     }
 
@@ -74,6 +152,31 @@ struct MainTests {
                     )
                 )
             }
+        }
+    }
+
+    @Test("A Cloud-only workspace cannot navigate to unsupported chat")
+    func cloudOnlyWorkspaceDoesNotPushChat() async throws {
+        let workspace = Workspace.preview(id: "cloud-workspace")
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: .preview(),
+            cloudMetadata: CloudWorkspaceMetadata(
+                workspaceID: workspace.id,
+                accountID: "account",
+                lastSeenGeneration: "generation"
+            )
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            }
+
+            await store.send(.workspaces(.workspaceTapped(item)))
+            #expect(store.state.path.isEmpty)
         }
     }
 
@@ -269,6 +372,7 @@ struct MainTests {
 
         try await withDependencies {
             $0.defaultDatabase = database
+            $0.defaultFileStorage = .inMemory
             $0.desktopClient.observeMessages = { workspaceID, _ in
                 #expect(workspaceID == cachedWorkspace.id)
                 return messages
@@ -284,6 +388,8 @@ struct MainTests {
                 return workspaceSnapshots
             }
         } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
             let store = Store(initialState: Main.State()) {
                 Main()
             }

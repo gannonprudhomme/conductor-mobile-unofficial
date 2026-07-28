@@ -28,7 +28,7 @@ Steps:
     a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version will do
 
     b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
-  
+
 2. Clone the repo & run `mise run xcode` to generate the Xcode project + open it.
 3. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
 
@@ -63,6 +63,29 @@ After downloading & launching the macOS app, you must install the "UI hook" into
 
 ## How does it work?
 
+### Experimental Conductor Cloud API
+
+The iOS app can validate and store a Conductor Cloud API key from Settings, then
+show the authenticated account's cloud workspaces in the existing workspace
+list. The key is stored in the device Keychain; only non-secret configuration
+and account identifiers are stored in app support.
+
+Cloud projects, workspaces, and coarse status are fetched from the fixed
+production API and cached in the mobile SQLite database. Because the
+[Cloud API](https://www.conductor.build/docs/api#endpoints) provides offset
+pagination rather than an incremental change feed, the app constructs
+deduplicated polling snapshots. Cloud and desktop observations merge into one
+canonical workspace row: Cloud supplies its coarse workspace state, while a
+paired desktop supplies richer working and pull-request state. Cached rows
+remain visible after relaunch and during offline refresh failures. API-only
+rows are display-only; a row becomes navigable when the desktop companion
+observes the same workspace ID. Local pairing continues to operate without a
+cloud credential, and a saved Cloud credential is enough to browse the
+workspace list without pairing a Mac.
+
+Opening cloud workspaces, cloud chat, polling transcripts, sending or stopping
+agents, and creating cloud workspaces or sessions are deliberately deferred.
+
 ### Reading data
 
 For the most part all of the data we get is from Conductor's SQLite database. Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms - and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
@@ -73,9 +96,32 @@ While Conductor does use SQLite to persist pretty much all of it's data, writing
 
 just writing to the database does not mean you will see the changes propagated in Conductor - at least not when it's open. (if you write to the SQLite database then restart, you will see them)
 
-As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script in Tauri's Web Inspector which connects to the desktop companion using Server Sent Events (SSEs). This means whenever we do (local Conductor/non-Conductor-Cloud) actions, we are performing the same functions that the Conductor UI itself performs.
+As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script in Tauri's Web Inspector which connects to the desktop companion using Server Sent Events (SSEs). Sends and stops call Conductor's own loaded message-processing controller and report explicit acceptance or rejection to the companion. SQLite remains authoritative for persisted messages and the final stopped session, which still arrive on the phone through database-backed WebSocket observation.
 
 Though note the `Copy loader` button isn't actually the UI hook itself. It instead retrieves & executes the UI hook from the desktop companion web server. This is mostly so it automatically updates itself during development.
+
+## Missing features
+
+The core of it works for what I personally need (from my testing!), but I'm certainly missing a ton of features:
+
+- Conductor Cloud chat, navigation, and workspace/session creation
+- File diffs / file viewing
+  - I just use GitHub for this!
+- Tool use results
+- Create PR / Create draft PR button
+- Plan mode
+- Cursor models & OpenCode
+  - This might work if Conductor uses the same schema as Codex & Claude code, but I haven't tested them.
+- Displaying available skills & MCPs
+- Viewing PRs
+- Displaying Codex goals
+- Parsing subagent actions
+- Parsing thinking actions
+- Displaying context usage
+- Showing compaction
+- Terminal access
+- Run status
+- Attaching files from the app
 
 ## Development
 

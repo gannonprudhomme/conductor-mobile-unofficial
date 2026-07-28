@@ -20,8 +20,18 @@ struct MigrationsTests {
         let mobileWorkspaceStates = try database.read { db in
             try MobileWorkspaceState.fetchCount(db)
         }
+        let cloudWorkspaceMetadata = try database.read { db in
+            try CloudWorkspaceMetadata.fetchCount(db)
+        }
         let sessions = try database.read { db in
             try Session.fetchCount(db)
+        }
+        let untitledSession = Session.preview(title: nil)
+        try database.write { db in
+            try Session.insert { untitledSession }.execute(db)
+        }
+        let persistedUntitledSession = try database.read { db in
+            try Session.find(untitledSession.id).fetchOne(db)
         }
         let repositories = try database.read { db in
             try Repository.fetchCount(db)
@@ -47,10 +57,18 @@ struct MigrationsTests {
                 sql: "SELECT name FROM pragma_table_info('sessions')"
             )
         }
+        let cloudWorkspaceMetadataColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('cloud_workspace_metadata')"
+            )
+        }
 
         #expect(workspaces == 0)
         #expect(mobileWorkspaceStates == 0)
+        #expect(cloudWorkspaceMetadata == 0)
         #expect(sessions == 0)
+        #expect(persistedUntitledSession?.title == nil)
         #expect(repositories == 0)
         #expect(messages == 0)
         #expect(!workspaceColumns.contains("CUSTOM_is_working"))
@@ -63,5 +81,9 @@ struct MigrationsTests {
         #expect(sessionColumns.contains("queue_paused_at"))
         #expect(sessionColumns.contains("codex_thinking_level"))
         #expect(sessionColumns.contains("claude_effort_level"))
+        #expect(
+            cloudWorkspaceMetadataColumns
+                == ["workspace_id", "account_id", "last_seen_generation"]
+        )
     }
 }

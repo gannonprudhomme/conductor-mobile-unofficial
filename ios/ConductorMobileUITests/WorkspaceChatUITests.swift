@@ -16,9 +16,7 @@ final class WorkspaceChatUITests: XCTestCase {
         app.launchArguments = ["-workspace-chat-ui-test"]
         app.launch()
 
-        let workspace = app.buttons
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "workspaces.workspace."))
-            .firstMatch
+        let workspace = app.buttons["workspace-row.ui-test-workspace"]
         XCTAssertTrue(workspace.waitForExistence(timeout: 10))
         workspace.tap()
 

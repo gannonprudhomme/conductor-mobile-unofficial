@@ -816,7 +816,7 @@ struct WorkspaceChatTests {
 
             await store.send(.renameSessionButtonTapped(session)) {
                 $0.renamingSession = session
-                $0.sessionTitleDraft = session.title
+                $0.sessionTitleDraft = session.title ?? ""
                 $0.destination = .renameSession
             }
             await store.send(.closeSessionResponse(.failure(TestError()))) {

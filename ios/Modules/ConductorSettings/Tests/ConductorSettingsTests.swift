@@ -6,11 +6,13 @@
 //
 
 import ComposableArchitecture
+import ConductorCloud
 import ConductorMobileData
 import CustomDump
 import Dependencies
 @testable import ConductorSettings
 import Foundation
+import SharedConductorData
 import Testing
 
 @MainActor
@@ -517,6 +519,47 @@ struct ConductorSettingsTests {
         }
     }
 
+    @Test("Saving an empty previously configured address clears local settings")
+    func clearPreviouslySavedServerAddress() async {
+        let isDismissed = LockIsolated(false)
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.dismiss = DismissEffect {
+                isDismissed.setValue(true)
+            }
+        } operation: {
+            let persistedState = ConductorSettings.State()
+            persistedState.$storedDisplayConfiguration.withLock {
+                $0 = DesktopClient.DisplayConfiguration(
+                    name: "Office desktop",
+                    icon: .desktop
+                )
+            }
+            persistedState.$storedServerAddress.withLock { $0 = "old-mac" }
+
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+            await store.send(
+                .binding(.set(\.initialServerAddress, "   "))
+            ) {
+                $0.initialServerAddress = "   "
+            }
+            #expect(!store.state.isSaveButtonDisabled)
+            await store.send(.saveButtonTapped) {
+                $0.initialServerAddress = ""
+                $0.$storedDisplayConfiguration.withLock { $0 = nil }
+                $0.$storedServerAddress.withLock { $0 = nil }
+            }
+            await store.finish()
+
+            #expect(isDismissed.value)
+            #expect(store.state.storedServerAddress == nil)
+            #expect(store.state.storedDisplayConfiguration == nil)
+        }
+    }
+
     @Test("Editing without saving leaves the persisted desktop settings unchanged")
     func discardDraft() async {
         await withDependencies {
@@ -569,6 +612,469 @@ struct ConductorSettingsTests {
             )
         }
     }
+
+    @Test("Cloud connection testing uses the draft key without saving it")
+    func testCloudConnection() async {
+        let testedKeys = LockIsolated<[String]>([])
+        let savedKeys = LockIsolated<[String]>([])
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.validateIdentity = { apiKey in
+                testedKeys.withValue { $0.append(apiKey) }
+                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .binding(.set(\.cloudAPIKey, "  synthetic-cloud-key  "))
+            ) {
+                $0.cloudAPIKey = "  synthetic-cloud-key  "
+            }
+            await store.send(.testCloudConnectionButtonTapped) {
+                $0.cloudAPIKey = "synthetic-cloud-key"
+                $0.cloudOperation = .testing
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = nil
+                $0.cloudConnectionTestSuccessCount = 1
+                $0.testedCloudAccountID = "synthetic-user::"
+            }
+            await store.send(.testCloudConnectionButtonTapped) {
+                $0.cloudOperation = .testing
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = nil
+                $0.cloudConnectionTestSuccessCount = 2
+            }
+
+            expectNoDifference(
+                testedKeys.value,
+                ["synthetic-cloud-key", "synthetic-cloud-key"]
+            )
+            #expect(savedKeys.value.isEmpty)
+            #expect(!store.state.isCloudCredentialConfigured)
+        }
+    }
+
+    @Test("An invalid replacement key does not overwrite the saved credential marker")
+    func invalidReplacementKey() async {
+        let savedKeys = LockIsolated<[String]>([])
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.validateIdentity = { _ in
+                throw CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+        } operation: {
+            let state = ConductorSettings.State()
+            state.$cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "saved-account")
+            }
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .binding(.set(\.cloudAPIKey, "replacement-key"))
+            ) {
+                $0.cloudAPIKey = "replacement-key"
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = nil
+                $0.alert = .failedToConnectToCloud(
+                    error: CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
+                )
+            }
+
+            #expect(savedKeys.value.isEmpty)
+            #expect(store.state.isCloudCredentialConfigured)
+        }
+    }
+
+    @Test("A valid new API key is tested and saved to the credential boundary")
+    func saveNewCloudCredential() async throws {
+        let isDismissed = LockIsolated(false)
+        let savedKeys = LockIsolated<[String]>([])
+        let (savePermission, savePermissionContinuation) = AsyncStream<Void>.makeStream()
+        let database = try appDatabase()
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultDatabase = database
+            $0.cloudAPIClient.validateIdentity = { _ in
+                CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+                for await _ in savePermission {
+                    break
+                }
+            }
+            $0.dismiss = DismissEffect {
+                isDismissed.setValue(true)
+            }
+        } operation: {
+            let state = ConductorSettings.State()
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(.binding(.set(\.cloudAPIKey, "new-key"))) {
+                $0.cloudAPIKey = "new-key"
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = .saving
+                $0.cloudConnectionTestSuccessCount = 1
+                $0.testedCloudAccountID = "synthetic-user::"
+            }
+            savePermissionContinuation.yield()
+            savePermissionContinuation.finish()
+            await store.receive(\.cloudSaveResult) {
+                $0.$cloudConfiguration.withLock {
+                    $0 = CloudConfiguration(accountID: "synthetic-user::")
+                }
+                $0.cloudAPIKey = ""
+            }
+            await store.receive(\.cloudCacheCleanupResult) {
+                $0.cloudOperation = nil
+            }
+
+            expectNoDifference(savedKeys.value, ["new-key"])
+            #expect(ConductorSettings.State().isCloudCredentialConfigured)
+            #expect(isDismissed.value)
+        }
+    }
+
+    @Test("A same-account API key replacement is tested and persisted")
+    func replaceCloudCredential() async throws {
+        let isDismissed = LockIsolated(false)
+        let testedKeys = LockIsolated<[String]>([])
+        let savedKeys = LockIsolated<[String]>([])
+        let database = try appDatabase()
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultDatabase = database
+            $0.cloudAPIClient.validateIdentity = { apiKey in
+                testedKeys.withValue { $0.append(apiKey) }
+                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+            $0.dismiss = DismissEffect {
+                isDismissed.setValue(true)
+            }
+        } operation: {
+            let state = ConductorSettings.State()
+            state.$cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "synthetic-user::")
+            }
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .binding(.set(\.cloudAPIKey, "  replacement-key  "))
+            ) {
+                $0.cloudAPIKey = "  replacement-key  "
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudAPIKey = "replacement-key"
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudConnectionTestSuccessCount = 1
+                $0.testedCloudAccountID = "synthetic-user::"
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudSaveResult) {
+                $0.$cloudConfiguration.withLock {
+                    $0 = CloudConfiguration(accountID: "synthetic-user::")
+                }
+                $0.cloudAPIKey = ""
+            }
+            await store.receive(\.cloudCacheCleanupResult) {
+                $0.cloudOperation = nil
+            }
+
+            expectNoDifference(testedKeys.value, ["replacement-key"])
+            expectNoDifference(savedKeys.value, ["replacement-key"])
+            #expect(store.state.isCloudCredentialConfigured)
+            #expect(isDismissed.value)
+        }
+    }
+
+    @Test("A tested API key saves without another validation request")
+    func testedCloudCredentialIsNotRetested() async throws {
+        let testedKeys = LockIsolated<[String]>([])
+        let savedKeys = LockIsolated<[String]>([])
+        let database = try appDatabase()
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultDatabase = database
+            $0.cloudAPIClient.validateIdentity = { apiKey in
+                testedKeys.withValue { $0.append(apiKey) }
+                return CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+            $0.dismiss = DismissEffect { }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(.binding(.set(\.cloudAPIKey, "new-key"))) {
+                $0.cloudAPIKey = "new-key"
+            }
+            await store.send(.testCloudConnectionButtonTapped) {
+                $0.cloudOperation = .testing
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = nil
+                $0.cloudConnectionTestSuccessCount = 1
+                $0.testedCloudAccountID = "synthetic-user::"
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudSaveResult) {
+                $0.$cloudConfiguration.withLock {
+                    $0 = CloudConfiguration(accountID: "synthetic-user::")
+                }
+                $0.cloudAPIKey = ""
+            }
+            await store.receive(\.cloudCacheCleanupResult) {
+                $0.cloudOperation = nil
+            }
+
+            expectNoDifference(testedKeys.value, ["new-key"])
+            expectNoDifference(savedKeys.value, ["new-key"])
+        }
+    }
+
+    @Test("Deleting a cloud credential leaves local pairing configured")
+    func deleteCloudCredential() async throws {
+        let deleteCount = LockIsolated(0)
+        let database = try appDatabase()
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.defaultDatabase = database
+            $0.cloudCredentialClient.deleteAPIKey = {
+                deleteCount.withValue { $0 += 1 }
+            }
+        } operation: {
+            let state = ConductorSettings.State()
+            state.$cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            state.$storedServerAddress.withLock { $0 = "paired-mac" }
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(.deleteCloudCredentialButtonTapped) {
+                $0.cloudOperation = .deleting
+            }
+            await store.receive(\.cloudCredentialDeleteResult) {
+                $0.$cloudConfiguration.withLock { $0 = nil }
+            }
+            await store.receive(\.cloudCacheCleanupResult) {
+                $0.cloudOperation = nil
+            }
+
+            #expect(deleteCount.value == 1)
+            expectNoDifference(store.state.storedServerAddress, "paired-mac")
+        }
+    }
+
+    @Test("A save cleanup failure retains the newly validated configuration")
+    func saveCleanupFailureRetainsConfiguration() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudWorkspaceCacheClient.clear = { _ in
+                throw CleanupError.failed
+            }
+        } operation: {
+            var state = ConductorSettings.State()
+            state.cloudOperation = .saving
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .cloudSaveResult(
+                    accountID: "new-account",
+                    result: .success(())
+                )
+            ) {
+                $0.$cloudConfiguration.withLock {
+                    $0 = CloudConfiguration(accountID: "new-account")
+                }
+            }
+            await store.receive(\.cloudCacheCleanupResult) {
+                $0.cloudOperation = nil
+                $0.alert = .failedToUpdateCloudCredential(
+                    error: CleanupError.failed
+                )
+            }
+            #expect(
+                store.state.cloudConfiguration
+                    == CloudConfiguration(accountID: "new-account")
+            )
+        }
+    }
+
+    @Test("A delete cleanup failure keeps the configuration cleared")
+    func deleteCleanupFailureKeepsConfigurationCleared() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudWorkspaceCacheClient.clear = { _ in
+                throw CleanupError.failed
+            }
+        } operation: {
+            var state = ConductorSettings.State()
+            state.cloudOperation = .deleting
+            state.$cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "old-account")
+            }
+            let store = TestStore(initialState: state) {
+                ConductorSettings()
+            }
+
+            await store.send(
+                .cloudCredentialDeleteResult(.success(()))
+            ) {
+                $0.$cloudConfiguration.withLock { $0 = nil }
+            }
+            await store.receive(\.cloudCacheCleanupResult) {
+                $0.cloudOperation = nil
+                $0.alert = .failedToUpdateCloudCredential(
+                    error: CleanupError.failed
+                )
+            }
+            #expect(store.state.cloudConfiguration == nil)
+        }
+    }
+
+    @Test("An invalid cloud draft prevents local settings from being saved")
+    func invalidCloudDraftPreventsLocalSave() async {
+        let cloudTestCount = LockIsolated(0)
+        let desktopTestCount = LockIsolated(0)
+        let isDismissed = LockIsolated(false)
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.validateIdentity = { _ in
+                cloudTestCount.withValue { $0 += 1 }
+                throw CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
+            }
+            $0.desktopClient.checkConnection = { _ in
+                desktopTestCount.withValue { $0 += 1 }
+            }
+            $0.dismiss = DismissEffect {
+                isDismissed.setValue(true)
+            }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(.binding(.set(\.initialServerAddress, "paired-mac"))) {
+                $0.initialServerAddress = "paired-mac"
+            }
+            await store.send(.binding(.set(\.cloudAPIKey, "invalid-draft"))) {
+                $0.cloudAPIKey = "invalid-draft"
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = nil
+                $0.alert = .failedToConnectToCloud(
+                    error: CloudAPIClientError.requestFailed(statusCode: 401, error: nil)
+                )
+            }
+            await store.finish()
+
+            #expect(cloudTestCount.value == 1)
+            #expect(desktopTestCount.value == 0)
+            #expect(!isDismissed.value)
+            #expect(!store.state.isCloudCredentialConfigured)
+            #expect(store.state.storedServerAddress == nil)
+        }
+    }
+
+    @Test("A failed local test does not persist a validated cloud draft")
+    func invalidLocalDraftPreventsCloudSave() async {
+        let savedKeys = LockIsolated<[String]>([])
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.validateIdentity = { _ in
+                CloudIdentity(userID: "synthetic-user", authMethod: .apiKey)
+            }
+            $0.cloudCredentialClient.saveAPIKey = { apiKey in
+                savedKeys.withValue { $0.append(apiKey) }
+            }
+            $0.desktopClient.checkConnection = { _ in
+                throw ConnectionError.unreachable
+            }
+        } operation: {
+            let store = TestStore(initialState: ConductorSettings.State()) {
+                ConductorSettings()
+            }
+
+            await store.send(.binding(.set(\.cloudAPIKey, "valid-key"))) {
+                $0.cloudAPIKey = "valid-key"
+            }
+            await store.send(
+                .binding(.set(\.initialServerAddress, "unreachable-mac"))
+            ) {
+                $0.initialServerAddress = "unreachable-mac"
+            }
+            await store.send(.saveButtonTapped) {
+                $0.cloudOperation = .saving
+            }
+            await store.receive(\.cloudConnectionTestResult) {
+                $0.cloudOperation = nil
+                $0.connectionTestSource = .saveButtonTapped
+                $0.cloudConnectionTestSuccessCount = 1
+                $0.testedCloudAccountID = "synthetic-user::"
+            }
+            await store.receive(\.connectionTestResult) {
+                $0.connectionTestSource = nil
+                $0.alert = .failedToConnect(
+                    to: "unreachable-mac",
+                    error: ConnectionError.unreachable
+                )
+            }
+
+            #expect(savedKeys.value.isEmpty)
+            #expect(!store.state.isCloudCredentialConfigured)
+            #expect(store.state.storedServerAddress == nil)
+        }
+    }
 }
 
 private enum ConnectionError: LocalizedError {
@@ -576,5 +1082,13 @@ private enum ConnectionError: LocalizedError {
 
     var errorDescription: String? {
         "The test desktop service is unreachable."
+    }
+}
+
+private enum CleanupError: LocalizedError {
+    case failed
+
+    var errorDescription: String? {
+        "The synthetic cleanup failed."
     }
 }

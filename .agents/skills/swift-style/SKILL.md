@@ -20,6 +20,9 @@ Apply these conventions to every Swift source and test file in the repository.
 - Prefer `if` and `switch` expressions when branches select a value instead of assigning that value separately in each branch.
 - In a `switch`, place cases that perform work before no-op cases that only `return` or `return .none`. Apply this ordering to reducer action switches too.
 - Place nested type declarations after all cases within a Swift enum.
+- Nest a supporting type inside the single declaration that owns it when it is not reused as an
+  independent domain concept, such as `CloudWorkspaceStatusResponse.Status`. Keep shared models
+  and independently meaningful domain concepts at file scope.
 
 ## Calls and diagnostics
 

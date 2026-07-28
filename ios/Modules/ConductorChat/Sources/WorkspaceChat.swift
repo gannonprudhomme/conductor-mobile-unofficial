@@ -421,7 +421,7 @@ public struct WorkspaceChat: Sendable {
 
             case let .renameSessionButtonTapped(session):
                 state.renamingSession = session
-                state.sessionTitleDraft = session.title
+                state.sessionTitleDraft = session.title ?? ""
                 state.destination = .renameSession
                 return .none
 
@@ -801,7 +801,7 @@ public struct WorkspaceChat: Sendable {
 
     private func observeSessions(workspaceID: String) -> Effect<Action> {
         .run { send in
-            await WebSocketHelpers.observe {
+            await StreamObservation.observe {
                 desktopClient.observeSessions(workspaceID: workspaceID)
             } onValue: { sessions in
                 await send(.loadSessionsResponse(.success(sessions)))
