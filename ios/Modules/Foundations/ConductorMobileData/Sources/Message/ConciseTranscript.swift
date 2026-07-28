@@ -192,23 +192,6 @@ public enum ConciseTranscript {
 }
 
 private extension AgentEvent {
-    var parentToolUseID: String? {
-        switch self {
-        case .assistant(let event):
-            event.parentToolUseID
-        case .error(let event):
-            event.parentToolUseID
-        case .result(let event):
-            event.parentToolUseID
-        case .system(let event):
-            event.parentToolUseID
-        case .user(let event):
-            event.parentToolUseID
-        case .unknown(let value):
-            value["parent_tool_use_id"]?.stringValue
-        }
-    }
-
     var hasText: Bool {
         switch self {
         case .assistant(let event):

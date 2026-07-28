@@ -21,6 +21,43 @@ struct Turn: Identifiable {
     let startedAt: Date
     private(set) var finishedAt: Date? = nil
     private(set) var rows: [Row]
+    private var assistantMessageGroupIDByMessageID: [String: AssistantMessageGroupID] = [:]
+
+    init(
+        id: String,
+        startedAt: Date,
+        finishedAt: Date? = nil,
+        rows: [Row]
+    ) {
+        self.id = id
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.rows = rows
+    }
+
+    private struct AssistantMessageGroupID: Hashable {
+        let value: Value
+
+        init(
+            _ message: AgentEvent.AssistantEvent.AssistantMessage,
+            fallbackID: String
+        ) {
+            self.value = if let id = message.id {
+                .id(id)
+            } else if let usage = message.usage {
+                // Cloud transcript normalization currently omits Claude's message ID, but every
+                // block from one logical message retains the same model and usage snapshot.
+                .usage(model: message.model, value: usage)
+            } else {
+                .id(fallbackID)
+            }
+        }
+
+        enum Value: Hashable {
+            case id(String)
+            case usage(model: String?, value: JSONValue)
+        }
+    }
     
     /// The first parsed representation of a parsed ``Message``
     ///
@@ -42,6 +79,7 @@ struct Turn: Identifiable {
         
         enum AssistantMessage {
             case text(messageID: String, content: TextContent, isMostRecentTextInTurn: Bool)
+            case thinking(messageID: String, content: String)
             case toolCall(messageID: String, toolCall: ToolCall)
             case error(messageID: String, message: String)
 
@@ -166,12 +204,21 @@ struct Turn: Identifiable {
                     description: String?,
                     reason: String?
                 )
+                case toolSearch(toolUseID: String)
+                case agent(
+                    toolUseID: String,
+                    model: String?,
+                    description: String
+                )
                 case webSearch(toolUseID: String)
                 case grep(toolUseID: String, pattern: String, path: String)
                 case mcp(toolUseID: String, name: String)
                 case unknown(toolUseID: String, name: String, input: [String: JSONValue])
       
-                init(from toolUseBlock: AgentEvent.AssistantEvent.AssistantMessage.AssistantMessageContent.ToolUseBlock) {
+                init(
+                    from toolUseBlock: AgentEvent.AssistantEvent.AssistantMessage.AssistantMessageContent.ToolUseBlock,
+                    model: String? = nil
+                ) {
                     let (toolUseID, input) = (toolUseBlock.id, toolUseBlock.input)
                     let unknown = Self.unknown(toolUseID: toolUseID, name: toolUseBlock.name, input: toolUseBlock.input)
                     
@@ -247,6 +294,19 @@ struct Turn: Identifiable {
                             description: input.string(for: "description"),
                             reason: input.string(for: "reason")
                         )
+                    case "ToolSearch":
+                        self = .toolSearch(toolUseID: toolUseID)
+                    case "Agent":
+                        guard let description = input.string(for: "description") else {
+                            self = unknown
+                            return
+                        }
+
+                        self = .agent(
+                            toolUseID: toolUseID,
+                            model: model,
+                            description: description
+                        )
                     case let name where name.hasPrefix("mcp__"):
                         self = .mcp(toolUseID: toolUseID, name: name)
                         
@@ -273,6 +333,27 @@ private extension Dictionary where Key == String, Value == JSONValue {
         }
         
         return value
+    }
+}
+
+private extension Turn.Row.AssistantMessage.ToolCall {
+    var isIncludedInSummaryToolCallCount: Bool {
+        switch self {
+        case .agent, .toolSearch:
+            false
+        case .mcp(_, let name):
+            name != "mcp__conductor__AskUserQuestion"
+        case .bash,
+             .editFile,
+             .grep,
+             .listFiles,
+             .readFile,
+             .runLocalCommand,
+             .unknown,
+             .webSearch,
+             .writeFile:
+            true
+        }
     }
 }
 
@@ -311,6 +392,7 @@ extension Turn {
             let occurredAt = message.sentAt ?? message.createdAt
             let existingTurnIndex = indexByTurnID[turnID]
             let row: Row
+            var assistantMessageGroupID: AssistantMessageGroupID?
 
             switch role {
             case .user:
@@ -323,6 +405,10 @@ extension Turn {
                 do {
                     let agentEvent: AgentEvent = try JSONDecoder().decode(AgentEvent.self, from: Data(content.utf8))
 
+                    guard agentEvent.parentToolUseID == nil else {
+                        continue
+                    }
+
                     if case .result = agentEvent {
                         if let existingTurnIndex {
                             turns[existingTurnIndex].finishedAt = occurredAt
@@ -332,6 +418,13 @@ extension Turn {
 
                     if agentEvent.isContinuationActivity, let existingTurnIndex {
                         turns[existingTurnIndex].finishedAt = nil
+                    }
+
+                    if case .assistant(let assistantEvent) = agentEvent {
+                        assistantMessageGroupID = .init(
+                            assistantEvent.message,
+                            fallbackID: message.id
+                        )
                     }
 
                     let assistantRow: Row.AssistantMessage? = switch agentEvent {
@@ -348,8 +441,19 @@ extension Turn {
                                     isMostRecentTextInTurn: true
                                 )
                             case .toolUse(let toolUseBlock):
-                                .toolCall(messageID: message.id, toolCall: .init(from: toolUseBlock))
-                            case .thinking, .unknown:
+                                .toolCall(
+                                    messageID: message.id,
+                                    toolCall: .init(
+                                        from: toolUseBlock,
+                                        model: assistantEvent.message.model
+                                    )
+                                )
+                            case .thinking(let thinkingBlock):
+                                .thinking(
+                                    messageID: message.id,
+                                    content: thinkingBlock.thinking
+                                )
+                            case .unknown:
                                 nil
                             }
                         } else {
@@ -381,6 +485,11 @@ extension Turn {
                 turnIndex = turns.count
                 indexByTurnID[turnID] = turnIndex
                 turns.append(Turn(id: turnID, startedAt: occurredAt, rows: []))
+            }
+
+            if let assistantMessageGroupID {
+                turns[turnIndex].assistantMessageGroupIDByMessageID[message.id] =
+                    assistantMessageGroupID
             }
 
             // Store whether each text row is the turn's most recent so rendering remains O(1),
@@ -453,6 +562,7 @@ enum DisplayedChatRow: Equatable, Identifiable {
         chunk: Turn.Row.AssistantMessage.TextContent.Chunk,
         isMostRecentTextInTurn: Bool
     )
+    case assistantThinking(messageID: String, content: String)
     case assistantToolCall(messageID: String, toolCall: Turn.Row.AssistantMessage.ToolCall)
     case assistantError(messageID: String, message: String)
     case turnInProgress(Turn.Row.TurnInProgress)
@@ -470,7 +580,24 @@ enum DisplayedChatRow: Equatable, Identifiable {
         let isExpanded: Bool
         let toolCallCount: Int
         let messageCount: Int
+        let subagentCount: Int
         let toolIcons: [ToolIcon]
+
+        init(
+            id: String,
+            isExpanded: Bool,
+            toolCallCount: Int,
+            messageCount: Int,
+            subagentCount: Int = 0,
+            toolIcons: [ToolIcon]
+        ) {
+            self.id = id
+            self.isExpanded = isExpanded
+            self.toolCallCount = toolCallCount
+            self.messageCount = messageCount
+            self.subagentCount = subagentCount
+            self.toolIcons = toolIcons
+        }
 
         enum ToolIcon: Hashable, Identifiable {
             case fileText
@@ -481,6 +608,8 @@ enum DisplayedChatRow: Equatable, Identifiable {
             case search
             case airplay
             case laptop
+            case wrench
+            case bot
 
             var id: Self { self }
 
@@ -496,6 +625,10 @@ enum DisplayedChatRow: Equatable, Identifiable {
                     .terminal
                 case .runLocalCommand:
                     .laptop
+                case .toolSearch:
+                    .wrench
+                case .agent:
+                    .bot
                 case .webSearch:
                     .globe
                 case .grep:
@@ -513,7 +646,8 @@ enum DisplayedChatRow: Equatable, Identifiable {
             "human:\(row.id)"
         case let .assistantTextChunk(messageID, chunk, _):
             "assistant:\(messageID):chunk:\(chunk.id)"
-        case let .assistantToolCall(messageID, _),
+        case let .assistantThinking(messageID, _),
+             let .assistantToolCall(messageID, _),
              let .assistantError(messageID, _):
             "assistant:\(messageID)"
         case .turnInProgress(let row):
@@ -543,6 +677,8 @@ private extension Turn.Row {
                         isMostRecentTextInTurn: isMostRecentTextInTurn
                     )
                 }
+            case let .thinking(messageID, content):
+                [.assistantThinking(messageID: messageID, content: content)]
             case let .toolCall(messageID, toolCall):
                 [.assistantToolCall(messageID: messageID, toolCall: toolCall)]
             case let .error(messageID, message):
@@ -579,6 +715,8 @@ enum ChatRowLayout {
             }
             return (chunk.id == 0 ? 8 : 0, shouldCollapseBottomPadding ? 0 : 8)
         case .assistantToolCall:
+            return (0, 4)
+        case .assistantThinking:
             return (0, 4)
         case .turnFooter:
             return (8, 0)
@@ -694,7 +832,9 @@ extension Turn {
                 !content.chunks.isEmpty
             case .assistantMessage(.error):
                 true
-            case .humanMessageRow, .assistantMessage(.toolCall):
+            case .humanMessageRow,
+                 .assistantMessage(.thinking),
+                 .assistantMessage(.toolCall):
                 false
             }
         }
@@ -712,7 +852,8 @@ extension Turn {
                     humanMessage: humanMessage,
                     finalResponseRowIndex: finalResponseRowIndex,
                     expandedSummaryIDs: expandedSummaryIDs,
-                    assistantRows: assistantRows
+                    assistantRows: assistantRows,
+                    assistantMessageGroupIDByMessageID: assistantMessageGroupIDByMessageID
                 )
 
                 displayedRows.append(contentsOf: rowsToAppend)
@@ -736,7 +877,8 @@ extension Turn {
                 humanMessage: humanMessage,
                 finalResponseRowIndex: finalResponseRowIndex,
                 expandedSummaryIDs: expandedSummaryIDs,
-                assistantRows: assistantRows
+                assistantRows: assistantRows,
+                assistantMessageGroupIDByMessageID: assistantMessageGroupIDByMessageID
             )
         )
 
@@ -751,7 +893,8 @@ extension Turn {
         humanMessage: Row.HumanMessageRow?,
         finalResponseRowIndex: Int?,
         expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID>,
-        assistantRows: [(index: Int, row: Row)]
+        assistantRows: [(index: Int, row: Row)],
+        assistantMessageGroupIDByMessageID: [String: AssistantMessageGroupID]
     ) -> [DisplayedChatRow] {
         guard let humanMessage else {
             return []
@@ -771,7 +914,9 @@ extension Turn {
             return switch indexedRow.row {
             case let .assistantMessage(.text(_, content, _)):
                 !content.chunks.isEmpty
-            case .assistantMessage(.toolCall), .assistantMessage(.error):
+            case .assistantMessage(.thinking),
+                 .assistantMessage(.toolCall),
+                 .assistantMessage(.error):
                 true
             case .humanMessageRow:
                 false
@@ -791,7 +936,8 @@ extension Turn {
             turnID: turnID,
             humanMessageID: humanMessage.id,
             expandedSummaryIDs: expandedSummaryIDs,
-            assistantRows: assistantRows
+            assistantRows: assistantRows,
+            assistantMessageGroupIDByMessageID: assistantMessageGroupIDByMessageID
         )
         segmentRows.append(.turnSummary(summary))
 
@@ -815,13 +961,16 @@ extension Turn {
         turnID: Turn.ID,
         humanMessageID: Row.HumanMessageRow.ID,
         expandedSummaryIDs: Set<DisplayedChatRow.TurnSummary.ID>,
-        assistantRows: [(index: Int, row: Row)]
+        assistantRows: [(index: Int, row: Row)],
+        assistantMessageGroupIDByMessageID: [String: AssistantMessageGroupID]
     ) -> DisplayedChatRow.TurnSummary {
         // Including the human-message ID keeps summaries independently addressable when one
         // stored turn contains multiple steered human messages.
         let summaryID = "\(turnID):\(humanMessageID)"
         var messageCount = 0
         var toolCallCount = 0
+        var subagentCount = 0
+        var assistantMessageGroupIDs: Set<AssistantMessageGroupID> = []
         var toolIcons: [DisplayedChatRow.TurnSummary.ToolIcon] = []
         var seenToolIcons: Set<DisplayedChatRow.TurnSummary.ToolIcon> = []
 
@@ -830,14 +979,28 @@ extension Turn {
         // order so their arrangement is stable and meaningful.
         for (_, row) in assistantRows {
             switch row {
-            case let .assistantMessage(.text(_, content, _)):
-                if !content.chunks.isEmpty {
+            case let .assistantMessage(.text(messageID, content, _)):
+                if let groupID = assistantMessageGroupIDByMessageID[messageID] {
+                    assistantMessageGroupIDs.insert(groupID)
+                } else if !content.chunks.isEmpty {
                     messageCount += 1
+                }
+            case let .assistantMessage(.thinking(messageID, _)):
+                if let groupID = assistantMessageGroupIDByMessageID[messageID] {
+                    assistantMessageGroupIDs.insert(groupID)
                 }
             case .assistantMessage(.error):
                 messageCount += 1
-            case .assistantMessage(.toolCall(_, let toolCall)):
-                toolCallCount += 1
+            case .assistantMessage(.toolCall(let messageID, let toolCall)):
+                if let groupID = assistantMessageGroupIDByMessageID[messageID] {
+                    assistantMessageGroupIDs.insert(groupID)
+                }
+                if toolCall.isIncludedInSummaryToolCallCount {
+                    toolCallCount += 1
+                }
+                if case .agent = toolCall {
+                    subagentCount += 1
+                }
                 let toolIcon = DisplayedChatRow.TurnSummary.ToolIcon(toolCall)
                 if seenToolIcons.insert(toolIcon).inserted {
                     toolIcons.append(toolIcon)
@@ -846,12 +1009,14 @@ extension Turn {
                 break
             }
         }
+        messageCount += assistantMessageGroupIDs.count
 
         return .init(
             id: summaryID,
             isExpanded: expandedSummaryIDs.contains(summaryID),
             toolCallCount: toolCallCount,
             messageCount: messageCount,
+            subagentCount: subagentCount,
             toolIcons: toolIcons
         )
     }

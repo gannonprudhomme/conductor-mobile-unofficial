@@ -1297,6 +1297,9 @@ struct ChatRowView: View {
                 isMostRecentTextInTurn: isMostRecentTextInTurn
             )
             .frame(maxWidth: .infinity, alignment: .leading)
+        case .assistantThinking(_, let content):
+            ThinkingRowView(content: content)
+                .frame(maxWidth: .infinity, alignment: .leading)
         case .assistantToolCall(_, let toolCall):
             ToolCallRowView(toolCall: toolCall)
                 .foregroundStyle(.theme(.textPrimary))
