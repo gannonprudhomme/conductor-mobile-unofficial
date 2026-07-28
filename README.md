@@ -1,6 +1,12 @@
 # *Unofficial* Conductor.build iOS app
 
-A native iOS app for Conductor.build while we're waiting for the official one to come out.
+A native-iOS app prototype for [Conductor.build](https://conductor.build).
+
+## Screenshots
+
+|||||
+|--|--|--|--|
+|<img src="docs/resources/showcase-home.png" width=200>|<img src="docs/resources/showcase-chat.png" width=200>|<img src="docs/resources/showcase-chat-menu.png" width=200>|<img src="docs/resources/showcase-new-workspace.png" width=200>|
 
 ## Installation
 
@@ -16,35 +22,33 @@ brew install mise xcodegen xcbeautify
 
 ### iOS
 
-Note: You can use an [Apple Personal Team](https://developer.apple.com/help/account/basics/about-your-developer-account) to install the iOS app to your physical device, but it will expire after 7 days. For it to last longer, you'll need an Apple Developer Account ($100/yr).
-
 Steps:
 1. Install Xcode 26
 
-  a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version will do
-  b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
-  
-2. Clone the repo
-3. Run `mise run xcode`
-4. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
+    a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version will do
 
-  a. Remember to log in in Xcode -> Settings -> Accounts
+    b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
 
-5. In the top-center bar select the left button (likely something like `ConductorDataTests` or something) and change it to `ConductorMobile`. Then choose your physical device
+2. Clone the repo & run `mise run xcode` to generate the Xcode project + open it.
+3. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
 
-  a. If you haven't connected it to your Mac before, you'll need to plug it in with a cable. After this initial pairing you can deploy it over Wi-Fi.
+4. In the top-center bar select the left button and change it to `ConductorMobile`. Then choose your physical device
+
+    a. If you haven't connected it to your Mac before, you'll need to plug it in with a cable. After this initial pairing you can deploy it over Wi-Fi.
 
 6. Press Run (Cmd+R)
-7. Proceed to desktop steps
 
 ### Desktop Companion
 
-In order to be able to actually control Conductor **remotely**, you need to install the desktop "companion". You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
+In order to read and write to local workspaces, as well as support features the Conductor Cloud API doesn't support yet (like GitHub PR status & in-progress status for Cloud workspaces), you can install our macOS companion app. You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
 
-#### UI Hook (for sending messages, stopping agents, renaming branches, and changing Conductor state)
+## Setup
 
-1. Press `Copy Loader`
-2. In Conductor, press Cmd+Opt+I to display the Web Inspector
+#### UI Hook
+
+After downloading & launching the macOS app, you must install the "UI hook" into the Conductor macOS app to actually _control_ local workspaces:
+1. Press `Copy Loader` in the `Conductor Mobile Companion` (aka "Desktop Companion")
+2. In Conductor, press `⌘+⌥+I` to display the Web Inspector
 3. Go to the `Sources` tab
 4. Press the `+` button in the bottom left, and select `Console Snippet`
 
@@ -56,22 +60,6 @@ In order to be able to actually control Conductor **remotely**, you need to inst
 <img src="docs/resources/02-run-snippet.png" width=400>
 
 7. Back in the desktop app, it should say "Connected" on the UI Hook row.
-
-> Upgrading from the proxy-based companion: uninstall the proxy with the old
-> companion and restart Conductor before upgrading. If you already upgraded
-> without uninstalling it, reinstall Conductor to restore its runtime.
-
-## Setup
-
-When you open the iOS app it'll immediately open the Settings screen in order to connect to your Mac. You can use your laptop's local IP address if you only want access over LAN. Howveer, assuming you want to access Conductor remotely, I recommend installing [Tailscale](https://tailscale.com/). It's free and quick & easy to setup.
-
-1. Download Tailscale on your iPhone and Mac, sign in on both devices, and turn it on on both
-  a. It's recommended to enable `VPN on Demand` on the iOS app.
-2. Find the MagicDNS name of the Mac you want to connect to. E.g. mine is `gannons-macbook-pro-2`
-3. In the iOS app, enter the MagicDNS name in the `Host IP address` field, and optionally configure the display name & icon
-4. Press `Test` and ensure it works!
-  a. A green checkmark should appear to right of `Host IP address`
-6. Profit
 
 ## How does it work?
 
@@ -100,18 +88,17 @@ agents, and creating cloud workspaces or sessions are deliberately deferred.
 
 ### Reading data
 
-For the most part all of the data we get is from Conductor's SQLite database. Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms, which you might want to reduce - and if there are any changes we send them to the app over a web socket.
+For the most part all of the data we get is from Conductor's SQLite database. Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms - and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
 
-### Writing data
+### Writing data through the UI hook
 
-#### UI hook
+While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI. It also
 
-> Note: This hook is required for sending messages, stopping agents, branch renames, and for seeing Status, Unread, Pinned, etc. changes propagate to Conductor without restarting it.
-
-While Conductor does use SQLite to persist pretty much all of it's data, just writing to the database does not mean you will see the changes propagated in Conductor - at least not when it's open. (if you write to the SQLite database then restart, you will see them)
+just writing to the database does not mean you will see the changes propagated in Conductor - at least not when it's open. (if you write to the SQLite database then restart, you will see them)
 
 As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script in Tauri's Web Inspector which connects to the desktop companion using Server Sent Events (SSEs). Sends and stops call Conductor's own loaded message-processing controller and report explicit acceptance or rejection to the companion. SQLite remains authoritative for persisted messages and the final stopped session, which still arrive on the phone through database-backed WebSocket observation.
 
+Though note the `Copy loader` button isn't actually the UI hook itself. It instead retrieves & executes the UI hook from the desktop companion web server. This is mostly so it automatically updates itself during development.
 
 ## Missing features
 
