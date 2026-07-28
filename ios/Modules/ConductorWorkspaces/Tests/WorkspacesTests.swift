@@ -77,6 +77,56 @@ struct WorkspacesTests {
         try await assertObservationSources(local: false, cloud: false)
     }
 
+    @Test("A same-account credential revision restarts Cloud observation")
+    func credentialRevisionRestartsCloudObservation() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialRevision: 1
+                )
+            }
+            let connectionCount = LockIsolated(0)
+            let (stream, continuation) = AsyncThrowingStream<
+                CloudWorkspaceSnapshot,
+                any Error
+            >.makeStream()
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.continuousClock = TestClock()
+                $0.cloudAPIClient.observeWorkspaces = {
+                    connectionCount.withValue { $0 += 1 }
+                    return stream
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let task = await store.send(.task)
+            for _ in 0..<1_000 where connectionCount.value < 1 {
+                await Task.yield()
+            }
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialRevision: 2
+                )
+            }
+            await store.receive(\.cloudConfigurationChanged)
+            for _ in 0..<1_000 where connectionCount.value < 2 {
+                await Task.yield()
+            }
+            #expect(connectionCount.value == 2)
+
+            await task.cancel()
+            continuation.finish()
+        }
+    }
+
     @Test("Workspace display options persist between state instances")
     func displayOptionsPersist() async throws {
         try await withDependencies {

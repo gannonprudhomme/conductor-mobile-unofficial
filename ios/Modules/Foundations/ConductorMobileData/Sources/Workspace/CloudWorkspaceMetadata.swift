@@ -36,6 +36,10 @@ extension CloudWorkspaceMetadata {
         in database: Database,
         keepingAccountID: String? = nil
     ) throws {
+        try CloudChatPersistence.clearCachedRows(
+            in: database,
+            keepingAccountID: keepingAccountID
+        )
         let metadata = if let keepingAccountID {
             try Self
                 .where { $0.accountID.neq(keepingAccountID) }
@@ -51,6 +55,11 @@ extension CloudWorkspaceMetadata {
         from database: Database
     ) throws {
         for item in metadata {
+            try CloudChatPersistence.removeCachedRows(
+                workspaceID: item.workspaceID,
+                accountID: item.accountID,
+                in: database
+            )
             try Self.find(item.id).delete().execute(database)
 
             let hasDesktopObservation = try MobileWorkspaceState
@@ -60,6 +69,18 @@ extension CloudWorkspaceMetadata {
                 .where { $0.workspaceID.eq(item.workspaceID) }
                 .fetchCount(database) > 0
             guard !hasDesktopObservation, !hasSessions else {
+                let workspace = try Workspace
+                    .find(item.workspaceID)
+                    .fetchOne(database)
+                if workspace?.hostingServerURL
+                    == Workspace.conductorCloudHostingServerURL {
+                    try Workspace
+                        .find(item.workspaceID)
+                        .update {
+                            $0.hostingServerURL = #bind(nil as String?)
+                        }
+                        .execute(database)
+                }
                 continue
             }
 

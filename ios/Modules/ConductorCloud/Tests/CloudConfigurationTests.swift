@@ -21,7 +21,8 @@ struct CloudConfigurationTests {
 
             $configuration.withLock {
                 $0 = CloudConfiguration(
-                    accountID: "user-1:organization-1:workspace-1"
+                    accountID: "user-1:organization-1:workspace-1",
+                    credentialRevision: 7
                 )
             }
 
@@ -29,11 +30,22 @@ struct CloudConfigurationTests {
                 configuration?.accountID
                     == "user-1:organization-1:workspace-1"
             )
+            #expect(configuration?.credentialRevision == 7)
             let encodedConfiguration = try JSONEncoder().encode(configuration)
             #expect(
                 !String(decoding: encodedConfiguration, as: UTF8.self)
                     .contains("api-key")
             )
         }
+    }
+
+    @Test("Legacy configuration decodes with an initial credential revision")
+    func legacyConfigurationRevision() throws {
+        let configuration = try JSONDecoder().decode(
+            CloudConfiguration.self,
+            from: Data(#"{"accountID":"account"}"#.utf8)
+        )
+
+        #expect(configuration == CloudConfiguration(accountID: "account"))
     }
 }

@@ -149,6 +149,38 @@ struct CloudAPIClientTests {
         )
     }
 
+    @Test("Stored identity is shared across concurrent and later callers")
+    func storedIdentityIsCached() async throws {
+        let identityRequests = LockIsolated(0)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+
+        try await withDependencies {
+            $0.cloudAPITransport.data = { request in
+                identityRequests.withValue { $0 += 1 }
+                return try testResponse(
+                    #"""
+                    {
+                      "userId": "user-1",
+                      "authMethod": "api-key"
+                    }
+                    """#,
+                    for: request
+                )
+            }
+        } operation: {
+            async let firstIdentity = client.getIdentity()
+            async let secondIdentity = client.getIdentity()
+
+            let identities = try await (firstIdentity, secondIdentity)
+            #expect(identities.0 == identities.1)
+            #expect(try await client.getIdentity() == identities.0)
+        }
+
+        #expect(identityRequests.value == 1)
+    }
+
     @Test(
         "Polling paginates, deduplicates snapshots, and refreshes status cadences"
     )
@@ -531,6 +563,1233 @@ struct CloudAPIClientTests {
         )
     }
 
+    @Test("Session observation paginates membership and distinguishes missing status")
+    func sessionObservationPagination() async throws {
+        let snapshots = LockIsolated<[CloudWorkspaceSessionSnapshot]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = ContinuousClock()
+            $0.cloudAPITransport.data = { request in
+                let path = request.url?.path ?? ""
+                let offset = requestOffset(request)
+                switch path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/workspaces/workspace":
+                    return try testResponse(
+                        workspaceJSON(id: "workspace"),
+                        for: request
+                    )
+                case "/v0/workspaces/workspace/sessions":
+                    let sessionID = offset == 0 ? "first" : "second"
+                    return try testResponse(
+                        page(
+                            data: sessionJSON(id: sessionID),
+                            offset: offset,
+                            hasMore: offset == 0
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/first/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "first",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/second/status":
+                    return try testResponse(
+                        #"{"userMessage":"Unavailable","retryable":true}"#,
+                        for: request,
+                        statusCode: 503
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await snapshot in client.observeSessions(
+                    workspaceID: "workspace"
+                ) {
+                    snapshots.withValue { $0.append(snapshot) }
+                }
+            }
+        }
+
+        await waitForCloudCondition {
+            snapshots.value.last?.statuses["first"]?.status == .idle
+        }
+        let snapshot = try #require(snapshots.value.last)
+        #expect(snapshot.sessions.map(\.id) == ["first", "second"])
+        #expect(snapshot.statuses["first"]?.status == .idle)
+        #expect(snapshot.statuses["second"] == nil)
+        #expect(snapshots.value.first?.statuses.isEmpty == true)
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Archived session membership emits while status is suspended")
+    func archivedSessionMembershipDoesNotWaitForStatus() async throws {
+        let snapshots = LockIsolated<[CloudWorkspaceSessionSnapshot]>([])
+        let statusStarted = LockIsolated(false)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/workspaces/workspace":
+                    return try testResponse(
+                        workspaceJSON(id: "workspace"),
+                        for: request
+                    )
+                case "/v0/workspaces/workspace/sessions":
+                    return try testResponse(
+                        page(
+                            data: sessionJSON(
+                                id: "archived",
+                                archivedAt: "2026-07-28T03:14:46Z"
+                            ),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/archived/status":
+                    statusStarted.setValue(true)
+                    try await Task.sleep(for: .seconds(3_600))
+                    throw CloudAPIClientError.invalidResponse
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await snapshot in client.observeSessions(
+                    workspaceID: "workspace"
+                ) {
+                    snapshots.withValue { $0.append(snapshot) }
+                }
+            }
+        }
+
+        await waitForCloudCondition {
+            statusStarted.value && snapshots.value.count == 1
+        }
+        let snapshot = try #require(snapshots.value.first)
+        #expect(snapshot.sessions.first?.archivedAt != nil)
+        #expect(snapshot.statuses.isEmpty)
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Session observation rejects incorrect pagination offsets")
+    func sessionObservationRejectsOffsetMismatch() async throws {
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/workspaces/workspace":
+                    return try testResponse(
+                        workspaceJSON(id: "workspace"),
+                        for: request
+                    )
+                case "/v0/workspaces/workspace/sessions":
+                    return try testResponse(
+                        page(
+                            data: sessionJSON(id: "session"),
+                            offset: 7,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await _ in client.observeSessions(
+                        workspaceID: "workspace"
+                    ) { }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        try await observation.value
+        #expect(receivedError.value == .invalidResponse)
+    }
+
+    @Test("Session primary requests begin while identity is suspended")
+    func sessionRequestsDoNotWaitForIdentity() async {
+        let requestedPaths = LockIsolated<Set<String>>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                let path = request.url?.path ?? ""
+                _ = requestedPaths.withValue { $0.insert(path) }
+                switch path {
+                case "/me":
+                    try await Task.sleep(for: .seconds(3_600))
+                    throw CloudAPIClientError.invalidResponse
+                case "/v0/workspaces/workspace":
+                    return try testResponse(
+                        workspaceJSON(id: "workspace"),
+                        for: request
+                    )
+                case "/v0/workspaces/workspace/sessions":
+                    return try testResponse(
+                        page(data: "", offset: 0, hasMore: false),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await _ in client.observeSessions(
+                    workspaceID: "workspace"
+                ) { }
+            }
+        }
+
+        await waitForCloudCondition {
+            requestedPaths.value.isSuperset(
+                of: [
+                    "/me",
+                    "/v0/workspaces/workspace",
+                    "/v0/workspaces/workspace/sessions",
+                ]
+            )
+        }
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Workspace project loading begins while identity is suspended")
+    func workspaceRequestsDoNotWaitForIdentity() async {
+        let requestedPaths = LockIsolated<Set<String>>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                let path = request.url?.path ?? ""
+                _ = requestedPaths.withValue { $0.insert(path) }
+                switch path {
+                case "/me":
+                    try await Task.sleep(for: .seconds(3_600))
+                    throw CloudAPIClientError.invalidResponse
+                case "/v0/projects":
+                    return try testResponse(
+                        page(data: "", offset: 0, hasMore: false),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await _ in client.observeWorkspaces() { }
+            }
+        }
+
+        await waitForCloudCondition {
+            requestedPaths.value.isSuperset(of: ["/me", "/v0/projects"])
+        }
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Stable and working session statuses refresh independently")
+    func sessionStatusCadencesAreIndependent() async throws {
+        let clock = TestClock()
+        let statusRequestCounts = LockIsolated<[String: Int]>([:])
+        let snapshots = LockIsolated<[CloudWorkspaceSessionSnapshot]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                let path = request.url?.path ?? ""
+                switch path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/workspaces/workspace":
+                    return try testResponse(
+                        workspaceJSON(id: "workspace"),
+                        for: request
+                    )
+                case "/v0/workspaces/workspace/sessions":
+                    return try testResponse(
+                        page(
+                            data: [
+                                sessionJSON(id: "stable"),
+                                sessionJSON(id: "working"),
+                            ]
+                            .joined(separator: ","),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/stable/status":
+                    statusRequestCounts.withValue {
+                        $0["stable", default: 0] += 1
+                    }
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "stable",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/working/status":
+                    statusRequestCounts.withValue {
+                        $0["working", default: 0] += 1
+                    }
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "working",
+                            status: "working"
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await snapshot in client.observeSessions(
+                    workspaceID: "workspace"
+                ) {
+                    snapshots.withValue { $0.append(snapshot) }
+                }
+            }
+        }
+
+        await waitForCloudCondition {
+            statusRequestCounts.value == ["stable": 1, "working": 1]
+                && snapshots.value.count == 2
+        }
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        for workingRequestCount in 2...5 {
+            await clock.advance(by: .milliseconds(2_500))
+            await waitForCloudCondition {
+                statusRequestCounts.value["working"] == workingRequestCount
+            }
+        }
+        await waitForCloudCondition {
+            statusRequestCounts.value == ["stable": 2, "working": 5]
+        }
+        #expect(statusRequestCounts.value == ["stable": 2, "working": 5])
+        #expect(snapshots.value.count == 2)
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("An all-stable session workspace refreshes status after ten seconds")
+    func allStableSessionStatusUsesClockDeadline() async throws {
+        let clock = TestClock()
+        let statusRequestCount = LockIsolated(0)
+        let snapshots = LockIsolated<[CloudWorkspaceSessionSnapshot]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/workspaces/workspace":
+                    return try testResponse(
+                        workspaceJSON(id: "workspace"),
+                        for: request
+                    )
+                case "/v0/workspaces/workspace/sessions":
+                    return try testResponse(
+                        page(
+                            data: sessionJSON(id: "stable"),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/stable/status":
+                    statusRequestCount.withValue { $0 += 1 }
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "stable",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await snapshot in client.observeSessions(
+                    workspaceID: "workspace"
+                ) {
+                    snapshots.withValue { $0.append(snapshot) }
+                }
+            }
+        }
+
+        await waitForCloudCondition {
+            statusRequestCount.value == 1
+                && snapshots.value.last?.statuses["stable"]?.status == .idle
+        }
+        await clock.advance(by: .seconds(9))
+        await Task.yield()
+        #expect(statusRequestCount.value == 1)
+        await clock.advance(by: .seconds(1))
+        await waitForCloudCondition { statusRequestCount.value == 2 }
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Transcript cursors follow raw API response order")
+    func transcriptCursorUsesRawOrder() async throws {
+        let clock = TestClock()
+        let requestedCursors = LockIsolated<[String?]>([])
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let cursor = URLComponents(
+                        url: try #require(request.url),
+                        resolvingAgainstBaseURL: false
+                    )?
+                    .queryItems?
+                    .first(where: { $0.name == "after" })?
+                    .value
+                    requestedCursors.withValue { $0.append(cursor) }
+                    let data = if cursor == nil {
+                        [
+                            transcriptMessageJSON(
+                                id: "raw-first",
+                                sessionIndex: 20
+                            ),
+                            transcriptMessageJSON(
+                                id: "raw-last",
+                                sessionIndex: 10
+                            ),
+                        ]
+                        .joined(separator: ",")
+                    } else {
+                        ""
+                    }
+                    return try testResponse(
+                        page(data: data, offset: 0, hasMore: false),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { updates.value.count == 1 }
+        await clock.advance(by: .seconds(10))
+        await waitForCloudCondition { requestedCursors.value.count == 2 }
+        #expect(requestedCursors.value == [nil, "raw-last"])
+        #expect(updates.value[0].messages.map(\.id) == ["raw-first", "raw-last"])
+        #expect(updates.value[0].rawCursor == "raw-last")
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Complete transcript pages use offsets without cursors")
+    func completeTranscriptPagination() async throws {
+        let clock = TestClock()
+        let requests = LockIsolated<[[URLQueryItem]]>([])
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let queryItems = requestQueryItems(request)
+                    requests.withValue { $0.append(queryItems) }
+                    let offset = queryItems
+                        .first(where: { $0.name == "offset" })?
+                        .value
+                    let id = offset == "0" ? "first" : "second"
+                    return try testResponse(
+                        page(
+                            data: transcriptMessageJSON(
+                                id: id,
+                                sessionIndex: offset == "0" ? 2 : 1
+                            ),
+                            offset: offset == "0" ? 0 : 1,
+                            hasMore: offset == "0"
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { updates.value.count == 1 }
+        #expect(
+            requests.value.map {
+                Set($0.map(\.name))
+            } == [
+                ["limit", "offset"],
+                ["limit", "offset"],
+            ]
+        )
+        #expect(updates.value[0].messages.map(\.id) == ["first", "second"])
+        #expect(updates.value[0].rawCursor == "second")
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Incremental transcript pages chain raw cursors without offsets")
+    func incrementalTranscriptPagination() async throws {
+        let clock = TestClock()
+        let requestedQueries = LockIsolated<[[URLQueryItem]]>([])
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let queryItems = requestQueryItems(request)
+                    requestedQueries.withValue { $0.append(queryItems) }
+                    let cursor = queryItems
+                        .first(where: { $0.name == "after" })?
+                        .value
+                    let data = if cursor == "committed" {
+                        [
+                            transcriptMessageJSON(id: "raw-first", sessionIndex: 20),
+                            transcriptMessageJSON(id: "page-cursor", sessionIndex: 10),
+                        ]
+                        .joined(separator: ",")
+                    } else {
+                        transcriptMessageJSON(id: "raw-last", sessionIndex: 5)
+                    }
+                    return try testResponse(
+                        page(
+                            data: data,
+                            offset: 0,
+                            hasMore: cursor == "committed"
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: CloudTranscriptCheckpoint(
+                        accountID: "user::",
+                        remoteSessionID: "session",
+                        rawCursor: "committed"
+                    )
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { updates.value.count == 1 }
+        #expect(
+            requestedQueries.value.map {
+                Set($0.map(\.name))
+            } == [
+                ["limit", "after"],
+                ["limit", "after"],
+            ]
+        )
+        #expect(
+            requestedQueries.value.compactMap {
+                $0.first(where: { $0.name == "after" })?.value
+            } == ["committed", "page-cursor"]
+        )
+        #expect(
+            updates.value[0].messages.map(\.id)
+                == ["raw-first", "page-cursor", "raw-last"]
+        )
+        #expect(updates.value[0].kind == .incremental)
+        #expect(updates.value[0].rawCursor == "raw-last")
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Incremental pagination rejects an empty page that claims more")
+    func incrementalPaginationRejectsEmptyPage() async throws {
+        try await expectInvalidIncrementalPage(data: "")
+    }
+
+    @Test("Incremental pagination rejects a non-advancing page cursor")
+    func incrementalPaginationRejectsNonAdvancingCursor() async throws {
+        try await expectInvalidIncrementalPage(
+            data: transcriptMessageJSON(id: "committed", sessionIndex: 1)
+        )
+    }
+
+    @Test("Incremental pagination rejects a non-adjacent cursor cycle")
+    func incrementalPaginationRejectsCursorCycle() async throws {
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let after = requestQueryItems(request)
+                        .first(where: { $0.name == "after" })?
+                        .value
+                    let nextCursor = switch after {
+                    case "committed":
+                        "A"
+                    case "A":
+                        "B"
+                    default:
+                        "A"
+                    }
+                    return try testResponse(
+                        page(
+                            data: transcriptMessageJSON(
+                                id: nextCursor,
+                                sessionIndex: 1
+                            ),
+                            offset: 0,
+                            hasMore: after != "B"
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await update in client.observeTranscript(
+                        sessionID: "session",
+                        workspaceID: "workspace",
+                        checkpoint: CloudTranscriptCheckpoint(
+                            accountID: "user::",
+                            remoteSessionID: "session",
+                            rawCursor: "committed"
+                        )
+                    ) {
+                        updates.withValue { $0.append(update) }
+                    }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        _ = await observation.result
+        #expect(receivedError.value == .invalidResponse)
+        #expect(updates.value.isEmpty)
+    }
+
+    @Test("A generic incremental HTTP 400 never falls back to a complete request")
+    func incrementalBadRequestDoesNotFallback() async throws {
+        let messageQueries = LockIsolated<[[URLQueryItem]]>([])
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    messageQueries.withValue {
+                        $0.append(requestQueryItems(request))
+                    }
+                    return try testResponse(
+                        #"{"code":"invalid_cursor","retryable":true}"#,
+                        for: request,
+                        statusCode: 400
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await _ in client.observeTranscript(
+                        sessionID: "session",
+                        workspaceID: "workspace",
+                        checkpoint: CloudTranscriptCheckpoint(
+                            accountID: "user::",
+                            remoteSessionID: "session",
+                            rawCursor: "committed"
+                        )
+                    ) { }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        _ = await observation.result
+        if case let .requestFailed(statusCode, _)? = receivedError.value {
+            #expect(statusCode == 400)
+        } else {
+            Issue.record("Expected an HTTP request failure.")
+        }
+        #expect(messageQueries.value.count == 1)
+        #expect(
+            Set(messageQueries.value[0].map(\.name))
+                == ["limit", "after"]
+        )
+    }
+
+    @Test("Transcript data displays while advisory status is suspended")
+    func transcriptDoesNotWaitForStatus() async {
+        let clock = TestClock()
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let statusStarted = LockIsolated(false)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    statusStarted.setValue(true)
+                    try await Task.sleep(for: .seconds(3_600))
+                    throw CloudAPIClientError.invalidResponse
+                case "/v0/sessions/session/messages":
+                    return try testResponse(
+                        page(
+                            data: transcriptMessageJSON(
+                                id: "message",
+                                sessionIndex: 1
+                            ),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition {
+            statusStarted.value && updates.value.count == 1
+        }
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Status authentication failure does not cancel transcript delivery")
+    func transcriptIgnoresAdvisoryStatusAuthenticationFailure() async {
+        let clock = TestClock()
+        let statusFailed = LockIsolated(false)
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    statusFailed.setValue(true)
+                    return try testResponse(
+                        #"{"userMessage":"Unauthorized","retryable":false}"#,
+                        for: request,
+                        statusCode: 401
+                    )
+                case "/v0/sessions/session/messages":
+                    while !statusFailed.value {
+                        await Task.yield()
+                    }
+                    return try testResponse(
+                        page(
+                            data: transcriptMessageJSON(
+                                id: "message",
+                                sessionIndex: 1
+                            ),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { updates.value.count == 1 }
+        #expect(updates.value[0].messages.map(\.id) == ["message"])
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Transcript pagination begins while identity is suspended")
+    func transcriptRequestsDoNotWaitForIdentity() async {
+        let requestedPaths = LockIsolated<Set<String>>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                let path = request.url?.path ?? ""
+                _ = requestedPaths.withValue { $0.insert(path) }
+                switch path {
+                case "/me":
+                    try await Task.sleep(for: .seconds(3_600))
+                    throw CloudAPIClientError.invalidResponse
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    return try testResponse(
+                        page(data: "", offset: 0, hasMore: false),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await _ in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) { }
+            }
+        }
+
+        await waitForCloudCondition {
+            requestedPaths.value.isSuperset(
+                of: [
+                    "/me",
+                    "/v0/sessions/session/status",
+                    "/v0/sessions/session/messages",
+                ]
+            )
+        }
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Transcript status validates its workspace before delivery")
+    func transcriptStatusRejectsWorkspaceMismatch() async throws {
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "other-workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    try await Task.sleep(for: .seconds(1))
+                    return try testResponse(
+                        page(
+                            data: transcriptMessageJSON(
+                                id: "message",
+                                sessionIndex: 1
+                            ),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await update in client.observeTranscript(
+                        sessionID: "session",
+                        workspaceID: "workspace",
+                        checkpoint: nil
+                    ) {
+                        updates.withValue { $0.append(update) }
+                    }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        _ = await observation.result
+        #expect(receivedError.value == .invalidResponse)
+        #expect(updates.value.isEmpty)
+    }
+
+    @Test("Transcript checkpoints resume only for their owning account")
+    func transcriptCheckpointOwnership() async throws {
+        let matchingQuery = try await firstTranscriptQuery(
+            identityUserID: "account",
+            checkpointAccountID: "account::"
+        )
+        let differentQueries = try await transcriptQueries(
+            identityUserID: "other-account",
+            checkpointAccountID: "account::",
+            expectedCount: 2
+        )
+
+        #expect(Set(matchingQuery.map(\.name)) == ["limit", "after"])
+        #expect(
+            differentQueries.map { Set($0.map(\.name)) }
+                == [
+                    ["limit", "after"],
+                    ["limit", "offset"],
+                ]
+        )
+    }
+
+    private func firstTranscriptQuery(
+        identityUserID: String,
+        checkpointAccountID: String
+    ) async throws -> [URLQueryItem] {
+        let queries = try await transcriptQueries(
+            identityUserID: identityUserID,
+            checkpointAccountID: checkpointAccountID,
+            expectedCount: 1
+        )
+        return try #require(queries.first)
+    }
+
+    private func transcriptQueries(
+        identityUserID: String,
+        checkpointAccountID: String,
+        expectedCount: Int
+    ) async throws -> [[URLQueryItem]] {
+        let clock = TestClock()
+        let messageQueries = LockIsolated<[[URLQueryItem]]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        """
+                        {"userId":"\(identityUserID)","authMethod":"api-key"}
+                        """,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    messageQueries.withValue {
+                        $0.append(requestQueryItems(request))
+                    }
+                    return try testResponse(
+                        page(data: "", offset: 0, hasMore: false),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await _ in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: CloudTranscriptCheckpoint(
+                        accountID: checkpointAccountID,
+                        remoteSessionID: "session",
+                        rawCursor: "committed"
+                    )
+                ) { }
+            }
+        }
+
+        await waitForCloudCondition {
+            messageQueries.value.count >= expectedCount
+        }
+        observation.cancel()
+        _ = try? await observation.value
+        return messageQueries.value
+    }
+
+    private func expectInvalidIncrementalPage(data: String) async throws {
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    return try testResponse(
+                        page(data: data, offset: 0, hasMore: true),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await _ in client.observeTranscript(
+                        sessionID: "session",
+                        workspaceID: "workspace",
+                        checkpoint: CloudTranscriptCheckpoint(
+                            accountID: "user::",
+                            remoteSessionID: "session",
+                            rawCursor: "committed"
+                        )
+                    ) { }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        _ = await observation.result
+        #expect(receivedError.value == .invalidResponse)
+    }
+
     private var testClient: CloudAPIClient {
         CloudAPIClient.live(baseURL: testBaseURL) {
             "stored-synthetic-api-key"
@@ -849,6 +2108,17 @@ private func requestOffset(_ request: URLRequest) -> Int {
     return offset
 }
 
+private func requestQueryItems(_ request: URLRequest) -> [URLQueryItem] {
+    guard let url = request.url else {
+        return []
+    }
+    return URLComponents(
+        url: url,
+        resolvingAgainstBaseURL: false
+    )?
+    .queryItems ?? []
+}
+
 private func statusJSON(
     workspaceID: String,
     status: String
@@ -857,6 +2127,57 @@ private func statusJSON(
     {
       "workspaceId": "\(workspaceID)",
       "status": "\(status)"
+    }
+    """
+}
+
+private func sessionJSON(
+    id: String,
+    archivedAt: String? = nil
+) -> String {
+    let archiveProperty = archivedAt.map {
+        ",\n  \"archivedAt\": \"\($0)\""
+    } ?? ""
+    return """
+    {
+      "id": "\(id)",
+      "deepLink": "https://app.conductor.build/session/\(id)",
+      "name": "\(id)",
+      "model": "gpt-5.6-sol"\(archiveProperty)
+    }
+    """
+}
+
+private func sessionStatusJSON(
+    workspaceID: String,
+    sessionID: String,
+    status: String
+) -> String {
+    """
+    {
+      "workspaceId": "\(workspaceID)",
+      "sessionId": "\(sessionID)",
+      "status": "\(status)",
+      "updatedAt": "1970-01-01T00:00:00Z"
+    }
+    """
+}
+
+private func transcriptMessageJSON(
+    id: String,
+    sessionIndex: Double
+) -> String {
+    """
+    {
+      "id": "\(id)",
+      "sessionId": "session",
+      "sessionIndex": \(sessionIndex),
+      "type": "userMessage",
+      "content": {
+        "type": "userMessage",
+        "message": "\(id)"
+      },
+      "receivedAt": "1970-01-01T00:00:00Z"
     }
     """
 }

@@ -7,6 +7,7 @@
 
 import Combine
 import ComposableArchitecture
+import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
 import Foundation
@@ -48,6 +49,9 @@ public struct Chat: Sendable {
         @Shared(.desktopConnectionStatus)
         var connectionStatus//: DesktopClient.ConnectionStatus = .connecting
 
+        @Shared(.cloudConfiguration)
+        var cloudConfiguration
+
         @Shared(.mobileModelSettingsOverride)
         var mobileModelSettingsOverride
 
@@ -57,6 +61,7 @@ public struct Chat: Sendable {
         @FetchOne var session: Session
         var queuedMessages: QueuedMessages.State
         var isFastModeEnabled: Bool
+        var isCloudHosted: Bool
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
         var isMessageSendInFlight = false
@@ -136,6 +141,7 @@ public struct Chat: Sendable {
         init(
             session: Session,
             messages: [Message] = [],
+            isCloudHosted: Bool = false,
             selectedModel: Session.Model? = nil,
             selectedReasoningEffort: Session.ReasoningEffort? = nil,
             shouldFocusMessageField: Bool = false
@@ -143,27 +149,35 @@ public struct Chat: Sendable {
             @Shared(.messageDrafts) var messageDrafts
             self._messageDraft = $messageDrafts[draftFor: session.id]
             self.isFastModeEnabled = session.isFastModeEnabled ?? false
+            self.isCloudHosted = isCloudHosted
             self.queuedMessages = QueuedMessages.State(session: session)
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
                 animation: .default
             )
-            self._messages = FetchAll(
-                wrappedValue: messages,
-                Message
-                    .where {
-                        $0.sessionID.eq(session.id)
-                            && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-                    }
-                    .order {
-                        (
-                            $0.sentAt.asc(nulls: .last),
-                            $0.createdAt,
-                            $0.id // IDs provide stable ordering when Conductor gives multiple messages identical timestamps.
-                        )
-                    }
-            )
+            self._messages = if isCloudHosted {
+                FetchAll(
+                    wrappedValue: messages,
+                    CloudMessageMetadata.messages(sessionID: session.id)
+                )
+            } else {
+                FetchAll(
+                    wrappedValue: messages,
+                    Message
+                        .where {
+                            $0.sessionID.eq(session.id)
+                                && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
+                        }
+                        .order {
+                            (
+                                $0.sentAt.asc(nulls: .last),
+                                $0.createdAt,
+                                $0.id // IDs provide stable ordering when Conductor gives multiple messages identical timestamps.
+                            )
+                        }
+                )
+            }
             self.hasUserSelectedModel = selectedModel != nil
             self.hasUserSelectedReasoningEffort = selectedReasoningEffort != nil
             self.selectedModel = selectedModel ?? session.model
@@ -190,8 +204,10 @@ public struct Chat: Sendable {
                 && lhs.queuedMessages == rhs.queuedMessages
                 && lhs.session == rhs.session
                 && lhs.connectionStatus == rhs.connectionStatus
+                && lhs.cloudConfiguration == rhs.cloudConfiguration
                 && lhs.mobileModelSettingsOverride == rhs.mobileModelSettingsOverride
                 && lhs.isFastModeEnabled == rhs.isFastModeEnabled
+                && lhs.isCloudHosted == rhs.isCloudHosted
                 && lhs.messageDraft == rhs.messageDraft
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -221,6 +237,7 @@ public struct Chat: Sendable {
 
     public enum Action: BindableAction {
         case binding(BindingAction<State>)
+        case cloudConfigurationChanged(CloudConfiguration?)
         case task
         case modelSettingsFetched(DesktopClient.ModelSettings)
         case fastModeButtonTapped
@@ -228,7 +245,10 @@ public struct Chat: Sendable {
             sessionID: Session.ID,
             messages: [Message]
         )
-        case loadMessagesFailed(any Error)
+        case loadMessagesFailed(
+            sessionID: Session.ID,
+            error: any Error
+        )
         case messagesUpdated([Message])
         /// Sent after POST returns its persisted row, before writing it locally. The message
         /// appears when that write is observed; this buffers it against an older first snapshot.
@@ -256,6 +276,7 @@ public struct Chat: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.desktopClient) var desktopClient
     private let messagePersistence = MessagePersistencePipeline()
 
@@ -271,6 +292,7 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
+                let cloudConfiguration = state.$cloudConfiguration
                 return .merge(
                     .run { send in
                         guard let settings = try? await desktopClient.fetchModelSettings() else {
@@ -278,9 +300,24 @@ public struct Chat: Sendable {
                         }
                         await send(.modelSettingsFetched(settings))
                     },
+                    .publisher {
+                        cloudConfiguration.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.cloudConfigurationChanged)
+                    },
                     observeMessages(state),
                     observePersistedMessages(state)
                 )
+
+            case let .cloudConfigurationChanged(configuration):
+                guard state.isCloudHosted else {
+                    return .none
+                }
+                guard configuration != nil else {
+                    return .cancel(id: CancelID.messageObservation)
+                }
+                return observeMessages(state)
 
             case let .modelSettingsFetched(settings):
                 let settings = state.mobileModelSettingsOverride ?? settings
@@ -334,9 +371,13 @@ public struct Chat: Sendable {
                 // After the first snapshot, database observation owns subsequent updates.
                 state.confirmedMessagesAwaitingInitialSnapshot.removeAll()
                 let displayedMessages = messages + confirmedMessagesMissingFromSnapshot
-                let transcriptMessages = displayedMessages
-                    .filter(Self.isTranscriptMessage)
-                    .sorted(by: Self.areMessagesInTranscriptOrder)
+                let transcriptMessages = if state.isCloudHosted {
+                    displayedMessages
+                } else {
+                    displayedMessages
+                        .filter(Self.isTranscriptMessage)
+                        .sorted(by: Self.areMessagesInTranscriptOrder)
+                }
                 state.isMessageSnapshotEmpty = transcriptMessages.isEmpty
                 state.turns = Turn.parse(
                     messages: transcriptMessages,
@@ -411,36 +452,43 @@ public struct Chat: Sendable {
                         model = state.selectedModel,
                         reasoningEffort = state.selectedReasoningEffort,
                         isFastModeEnabled = state.isFastModeEnabled,
+                        isCloudHosted = state.isCloudHosted,
                         sessionID = state.session.id,
                         workspaceID = state.session.workspaceID,
                     ] send in
                     let result = await Result {
+                        let mutationSessionID = try await mutationSessionID(
+                            canonicalSessionID: sessionID,
+                            isCloudHosted: isCloudHosted
+                        )
                         if let canonicalMessage = try await desktopClient.sendMessage(
                             workspaceID: workspaceID,
-                            sessionID: sessionID,
+                            sessionID: mutationSessionID,
                             message: message,
                             model: model,
                             isFastModeEnabled: isFastModeEnabled,
                             mode: mode,
                             reasoningEffort: reasoningEffort
                         ) {
-                            do {
-                                try await messagePersistence.confirm(
-                                    canonicalMessage,
-                                    sessionID: sessionID,
-                                    database: database
-                                )
-                            } catch {
-                                Logger.chat.error(
-                                    "Failed to reconcile sent message: \(error)"
+                            if !isCloudHosted {
+                                do {
+                                    try await messagePersistence.confirm(
+                                        canonicalMessage,
+                                        sessionID: sessionID,
+                                        database: database
+                                    )
+                                } catch {
+                                    Logger.chat.error(
+                                        "Failed to reconcile sent message: \(error)"
+                                    )
+                                }
+                                await send(
+                                    .messageConfirmed(
+                                        sessionID: sessionID,
+                                        message: canonicalMessage
+                                    )
                                 )
                             }
-                            await send(
-                                .messageConfirmed(
-                                    sessionID: sessionID,
-                                    message: canonicalMessage
-                                )
-                            )
                         }
                         return message
                     }
@@ -479,16 +527,29 @@ public struct Chat: Sendable {
                 }
 
                 state.isStopInFlight = true
-                return .run { [sessionID = state.session.id, workspaceID = state.session.workspaceID] send in
+                return .run {
+                    [
+                        isCloudHosted = state.isCloudHosted,
+                        sessionID = state.session.id,
+                        workspaceID = state.session.workspaceID,
+                    ] send in
                     let result = await Result {
+                        let mutationSessionID = try await mutationSessionID(
+                            canonicalSessionID: sessionID,
+                            isCloudHosted: isCloudHosted
+                        )
                         if let canonicalSession = try await desktopClient.stopSession(
                             workspaceID: workspaceID,
-                            sessionID: sessionID
+                            sessionID: mutationSessionID
                         ) {
-                            do {
-                                try await reconcileSession(canonicalSession)
-                            } catch {
-                                Logger.chat.error("Failed to reconcile stopped session: \(error)")
+                            if !isCloudHosted {
+                                do {
+                                    try await reconcileSession(canonicalSession)
+                                } catch {
+                                    Logger.chat.error(
+                                        "Failed to reconcile stopped session: \(error)"
+                                    )
+                                }
                             }
                         }
                     }
@@ -511,7 +572,10 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case .loadMessagesFailed:
+            case let .loadMessagesFailed(sessionID, _):
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
                 return .none
 
             case .binding, .queuedMessages:
@@ -521,7 +585,10 @@ public struct Chat: Sendable {
     }
 
     private func observeMessages(_ state: State) -> Effect<Action> {
-        .run {
+        if state.isCloudHosted {
+            return observeCloudMessages(state)
+        }
+        return .run {
             [
                 initiallyIsLoadingMessages = state.isLoadingMessages,
                 sessionID = state.session.id,
@@ -550,9 +617,77 @@ public struct Chat: Sendable {
                 }
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
-                await send(.loadMessagesFailed(error))
+                await send(
+                    .loadMessagesFailed(
+                        sessionID: sessionID,
+                        error: error
+                    )
+                )
             }
         }
+        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
+    }
+
+    private func observeCloudMessages(_ state: State) -> Effect<Action> {
+        .run {
+            [
+                initiallyIsLoadingMessages = state.isLoadingMessages,
+                sessionID = state.session.id,
+                workspaceID = state.session.workspaceID,
+            ] send in
+            var isAwaitingInitialResponse = initiallyIsLoadingMessages
+            do {
+                let cache = try await database.read { database in
+                    try CloudChatPersistence.cachedTranscript(
+                        for: sessionID,
+                        in: database
+                    )
+                }
+                if isAwaitingInitialResponse, cache.checkpoint != nil {
+                    isAwaitingInitialResponse = false
+                    await send(
+                        .initialMessagesResponse(
+                            sessionID: sessionID,
+                            messages: cache.messages
+                        )
+                    )
+                }
+                let updates = cloudAPIClient.observeTranscript(
+                    sessionID: cache.remoteSessionID,
+                    workspaceID: workspaceID,
+                    checkpoint: cache.checkpoint
+                )
+                for try await update in updates {
+                    let messages = try await database.write { database in
+                        _ = try CloudChatPersistence.persist(update, in: database)
+                        return try CloudMessageMetadata
+                            .messages(sessionID: sessionID)
+                            .fetchAll(database)
+                    }
+                    if isAwaitingInitialResponse, update.kind == .complete {
+                        isAwaitingInitialResponse = false
+                        await send(
+                            .initialMessagesResponse(
+                                sessionID: sessionID,
+                                messages: messages
+                            )
+                        )
+                    }
+                }
+            } catch {
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
+                    return
+                }
+                Logger.chat.error("Failed to load Cloud messages: \(error)")
+                await send(
+                    .loadMessagesFailed(
+                        sessionID: sessionID,
+                        error: error
+                    )
+                )
+            }
+        }
+        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
     }
 
     private func observePersistedMessages(_ state: State) -> Effect<Action> {
@@ -603,6 +738,43 @@ public struct Chat: Sendable {
         }
     }
 
+    private func mutationSessionID(
+        canonicalSessionID: Session.ID,
+        isCloudHosted: Bool
+    ) async throws -> String {
+        if isCloudHosted {
+            try await remoteSessionID(for: canonicalSessionID)
+        } else {
+            canonicalSessionID
+        }
+    }
+
+    private func remoteSessionID(
+        for canonicalSessionID: Session.ID
+    ) async throws -> String {
+        let remoteSessionID = try await database.read { database in
+            try CloudChatPersistence.remoteSessionID(
+                for: canonicalSessionID,
+                in: database
+            )
+        }
+        guard let remoteSessionID else {
+            throw CloudChatRoutingError.missingSessionMetadata
+        }
+        return remoteSessionID
+    }
+
+    private enum CancelID: Hashable {
+        case messageObservation
+    }
+}
+
+private enum CloudChatRoutingError: LocalizedError {
+    case missingSessionMetadata
+
+    var errorDescription: String? {
+        "This Cloud chat has not finished loading. Try again shortly."
+    }
 }
 
 private actor MessagePersistencePipeline {
@@ -802,7 +974,8 @@ struct ChatView: View {
     ) -> some View {
         VStack(spacing: 8) {
             statusLayout {
-                if store.connectionStatus != .connected {
+                if !store.isCloudHosted,
+                   store.connectionStatus != .connected {
                     reconnecting
                         .frame(maxWidth: .infinity, alignment: .center)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -903,7 +1076,8 @@ struct ChatView: View {
         } else {
             queuedMessagesHeight
         }
-        let connectionHeight = if store.connectionStatus == .connected {
+        let connectionHeight = if store.isCloudHosted
+            || store.connectionStatus == .connected {
             CGFloat.zero
         } else {
             reconnectingSize.height

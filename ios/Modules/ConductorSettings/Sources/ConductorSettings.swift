@@ -385,8 +385,13 @@ public struct ConductorSettings: Sendable {
                     return .none
 
                 case .success:
+                    let nextCredentialRevision =
+                        (state.cloudConfiguration?.credentialRevision ?? 0) + 1
                     state.$cloudConfiguration.withLock {
-                        $0 = CloudConfiguration(accountID: accountID)
+                        $0 = CloudConfiguration(
+                            accountID: accountID,
+                            credentialRevision: nextCredentialRevision
+                        )
                     }
                     state.cloudAPIKey = ""
                     return cleanCloudCache(

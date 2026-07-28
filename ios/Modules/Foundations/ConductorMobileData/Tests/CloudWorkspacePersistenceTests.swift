@@ -122,6 +122,59 @@ struct CloudWorkspacePersistenceTests {
         #expect(repositoryCount == 1)
     }
 
+    @Test("Desktop and Cloud snapshot order preserves the same Cloud authority")
+    func snapshotOrderPreservesCloudAuthority() throws {
+        let desktopWorkspace = Workspace.preview(
+            id: "cloud-workspace",
+            branch: "desktop-branch",
+            createdAt: Date(timeIntervalSince1970: 900),
+            creatorUserID: "desktop-creator",
+            hostingServerURL: "https://desktop.invalid",
+            pinnedAt: "2026-07-28T00:00:00Z",
+            repositoryID: "desktop-repository",
+            state: .archived,
+            unread: 1,
+            updatedAt: Date(timeIntervalSince1970: 901),
+            workspaceName: "Desktop name"
+        )
+
+        let desktopThenCloud = try persistedWorkspace {
+            try CloudWorkspacePersistence.persistDesktopWorkspaces(
+                [desktopWorkspace],
+                in: $0
+            )
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(workspaceIDs: [desktopWorkspace.id]),
+                in: $0
+            )
+        }
+        let cloudThenDesktop = try persistedWorkspace {
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(workspaceIDs: [desktopWorkspace.id]),
+                in: $0
+            )
+            try CloudWorkspacePersistence.persistDesktopWorkspaces(
+                [desktopWorkspace],
+                in: $0
+            )
+        }
+
+        #expect(desktopThenCloud == cloudThenDesktop)
+        #expect(desktopThenCloud.branch == "desktop-branch")
+        #expect(desktopThenCloud.pinnedAt == "2026-07-28T00:00:00Z")
+        #expect(desktopThenCloud.unread == 1)
+        #expect(desktopThenCloud.workspaceName == "Cloud workspace")
+        #expect(desktopThenCloud.creatorUserID == "creator-1")
+        #expect(desktopThenCloud.createdAt == Date(timeIntervalSince1970: 1))
+        #expect(desktopThenCloud.updatedAt == Date(timeIntervalSince1970: 2))
+        #expect(desktopThenCloud.state == .ready)
+        #expect(
+            desktopThenCloud.hostingServerURL
+                == Workspace.conductorCloudHostingServerURL
+        )
+        #expect(desktopThenCloud.repositoryID == "project-1")
+    }
+
     @Test("Account replacement removes only stale API-owned rows")
     func replacesAccountAndReconcilesStaleRows() throws {
         let database = try appDatabase()
@@ -292,6 +345,147 @@ struct CloudWorkspacePersistenceTests {
             #expect(metadata == nil)
         }
     }
+
+    @Test("Deleted and omitted workspaces remove Cloud chats before ownership")
+    func staleWorkspaceRemovesCloudChatsFirst() throws {
+        for isExplicitlyDeleted in [true, false] {
+            let database = try appDatabase()
+            let workspaceID = "dual-source"
+            let desktopSession = Session.preview(
+                id: "desktop-session",
+                workspaceID: workspaceID
+            )
+            let desktopMessage = Message(
+                id: "desktop-message",
+                sessionID: desktopSession.id,
+                role: .user,
+                content: "Desktop",
+                createdAt: .distantPast
+            )
+
+            try database.write { db in
+                try CloudWorkspacePersistence.persist(
+                    cloudSnapshot(workspaceIDs: [workspaceID]),
+                    in: db
+                )
+                try MobileWorkspaceState.insert {
+                    MobileWorkspaceState(
+                        workspaceID: workspaceID,
+                        isWorking: false
+                    )
+                }
+                .execute(db)
+                try Session.insert { desktopSession }.execute(db)
+                try Message.insert { desktopMessage }.execute(db)
+                try persistCloudChat(workspaceID: workspaceID, in: db)
+
+                let nextSnapshot = isExplicitlyDeleted
+                    ? cloudSnapshot(
+                        workspaceIDs: [workspaceID],
+                        status: .deleted
+                    )
+                    : cloudSnapshot(workspaceIDs: [])
+                try CloudWorkspacePersistence.persist(nextSnapshot, in: db)
+            }
+
+            let storedRows = try database.read { db in
+                (
+                    cloudSessionCount: try CloudSessionMetadata.fetchCount(db),
+                    cloudMessageCount: try CloudMessageMetadata.fetchCount(db),
+                    cloudMessage: try Message
+                        .find(
+                            CloudCanonicalID.message(
+                                accountID: "account-1",
+                                remoteSessionID: "cloud-session",
+                                eventID: "cloud-event",
+                                partOrder: 0
+                            )
+                        )
+                        .fetchOne(db),
+                    desktopSession: try Session
+                        .find(desktopSession.id)
+                        .fetchOne(db),
+                    desktopMessage: try Message
+                        .find(desktopMessage.id)
+                        .fetchOne(db),
+                    workspace: try Workspace.find(workspaceID).fetchOne(db),
+                    cloudWorkspace: try CloudWorkspaceMetadata
+                        .find(workspaceID)
+                        .fetchOne(db)
+                )
+            }
+            #expect(storedRows.cloudSessionCount == 0)
+            #expect(storedRows.cloudMessageCount == 0)
+            #expect(storedRows.cloudMessage == nil)
+            #expect(storedRows.desktopSession == desktopSession)
+            #expect(storedRows.desktopMessage == desktopMessage)
+            #expect(storedRows.workspace != nil)
+            #expect(storedRows.workspace?.hostingServerURL == nil)
+            #expect(storedRows.workspace?.isCloudHosted == false)
+            #expect(storedRows.cloudWorkspace == nil)
+        }
+    }
+}
+
+private func persistedWorkspace(
+    _ operation: (Database) throws -> Void
+) throws -> Workspace {
+    let database = try appDatabase()
+    return try database.write { db in
+        try operation(db)
+        return try #require(
+            try Workspace.find("cloud-workspace").fetchOne(db)
+        )
+    }
+}
+
+private func persistCloudChat(
+    workspaceID: Workspace.ID,
+    in database: Database
+) throws {
+    let date = Date(timeIntervalSince1970: 100)
+    _ = try CloudChatPersistence.persist(
+        CloudWorkspaceSessionSnapshot(
+            accountID: "account-1",
+            workspace: CloudWorkspace(
+                id: workspaceID,
+                name: "Cloud workspace",
+                createdAt: date
+            ),
+            sessions: [
+                CloudSession(
+                    id: "cloud-session",
+                    deepLink: URL(string: "https://app.conductor.build")!,
+                    model: "gpt-5.6-sol"
+                ),
+            ],
+            statuses: [:]
+        ),
+        in: database
+    )
+    _ = try CloudChatPersistence.persist(
+        CloudTranscriptUpdate(
+            accountID: "account-1",
+            sessionID: "cloud-session",
+            messages: [
+                CloudTranscriptMessage(
+                    id: "cloud-event",
+                    sessionID: "cloud-session",
+                    sessionIndex: 1,
+                    type: .init(rawValue: "userMessage"),
+                    content: .object([
+                        "type": .string("userMessage"),
+                        "message": .string("Cloud"),
+                        "turnId": .string("turn"),
+                    ]),
+                    receivedAt: date
+                ),
+            ],
+            kind: .complete,
+            rawCursor: "cloud-event"
+        ),
+        in: database
+    )
 }
 
 private func cloudSnapshot(

@@ -7,6 +7,7 @@
 
 import SharedConductorData
 import ConductorFoundation
+import Foundation
 import IssueReporting
 
 extension Workspace {
@@ -39,7 +40,18 @@ extension Workspace.Status {
 
 extension Workspace {
     public var isCloudHosted: Bool {
-        hostingServerURL?.isEmpty == false
+        guard let hostingServerURL,
+              let components = URLComponents(string: hostingServerURL),
+              components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "api.conductor.build",
+              components.port == nil || components.port == 443,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return false
+        }
+        return components.path.isEmpty || components.path == "/"
     }
 
     public var emptyChatDirectoryName: String {

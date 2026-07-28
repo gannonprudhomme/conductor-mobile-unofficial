@@ -108,7 +108,9 @@ extension Session {
         public static let opus_1M = Self(rawValue: "opus-1m")
         public static let opus5_1M = Self(rawValue: "opus-5-1m")
         public static let opus4_8_1M = Self(rawValue: "opus-4-8-1m")
+        public static let opus4_8 = Self(rawValue: "opus-4-8")
         public static let opus4_7_1M = Self(rawValue: "opus-4-7-1m")
+        public static let opus4_7 = Self(rawValue: "opus-4-7")
         public static let opus4_6_1M = Self(rawValue: "opus-4-6-1m")
         public static let sonnet5_1M = Self(rawValue: "sonnet-5-1m")
         public static let sonnet_4_6_1M = Self(rawValue: "sonnet-4-6-1m")
@@ -119,13 +121,17 @@ extension Session {
         public static let gpt_5_6_luna = Self(rawValue: "gpt-5.6-luna")
         public static let gpt5_5 = Self(rawValue: "gpt-5.5")
         public static let gpt5_4 = Self(rawValue: "gpt-5.4")
+        public static let gpt5_3CodexSpark = Self(rawValue: "gpt-5.3-codex-spark")
         public static let gpt5_3Codex = Self(rawValue: "gpt-5.3-codex")
+        public static let gpt5_2Codex = Self(rawValue: "gpt-5.2-codex")
 
         public static let claudeModels: [Self] = [
             .fable5,
             .opus5_1M,
             .opus4_8_1M,
+            .opus4_8,
             .opus4_7_1M,
+            .opus4_7,
             .opus4_6_1M,
             .sonnet5_1M,
             .sonnet_4_6_1M,
@@ -139,6 +145,9 @@ extension Session {
             .gpt_5_6_luna,
             .gpt5_5,
             .gpt5_4,
+            .gpt5_3CodexSpark,
+            .gpt5_3Codex,
+            .gpt5_2Codex,
         ]
 
         public static func models(for agentType: AgentType) -> [Self] {
@@ -243,7 +252,13 @@ extension Session {
 extension Session.Model {
     public var availableClaudeReasoningEfforts: [Session.ReasoningEffort] {
         switch self {
-        case .fable5, .opus5_1M, .opus4_8_1M, .opus4_7_1M, .sonnet5_1M:
+        case .fable5,
+             .opus5_1M,
+             .opus4_8_1M,
+             .opus4_8,
+             .opus4_7_1M,
+             .opus4_7,
+             .sonnet5_1M:
             [.low, .medium, .high, .extraHigh, .max, .ultracode]
         case .opus4_6_1M, .sonnet_4_6_1M, .sonnet_4_6:
             [.low, .medium, .high, .max]
@@ -260,7 +275,11 @@ extension Session.Model {
             [.none, .low, .medium, .high, .extraHigh, .max, .ultra]
         case .gpt_5_6_luna:
             [.none, .low, .medium, .high, .extraHigh, .max]
-        case .gpt5_5, .gpt5_4, .gpt5_3Codex:
+        case .gpt5_5,
+             .gpt5_4,
+             .gpt5_3CodexSpark,
+             .gpt5_3Codex,
+             .gpt5_2Codex:
             [.none, .low, .medium, .high, .extraHigh]
         default:
             []
