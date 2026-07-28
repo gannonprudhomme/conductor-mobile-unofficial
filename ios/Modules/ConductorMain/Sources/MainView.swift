@@ -39,6 +39,8 @@ public struct Main: Sendable {
     }
 
     public enum Action {
+        case appBecameActive
+        case appEnteredBackground
         case cloudCacheCleanupResult(Result<Void, any Error>)
         case cloudCredentialReconciliationResult(Result<String?, any Error>)
         case cloudMutationRunnerResult(Result<Void, any Error>)
@@ -93,6 +95,12 @@ public struct Main: Sendable {
                             )
                         }
                     )
+
+                case .appBecameActive:
+                    return .send(.workspaces(.appBecameActive))
+
+                case .appEnteredBackground:
+                    return .send(.workspaces(.appEnteredBackground))
 
                 case let .cloudMutationRunnerResult(.failure(error)):
                     return .send(.workspaces(.loadWorkspacesFailed(error)))
@@ -233,6 +241,7 @@ extension Main.Path.State: Equatable { }
 
 public struct MainView: View {
     @Bindable var store: StoreOf<Main>
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(store: StoreOf<Main>) {
         self.store = store
@@ -256,6 +265,21 @@ public struct MainView: View {
             // MainView stays mounted while destinations are pushed, keeping the workspace socket
             // alive while the root WorkspacesView is off-screen.
             await store.send(.task).finish()
+        }
+        .onChange(of: scenePhase) { _, scenePhase in
+            switch scenePhase {
+            case .active:
+                store.send(.appBecameActive)
+
+            case .background:
+                store.send(.appEnteredBackground)
+
+            case .inactive:
+                break
+
+            @unknown default:
+                break
+            }
         }
         .sensoryFeedback(.error, trigger: store.workspaces.connectionStatus) {
             $0 == .connected && $1 == .disconnected

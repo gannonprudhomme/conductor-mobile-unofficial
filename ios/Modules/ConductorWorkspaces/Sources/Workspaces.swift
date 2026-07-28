@@ -93,6 +93,7 @@ public struct Workspaces: Sendable {
         public var workspaces: [WorkspaceWithRepository] = []
 
         public var cloudObservationStatus: CloudObservationStatus
+        var cloudFailureSuppressionDeadline: Date?
         var hasPresentedCloudFailureAlert = false
         var isLoadingWorkspaces: Bool
         var sections: [WorkspaceSection] = []
@@ -312,6 +313,8 @@ public struct Workspaces: Sendable {
     }
 
     public enum Action {
+        case appBecameActive
+        case appEnteredBackground
         case cloudConfigurationChanged(CloudConfiguration?)
         case cloudObservationFailed(CloudFailure)
         case cloudSnapshotReceived
@@ -415,7 +418,52 @@ public struct Workspaces: Sendable {
                         )
                 )
 
+            case .appBecameActive:
+                // iOS suspends both connection streams in the background. Restart them and
+                // allow the network path a brief grace period before reporting an outage.
+                state.cloudFailureSuppressionDeadline = now
+                    .addingTimeInterval(5)
+                state.hasPresentedCloudFailureAlert = false
+                if state.isCloudCredentialConfigured {
+                    state.cloudObservationStatus = .loading
+                }
+                if state.hasLocalConfiguration {
+                    state.$connectionStatus.withLock { $0 = .connecting }
+                }
+
+                return .merge(
+                    state.isCloudCredentialConfigured
+                        ? observeCloudWorkspaces()
+                        : .none,
+                    state.hasLocalConfiguration
+                        ? .merge(
+                            monitorConnection(),
+                            observeLocalWorkspaces(state)
+                        )
+                        : .none
+                )
+
+            case .appEnteredBackground:
+                // Cancelling an observation can race with its final failure action. Keep offline
+                // failures suppressed until the next active phase replaces this deadline.
+                state.cloudFailureSuppressionDeadline = .distantFuture
+                if state.destination?.alert != nil {
+                    state.destination = nil
+                }
+                if state.isCloudCredentialConfigured {
+                    state.cloudObservationStatus = .loading
+                }
+                if state.hasLocalConfiguration {
+                    state.$connectionStatus.withLock { $0 = .connecting }
+                }
+                return .merge(
+                    .cancel(id: CancelID.cloudObservation),
+                    .cancel(id: CancelID.connectionMonitor),
+                    .cancel(id: CancelID.desktopObservation)
+                )
+
             case let .cloudConfigurationChanged(configuration):
+                state.cloudFailureSuppressionDeadline = nil
                 state.hasPresentedCloudFailureAlert = false
                 guard configuration != nil else {
                     state.cloudObservationStatus = .disconnected
@@ -428,6 +476,16 @@ public struct Workspaces: Sendable {
                 return observeCloudWorkspaces()
 
             case let .cloudObservationFailed(failure):
+                // Ignore stale offline failures from the background transition, while still
+                // surfacing authentication and unexpected failures immediately.
+                if case .offline = failure,
+                   let deadline = state.cloudFailureSuppressionDeadline,
+                   deadline > now {
+                    state.cloudObservationStatus = .loading
+                    return .none
+                }
+
+                state.cloudFailureSuppressionDeadline = nil
                 state.cloudObservationStatus = .failed
                 guard !state.hasPresentedCloudFailureAlert,
                       state.destination == nil else {
@@ -438,6 +496,7 @@ public struct Workspaces: Sendable {
                 return .none
 
             case .cloudSnapshotReceived:
+                state.cloudFailureSuppressionDeadline = nil
                 state.cloudObservationStatus = .connected
                 state.hasPresentedCloudFailureAlert = false
                 return .none
