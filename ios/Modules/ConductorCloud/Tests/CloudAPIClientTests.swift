@@ -912,7 +912,12 @@ struct CloudAPIClientTests {
         for _ in 0..<10 {
             await Task.yield()
         }
-        await clock.advance(by: .seconds(10))
+        for workingRequestCount in 2...5 {
+            await clock.advance(by: .milliseconds(2_500))
+            await waitForCloudCondition {
+                statusRequestCounts.value["working"] == workingRequestCount
+            }
+        }
         await waitForCloudCondition {
             statusRequestCounts.value == ["stable": 2, "working": 5]
         }
