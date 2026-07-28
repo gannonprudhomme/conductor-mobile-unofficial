@@ -1057,7 +1057,7 @@ struct ChatView: View {
                 Color.theme(.background)
                     .ignoresSafeArea()
             }
-            .overlay(alignment: .bottom) {
+            .safeAreaBar(edge: .bottom, spacing: 4) {
                 bottomOverlay(
                     statusLayout: statusLayout,
                     queuedMessagesStore: queuedMessagesStore
@@ -1065,12 +1065,6 @@ struct ChatView: View {
                 .fixedSize(
                     horizontal: false,
                     vertical: !queuedMessagesStore.isExpanded
-                )
-                .frame(
-                    height: queuedMessagesStore.isExpanded
-                        ? proxy.size.height
-                        : nil,
-                    alignment: .bottom
                 )
             }
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
