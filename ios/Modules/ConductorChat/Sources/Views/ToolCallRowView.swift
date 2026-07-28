@@ -73,8 +73,12 @@ struct ToolCallRowView: View {
             FileTagView(fileName: fileName(from: filePath))
         case .writeFile(_, let filePath, _):
             FileTagView(fileName: fileName(from: filePath))
-        case .editFile(_, let filePath, _, _):
-            FileTagView(fileName: fileName(from: filePath))
+        case .editFile(_, let filePath, let oldString, let newString):
+            HStack(spacing: 8) {
+                FileTagView(fileName: fileName(from: filePath))
+
+                LinesChangesStats(oldString: oldString, newString: newString)
+            }
         case .listFiles(_, let path):
             somethingText(fileName(from: path ?? "."))
         case .bash(_, let command):
@@ -181,7 +185,7 @@ struct LinesChangesStats: View {
     }
     
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 8) {
             Text("+\(Text(additions, format: .number))")
                 .foregroundStyle(.theme(.gitGreen))
             
@@ -192,6 +196,7 @@ struct LinesChangesStats: View {
         }
         // .font(.theme(.footnote)) /// Same as ``FileTagView``
         .monospaced()
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -199,8 +204,8 @@ private func lineDiffCounts(
     oldString: String,
     newString: String
 ) -> (additions: Int, deletions: Int) {
-    let oldLines = oldString.split(separator: "\n", omittingEmptySubsequences: false)
-    let newLines = newString.split(separator: "\n", omittingEmptySubsequences: false)
+    let oldLines = diffableLines(in: oldString)
+    let newLines = diffableLines(in: newString)
 
     return newLines.difference(from: oldLines).reduce(
         into: (additions: 0, deletions: 0)
@@ -212,6 +217,18 @@ private func lineDiffCounts(
             counts.deletions += 1
         }
     }
+}
+
+private func diffableLines(in string: String) -> [Substring] {
+    guard !string.isEmpty else {
+        return []
+    }
+
+    var lines = string.split(separator: "\n", omittingEmptySubsequences: false)
+    if string.last == "\n" {
+        lines.removeLast()
+    }
+    return lines
 }
 
 #Preview("Tool Calls") {
