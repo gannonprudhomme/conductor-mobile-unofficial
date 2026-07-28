@@ -31,6 +31,7 @@ public struct Main: Sendable {
         public var path = StackState<Path.State>()
         @Presents public var settings: ConductorSettings.State?
         public var workspaces = Workspaces.State()
+        var isInBackground = false
 
         public init() {
             // A fresh install needs at least one usable local or cloud connection.
@@ -40,6 +41,8 @@ public struct Main: Sendable {
     }
 
     public enum Action {
+        case appBecameActive
+        case appEnteredBackground
         case cloudCacheCleanupResult(Result<Void, any Error>)
         case cloudCredentialReconciliationResult(Result<String?, any Error>)
         case path(StackActionOf<Path>)
@@ -74,6 +77,20 @@ public struct Main: Sendable {
                             )
                         )
                     }
+
+                case .appBecameActive:
+                    guard state.isInBackground else {
+                        return .none
+                    }
+                    state.isInBackground = false
+                    return .send(.workspaces(.appBecameActive))
+
+                case .appEnteredBackground:
+                    guard !state.isInBackground else {
+                        return .none
+                    }
+                    state.isInBackground = true
+                    return .send(.workspaces(.appEnteredBackground))
 
                 case let .cloudCredentialReconciliationResult(result):
                     switch result {
@@ -137,6 +154,13 @@ public struct Main: Sendable {
                                 workspaceWithRepository: creation.workspace,
                                 selectedModel: creation.selectedModel,
                                 selectedReasoningEffort: creation.selectedReasoningEffort,
+                                initialMessage: creation.initialPrompt.map {
+                                    WorkspaceChat.InitialMessage(
+                                        id: $0.attemptID,
+                                        content: $0.content,
+                                        deliveryResult: $0.deliveryResult
+                                    )
+                                },
                                 shouldFocusMessageField: true
                             )
                         )
@@ -200,6 +224,7 @@ extension Main.Path.State: Equatable { }
 
 public struct MainView: View {
     @Bindable var store: StoreOf<Main>
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(store: StoreOf<Main>) {
         self.store = store
@@ -223,6 +248,21 @@ public struct MainView: View {
             // MainView stays mounted while destinations are pushed, keeping the workspace socket
             // alive while the root WorkspacesView is off-screen.
             await store.send(.task).finish()
+        }
+        .onChange(of: scenePhase) { _, scenePhase in
+            switch scenePhase {
+            case .active:
+                store.send(.appBecameActive)
+
+            case .background:
+                store.send(.appEnteredBackground)
+
+            case .inactive:
+                break
+
+            @unknown default:
+                break
+            }
         }
         .sensoryFeedback(.error, trigger: store.workspaces.connectionStatus) {
             $0 == .connected && $1 == .disconnected

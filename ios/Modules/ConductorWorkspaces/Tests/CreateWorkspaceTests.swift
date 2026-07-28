@@ -66,16 +66,7 @@ struct CreateWorkspaceTests {
             repositoryID: repository.id
         )
         let database = try appDatabase()
-        let sentMessage = Message(
-            id: "message",
-            sessionID: session.id,
-            role: .user,
-            content: "Run the tests.",
-            createdAt: Date(timeIntervalSince1970: 1_783_555_200),
-            turnID: "turn"
-        )
-
-        try await withDependencies {
+        await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
             var state = CreateWorkspace.State(repositories: [repository])
@@ -109,15 +100,17 @@ struct CreateWorkspaceTests {
                     model,
                     isFastModeEnabled,
                     mode,
-                    reasoningEffort in
+                    reasoningEffort,
+                    attemptID in
                     #expect(requestedWorkspaceID == workspaceID)
                     #expect(sessionID == session.id)
                     #expect(message == "Run the tests.")
                     #expect(model == .gpt_5_6_terra)
                     #expect(isFastModeEnabled)
-                    #expect(mode == .steer)
+                    #expect(mode == .sent)
                     #expect(reasoningEffort == .ultra)
-                    return sentMessage
+                    #expect(attemptID == UUID(1))
+                    return .accepted(messageID: "message")
                 }
             }
 
@@ -133,6 +126,11 @@ struct CreateWorkspaceTests {
                 \.delegate,
                 .workspaceCreated(
                     WorkspaceCreationResult(
+                        initialPrompt: .init(
+                            attemptID: UUID(1),
+                            content: "Run the tests.",
+                            deliveryResult: .accepted(messageID: "message")
+                        ),
                         selectedModel: .gpt_5_6_terra,
                         selectedReasoningEffort: .ultra,
                         workspace: WorkspaceWithRepository(
@@ -143,10 +141,73 @@ struct CreateWorkspaceTests {
                 )
             )
 
-            let message = try await database.read { database in
-                try Message.find(sentMessage.id).fetchOne(database)
+        }
+    }
+
+    @Test(
+        "An unsuccessful initial prompt does not relabel workspace creation as failed",
+        arguments: [
+            MessageDeliveryResult.rejected(reason: "Prompt rejected."),
+            .unknown(reason: "Prompt delivery unconfirmed."),
+        ]
+    )
+    func promptFailureDoesNotFailCreation(
+        deliveryResult: MessageDeliveryResult
+    ) async throws {
+        let repository = Repository.preview()
+        let workspaceID = UUID(0).uuidString.lowercased()
+        let session = Session.preview(id: "session", workspaceID: workspaceID)
+        let workspace = Workspace.preview(
+            id: workspaceID,
+            activeSessionID: session.id,
+            repositoryID: repository.id
+        )
+        let database = try appDatabase()
+
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let state = CreateWorkspace.State(repositories: [repository])
+            state.$prompt.withLock { $0 = "Run it." }
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.uuid = .incrementing
+                $0.desktopClient.createWorkspace = { _, _, _, _, _ in
+                    CreatedWorkspace(workspace: workspace, session: session)
+                }
+                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
+                    deliveryResult
+                }
             }
-            expectNoDifference(message, sentMessage)
+
+            await store.send(.createButtonTapped) {
+                $0.isCreateAPIInFlight = true
+                $0.workspaceID = workspaceID
+            }
+            await store.receive(\.createWorkspaceSucceeded) {
+                $0.$prompt.withLock { $0 = "" }
+                $0.isCreateAPIInFlight = false
+            }
+            await store.receive(
+                \.delegate,
+                .workspaceCreated(
+                    WorkspaceCreationResult(
+                        initialPrompt: .init(
+                            attemptID: UUID(1),
+                            content: "Run it.",
+                            deliveryResult: deliveryResult
+                        ),
+                        selectedModel: state.selectedModel,
+                        selectedReasoningEffort: state.selectedReasoningEffort,
+                        workspace: WorkspaceWithRepository(
+                            workspace: workspace,
+                            repository: repository
+                        )
+                    )
+                )
+            )
         }
     }
 

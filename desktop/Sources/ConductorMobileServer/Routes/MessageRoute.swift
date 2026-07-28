@@ -8,6 +8,7 @@
 import Dependencies
 import Foundation
 import Hummingbird
+import HTTPTypes
 import SharedConductorData
 import SQLiteData
 
@@ -18,21 +19,20 @@ enum MessageRoute {
         database: any DatabaseWriter,
         commandTimeout: Duration
     ) async throws -> Response {
-        @Dependency(\.continuousClock) var continuousClock
-        @Dependency(\.uuid) var uuid
-        @Dependency(\.workspaceUIHook) var workspaceUIHook
-        let clock = continuousClock
-        let uiHook = workspaceUIHook
-
         let sendMessageRequest = try await request.decode(
-            as: SendMessageRequest.self,
+            as: MessageSendRequest.self,
             context: context
         )
         guard !sendMessageRequest.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PlainTextResponseError(.badRequest, message: "Message cannot be empty.")
         }
+        let attemptID = sendMessageRequest.attemptID
         let workspaceID = try context.parameters.require("workspaceID")
         let sessionID = try context.parameters.require("sessionID")
+        @Dependency(\.continuousClock) var clock
+        @Dependency(\.uuid) var uuid
+        @Dependency(\.workspaceUIHook) var workspaceUIHook
+        let uiHook = workspaceUIHook
 
         let session: Session?
         do {
@@ -44,18 +44,22 @@ enum MessageRoute {
                     }
                     .fetchOne(database)
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            throw PlainTextResponseError(
-                .internalServerError,
-                message: "Could not load message send context: \(error)"
+            return try response(
+                attemptID: attemptID,
+                result: .rejected(reason: "Could not load message send context: \(error)")
             )
         }
 
         guard let session else {
-            throw PlainTextResponseError(.notFound, message: "Session not found.")
+            return try response(
+                attemptID: attemptID,
+                result: .rejected(reason: "Session not found.")
+            )
         }
-        let model = sendMessageRequest.model ?? session.model.rawValue
-        let requestedModel = Session.Model(rawValue: model)
+        let requestedModel = Session.Model(rawValue: sendMessageRequest.model)
         let requestedAgentType: Session.AgentType
         if requestedModel == session.model
             || Session.Model.models(for: session.agentType).contains(requestedModel) {
@@ -64,23 +68,23 @@ enum MessageRoute {
                   let agentType = requestedModel.agentType {
             requestedAgentType = agentType
         } else {
-            throw PlainTextResponseError(
-                .badRequest,
-                message: "Model is not available for this session's agent."
+            return try response(
+                attemptID: attemptID,
+                result: .rejected(reason: "Model is not available for this session's agent.")
             )
         }
         let isFastModeEnabled = sendMessageRequest.isFastModeEnabled
-            ?? session.isFastModeEnabled
-            ?? false
         let availableReasoningEfforts = Session.availableReasoningEfforts(
             agentType: requestedAgentType,
             model: requestedModel
         )
         if let requestedReasoningEffort = sendMessageRequest.reasoningEffort,
            !availableReasoningEfforts.contains(requestedReasoningEffort) {
-            throw PlainTextResponseError(
-                .badRequest,
-                message: "Reasoning effort is not available for this model."
+            return try response(
+                attemptID: attemptID,
+                result: .rejected(
+                    reason: "Reasoning effort is not available for this model."
+                )
             )
         }
         let reasoningEffort: Session.ReasoningEffort? = if let requestedReasoningEffort = sendMessageRequest.reasoningEffort {
@@ -117,9 +121,11 @@ enum MessageRoute {
                     }
                 }
                 guard didUpdate else {
-                    throw PlainTextResponseError(
-                        .serviceUnavailable,
-                        message: "Conductor is not connected to change the session agent."
+                    return try response(
+                        attemptID: attemptID,
+                        result: .rejected(
+                            reason: "Conductor is not connected to change the session agent."
+                        )
                     )
                 }
             } else if requestedModel != session.model {
@@ -142,16 +148,27 @@ enum MessageRoute {
                     }
                 }
                 guard didUpdate else {
-                    throw PlainTextResponseError(
-                        .serviceUnavailable,
-                        message: "Conductor is not connected to change the session model."
+                    return try response(
+                        attemptID: attemptID,
+                        result: .rejected(
+                            reason: "Conductor is not connected to change the session model."
+                        )
                     )
                 }
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as WorkspaceUIHook.DispatchError {
-            throw responseError(
-                for: error,
-                deliveryUnknownMessage: "Could not determine whether the session model was delivered."
+            return try response(
+                attemptID: attemptID,
+                result: .rejected(
+                    reason: updateFailureReason(for: error, subject: "the session model")
+                )
+            )
+        } catch {
+            return try response(
+                attemptID: attemptID,
+                result: .rejected(reason: "Could not update the session model: \(error)")
             )
         }
 
@@ -184,10 +201,19 @@ enum MessageRoute {
                         )
                     }
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as WorkspaceUIHook.DispatchError {
-                throw responseError(
-                    for: error,
-                    deliveryUnknownMessage: "Could not determine whether Fast Mode was delivered."
+                return try response(
+                    attemptID: attemptID,
+                    result: .rejected(
+                        reason: updateFailureReason(for: error, subject: "Fast Mode")
+                    )
+                )
+            } catch {
+                return try response(
+                    attemptID: attemptID,
+                    result: .rejected(reason: "Could not update Fast Mode: \(error)")
                 )
             }
         }
@@ -196,23 +222,26 @@ enum MessageRoute {
         return try await withThrowingTaskGroup(of: MessageSendEvent.self) { group in
             group.addTask {
                 do {
-                    try await uiHook.sendMessage(
+                    let messageID = try await uiHook.sendMessage(
                         requestID: requestID,
+                        attemptID: attemptID,
                         sessionID: sessionID,
                         workspaceID: workspaceID,
                         content: sendMessageRequest.message,
-                        mode: sendMessageRequest.mode ?? .sent,
+                        mode: sendMessageRequest.mode,
                         reasoningEffort: reasoningEffort
                     )
-                    return .accepted
+                    return .accepted(messageID)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch let error as WorkspaceUIHook.CommandDispatchError {
                     return .failed(error)
+                } catch {
+                    return .failed(.deliveryUnknown)
                 }
             }
             group.addTask {
-                try await clock.sleep(for: commandTimeout)
+                try await Task.sleep(for: commandTimeout)
                 return .deadline
             }
             defer { group.cancelAll() }
@@ -221,22 +250,31 @@ enum MessageRoute {
                 throw CancellationError()
             }
             switch event {
-            case .accepted:
-                return Response(status: .noContent)
+            case .accepted(let messageID):
+                return try response(
+                    attemptID: attemptID,
+                    result: .accepted(messageID: messageID)
+                )
             case .deadline, .failed(.deliveryUnknown), .failed(.persistenceTimedOut):
-                throw PlainTextResponseError(
-                    .serviceUnavailable,
-                    message: "Could not determine whether the message was delivered. Check the conversation before retrying."
+                return try response(
+                    attemptID: attemptID,
+                    result: .unknown(
+                        reason: "Could not determine whether the message was delivered."
+                    )
                 )
             case .failed(.commandFailed(let message)):
-                throw PlainTextResponseError(
-                    .badGateway,
-                    message: "Conductor could not send the message: \(message)"
+                return try response(
+                    attemptID: attemptID,
+                    result: .rejected(
+                        reason: "Conductor rejected the message: \(message)"
+                    )
                 )
             case .failed(.listenerUnavailable):
-                throw PlainTextResponseError(
-                    .serviceUnavailable,
-                    message: "Conductor's workspace UI hook is unavailable."
+                return try response(
+                    attemptID: attemptID,
+                    result: .rejected(
+                        reason: "Conductor's workspace UI hook is unavailable."
+                    )
                 )
             }
         }
@@ -269,48 +307,37 @@ enum MessageRoute {
         throw CancellationError()
     }
 
-    private static func responseError(
+    private static func updateFailureReason(
         for error: WorkspaceUIHook.DispatchError,
-        deliveryUnknownMessage: String
-    ) -> PlainTextResponseError {
+        subject: String
+    ) -> String {
         switch error {
         case .deliveryUnknown:
-            PlainTextResponseError(
-                .serviceUnavailable,
-                message: deliveryUnknownMessage
-            )
+            "Could not determine whether \(subject) was delivered."
         case .listenerUnavailable:
-            PlainTextResponseError(
-                .serviceUnavailable,
-                message: "Conductor's workspace UI hook is unavailable."
-            )
+            "Conductor's workspace UI hook is unavailable."
         case .mutationInFlight:
-            PlainTextResponseError(
-                .conflict,
-                message: "Another Conductor UI change is still in progress."
-            )
-        }
-    }
-
-    private struct SendMessageRequest: Decodable {
-        let message: String
-        let model: String?
-        let isFastModeEnabled: Bool?
-        let mode: WorkspaceUIHook.MessageMode?
-        let reasoningEffort: Session.ReasoningEffort?
-
-        private enum CodingKeys: String, CodingKey {
-            case message
-            case model
-            case isFastModeEnabled = "fast_mode"
-            case mode
-            case reasoningEffort = "reasoning_effort"
+            "Another Conductor UI change is still in progress."
         }
     }
 
     private enum MessageSendEvent: Sendable {
-        case accepted
+        case accepted(Message.ID?)
         case deadline
         case failed(WorkspaceUIHook.CommandDispatchError)
+    }
+
+    private static func response(
+        attemptID: UUID,
+        result: MessageDeliveryResult
+    ) throws -> Response {
+        let data = try JSONEncoder().encode(
+            MessageSendResponse(attemptID: attemptID, result: result)
+        )
+        return Response(
+            status: .ok,
+            headers: [.contentType: "application/json; charset=utf-8"],
+            body: .init(byteBuffer: ByteBuffer(data: data))
+        )
     }
 }

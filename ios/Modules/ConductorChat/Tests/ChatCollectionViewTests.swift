@@ -287,6 +287,34 @@ struct ChatCollectionViewTests {
         )
     }
 
+    @Test("Canonical confirmation preserves and reconfigures diffable identity")
+    func confirmationPreservesDiffableIdentity() {
+        let bubbleID = UUID()
+        let optimisticMessage = displayedRow(
+            .optimisticMessage(
+                .init(
+                    id: bubbleID,
+                    content: "Test",
+                    deliveryDetail: nil,
+                    status: .unconfirmed
+                )
+            )
+        )
+        let canonicalMessage = displayedRow(
+            .humanMessage(
+                .init(id: bubbleID.uuidString, content: "Test")
+            )
+        )
+
+        #expect(optimisticMessage.id == canonicalMessage.id)
+        #expect(
+            ChatCollectionView.changedRowIDs(
+                previousRowsByID: [optimisticMessage.id: optimisticMessage],
+                rows: [canonicalMessage]
+            ) == [canonicalMessage.id]
+        )
+    }
+
     @Test("Only message growth and working-row insertion animate bottom follow")
     func bottomFollowAnimationPolicy() {
         let message = displayedRow(

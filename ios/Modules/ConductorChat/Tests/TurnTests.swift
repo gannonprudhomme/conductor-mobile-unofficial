@@ -1436,6 +1436,8 @@ private enum DisplayedRowProjection: Equatable {
         self = switch row {
         case .humanMessage(let message):
             .human(id: message.id)
+        case .optimisticMessage:
+            .human(id: row.id)
         case .assistantTextChunk,
              .assistantThinking,
              .assistantToolCall,

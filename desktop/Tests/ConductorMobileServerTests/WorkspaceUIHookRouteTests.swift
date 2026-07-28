@@ -24,6 +24,7 @@ struct WorkspaceUIHookRouteTests {
         let send = Task {
             try await uiHook.sendMessage(
                 requestID: requestID,
+                attemptID: UUID(),
                 sessionID: "session-1",
                 workspaceID: "workspace-1",
                 content: "Run the tests.",
@@ -65,7 +66,7 @@ struct WorkspaceUIHookRouteTests {
                         .origin: "https://malicious.example",
                     ],
                     body: ByteBuffer(
-                        string: "{\"requestId\":\"\(command.requestID)\"}"
+                        string: "{\"requestId\":\"\(command.requestID)\",\"result\":{\"type\":\"accepted\",\"messageId\":\"message-id\",\"state\":\"sent\"}}"
                     )
                 ) { response in
                     #expect(response.status == .forbidden)
@@ -80,7 +81,7 @@ struct WorkspaceUIHookRouteTests {
                         .origin: WorkspaceUIHookRoute.origin,
                     ],
                     body: ByteBuffer(
-                        string: "{\"requestId\":\"\(command.requestID)\"}"
+                        string: "{\"requestId\":\"\(command.requestID)\",\"result\":{\"type\":\"accepted\",\"messageId\":\"message-id\",\"state\":\"sent\"}}"
                     )
                 ) { response in
                     #expect(response.status == .noContent)
@@ -92,7 +93,7 @@ struct WorkspaceUIHookRouteTests {
             }
         }
 
-        try await send.value
+        #expect(try await send.value == "message-id")
     }
 
     @Test("Hook script admits only Conductor or narrow originless script loads")

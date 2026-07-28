@@ -7,6 +7,7 @@
 
 import Dependencies
 import Foundation
+import Hummingbird
 import HummingbirdTesting
 import NIOCore
 import SharedConductorData
@@ -16,24 +17,101 @@ import Testing
 @testable import ConductorMobileServer
 
 struct MessageRouteTests {
-    @Test("POST message sends through the UI hook and returns no content")
-    func post() async throws {
+    @Test("POST returns an accepted receipt with the echoed attempt ID")
+    func accepted() async throws {
+        let attemptID = UUID(42)
+        let messageID = "canonical-message"
+        let recorder = MessageRouteRecorder()
+        let database = try await messageRouteDatabase()
+
+        try await withDependencies {
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.sendMessage = {
+                requestID,
+                receivedAttemptID,
+                sessionID,
+                workspaceID,
+                content,
+                mode,
+                _ in
+                await recorder.record(
+                    requestID: requestID,
+                    attemptID: receivedAttemptID,
+                    sessionID: sessionID,
+                    workspaceID: workspaceID,
+                    content: content,
+                    mode: mode
+                )
+                return messageID
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: attemptID),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(
+                response.receipt == MessageSendResponse(
+                    attemptID: attemptID,
+                    result: .accepted(messageID: messageID)
+                )
+            )
+        }
+
+        let recorded = await recorder.message
+        #expect(recorded?.attemptID == attemptID)
+        #expect(recorded?.requestID != attemptID)
+        #expect(recorded?.sessionID == "session-1")
+        #expect(recorded?.workspaceID == "workspace-1")
+        #expect(recorded?.content == "  Run the tests.  ")
+        #expect(recorded?.mode == .sent)
+    }
+
+    @Test("Idle and working sessions both send with the sent mode", arguments: [
+        Session.Status.idle,
+        Session.Status.working,
+    ])
+    func sentMode(status: Session.Status) async throws {
+        let database = try await messageRouteDatabase(status: status)
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.sendMessage = {
+                requestID,
+                attemptID,
+                sessionID,
+                workspaceID,
+                content,
+                mode,
+                _ in
+                await recorder.record(
+                    requestID: requestID,
+                    attemptID: attemptID,
+                    sessionID: sessionID,
+                    workspaceID: workspaceID,
+                    content: content,
+                    mode: mode
+                )
+                return "message-id"
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(43)),
+                database: database
+            )
+            #expect(response.status == .ok)
+        }
+        #expect(await recorder.message?.mode == .sent)
+    }
+
+    @Test("Fast Mode is synchronized before sending")
+    func fastModeSynchronization() async throws {
+        let attemptID = UUID(47)
         let database = try await messageRouteDatabase()
         let recorder = MessageRouteRecorder()
         try await withDependencies {
             $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
-            $0.workspaceUIHook.updateSessionModel = { sessionID, model, waitUntilChangeAvailableInDatabase in
-                await recorder.recordModelUpdate(sessionID: sessionID, model: model)
-                try await database.write { database in
-                    try Session
-                        .find(sessionID)
-                        .update { $0.model = #bind(model) }
-                        .execute(database)
-                }
-                try await waitUntilChangeAvailableInDatabase()
-                return true
-            }
             $0.workspaceUIHook.dispatch = { command, _, waitUntilChangeAvailableInDatabase in
                 #expect(
                     command == .sessionFastMode(
@@ -41,7 +119,6 @@ struct MessageRouteTests {
                         isEnabled: true
                     )
                 )
-                await recorder.recordFastModeUpdate(isEnabled: true)
                 try await database.write { database in
                     try Session
                         .find("session-1")
@@ -49,172 +126,186 @@ struct MessageRouteTests {
                         .execute(database)
                 }
                 try await waitUntilChangeAvailableInDatabase()
+                await recorder.recordFastModeUpdate()
                 return .hook
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, reasoningEffort in
-                let persistedSession = try await database.read { database in
+            $0.workspaceUIHook.sendMessage = {
+                requestID,
+                receivedAttemptID,
+                sessionID,
+                workspaceID,
+                content,
+                mode,
+                _ in
+                let session = try await database.read { database in
                     try Session.find(sessionID).fetchOne(database)
                 }
-                #expect(persistedSession?.model == .gpt_5_6_terra)
-                #expect(persistedSession?.isFastModeEnabled == true)
-                #expect(reasoningEffort == .ultra)
-                await recorder.recordMessage(
+                #expect(session?.isFastModeEnabled == true)
+                await recorder.record(
+                    requestID: requestID,
+                    attemptID: receivedAttemptID,
                     sessionID: sessionID,
+                    workspaceID: workspaceID,
                     content: content,
                     mode: mode
                 )
+                return "message-id"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"  Run the tests.  ","model":"gpt-5.6-terra","fast_mode":true,"mode":"queued","reasoning_effort":"ultra"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .noContent)
-                    #expect(response.body.readableBytes == 0)
-                }
-            }
-        }
-
-        #expect(
-            await recorder.message == MessageRouteRecorder.RecordedMessage(
-                sessionID: "session-1",
-                content: "  Run the tests.  ",
-                mode: .queued
+            let response = try await postMessage(
+                body: requestBody(attemptID: attemptID, isFastModeEnabled: true),
+                database: database
             )
-        )
-        #expect(await recorder.updatedSessionID == "session-1")
-        #expect(await recorder.updatedModel == .gpt_5_6_terra)
-        #expect(await recorder.isUpdatedFastModeEnabled == true)
+            #expect(response.status == .ok)
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
+        }
+        #expect(await recorder.didUpdateFastMode)
+        #expect(await recorder.didSend)
     }
 
-    @Test("POST message returns unavailable when the UI hook cannot send")
-    func unavailableUIHook() async throws {
-        let database = try await messageRouteDatabase()
-        try await withDependencies {
-            $0.continuousClock = ContinuousClock()
-            $0.uuid = .incrementing
-            $0.workspaceUIHook.dispatch = { _, fallback, _ in
-                try await fallback?()
-                return .sqliteFallback
-            }
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
-                throw WorkspaceUIHook.CommandDispatchError.listenerUnavailable
-            }
-        } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Run fast.","model":"gpt-5.5","fast_mode":true}"#
-                    )
-                ) { response in
-                    #expect(response.status == .serviceUnavailable)
-                    #expect(
-                        String(buffer: response.body)
-                            == "Conductor's workspace UI hook is unavailable."
-                    )
-                }
-            }
-        }
-
-        let isPersistedFastModeEnabled = try await database.read { database in
-            try Session.find("session-1").fetchOne(database)?.isFastModeEnabled
-        }
-        #expect(isPersistedFastModeEnabled == true)
-    }
-
-    @Test("POST message skips Fast Mode synchronization when unchanged")
+    @Test("Unchanged Fast Mode skips synchronization")
     func unchangedFastMode() async throws {
         let database = try await messageRouteDatabase()
-        let recorder = MessageRouteRecorder()
         try await withDependencies {
-            $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
             $0.workspaceUIHook.dispatch = { _, _, _ in
                 Issue.record("Fast Mode should not be synchronized when unchanged.")
                 return .hook
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
-                await recorder.recordMessage(
-                    sessionID: sessionID,
-                    content: content,
-                    mode: mode
-                )
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in
+                "message-id"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Run normally.","model":"gpt-5.5","fast_mode":false}"#
-                    )
-                ) { response in
-                    #expect(response.status == .noContent)
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(48)),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
         }
+    }
 
-        #expect(
-            await recorder.message == MessageRouteRecorder.RecordedMessage(
-                sessionID: "session-1",
-                content: "Run normally.",
-                mode: .sent
+    @Test("Fast Mode delivery failure rejects without sending")
+    func fastModeDeliveryFailure() async throws {
+        let database = try await messageRouteDatabase()
+        let recorder = MessageRouteRecorder()
+        try await withDependencies {
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.dispatch = { _, _, _ in
+                throw WorkspaceUIHook.DispatchError.deliveryUnknown
+            }
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in
+                await recorder.markSent()
+                return "unexpected"
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(49), isFastModeEnabled: true),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(
+                response.receipt?.result == .rejected(
+                    reason: "Could not determine whether Fast Mode was delivered."
+                )
+            )
+        }
+        #expect(await recorder.didSend == false)
+    }
+
+    @Test("A missing UI hook listener is rejected")
+    func listenerUnavailable() async throws {
+        try await expectResult(
+            from: WorkspaceUIHook.CommandDispatchError.listenerUnavailable,
+            expectedResult: .rejected(
+                reason: "Conductor's workspace UI hook is unavailable."
             )
         )
     }
 
-    @Test("POST message does not send when Fast Mode delivery fails")
-    func fastModeDeliveryFails() async throws {
+    @Test("Post-enqueue failures preserve delivery certainty", arguments: [
+        WorkspaceUIHook.CommandDispatchError.commandFailed("Browser rejected."),
+        .deliveryUnknown,
+        .persistenceTimedOut,
+    ])
+    func postEnqueueFailure(error: WorkspaceUIHook.CommandDispatchError) async throws {
+        let expectedResult: MessageDeliveryResult = switch error {
+        case .commandFailed(let message):
+            .rejected(reason: "Conductor rejected the message: \(message)")
+        case .deliveryUnknown, .persistenceTimedOut:
+            .unknown(reason: "Could not determine whether the message was delivered.")
+        case .listenerUnavailable:
+            .rejected(reason: "Conductor's workspace UI hook is unavailable.")
+        }
+        try await expectResult(
+            from: error,
+            expectedResult: expectedResult
+        )
+    }
+
+    @Test("An unclassified send failure is delivery-unknown")
+    func preEnqueueFailure() async throws {
+        try await expectResult(
+            from: TestError.encoding,
+            expectedResult: .unknown(
+                reason: "Could not determine whether the message was delivered."
+            )
+        )
+    }
+
+    @Test("The route's configured deadline owns message timeout")
+    func configuredDeadline() async throws {
+        let database = try await messageRouteDatabase()
+        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
+        defer { responseContinuation.finish() }
+        try await withDependencies {
+            $0.uuid = .incrementing
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in
+                for await _ in responses { }
+                throw CancellationError()
+            }
+        } operation: {
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(50)),
+                database: database,
+                commandTimeout: .milliseconds(20)
+            )
+            #expect(
+                response.receipt?.result == .unknown(
+                    reason: "Could not determine whether the message was delivered."
+                )
+            )
+        }
+    }
+
+    @Test("Model update failure is rejected before sending")
+    func modelUpdateFailure() async throws {
         let database = try await messageRouteDatabase()
         let recorder = MessageRouteRecorder()
         try await withDependencies {
-            $0.workspaceUIHook.dispatch = { _, _, _ in
-                throw WorkspaceUIHook.DispatchError.deliveryUnknown
-            }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
-                await recorder.recordMessage(
-                    sessionID: sessionID,
-                    content: content,
-                    mode: mode
-                )
+            $0.workspaceUIHook.updateSessionModel = { _, _, _ in false }
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in
+                await recorder.markSent()
+                return "unexpected"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Run fast.","model":"gpt-5.5","fast_mode":true}"#
-                    )
-                ) { response in
-                    #expect(response.status == .serviceUnavailable)
-                    #expect(
-                        String(buffer: response.body)
-                            == "Could not determine whether Fast Mode was delivered."
-                    )
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(44), model: "gpt-5.6-terra"),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(
+                response.receipt?.result == .rejected(
+                    reason: "Conductor is not connected to change the session model."
+                )
+            )
         }
-
-        #expect(await recorder.message == nil)
+        #expect(await recorder.didSend == false)
     }
 
-    @Test("POST first message can switch the session agent and model")
+    @Test("A first message can switch the session agent and model")
     func firstMessageSwitchesAgent() async throws {
+        let attemptID = UUID(51)
         let database = try await messageRouteDatabase()
         let recorder = MessageRouteRecorder()
 
@@ -238,81 +329,49 @@ struct MessageRouteTests {
                 try await waitUntilChangeAvailableInDatabase()
                 return true
             }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, reasoningEffort in
-                let persistedSession = try await database.read { database in
+            $0.workspaceUIHook.sendMessage = {
+                requestID,
+                receivedAttemptID,
+                sessionID,
+                workspaceID,
+                content,
+                mode,
+                reasoningEffort in
+                let session = try await database.read { database in
                     try Session.find(sessionID).fetchOne(database)
                 }
-                #expect(persistedSession?.agentType == .claude)
-                #expect(persistedSession?.model == .fable5)
+                #expect(session?.agentType == .claude)
+                #expect(session?.model == .fable5)
                 #expect(reasoningEffort == .ultracode)
-                await recorder.recordMessage(
+                await recorder.record(
+                    requestID: requestID,
+                    attemptID: receivedAttemptID,
                     sessionID: sessionID,
+                    workspaceID: workspaceID,
                     content: content,
                     mode: mode
                 )
+                return "message-id"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Switch providers.","model":"fable-5","reasoning_effort":"ultracode"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .noContent)
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(
+                    attemptID: attemptID,
+                    model: "fable-5",
+                    reasoningEffort: .ultracode
+                ),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
         }
 
-        let session = try await database.read { database in
-            try Session.find("session-1").fetchOne(database)
-        }
-        #expect(session?.agentType == .claude)
-        #expect(session?.model == .fable5)
-        #expect(await recorder.message?.content == "Switch providers.")
+        #expect(await recorder.message?.content == "  Run the tests.  ")
     }
 
-    @Test("POST message requires the UI hook to change the session model")
-    func modelChangeRequiresUIHook() async throws {
-        let database = try await messageRouteDatabase()
-        let recorder = MessageRouteRecorder()
-        try await withDependencies {
-            $0.workspaceUIHook.updateSessionModel = { _, _, _ in false }
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
-                await recorder.recordMessage(
-                    sessionID: sessionID,
-                    content: content,
-                    mode: mode
-                )
-            }
-        } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Use Terra.","model":"gpt-5.6-terra"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .serviceUnavailable)
-                    #expect(
-                        String(buffer: response.body)
-                            == "Conductor is not connected to change the session model."
-                    )
-                }
-            }
-        }
-
-        #expect(await recorder.message == nil)
-    }
-
-    @Test("POST message rejects a model from another agent after a message was sent")
+    @Test("A model from another agent is rejected after the first message")
     func incompatibleModelAfterMessage() async throws {
+        let attemptID = UUID(52)
         let database = try await messageRouteDatabase()
         try await database.write { database in
             try Session
@@ -322,117 +381,28 @@ struct MessageRouteTests {
         }
         let recorder = MessageRouteRecorder()
         try await withDependencies {
-            $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
-                await recorder.recordMessage(
-                    sessionID: sessionID,
-                    content: content,
-                    mode: mode
-                )
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in
+                await recorder.markSent()
+                return "unexpected"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Switch providers.","model":"fable-5"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .badRequest)
-                    #expect(
-                        String(buffer: response.body)
-                            == "Model is not available for this session's agent."
-                    )
-                }
-            }
-        }
-
-        #expect(await recorder.message == nil)
-    }
-
-    @Test("POST message reports unknown delivery when its callback misses the deadline")
-    func deliveryUnknown() async throws {
-        let database = try await messageRouteDatabase()
-        let clock = ContinuousClock()
-        let (sendStarted, sendStartedContinuation) = AsyncStream<Void>.makeStream(
-            bufferingPolicy: .bufferingNewest(1)
-        )
-        let (receiptGate, receiptGateContinuation) = AsyncStream<Void>.makeStream()
-        defer {
-            sendStartedContinuation.finish()
-            receiptGateContinuation.finish()
-        }
-
-        try await withDependencies {
-            $0.continuousClock = clock
-            $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
-                sendStartedContinuation.yield(())
-                for await _ in receiptGate {}
-                throw CancellationError()
-            }
-        } operation: {
-            let application = Server.makeApplication(
-                database: database,
-                uiCommandTimeout: .milliseconds(50)
+            let response = try await postMessage(
+                body: requestBody(attemptID: attemptID, model: "fable-5"),
+                database: database
             )
-            let request = Task {
-                try await application.test(.router) { client in
-                    try await client.execute(
-                        uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                        method: .post,
-                        headers: [.contentType: "application/json"],
-                        body: ByteBuffer(string: #"{"message":"Run the tests."}"#)
-                    ) { response in
-                        #expect(response.status == .serviceUnavailable)
-                        #expect(
-                            String(buffer: response.body)
-                                == "Could not determine whether the message was delivered. Check the conversation before retrying."
-                        )
-                    }
-                }
-            }
-            for await _ in sendStarted {
-                break
-            }
-            try await request.value
+            #expect(response.status == .ok)
+            #expect(
+                response.receipt?.result == .rejected(
+                    reason: "Model is not available for this session's agent."
+                )
+            )
         }
+        #expect(await recorder.didSend == false)
     }
 
-    @Test("POST message preserves a definite browser failure")
-    func commandFailure() async throws {
-        let database = try await messageRouteDatabase()
-
-        try await withDependencies {
-            $0.continuousClock = ContinuousClock()
-            $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
-                throw WorkspaceUIHook.CommandDispatchError.commandFailed("Rejected.")
-            }
-        } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"message":"Run the tests."}"#)
-                ) { response in
-                    #expect(response.status == .badGateway)
-                    #expect(
-                        String(buffer: response.body)
-                            == "Conductor could not send the message: Rejected."
-                    )
-                }
-            }
-        }
-    }
-
-    @Test("POST message rejects Ultra reasoning for Claude")
-    func claudeUltraReasoning() async throws {
+    @Test("An unavailable reasoning effort is rejected before sending")
+    func unavailableReasoningEffort() async throws {
+        let attemptID = UUID(53)
         let database = try await messageRouteDatabase()
         try await database.write { database in
             try Session
@@ -444,34 +414,32 @@ struct MessageRouteTests {
                 }
                 .execute(database)
         }
-
+        let recorder = MessageRouteRecorder()
         try await withDependencies {
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _ in
-                Issue.record("Invalid reasoning effort should not be sent.")
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in
+                await recorder.markSent()
+                return "unexpected"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Think deeply.","reasoning_effort":"ultra"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .badRequest)
-                    #expect(
-                        String(buffer: response.body)
-                            == "Reasoning effort is not available for this model."
-                    )
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(
+                    attemptID: attemptID,
+                    model: "fable-5",
+                    reasoningEffort: .ultra
+                ),
+                database: database
+            )
+            #expect(
+                response.receipt?.result == .rejected(
+                    reason: "Reasoning effort is not available for this model."
+                )
+            )
         }
+        #expect(await recorder.didSend == false)
     }
 
-    @Test("POST message forwards Ultracode reasoning for Claude")
-    func claudeUltracodeReasoning() async throws {
+    @Test("A valid Claude reasoning effort is forwarded")
+    func claudeReasoningEffort() async throws {
         let database = try await messageRouteDatabase()
         try await database.write { database in
             try Session
@@ -479,132 +447,155 @@ struct MessageRouteTests {
                 .update {
                     $0.agentType = #bind(Session.AgentType.claude)
                     $0.model = #bind(Session.Model.fable5)
-                    $0.claudeEffortLevel = #bind(Session.ReasoningEffort.high)
                 }
                 .execute(database)
         }
-
         try await withDependencies {
-            $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, reasoningEffort in
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, reasoningEffort in
                 #expect(reasoningEffort == .ultracode)
+                return "message-id"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Think deeply.","reasoning_effort":"ultracode"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .noContent)
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(
+                    attemptID: UUID(54),
+                    model: "fable-5",
+                    reasoningEffort: .ultracode
+                ),
+                database: database
+            )
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
         }
     }
 
-    @Test("POST message forwards Default reasoning for Codex")
-    func defaultReasoning() async throws {
+    @Test("An omitted reasoning effort uses the model default")
+    func defaultReasoningEffort() async throws {
         let database = try await messageRouteDatabase()
-
         try await withDependencies {
-            $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, reasoningEffort in
-                #expect(reasoningEffort == Session.ReasoningEffort.none)
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, reasoningEffort in
+                #expect(reasoningEffort == .medium)
+                return "message-id"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(
-                        string: #"{"message":"Use the default.","reasoning_effort":"none"}"#
-                    )
-                ) { response in
-                    #expect(response.status == .noContent)
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(55)),
+                database: database
+            )
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
         }
     }
 
-    @Test("POST message sends immediately for an idle session")
-    func idleSession() async throws {
+    @Test("An omitted reasoning effort preserves a compatible session setting")
+    func persistedReasoningEffort() async throws {
         let database = try await messageRouteDatabase()
         try await database.write { database in
             try Session
                 .find("session-1")
-                .update { $0.status = Session.Status.idle }
+                .update {
+                    $0.codexThinkingLevel = #bind(Session.ReasoningEffort.high)
+                }
                 .execute(database)
         }
-        let recorder = MessageRouteRecorder()
-
         try await withDependencies {
-            $0.continuousClock = ContinuousClock()
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
-                await recorder.recordMessage(
-                    sessionID: sessionID,
-                    content: content,
-                    mode: mode
-                )
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, reasoningEffort in
+                #expect(reasoningEffort == .high)
+                return "message-id"
             }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"message":"Run the tests."}"#)
-                ) { response in
-                    #expect(response.status == .noContent)
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(56)),
+                database: database
+            )
+            #expect(response.receipt?.result == .accepted(messageID: "message-id"))
         }
-
-        #expect(await recorder.message?.mode == .sent)
     }
 
-    @Test("POST message rejects blank input before contacting the UI hook")
-    func blankMessage() async throws {
-        let database = try testConductorDatabase()
-        let recorder = MessageRouteRecorder()
+    @Test("Malformed and blank requests remain untyped 400 responses", arguments: [
+        #"{"message":"Run tests"}"#,
+        #"{"attemptId":"00000000-0000-0000-0000-000000000045","message":"Run tests","model":"gpt-5.5"}"#,
+        #"{"attemptId":"00000000-0000-0000-0000-000000000045","message":"  \n ","model":"gpt-5.5","fast_mode":false}"#,
+    ])
+    func badRequest(body: String) async throws {
+        let database = try await messageRouteDatabase()
+        let response = try await postMessage(
+            body: body,
+            database: database
+        )
+        #expect(response.status == .badRequest)
+        #expect(response.receipt == nil)
+    }
+
+    private func expectResult(
+        from error: any Error & Sendable,
+        expectedResult: MessageDeliveryResult
+    ) async throws {
+        let database = try await messageRouteDatabase()
         try await withDependencies {
             $0.uuid = .incrementing
-            $0.workspaceUIHook.sendMessage = { _, sessionID, _, content, mode, _ in
-                await recorder.recordMessage(
-                    sessionID: sessionID,
-                    content: content,
-                    mode: mode
-                )
-            }
+            $0.workspaceUIHook.sendMessage = { _, _, _, _, _, _, _ in throw error }
         } operation: {
-            let application = Server.makeApplication(database: database)
-            try await application.test(.router) { client in
-                try await client.execute(
-                    uri: "/workspaces/workspace-1/sessions/session-1/messages",
-                    method: .post,
-                    headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"message":" \n "}"#)
-                ) { response in
-                    #expect(response.status == .badRequest)
-                    #expect(String(buffer: response.body) == "Message cannot be empty.")
-                }
-            }
+            let response = try await postMessage(
+                body: requestBody(attemptID: UUID(46)),
+                database: database
+            )
+            #expect(response.status == .ok)
+            #expect(
+                response.receipt == MessageSendResponse(
+                    attemptID: UUID(46),
+                    result: expectedResult
+                )
+            )
         }
-
-        #expect(await recorder.message == nil)
     }
 }
 
-private func messageRouteDatabase() async throws -> DatabaseQueue {
+private func requestBody(
+    attemptID: UUID,
+    model: String = "gpt-5.5",
+    isFastModeEnabled: Bool = false,
+    reasoningEffort: Session.ReasoningEffort? = nil
+) -> String {
+    let reasoning = reasoningEffort.map {
+        #","reasoning_effort":"\#($0.rawValue)""#
+    } ?? ""
+    return #"{"attemptId":"\#(attemptID.uuidString)","message":"  Run the tests.  ","model":"\#(model)","fast_mode":\#(isFastModeEnabled),"mode":"sent"\#(reasoning)}"#
+}
+
+private func postMessage(
+    body: String,
+    database: DatabaseQueue,
+    commandTimeout: Duration = .seconds(5)
+) async throws -> (status: HTTPResponse.Status, receipt: MessageSendResponse?) {
+    let application = Server.makeApplication(
+        database: database,
+        uiCommandTimeout: commandTimeout
+    )
+    let result = LockIsolated<(HTTPResponse.Status, MessageSendResponse?)?>(nil)
+    try await application.test(.router) { client in
+        try await client.execute(
+            uri: "/workspaces/workspace-1/sessions/session-1/messages",
+            method: .post,
+            headers: [.contentType: "application/json"],
+            body: ByteBuffer(string: body)
+        ) { response in
+            let data = Data(response.body.readableBytesView)
+            result.withValue {
+                $0 = (
+                    response.status,
+                    try? JSONDecoder().decode(MessageSendResponse.self, from: data)
+                )
+            }
+        }
+    }
+    return try #require(result.value)
+}
+
+private func messageRouteDatabase(
+    status: Session.Status = .working
+) async throws -> DatabaseQueue {
     let database = try testConductorDatabase()
     let date = Date(timeIntervalSince1970: 1_783_555_200)
     let workspace = Workspace(
@@ -622,7 +613,7 @@ private func messageRouteDatabase() async throws -> DatabaseQueue {
         createdAt: "2026-07-09T00:00:01Z",
         updatedAt: "2026-07-09T00:00:01Z",
         lastUserMessageAt: nil,
-        status: .working,
+        status: status,
         model: .gpt5_5,
         unreadCount: 0,
         freshlyCompacted: 0,
@@ -638,34 +629,46 @@ private func messageRouteDatabase() async throws -> DatabaseQueue {
 
 private actor MessageRouteRecorder {
     private(set) var message: RecordedMessage?
-    private(set) var isUpdatedFastModeEnabled: Bool?
-    private(set) var updatedModel: Session.Model?
-    private(set) var updatedSessionID: Session.ID?
+    private(set) var didSend = false
+    private(set) var didUpdateFastMode = false
 
-    func recordMessage(
+    func record(
+        requestID: UUID,
+        attemptID: UUID,
         sessionID: Session.ID,
+        workspaceID: Workspace.ID,
         content: String,
         mode: WorkspaceUIHook.MessageMode
     ) {
+        didSend = true
         message = RecordedMessage(
+            requestID: requestID,
+            attemptID: attemptID,
             sessionID: sessionID,
+            workspaceID: workspaceID,
             content: content,
             mode: mode
         )
     }
 
-    func recordModelUpdate(sessionID: Session.ID, model: Session.Model) {
-        updatedModel = model
-        updatedSessionID = sessionID
+    func markSent() {
+        didSend = true
     }
 
-    func recordFastModeUpdate(isEnabled: Bool) {
-        isUpdatedFastModeEnabled = isEnabled
+    func recordFastModeUpdate() {
+        didUpdateFastMode = true
     }
 
     struct RecordedMessage: Equatable {
+        let requestID: UUID
+        let attemptID: UUID
         let sessionID: Session.ID
+        let workspaceID: Workspace.ID
         let content: String
         let mode: WorkspaceUIHook.MessageMode
     }
+}
+
+private enum TestError: Error {
+    case encoding
 }

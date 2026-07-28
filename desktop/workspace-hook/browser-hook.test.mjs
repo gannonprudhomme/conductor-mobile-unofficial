@@ -384,6 +384,7 @@ isolatedTest("commands run in order with real service signatures and continue af
     },
     async enqueueMessage() {},
     async sendMessageImmediately() {},
+    async sendToAgent() {},
   };
   const environment = installHookGlobals({
     shell: {
@@ -674,8 +675,17 @@ isolatedTest("message commands persist effort, call the explicit controller mode
   shell.sessionService.updateSessionClaudeEffortLevel = async (...arguments_) => {
     calls.push(["claudeEffort", arguments_]);
   };
-  shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
-    calls.push(["sent", arguments_]);
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
+    calls.push(["sent", [input]]);
+    await this.sendToAgent(
+      input.session,
+      { content: input.message, id: "message-1" },
+      "generated-turn",
+      { deliveryMode: "default" },
+    );
+  };
+  shell.messageProcessingController.sendToAgent = async (...arguments_) => {
+    calls.push(["agent", arguments_]);
   };
   shell.messageProcessingController.enqueueMessage = async (...arguments_) => {
     calls.push(["queued", arguments_]);
@@ -709,8 +719,21 @@ isolatedTest("message commands persist effort, call the explicit controller mode
       includeAttachments: false,
     }],
   ]);
+  assert.deepEqual(calls[3], [
+    "agent",
+    [
+      { ...session, codexThinkingLevel: "ultra" },
+      { content: "Run the tests.", id: "message-1" },
+      "generated-turn",
+      { deliveryMode: "default" },
+    ],
+  ]);
   assert.deepEqual(environment.commandResults[0], {
     requestId: "request-1",
+    result: {
+      type: "accepted",
+      messageId: "message-1",
+    },
   });
 
   session.agentType = "claude";
@@ -722,18 +745,18 @@ isolatedTest("message commands persist effort, call the explicit controller mode
   }));
   await waitUntil(() => environment.commandResults.length === 2);
   await waitUntil(() => environment.errors.length === 1);
-  assert.deepEqual(calls[3], [
+  assert.deepEqual(calls[4], [
     "sessions",
     { workspaceId: "workspace-1", hidden: false },
   ]);
-  assert.deepEqual(calls[4], [
+  assert.deepEqual(calls[5], [
     "claudeEffort",
     [{
       sessionId: "session-1",
       claudeEffortLevel: "ultracode",
     }],
   ]);
-  assert.deepEqual(calls[5], [
+  assert.deepEqual(calls[6], [
     "queued",
     [{
       session: { ...session, claudeEffortLevel: "ultracode" },
@@ -741,21 +764,127 @@ isolatedTest("message commands persist effort, call the explicit controller mode
       workspaceId: "workspace-1",
       includeAttachments: false,
       sendMode: "queued",
+      turnId: "request-2-attempt",
     }],
   ]);
   assert.deepEqual(environment.commandResults[1], {
     requestId: "request-2",
-    error: "Rejected.",
+    result: {
+      type: "unknown",
+      reason: "Conductor started queueing the message, but delivery could not be confirmed.",
+    },
   });
-  assert.equal(environment.errors[0][1].message, "Rejected.");
+  assert.equal(
+    environment.errors[0][1].message,
+    "Conductor started queueing the message, but delivery could not be confirmed.",
+  );
+});
+
+isolatedTest("a send-controller failure reports unknown delivery", async () => {
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
+    await this.sendToAgent(
+      input.session,
+      { content: input.message, id: "message-1" },
+      "generated-turn",
+      {},
+    );
+  };
+  shell.messageProcessingController.sendToAgent = async () => {
+    throw new Error("Connection closed.");
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+    result: {
+      type: "unknown",
+      reason: "Conductor started sending the message, but delivery could not be confirmed.",
+    },
+  });
+});
+
+isolatedTest("a send without an observable message reports unknown delivery", async () => {
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
+    if (input.includeAttachments === "unsupported") {
+      await this.sendToAgent();
+    }
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+    result: {
+      type: "unknown",
+      reason: "Conductor accepted the send command, but created no observable message receipt.",
+    },
+  });
+});
+
+isolatedTest("an invalid attempt is rejected before controller dispatch", async () => {
+  let didDispatch = false;
+  const shell = emptyWorkspaceShell();
+  shell.messageProcessingController.sendMessageImmediately = async () => {
+    didDispatch = true;
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage({
+    data: JSON.stringify({
+      requestId: "request-1",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      sendMessage: {
+        attemptId: "",
+        content: "Run the tests.",
+        mode: "sent",
+      },
+    }),
+  });
+
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.equal(didDispatch, false);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+    result: {
+      type: "rejected",
+      reason: "The message attempt ID is invalid.",
+    },
+  });
 });
 
 isolatedTest("command result reporting retries without executing twice", async () => {
   const calls = [];
   const shell = emptyWorkspaceShell();
   shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
-  shell.messageProcessingController.sendMessageImmediately = async (...arguments_) => {
-    calls.push(arguments_);
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
+    calls.push(input);
+    await this.sendToAgent(
+      input.session,
+      { content: input.message, id: "message-1" },
+      "generated-turn",
+      {},
+    );
   };
   const environment = installHookGlobals({ shell });
   environment.commandResultFailures = 1;
@@ -770,6 +899,69 @@ isolatedTest("command result reporting retries without executing twice", async (
   await waitUntil(() => environment.commandResultAttempts.length === 2);
   assert.equal(calls.length, 1);
   assert.equal(environment.commandResults.length, 1);
+});
+
+isolatedTest("hung and native sends remain isolated from later mobile sends", async () => {
+  const firstSend = deferred();
+  const mobileMessages = [];
+  const nativeTurns = [];
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendToAgent = async (_session, _message, turnId) => {
+    nativeTurns.push(turnId);
+  };
+  const originalSendToAgent = shell.messageProcessingController.sendToAgent;
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
+    mobileMessages.push(input.message);
+    await this.sendToAgent(
+      input.session,
+      { id: input.message === "First" ? "message-1" : "message-2" },
+      "generated-turn",
+      {},
+    );
+    if (input.message === "First") {
+      await firstSend.promise;
+    }
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+  const source = environment.eventSources[0];
+
+  source.onmessage(messageCommand({
+    requestId: "request-1",
+    content: "First",
+    mode: "sent",
+  }));
+  await waitUntil(() => mobileMessages.length === 1);
+
+  await shell.messageProcessingController.sendToAgent(
+    { id: "session-1" },
+    { id: "native-message" },
+    "native-turn",
+  );
+  source.onmessage(messageCommand({
+    requestId: "request-2",
+    content: "Second",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.equal(shell.messageProcessingController.sendToAgent, originalSendToAgent);
+  assert.deepEqual(
+    nativeTurns,
+    ["generated-turn", "native-turn", "generated-turn"],
+  );
+  assert.deepEqual(mobileMessages, ["First", "Second"]);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-2",
+    result: {
+      type: "accepted",
+      messageId: "message-2",
+    },
+  });
+
+  firstSend.resolve();
+  await waitUntil(() => environment.commandResults.length === 2);
 });
 
 isolatedTest("stop commands cancel the exact session and report success or errors", async () => {
@@ -846,9 +1038,14 @@ isolatedTest("message sends bypass a blocked workspace command", async () => {
     await pinGate.promise;
   };
   shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
-  shell.messageProcessingController.sendMessageImmediately = async () => {
+  shell.messageProcessingController.sendMessageImmediately = async function (input) {
     calls.push("message");
-    return { messageId: "message-1", state: "sent" };
+    await this.sendToAgent(
+      input.session,
+      { id: "message-1" },
+      "generated-turn",
+      {},
+    );
   };
   const environment = installHookGlobals({ shell });
   await prepareHook();
@@ -865,6 +1062,71 @@ isolatedTest("message sends bypass a blocked workspace command", async () => {
   assert.deepEqual(calls, ["pin", "message"]);
   await waitUntil(() => environment.commandResults.length === 1);
   pinGate.resolve();
+});
+
+isolatedTest("queued sends preserve ordering with workspace mutations", async () => {
+  const pinGate = deferred();
+  const calls = [];
+  const shell = emptyWorkspaceShell();
+  shell.workspaceService.setWorkspacePinned = async () => {
+    calls.push("pin");
+    await pinGate.promise;
+  };
+  shell.sessionService.getSessionsForWorkspace = async () => {
+    calls.push("session");
+    return [{ id: "session-1" }];
+  };
+  shell.messageProcessingController.enqueueMessage = async () => {
+    calls.push("queued");
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(command({ pinned: true }));
+  await waitUntil(() => calls.length === 1);
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "queued",
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ["pin"]);
+
+  pinGate.resolve();
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.deepEqual(calls, ["pin", "session", "queued"]);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+    result: { type: "accepted" },
+  });
+});
+
+isolatedTest("an unsupported immediate-send receiver is rejected before dispatch", async () => {
+  let didDispatch = false;
+  const shell = emptyWorkspaceShell();
+  shell.sessionService.getSessionsForWorkspace = async () => [{ id: "session-1" }];
+  shell.messageProcessingController.sendMessageImmediately = async function () {
+    didDispatch = true;
+    await this.unsupportedSend();
+  };
+  const environment = installHookGlobals({ shell });
+  await prepareHook();
+
+  environment.eventSources[0].onmessage(messageCommand({
+    requestId: "request-1",
+    content: "Run the tests.",
+    mode: "sent",
+  }));
+
+  await waitUntil(() => environment.commandResults.length === 1);
+  assert.equal(didDispatch, false);
+  assert.deepEqual(environment.commandResults[0], {
+    requestId: "request-1",
+    result: {
+      type: "rejected",
+      reason: "This Conductor version has an unsupported immediate-message implementation.",
+    },
+  });
 });
 
 isolatedTest("workspace creation resolves when Conductor publishes the workspace", async () => {
@@ -1064,6 +1326,7 @@ function emptyWorkspaceShell() {
     async cancelSession() {},
     async enqueueMessage() {},
     async sendMessageImmediately() {},
+    async sendToAgent() {},
   };
   return {
     agentService,
@@ -1104,7 +1367,7 @@ function messageCommand({ requestId, ...sendMessage }) {
       requestId,
       sessionId: "session-1",
       workspaceId: "workspace-1",
-      sendMessage,
+      sendMessage: { attemptId: `${requestId}-attempt`, ...sendMessage },
     }),
   };
 }
