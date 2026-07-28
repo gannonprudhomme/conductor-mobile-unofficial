@@ -1018,7 +1018,7 @@ public struct WorkspacesView: View {
 
                 if cloudStatus != nil && localStatus != nil {
                     Rectangle()
-                        .fill(.theme(.border))
+                        .fill(.theme(.textSecondary))
                         .frame(width: 1, height: 12)
                         .accessibilityHidden(true)
                 }

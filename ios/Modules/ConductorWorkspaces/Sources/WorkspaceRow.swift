@@ -93,7 +93,7 @@ struct WorkspaceRow: View {
 
     private var rowLabel: some View {
         Label {
-            HStack(spacing: 5) {
+            HStack(spacing: 8) {
                 Text(title)
                     .lineLimit(1)
 
