@@ -112,6 +112,26 @@ struct CloudAPIClientTests {
         )
     }
 
+    @Test("Observation streams finish normally for URLSession cancellation")
+    func observationURLCancellation() async throws {
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+
+        try await withDependencies {
+            $0.cloudAPITransport.data = { _ in
+                throw URLError(.cancelled)
+            }
+        } operation: {
+            for try await _ in client.observeSessions("workspace") {
+                Issue.record("A canceled session stream should not emit.")
+            }
+            for try await _ in client.observeTranscript("session", nil) {
+                Issue.record("A canceled transcript stream should not emit.")
+            }
+        }
+    }
+
     @Test("Stored and candidate identity checks use separate credentials")
     func identityCredentialOwnership() async throws {
         let credentialLoads = LockIsolated(0)
@@ -406,6 +426,89 @@ struct CloudAPIClientTests {
         observation.cancel()
         await observation.value
         #expect(errors.value.isEmpty)
+    }
+
+    @Test("Workspace creation recovery matches its request-specific session")
+    func workspaceCreationRecovery() async throws {
+        let recoverySessionName = "Conductor Mobile recovery-token"
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let response = try await withDependencies {
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/projects":
+                    return try testResponse(
+                        page(
+                            data: #"""
+                            {
+                              "id": "project",
+                              "name": "Project",
+                              "gitRemote": "https://example.test/repo.git"
+                            }
+                            """#,
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                case "/v0/projects/project/workspaces":
+                    return try testResponse(
+                        page(
+                            data: [
+                                workspaceJSON(id: "existing"),
+                                workspaceJSON(id: "concurrent"),
+                                workspaceJSON(id: "recovered"),
+                            ]
+                            .joined(separator: ","),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                case "/v0/workspaces/concurrent/sessions":
+                    return try testResponse(
+                        page(
+                            data: sessionJSON(id: "other-session"),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                case "/v0/workspaces/recovered/sessions":
+                    return try testResponse(
+                        page(
+                            data: sessionJSON(
+                                id: "initial-session",
+                                name: recoverySessionName
+                            ),
+                            offset: 0,
+                            hasMore: false
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            try await client.recoverWorkspaceCreation(
+                expectedAccountID: "user::",
+                request: CloudWorkspaceCreationRecoveryRequest(
+                    baselineWorkspaceIDs: ["existing"],
+                    projectID: "project",
+                    sessionName: recoverySessionName
+                )
+            )
+        }
+
+        #expect(response?.workspaceID == "recovered")
+        #expect(response?.sessionID == "initial-session")
     }
 
     @Test("Polling limits concurrent status requests to eight")
@@ -770,7 +873,7 @@ struct CloudAPIClientTests {
                         $0 += 1
                         return $0
                     }
-                    if requestCount == 1 {
+                    if requestCount <= 2 {
                         return try testResponse(
                             #"""
                             {
@@ -802,10 +905,10 @@ struct CloudAPIClientTests {
             }
         }
 
-        await waitForCloudCondition { messageRequestCount.value == 1 }
+        await waitForCloudCondition { messageRequestCount.value == 2 }
         await clock.advance(by: .seconds(1))
         await waitForCloudCondition { updates.value.count == 1 }
-        #expect(messageRequestCount.value == 2)
+        #expect(messageRequestCount.value == 4)
         #expect(updates.value.first?.kind == .complete)
 
         observation.cancel()
@@ -1056,6 +1159,60 @@ struct CloudAPIClientTests {
         _ = try? await observation.value
     }
 
+    @Test("Concurrent pagination does not serially retry semantic failures")
+    func concurrentPaginationSemanticFailure() async throws {
+        let requestCount = LockIsolated(0)
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.date.now = Date(timeIntervalSince1970: 0)
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    requestCount.withValue { $0 += 1 }
+                    return try testResponse(
+                        #"{"userMessage":"Unauthorized"}"#,
+                        for: request,
+                        statusCode: 401
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await _ in client.observeTranscript(
+                        sessionID: "session",
+                        checkpoint: nil
+                    ) { }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        _ = await observation.result
+        #expect((1...2).contains(requestCount.value))
+        #expect(receivedError.value?.isAuthenticationFailure == true)
+    }
+
     @Test("Incremental transcript pages chain raw cursors without offsets")
     func incrementalTranscriptPagination() async throws {
         let clock = TestClock()
@@ -1163,6 +1320,79 @@ struct CloudAPIClientTests {
         )
     }
 
+    @Test("Incremental pagination rejects a multi-cursor cycle")
+    func incrementalPaginationRejectsCursorCycle() async throws {
+        let receivedError = LockIsolated<CloudAPIClientError?>(nil)
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.date.now = Date(timeIntervalSince1970: 0)
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let cursor = requestQueryItems(request)
+                        .first(where: { $0.name == "after" })?
+                        .value
+                    let nextCursor = switch cursor {
+                    case "committed":
+                        "first"
+                    case "first":
+                        "second"
+                    default:
+                        "first"
+                    }
+                    return try testResponse(
+                        page(
+                            data: transcriptMessageJSON(
+                                id: nextCursor,
+                                sessionIndex: 1
+                            ),
+                            offset: 0,
+                            hasMore: true
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                do {
+                    for try await _ in client.observeTranscript(
+                        sessionID: "session",
+                        checkpoint: CloudTranscriptCheckpoint(
+                            accountID: "user::",
+                            remoteSessionID: "session",
+                            rawCursor: "committed",
+                            lastFullTranscriptRefreshAt: .distantFuture
+                        )
+                    ) { }
+                } catch let error as CloudAPIClientError {
+                    receivedError.setValue(error)
+                }
+            }
+        }
+
+        _ = await observation.result
+        #expect(receivedError.value == .invalidResponse)
+    }
+
     @Test("An invalid incremental cursor recovers with a complete request")
     func invalidIncrementalCursorRecovers() async throws {
         let clock = TestClock()
@@ -1233,14 +1463,15 @@ struct CloudAPIClientTests {
         await waitForCloudCondition { updates.value.count == 1 }
         observation.cancel()
         _ = try? await observation.value
-        #expect(messageQueries.value.count == 2)
+        #expect(messageQueries.value.count == 3)
         #expect(
             Set(messageQueries.value[0].map(\.name))
                 == ["limit", "after"]
         )
         #expect(
-            Set(messageQueries.value[1].map(\.name))
-                == ["limit", "offset"]
+            messageQueries.value.dropFirst().allSatisfy {
+                Set($0.map(\.name)) == ["limit", "offset"]
+            }
         )
         #expect(updates.value[0].kind == .complete)
     }
@@ -1821,12 +2052,15 @@ private func statusJSON(
     """
 }
 
-private func sessionJSON(id: String) -> String {
+private func sessionJSON(
+    id: String,
+    name: String? = nil
+) -> String {
     """
     {
       "id": "\(id)",
       "deepLink": "https://app.conductor.build/session/\(id)",
-      "name": "\(id)",
+      "name": "\(name ?? id)",
       "model": "gpt-5.6-sol"
     }
     """

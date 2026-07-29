@@ -18,7 +18,6 @@ public struct CloudWorkspaceCreationPayload: Codable, Equatable, Sendable {
     public let selectedReasoningEffort: Session.ReasoningEffort?
     public let prompt: String
     public var baselineRemoteWorkspaceIDs: [String]?
-    public var baselineCapturedAt: Date?
 
     public init(
         request: CloudCreateWorkspaceRequest,
@@ -28,8 +27,7 @@ public struct CloudWorkspaceCreationPayload: Codable, Equatable, Sendable {
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort?,
         prompt: String,
-        baselineRemoteWorkspaceIDs: [String]? = nil,
-        baselineCapturedAt: Date? = nil
+        baselineRemoteWorkspaceIDs: [String]? = nil
     ) {
         self.request = request
         self.canonicalRepositoryID = canonicalRepositoryID
@@ -39,7 +37,6 @@ public struct CloudWorkspaceCreationPayload: Codable, Equatable, Sendable {
         self.selectedReasoningEffort = selectedReasoningEffort
         self.prompt = prompt
         self.baselineRemoteWorkspaceIDs = baselineRemoteWorkspaceIDs
-        self.baselineCapturedAt = baselineCapturedAt
     }
 }
 public struct CloudWorkspaceCreationCompletionPayload: Codable, Equatable, Sendable {

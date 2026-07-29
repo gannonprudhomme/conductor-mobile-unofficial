@@ -14,14 +14,14 @@ struct ChatTextField: View {
     @FocusState var isFocused: Bool
 
     @Binding var text: String
-    @Binding var selectedModel: Session.Model
+    let selectedModel: Session.Model
     let selectedReasoningEffort: Session.ReasoningEffort?
     let availableReasoningEfforts: [Session.ReasoningEffort]
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let configurationInteractionMode: ModelConfigurationInteractionMode
     let contextWindowUsage: ContextWindowUsage?
     let allowsQueue: Bool
-    let showsConfigurationControls: Bool
     let isFastModeEnabled: Bool
     let isEditingQueuedMessage: Bool
     let isSendInFlight: Bool
@@ -30,6 +30,10 @@ struct ChatTextField: View {
     let shouldFocusOnAppear: Bool
     let onFastModeTapped: @MainActor () -> Void
     let onCancelEditingTapped: @MainActor () -> Void
+    let onConfigurationControlTapped: @MainActor (
+        ModelConfigurationControl
+    ) -> Void
+    let onSelectModel: @MainActor (Session.Model) -> Void
     let onSelectReasoningEffort: @MainActor (Session.ReasoningEffort) -> Void
     let onSendTapped: @MainActor () -> Void
     let onQueueTapped: @MainActor () -> Void
@@ -39,20 +43,24 @@ struct ChatTextField: View {
         text: Binding<String>,
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool,
+        configurationInteractionMode: ModelConfigurationInteractionMode = .editable,
         contextWindowUsage: ContextWindowUsage? = nil,
         allowsQueue: Bool = true,
-        showsConfigurationControls: Bool = true,
         isFastModeEnabled: Bool,
         isEditingQueuedMessage: Bool = false,
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
-        selectedModel: Binding<Session.Model>,
+        selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort?,
         availableReasoningEfforts: [Session.ReasoningEffort],
         shouldFocusOnAppear: Bool = false,
         onFastModeTapped: @escaping @MainActor () -> Void,
         onCancelEditingTapped: @escaping @MainActor () -> Void = { },
+        onConfigurationControlTapped: @escaping @MainActor (
+            ModelConfigurationControl
+        ) -> Void = { _ in },
+        onSelectModel: @escaping @MainActor (Session.Model) -> Void = { _ in },
         onSelectReasoningEffort: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSendTapped: @escaping @MainActor () -> Void,
         onQueueTapped: @escaping @MainActor () -> Void = { },
@@ -61,20 +69,22 @@ struct ChatTextField: View {
         self._text = text
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.configurationInteractionMode = configurationInteractionMode
         self.contextWindowUsage = contextWindowUsage
         self.allowsQueue = allowsQueue
-        self.showsConfigurationControls = showsConfigurationControls
         self.isFastModeEnabled = isFastModeEnabled
         self.isEditingQueuedMessage = isEditingQueuedMessage
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
-        self._selectedModel = selectedModel
+        self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.availableReasoningEfforts = availableReasoningEfforts
         self.shouldFocusOnAppear = shouldFocusOnAppear
         self.onFastModeTapped = onFastModeTapped
         self.onCancelEditingTapped = onCancelEditingTapped
+        self.onConfigurationControlTapped = onConfigurationControlTapped
+        self.onSelectModel = onSelectModel
         self.onSelectReasoningEffort = onSelectReasoningEffort
         self.onSendTapped = onSendTapped
         self.onQueueTapped = onQueueTapped
@@ -148,23 +158,27 @@ struct ChatTextField: View {
         .font(.theme(.body))
         .foregroundStyle(.theme(.textPrimary))
         .tint(.theme(.accent))
+        .accessibilityIdentifier("chat.message")
     }
 
     private var bottomRowButtons: some View {
         HStack(spacing: 8) {
             Group {
-                if showsConfigurationControls {
+                if configurationInteractionMode != .hidden {
                     ModelAndFastModeControls(
                         agentType: agentType,
                         allowsAgentSwitching: allowsAgentSwitching,
                         availableReasoningEfforts: availableReasoningEfforts,
+                        interactionMode: configurationInteractionMode,
                         isFastModeEnabled: isFastModeEnabled,
                         isFastModeButtonDisabled: isAnyActionInFlight,
                         selectedModel: selectedModel,
                         selectedReasoningEffort: selectedReasoningEffort,
                         onFastModeTapped: onFastModeTapped,
+                        onInformationalControlTapped:
+                            onConfigurationControlTapped,
                         onSelectReasoningEffort: onSelectReasoningEffort,
-                        onSelectModel: { selectedModel = $0 }
+                        onSelectModel: onSelectModel
                     )
                 } else {
                     Text(selectedModel.rawValue)
@@ -256,6 +270,7 @@ struct ChatTextField: View {
             }
             .disabled(!isEnabled)
             .accessibilityIdentifier("chat.send")
+            .accessibilityValue(isInFlight ? "Sending" : "Idle")
             .glassEffect(
                 .regular
                     .tint(Color.theme(.foreground).opacity(isEnabled ? 1 : 0.5))
@@ -400,10 +415,11 @@ struct ChatTextField: View {
             isSendInFlight: false,
             isStopInFlight: false,
             isWorking: true,
-            selectedModel: $selectedModel,
+            selectedModel: selectedModel,
             selectedReasoningEffort: .ultra,
             availableReasoningEfforts: selectedModel.availableCodexReasoningEfforts,
             onFastModeTapped: { isFastModeEnabled.toggle() },
+            onSelectModel: { selectedModel = $0 },
             onSelectReasoningEffort: { _ in },
             onSendTapped: { },
             onStopTapped: { }

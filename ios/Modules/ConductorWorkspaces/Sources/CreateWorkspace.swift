@@ -141,8 +141,7 @@ public struct CreateWorkspace: Sendable {
             CreatedWorkspace,
             selectedModel: Session.Model,
             selectedReasoningEffort: Session.ReasoningEffort?,
-            requestLease: DesktopRequestLease,
-            initialPrompt: WorkspaceCreationResult.InitialPrompt?
+            requestLease: DesktopRequestLease
         )
         case modelSettingsFetched(DesktopClient.ModelSettings)
         case modeSelected(Mode)
@@ -158,6 +157,7 @@ public struct CreateWorkspace: Sendable {
     }
 
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.defaultDatabase) var database
     @Dependency(\.uuid) var uuid
 
     public init() {}
@@ -222,9 +222,9 @@ public struct CreateWorkspace: Sendable {
                         workspaceID,
                     ] send in
                     do {
-                        // Workspace creation and optional prompt delivery are one endpoint-pinned
-                        // workflow. The lease prevents any obsolete-address result from entering the
-                        // durable cache or navigation state after Settings changes the address.
+                        // Workspace creation and its durable initial-prompt handoff are pinned to
+                        // one endpoint. The lease prevents an old-address result from entering
+                        // navigation after Settings changes the desktop address.
                         let requestLease = try desktopClient.acquireRequestLease()
                         let createdWorkspace = try await DesktopRequestLeaseContext.$current
                             .withValue(requestLease) {
@@ -236,51 +236,42 @@ public struct CreateWorkspace: Sendable {
                                     isFastModeEnabled: isFastModeEnabled
                                 )
                             }
-                        let initialPrompt: WorkspaceCreationResult.InitialPrompt?
-                        if let promptMessageID {
-                            let result: MessageDeliveryResult
-                            do {
-                                result = try await DesktopRequestLeaseContext.$current
-                                    .withValue(requestLease) {
-                                        try await desktopClient.sendMessage(
-                                            workspaceID: createdWorkspace.workspace.id,
-                                            sessionID: createdWorkspace.session.id,
-                                            message: prompt,
-                                            model: model,
-                                            isFastModeEnabled: isFastModeEnabled,
-                                            mode: .sent,
-                                            reasoningEffort: reasoningEffort,
-                                            attemptID: promptMessageID
-                                        )
-                                    }
-                            } catch is CancellationError {
-                                throw CancellationError()
-                            } catch DesktopClientError.staleRequestLease {
-                                throw DesktopClientError.staleRequestLease
-                            } catch {
-                                result = .unknown(
-                                    reason: "Prompt delivery could not be determined."
-                                )
-                            }
-                            initialPrompt = WorkspaceCreationResult.InitialPrompt(
-                                attemptID: promptMessageID,
-                                content: prompt,
-                                deliveryResult: result
-                            )
-                        } else {
-                            initialPrompt = nil
-                        }
                         try await desktopClient.persistCreatedWorkspace(
                             createdWorkspace: createdWorkspace,
                             requestLease: requestLease
                         )
+                        if let promptMessageID {
+                            try await database.write { database in
+                                try MessageDeliveryAttempt
+                                    .insert {
+                                        MessageDeliveryAttempt(
+                                            attemptID: promptMessageID,
+                                            route: .desktop,
+                                            desktopEndpoint:
+                                                requestLease.baseURL
+                                                    .absoluteString,
+                                            canonicalWorkspaceID:
+                                                createdWorkspace.workspace.id,
+                                            canonicalSessionID:
+                                                createdWorkspace.session.id,
+                                            content: prompt,
+                                            model: model,
+                                            isFastModeEnabled:
+                                                isFastModeEnabled,
+                                            mode: .sent,
+                                            reasoningEffort: reasoningEffort,
+                                            submittedDraft: prompt
+                                        )
+                                    }
+                                    .execute(database)
+                            }
+                        }
                         await send(
                             .createWorkspaceSucceeded(
                                 createdWorkspace,
                                 selectedModel: model,
                                 selectedReasoningEffort: reasoningEffort,
-                                requestLease: requestLease,
-                                initialPrompt: initialPrompt
+                                requestLease: requestLease
                             )
                         )
                     } catch is CancellationError {
@@ -321,8 +312,7 @@ public struct CreateWorkspace: Sendable {
                 createdWorkspace,
                 selectedModel,
                 selectedReasoningEffort,
-                requestLease,
-                initialPrompt
+                requestLease
             ):
                 guard desktopClient.isRequestLeaseValid(lease: requestLease) else {
                     state.isCreateAPIInFlight = false
@@ -337,7 +327,6 @@ public struct CreateWorkspace: Sendable {
                     .delegate(
                         .workspaceCreated(
                             WorkspaceCreationResult(
-                                initialPrompt: initialPrompt,
                                 selectedModel: selectedModel,
                                 selectedReasoningEffort: selectedReasoningEffort,
                                 requestLease: requestLease,
@@ -435,7 +424,6 @@ public struct CloudWorkspaceCreationForm: Equatable, Sendable {
 /// emitted them; Cloud results are account-scoped and do not need a desktop lease.
 public struct WorkspaceCreationResult: Equatable, Sendable {
     public let completionID: UUID?
-    public let initialPrompt: InitialPrompt?
     public let selectedModel: Session.Model
     public let selectedReasoningEffort: Session.ReasoningEffort?
     /// Endpoint identity on which local creation and its atomic persistence completed.
@@ -445,7 +433,6 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
 
     /// Packages creation state for the parent delegate action after persistence has succeeded.
     public init(
-        initialPrompt: InitialPrompt? = nil,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort? = nil,
         requestLease: DesktopRequestLease? = nil,
@@ -454,7 +441,6 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
         completionID: UUID? = nil
     ) {
         self.completionID = completionID
-        self.initialPrompt = initialPrompt
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.requestLease = requestLease
@@ -462,21 +448,6 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
         self.workspace = workspace
     }
 
-    public struct InitialPrompt: Equatable, Sendable {
-        public let attemptID: UUID
-        public let content: String
-        public let deliveryResult: MessageDeliveryResult
-
-        public init(
-            attemptID: UUID,
-            content: String,
-            deliveryResult: MessageDeliveryResult
-        ) {
-            self.attemptID = attemptID
-            self.content = content
-            self.deliveryResult = deliveryResult
-        }
-    }
 }
 
 extension AlertState where Action == CreateWorkspace.Action.Alert {

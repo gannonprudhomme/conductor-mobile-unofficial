@@ -55,6 +55,7 @@ public enum CloudTranscriptAdapter {
                     content: text,
                     turnID: turnID,
                     model: content["config"]?.objectValue?["model"]?.stringValue,
+                    sdkMessageID: content["id"]?.stringValue,
                     senderID: content["senderId"]?.stringValue
                 ),
             ]
@@ -337,6 +338,7 @@ public enum CloudTranscriptAdapter {
         content: String,
         turnID: String,
         model: String? = nil,
+        sdkMessageID: String? = nil,
         senderID: String? = nil
     ) -> Part {
         Part(
@@ -353,6 +355,7 @@ public enum CloudTranscriptAdapter {
                 createdAt: event.receivedAt,
                 sentAt: event.receivedAt,
                 model: model,
+                sdkMessageID: sdkMessageID,
                 turnID: turnID,
                 senderID: senderID
             ),

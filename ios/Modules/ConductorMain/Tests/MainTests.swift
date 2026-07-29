@@ -258,11 +258,6 @@ struct MainTests {
             endpointEpoch: 0
         )
         let creation = WorkspaceCreationResult(
-            initialPrompt: .init(
-                attemptID: UUID(42),
-                content: "Run the tests.",
-                deliveryResult: .unknown(reason: "Delivery unconfirmed.")
-            ),
             selectedModel: .gpt_5_6_terra,
             selectedReasoningEffort: .ultra,
             requestLease: requestLease,
@@ -288,13 +283,6 @@ struct MainTests {
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
                             selectedReasoningEffort: .ultra,
-                            initialMessage: .init(
-                                id: UUID(42),
-                                content: "Run the tests.",
-                                deliveryResult: .unknown(
-                                    reason: "Delivery unconfirmed."
-                                )
-                            ),
                             shouldFocusMessageField: true
                         )
                     )

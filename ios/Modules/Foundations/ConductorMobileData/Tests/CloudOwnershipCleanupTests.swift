@@ -13,28 +13,101 @@ import SQLiteData
 import Testing
 
 struct CloudOwnershipCleanupTests {
-    @Test("Authoritative cleanup preserves an acknowledged send subtree")
-    func acknowledgedSendProtectsSubtree() throws {
+    @Test("Removing Cloud ownership restores the raw Desktop workspace ID")
+    func cloudRemovalRestoresDesktopWorkspaceID() throws {
         let database = try appDatabase()
         let fixture = try insertFixture(in: database)
-        let attempt = try CloudPendingMutation(
+        let desktopSession = Session.preview(
+            id: "desktop-session",
+            workspaceID: fixture.workspaceID
+        )
+        let desktopAttempt = MessageDeliveryAttempt(
+            attemptID: UUID(4),
+            route: .desktop,
+            desktopEndpoint: "http://desktop.test",
+            canonicalWorkspaceID: fixture.workspaceID,
+            remoteWorkspaceID: "remote-workspace",
+            canonicalSessionID: desktopSession.id,
+            remoteSessionID: desktopSession.id,
+            content: "Hello",
+            model: .gpt5_5,
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: .high,
+            submittedDraft: "Hello"
+        )
+        try database.write { database in
+            try MobileWorkspaceState.insert {
+                MobileWorkspaceState(
+                    workspaceID: fixture.workspaceID,
+                    isWorking: true
+                )
+            }
+            .execute(database)
+            try Session.insert { desktopSession }.execute(database)
+            try MessageDeliveryAttempt.insert { desktopAttempt }
+                .execute(database)
+
+            try CloudOwnershipCleanup.perform(
+                scope: .workspaces([fixture.workspaceID]),
+                reason: .authoritativeSnapshot,
+                in: database
+            )
+        }
+
+        let persisted = try database.read { database in
+            (
+                canonicalWorkspace: try Workspace
+                    .find(fixture.workspaceID)
+                    .fetchOne(database),
+                desktopWorkspace: try Workspace
+                    .find("remote-workspace")
+                    .fetchOne(database),
+                mobileState: try MobileWorkspaceState
+                    .find("remote-workspace")
+                    .fetchOne(database),
+                desktopSession: try Session
+                    .find(desktopSession.id)
+                    .fetchOne(database),
+                desktopAttempt: try MessageDeliveryAttempt
+                    .find(desktopAttempt.attemptID)
+                    .fetchOne(database)
+            )
+        }
+        #expect(persisted.canonicalWorkspace == nil)
+        #expect(persisted.desktopWorkspace?.id == "remote-workspace")
+        #expect(persisted.desktopWorkspace?.hostingServerURL == nil)
+        #expect(persisted.mobileState?.isWorking == true)
+        #expect(persisted.desktopSession?.workspaceID == "remote-workspace")
+        #expect(
+            persisted.desktopAttempt?.canonicalWorkspaceID
+                == "remote-workspace"
+        )
+    }
+
+    @Test("Authoritative cleanup preserves an unresolved delivery subtree")
+    func unresolvedDeliveryProtectsSubtree() throws {
+        let database = try appDatabase()
+        let fixture = try insertFixture(in: database)
+        let attempt = MessageDeliveryAttempt(
+            attemptID: UUID(0),
+            route: .cloud,
             accountID: fixture.accountID,
             credentialGeneration: UUID(1),
-            operation: .sendMessage,
-            resourceKind: .message,
-            request: CloudSendMessageRequest(
-                messageID: "remote-message",
-                message: "Hello"
-            ),
             canonicalWorkspaceID: fixture.workspaceID,
             remoteWorkspaceID: "remote-workspace",
             canonicalSessionID: fixture.sessionID,
             remoteSessionID: "remote-session",
-            stableRemoteMessageID: "remote-message",
-            state: .acknowledged
+            content: "Hello",
+            model: Session.Model(rawValue: "sonnet-4-6"),
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: .high,
+            submittedDraft: "Hello",
+            state: .unknown
         )
         try database.write { database in
-            try CloudPendingMutation.insert { attempt }.execute(database)
+            try MessageDeliveryAttempt.insert { attempt }.execute(database)
             try CloudOwnershipCleanup.perform(
                 scope: .workspaces([fixture.workspaceID]),
                 reason: .authoritativeSnapshot,
@@ -47,7 +120,7 @@ struct CloudOwnershipCleanupTests {
                 .fetchOne(database)
             let session = try Session.find(fixture.sessionID)
                 .fetchOne(database)
-            let persistedAttempt = try CloudPendingMutation
+            let persistedAttempt = try MessageDeliveryAttempt
                 .find(attempt.attemptID)
                 .fetchOne(database)
             #expect(workspace != nil)
@@ -60,18 +133,24 @@ struct CloudOwnershipCleanupTests {
     func credentialRemovalIgnoresProtections() throws {
         let database = try appDatabase()
         let fixture = try insertFixture(in: database)
-        let handoff = InitialPromptHandoff(
-            creationAttemptID: UUID(2),
+        let attempt = MessageDeliveryAttempt(
+            attemptID: UUID(2),
+            route: .cloud,
             accountID: fixture.accountID,
             credentialGeneration: UUID(3),
             canonicalWorkspaceID: fixture.workspaceID,
             remoteWorkspaceID: "remote-workspace",
             canonicalSessionID: fixture.sessionID,
             remoteSessionID: "remote-session",
-            originalPrompt: "Hello"
+            content: "Hello",
+            model: Session.Model(rawValue: "sonnet-4-6"),
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: .high,
+            submittedDraft: "Hello"
         )
         try database.write { database in
-            try InitialPromptHandoff.insert { handoff }.execute(database)
+            try MessageDeliveryAttempt.insert { attempt }.execute(database)
             try CloudOwnershipCleanup.perform(
                 scope: .account(fixture.accountID),
                 reason: .credentialRemoval,
@@ -84,15 +163,15 @@ struct CloudOwnershipCleanupTests {
                 .fetchOne(database)
             let session = try Session.find(fixture.sessionID)
                 .fetchOne(database)
-            let persistedHandoff = try InitialPromptHandoff
-                .find(handoff.handoffID)
+            let persistedAttempt = try MessageDeliveryAttempt
+                .find(attempt.attemptID)
                 .fetchOne(database)
             let workspaceMetadata = try CloudWorkspaceMetadata
                 .find(fixture.workspaceID)
                 .fetchOne(database)
             #expect(workspace == nil)
             #expect(session == nil)
-            #expect(persistedHandoff == nil)
+            #expect(persistedAttempt == nil)
             #expect(workspaceMetadata == nil)
         }
     }

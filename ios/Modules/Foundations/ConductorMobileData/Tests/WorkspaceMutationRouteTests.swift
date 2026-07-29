@@ -93,12 +93,39 @@ struct WorkspaceMutationRouteTests {
         let configurations = CloudCreationConfigurationCatalog.configurations
 
         #expect(configurations.allSatisfy { [.claude, .codex].contains($0.agent) })
-        #expect(!configurations.contains { $0.model == .opus5_1M })
+        #expect(configurations.contains { $0.model == .opus5_1M })
         #expect(
             !configurations.contains {
                 $0.efforts.contains(.ultracode)
             }
         )
-        #expect(configurations.allSatisfy { !$0.supportsFastMode })
+        #expect(
+            configurations.first { $0.model == .gpt_5_6_sol }?.efforts
+                == [.none, .low, .medium, .high, .extraHigh, .max, .ultra]
+        )
+        #expect(
+            configurations.first { $0.model == .gpt_5_6_terra }?.efforts
+                == [.none, .low, .medium, .high, .extraHigh, .max, .ultra]
+        )
+        #expect(
+            configurations.first { $0.model == .gpt5_5 }?.efforts
+                == [.none, .low, .medium, .high, .extraHigh]
+        )
+        #expect(
+            configurations.first { $0.model == .haiku4_5 }?.efforts
+                == [.low, .medium, .high, .extraHigh, .max]
+        )
+        #expect(
+            configurations.first { $0.model == .opus }?.supportsFastMode
+                == true
+        )
+        #expect(
+            configurations.first { $0.model == .sonnet_4_6 }?
+                .supportsFastMode == false
+        )
+        #expect(
+            configurations.first { $0.model == .gpt5_5 }?.supportsFastMode
+                == true
+        )
     }
 }

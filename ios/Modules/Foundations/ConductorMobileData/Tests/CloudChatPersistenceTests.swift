@@ -12,6 +12,68 @@ import SharedConductorData
 import Testing
 
 struct CloudChatPersistenceTests {
+    @Test("An idle snapshot retires a cancel and releases a removed session")
+    func cancelReconciliation() throws {
+        let database = try appDatabase()
+        let accountID = "account"
+        let remoteSessionID = "session"
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: accountID,
+            remoteSessionID: remoteSessionID
+        )
+        let attempt = try CloudPendingMutation(
+            attemptID: UUID(48),
+            accountID: accountID,
+            credentialGeneration: UUID(49),
+            operation: .cancelSession,
+            resourceKind: .session,
+            request: CloudSendMessageRequest(
+                messageID: "unused",
+                message: "unused"
+            ),
+            canonicalWorkspaceID: "workspace",
+            remoteWorkspaceID: "workspace",
+            canonicalSessionID: canonicalSessionID,
+            remoteSessionID: remoteSessionID,
+            state: .accepted
+        )
+
+        try database.write { database in
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: accountID,
+                    sessionIDs: [remoteSessionID]
+                ),
+                in: database
+            )
+            try CloudPendingMutation.insert { attempt }.execute(database)
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: accountID,
+                    sessionIDs: [remoteSessionID]
+                ),
+                in: database
+            )
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: accountID, sessionIDs: []),
+                in: database
+            )
+        }
+
+        let persisted = try database.read { database in
+            (
+                attempt: try CloudPendingMutation
+                    .find(attempt.attemptID)
+                    .fetchOne(database),
+                session: try Session
+                    .find(canonicalSessionID)
+                    .fetchOne(database)
+            )
+        }
+        #expect(persisted.attempt == nil)
+        #expect(persisted.session == nil)
+    }
+
     @Test("UUID session IDs reconcile across API casing")
     func uuidSessionIDCaseReconciliation() throws {
         let database = try appDatabase()
@@ -115,6 +177,79 @@ struct CloudChatPersistenceTests {
                     remoteSessionID: "same"
                 )
         )
+    }
+
+    @Test("Desktop visibility survives later Cloud snapshots")
+    func desktopVisibilitySurvivesCloudRefresh() throws {
+        let database = try appDatabase()
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "archived"
+        )
+
+        try database.write { database in
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["archived"]),
+                in: database
+            )
+            _ = try CloudChatPersistence.reconcileSessionVisibility(
+                from: [
+                    Session.preview(
+                        id: "archived",
+                        workspaceID: "workspace",
+                        isHidden: true
+                    ),
+                ],
+                canonicalWorkspaceID: "workspace",
+                remoteWorkspaceID: "workspace",
+                in: database
+            )
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["archived"]),
+                in: database
+            )
+        }
+
+        let session = try database.read { database in
+            try Session.find(canonicalSessionID).fetchOne(database)
+        }
+        #expect(session?.isHidden == true)
+    }
+
+    @Test("Partial Cloud snapshots preserve known session configuration")
+    func partialSnapshotPreservesSessionConfiguration() throws {
+        let database = try appDatabase()
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "session"
+        )
+
+        try database.write { database in
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: "account",
+                    sessionIDs: ["session"],
+                    effort: "high",
+                    fastMode: true
+                ),
+                in: database
+            )
+            _ = try CloudChatPersistence.persist(
+                snapshot(
+                    accountID: "account",
+                    sessionIDs: ["session"],
+                    effort: nil,
+                    fastMode: nil
+                ),
+                in: database
+            )
+        }
+
+        let session = try database.read { database in
+            try Session.find(canonicalSessionID).fetchOne(database)
+        }
+        #expect(session?.reasoningEffort == .high)
+        #expect(session?.isFastModeEnabled == true)
     }
 
     @Test("Account replacement removes only the old Cloud-owned rows")
@@ -288,6 +423,188 @@ struct CloudChatPersistenceTests {
             try CloudMessageMetadata.fetchCount(db)
         }
         #expect(messageCount == 0)
+    }
+
+    @Test("A nested Cloud message ID acknowledges its pending send")
+    func nestedMessageIDAcknowledgesSend() throws {
+        let database = try appDatabase()
+        let attemptID = UUID()
+        let remoteMessageID = attemptID.uuidString.lowercased()
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "session"
+        )
+        let attempt = MessageDeliveryAttempt(
+            attemptID: attemptID,
+            route: .cloud,
+            accountID: "account",
+            credentialGeneration: UUID(),
+            canonicalWorkspaceID: "workspace",
+            remoteWorkspaceID: "workspace",
+            canonicalSessionID: canonicalSessionID,
+            remoteSessionID: "session",
+            content: "Test",
+            model: Session.Model(rawValue: ""),
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: nil,
+            submittedDraft: "Test",
+            state: .accepted
+        )
+
+        try database.write { database in
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["session"]),
+                in: database
+            )
+            try MessageDeliveryAttempt.insert { attempt }.execute(database)
+            _ = try CloudChatPersistence.persist(
+                transcript(
+                    messages: [
+                        userEvent(
+                            id: "session:1:0",
+                            index: 1,
+                            text: "Test",
+                            remoteMessageID: remoteMessageID
+                        ),
+                    ]
+                ),
+                in: database
+            )
+        }
+
+        let storedAttempt = try database.read { database in
+            try MessageDeliveryAttempt.find(attemptID).fetchOne(database)
+        }
+        #expect(storedAttempt?.deliveryState == .acknowledged)
+    }
+
+    @Test(
+        "Cloud delivery acknowledgement uses exact fallback identifiers",
+        arguments: [
+            CloudDeliveryCorrelation.turnID,
+            .eventID,
+        ]
+    )
+    func fallbackIdentifierAcknowledgesSend(
+        correlation: CloudDeliveryCorrelation
+    ) throws {
+        let database = try appDatabase()
+        let attemptID = UUID()
+        let remoteMessageID = attemptID.uuidString.lowercased()
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "session"
+        )
+        let attempt = MessageDeliveryAttempt(
+            attemptID: attemptID,
+            route: .cloud,
+            accountID: "account",
+            credentialGeneration: UUID(),
+            canonicalWorkspaceID: "workspace",
+            remoteWorkspaceID: "workspace",
+            canonicalSessionID: canonicalSessionID,
+            remoteSessionID: "session",
+            content: "Test",
+            model: Session.Model(rawValue: ""),
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: nil,
+            submittedDraft: "Test",
+            state: .accepted
+        )
+        let event = switch correlation {
+        case .turnID:
+            userEvent(
+                id: "session:1:0",
+                index: 1,
+                text: "Test",
+                remoteMessageID: remoteMessageID,
+                includeMessageID: false
+            )
+        case .eventID:
+            userEvent(
+                id: remoteMessageID,
+                index: 1,
+                text: "Test",
+                includeTurnID: false
+            )
+        }
+
+        try database.write { database in
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["session"]),
+                in: database
+            )
+            try MessageDeliveryAttempt.insert { attempt }.execute(database)
+            _ = try CloudChatPersistence.persist(
+                transcript(messages: [event]),
+                in: database
+            )
+        }
+
+        let storedAttempt = try database.read { database in
+            try MessageDeliveryAttempt.find(attemptID).fetchOne(database)
+        }
+        #expect(storedAttempt?.deliveryState == .acknowledged)
+    }
+
+    @Test("Cached transcript evidence reconciles a previously accepted send")
+    func cachedTranscriptReconcilesAcceptedSend() throws {
+        let database = try appDatabase()
+        let attemptID = UUID()
+        let remoteMessageID = attemptID.uuidString.lowercased()
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "session"
+        )
+        let attempt = MessageDeliveryAttempt(
+            attemptID: attemptID,
+            route: .cloud,
+            accountID: "account",
+            credentialGeneration: UUID(),
+            canonicalWorkspaceID: "workspace",
+            remoteWorkspaceID: "workspace",
+            canonicalSessionID: canonicalSessionID,
+            remoteSessionID: "session",
+            content: "Test",
+            model: Session.Model(rawValue: ""),
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: nil,
+            submittedDraft: "Test",
+            state: .accepted
+        )
+
+        try database.write { database in
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["session"]),
+                in: database
+            )
+            _ = try CloudChatPersistence.persist(
+                transcript(
+                    messages: [
+                        userEvent(
+                            id: "session:1:0",
+                            index: 1,
+                            text: "Test",
+                            remoteMessageID: remoteMessageID
+                        ),
+                    ]
+                ),
+                in: database
+            )
+            try MessageDeliveryAttempt.insert { attempt }.execute(database)
+            try CloudChatPersistence.reconcileDeliveryAttempts(
+                for: canonicalSessionID,
+                in: database
+            )
+        }
+
+        let storedAttempt = try database.read { database in
+            try MessageDeliveryAttempt.find(attemptID).fetchOne(database)
+        }
+        #expect(storedAttempt?.deliveryState == .acknowledged)
     }
 
     @Test("An unsupported incremental replacement removes obsolete visible parts")
@@ -593,7 +910,9 @@ struct CloudChatPersistenceTests {
 
 private func snapshot(
     accountID: String,
-    sessionIDs: [String]
+    sessionIDs: [String],
+    effort: String? = "high",
+    fastMode: Bool? = nil
 ) -> CloudWorkspaceSessionSnapshot {
     let date = Date(timeIntervalSince1970: 100)
     let sessions = sessionIDs.map {
@@ -602,8 +921,9 @@ private func snapshot(
             deepLink: URL(string: "https://app.conductor.build")!,
             name: $0,
             model: "gpt-5.6-sol",
-            effort: "high",
-            agent: "codex"
+            effort: effort,
+            agent: "codex",
+            fastMode: fastMode
         )
     }
     return CloudWorkspaceSessionSnapshot(
@@ -646,20 +966,34 @@ private func transcript(
 private func userEvent(
     id: String,
     index: Double,
-    text: String
+    text: String,
+    remoteMessageID: String? = nil,
+    includeMessageID: Bool = true,
+    includeTurnID: Bool = true
 ) -> CloudTranscriptMessage {
-    CloudTranscriptMessage(
+    var content: [String: CloudJSONValue] = [
+        "type": .string("userMessage"),
+        "message": .string(text),
+    ]
+    if includeTurnID {
+        content["turnId"] = .string(remoteMessageID ?? "turn")
+    }
+    if includeMessageID, let remoteMessageID {
+        content["id"] = .string(remoteMessageID)
+    }
+    return CloudTranscriptMessage(
         id: id,
         sessionID: "session",
         sessionIndex: index,
         type: .init(rawValue: "userMessage"),
-        content: .object([
-            "type": .string("userMessage"),
-            "message": .string(text),
-            "turnId": .string("turn"),
-        ]),
+        content: .object(content),
         receivedAt: Date(timeIntervalSince1970: index)
     )
+}
+
+enum CloudDeliveryCorrelation: Sendable {
+    case turnID
+    case eventID
 }
 
 private func unsupportedEvent(

@@ -45,6 +45,7 @@ public struct Main: Sendable {
         case appEnteredBackground
         case cloudCacheCleanupResult(Result<Void, any Error>)
         case cloudCredentialReconciliationResult(Result<String?, any Error>)
+        case messageDeliveryOutboxResult(Result<Void, any Error>)
         case cloudMutationRunnerResult(Result<Void, any Error>)
         case cloudWorkspaceCompletionConsumed(Result<Void, any Error>)
         case path(StackActionOf<Path>)
@@ -57,6 +58,7 @@ public struct Main: Sendable {
     @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.messageDeliveryOutbox) var messageDeliveryOutbox
 
     public init() {
     }
@@ -79,14 +81,26 @@ public struct Main: Sendable {
                             )
                         )
                     }
+                    let startOutbox: Effect<Action> = .run {
+                        [messageDeliveryOutbox] send in
+                        await send(
+                            .messageDeliveryOutboxResult(
+                                await Result {
+                                    try await messageDeliveryOutbox.start()
+                                }
+                            )
+                        )
+                    }
                     guard state.cloudConfiguration != nil else {
                         return .merge(
                             startRunner,
+                            startOutbox,
                             .send(.workspaces(.task))
                         )
                     }
                     return .merge(
                         startRunner,
+                        startOutbox,
                         .run { [cloudCredentialClient] send in
                             await send(
                                 .cloudCredentialReconciliationResult(
@@ -103,6 +117,12 @@ public struct Main: Sendable {
                     return .send(.workspaces(.loadWorkspacesFailed(error)))
 
                 case .cloudMutationRunnerResult(.success):
+                    return .none
+
+                case let .messageDeliveryOutboxResult(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .messageDeliveryOutboxResult(.success):
                     return .none
 
                 case let .cloudWorkspaceCompletionConsumed(.failure(error)):
@@ -202,13 +222,6 @@ public struct Main: Sendable {
                                     selectedSessionID: creation.selectedSessionID,
                                     selectedModel: creation.selectedModel,
                                     selectedReasoningEffort: creation.selectedReasoningEffort,
-                                    initialMessage: creation.initialPrompt.map {
-                                        WorkspaceChat.InitialMessage(
-                                            id: $0.attemptID,
-                                            content: $0.content,
-                                            deliveryResult: $0.deliveryResult
-                                        )
-                                    },
                                     shouldFocusMessageField: true
                                 )
                             )

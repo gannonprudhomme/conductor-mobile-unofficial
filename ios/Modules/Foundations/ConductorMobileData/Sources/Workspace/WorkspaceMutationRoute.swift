@@ -155,6 +155,7 @@ public enum CloudCreationConfigurationCatalog {
 
     public static let configurations: [CloudCreationConfiguration] = [
         claude(.fable5),
+        claude(.opus5_1M),
         claude(.opus4_8_1M),
         claude(Session.Model(rawValue: "opus-4-8")),
         claude(.opus4_7_1M),
@@ -179,11 +180,25 @@ public enum CloudCreationConfigurationCatalog {
     private static func claude(
         _ model: Session.Model
     ) -> CloudCreationConfiguration {
-        CloudCreationConfiguration(
+        let supportsFastMode = switch model {
+        case .opus5_1M,
+             .opus4_8_1M,
+             .opus4_8,
+             .opus4_7_1M,
+             .opus4_7,
+             .opus_1M,
+             .opus,
+             .opus4_6_1M:
+            true
+
+        default:
+            false
+        }
+        return CloudCreationConfiguration(
             agent: .claude,
             model: model,
             efforts: [.low, .medium, .high, .extraHigh, .max],
-            supportsFastMode: false
+            supportsFastMode: supportsFastMode
         )
     }
 
@@ -193,8 +208,8 @@ public enum CloudCreationConfigurationCatalog {
         CloudCreationConfiguration(
             agent: .codex,
             model: model,
-            efforts: [.none, .low, .medium, .high, .extraHigh, .max],
-            supportsFastMode: false
+            efforts: model.availableCodexReasoningEfforts,
+            supportsFastMode: true
         )
     }
 }

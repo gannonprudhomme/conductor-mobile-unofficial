@@ -633,10 +633,36 @@ public struct CloudCreateWorkspaceResponse: Decodable, Equatable, Sendable {
     public let sessionID: String
     public let deepLink: URL
 
+    public init(
+        workspaceID: String,
+        sessionID: String,
+        deepLink: URL
+    ) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.deepLink = deepLink
+    }
+
     private enum CodingKeys: String, CodingKey {
         case workspaceID = "workspaceId"
         case sessionID = "sessionId"
         case deepLink
+    }
+}
+
+public struct CloudWorkspaceCreationRecoveryRequest: Equatable, Sendable {
+    public let baselineWorkspaceIDs: [String]
+    public let projectID: String?
+    public let sessionName: String
+
+    public init(
+        baselineWorkspaceIDs: [String],
+        projectID: String?,
+        sessionName: String
+    ) {
+        self.baselineWorkspaceIDs = baselineWorkspaceIDs
+        self.projectID = projectID
+        self.sessionName = sessionName
     }
 }
 

@@ -87,6 +87,9 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             sessionPicker.waitForExistence(timeout: 120),
             "Cloud workspace creation did not navigate to chat."
         )
+        let createdWorkspaceID = "workspace-row." + (try XCTUnwrap(
+            sessionPicker.value as? String
+        ))
 
         let initialSession = waitForSessionCount(1, in: app).first!
         let initialSessionID = initialSession.identifier
@@ -100,6 +103,8 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         let createdSession = try XCTUnwrap(
             sessions.first { $0.identifier != initialSessionID }
         )
+        assertChatFinishesLoading(in: app)
+        sendMessageAndWaitForAcknowledgement(in: app)
 
         assertSelection(
             initialSessionID,
@@ -123,10 +128,6 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             "Filtered by \(repositoryName)"
         )
 
-        let createdWorkspaceID = waitForAddedWorkspaceIdentifier(
-            baseline: baselineWorkspaceIDs,
-            in: app
-        )
         let createdWorkspace = workspaceElement(createdWorkspaceID, in: app)
         XCTAssertTrue(createdWorkspace.waitForExistence(timeout: 10))
         createdWorkspace.tap()
@@ -276,22 +277,6 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             .map(\.identifier)
     }
 
-    private func waitForAddedWorkspaceIdentifier(
-        baseline: Set<String>,
-        in app: XCUIApplication
-    ) -> String {
-        let predicate = NSPredicate { _, _ in
-            Set(self.workspaceIdentifiers(in: app))
-                .subtracting(baseline)
-                .count == 1
-        }
-        expectation(for: predicate, evaluatedWith: app)
-        waitForExpectations(timeout: 60)
-        return Set(workspaceIdentifiers(in: app))
-            .subtracting(baseline)
-            .first!
-    }
-
     private func sessionButton(
         _ identifier: String,
         in app: XCUIApplication
@@ -361,6 +346,42 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             )
         )
         XCTAssertEqual(selectedButtons.count, 1)
+    }
+
+    private func assertChatFinishesLoading(in app: XCUIApplication) {
+        let loading = app.descendants(matching: .any)["chat.loading"]
+        XCTAssertTrue(
+            loading.waitForNonExistence(timeout: 60),
+            "The newly created session remained in its loading state."
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["chat.empty"]
+                .waitForExistence(timeout: 10),
+            "The newly created session did not present its empty chat."
+        )
+    }
+
+    private func sendMessageAndWaitForAcknowledgement(
+        in app: XCUIApplication
+    ) {
+        let message = "Cloud mobile lifecycle test"
+        let messageField = app.textFields["chat.message"]
+        XCTAssertTrue(messageField.waitForExistence(timeout: 10))
+        messageField.tap()
+        messageField.typeText(message)
+
+        let sendButton = app.buttons["chat.send"]
+        XCTAssertTrue(sendButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(sendButton.isEnabled)
+        sendButton.tap()
+
+        let acknowledged = NSPredicate(format: "value == %@", "Idle")
+        expectation(for: acknowledged, evaluatedWith: sendButton)
+        waitForExpectations(timeout: 60)
+        XCTAssertTrue(
+            app.staticTexts[message].waitForExistence(timeout: 30),
+            "The sent message never appeared in the Cloud transcript."
+        )
     }
 
     private func navigateBackToWorkspaces(in app: XCUIApplication) {

@@ -13,11 +13,6 @@ import SharedConductorData
 import Sharing
 import SQLiteData
 
-public enum WorkspaceMutationResult: Equatable, Sendable {
-    case desktop(message: Message?)
-    case cloud(attemptID: UUID)
-}
-
 public struct WorkspaceSessionCreationResult: Equatable, Sendable {
     public let session: Session
     public let attemptID: UUID?
@@ -25,14 +20,6 @@ public struct WorkspaceSessionCreationResult: Equatable, Sendable {
     public init(session: Session, attemptID: UUID?) {
         self.session = session
         self.attemptID = attemptID
-    }
-}
-
-public struct CloudSendDraftRollback: Codable, Equatable, Sendable {
-    public let submittedDraft: String
-
-    public init(submittedDraft: String) {
-        self.submittedDraft = submittedDraft
     }
 }
 
@@ -53,16 +40,16 @@ public struct WorkspaceMutationClient: Sendable {
     public var archiveSession: @Sendable (
         _ route: WorkspaceMutationRoute,
         _ session: Session
-    ) async throws -> WorkspaceMutationResult
+    ) async throws -> Void
     public var archiveWorkspace: @Sendable (
         _ route: WorkspaceMutationRoute,
         _ canonicalWorkspaceID: Workspace.ID
-    ) async throws -> WorkspaceMutationResult
+    ) async throws -> Void
     public var cancelSession: @Sendable (
         _ route: WorkspaceMutationRoute,
         _ canonicalWorkspaceID: Workspace.ID,
         _ canonicalSessionID: Session.ID
-    ) async throws -> WorkspaceMutationResult
+    ) async throws -> Void
     public var createSession: @Sendable (
         _ route: WorkspaceMutationRoute,
         _ canonicalWorkspaceID: Workspace.ID,
@@ -74,23 +61,12 @@ public struct WorkspaceMutationClient: Sendable {
         _ prompt: String,
         _ model: Session.Model,
         _ reasoningEffort: Session.ReasoningEffort?
-    ) async throws -> WorkspaceMutationResult
+    ) async throws -> Void
     public var renameSession: @Sendable (
         _ route: WorkspaceMutationRoute,
         _ session: Session,
         _ title: String
-    ) async throws -> WorkspaceMutationResult
-    public var sendMessage: @Sendable (
-        _ route: WorkspaceMutationRoute,
-        _ canonicalWorkspaceID: Workspace.ID,
-        _ canonicalSessionID: Session.ID,
-        _ submittedDraft: String,
-        _ message: String,
-        _ model: Session.Model,
-        _ isFastModeEnabled: Bool,
-        _ mode: MessageSendMode,
-        _ reasoningEffort: Session.ReasoningEffort?
-    ) async throws -> WorkspaceMutationResult
+    ) async throws -> Void
 }
 
 extension WorkspaceMutationClient: DependencyKey {
@@ -110,10 +86,10 @@ extension WorkspaceMutationClient: DependencyKey {
                         workspaceID: session.workspaceID,
                         sessionID: session.id
                     )
-                    return .desktop(message: nil)
+                    return
 
                 case let .cloud(accountID, remoteWorkspaceID):
-                    return try await persistSessionArchive(
+                    try await persistSessionArchive(
                         accountID: accountID,
                         remoteWorkspaceID: remoteWorkspaceID,
                         session: session,
@@ -130,10 +106,10 @@ extension WorkspaceMutationClient: DependencyKey {
                     try await desktopClient.archiveWorkspace(
                         workspaceID: canonicalWorkspaceID
                     )
-                    return .desktop(message: nil)
+                    return
 
                 case let .cloud(accountID, remoteWorkspaceID):
-                    return try await persistWorkspaceArchive(
+                    try await persistWorkspaceArchive(
                         accountID: accountID,
                         remoteWorkspaceID: remoteWorkspaceID,
                         canonicalWorkspaceID: canonicalWorkspaceID,
@@ -164,10 +140,10 @@ extension WorkspaceMutationClient: DependencyKey {
                             try Session.upsert { response }.execute(database)
                         }
                     }
-                    return .desktop(message: nil)
+                    return
 
                 case let .cloud(accountID, remoteWorkspaceID):
-                    return try await persistCancel(
+                    try await persistCancel(
                         accountID: accountID,
                         remoteWorkspaceID: remoteWorkspaceID,
                         canonicalSessionID: canonicalSessionID,
@@ -213,7 +189,7 @@ extension WorkspaceMutationClient: DependencyKey {
                 guard case let .cloud(accountID) = route else {
                     throw WorkspaceMutationClientError.unsupportedOperation
                 }
-                return try await persistWorkspaceCreation(
+                try await persistWorkspaceCreation(
                     accountID: accountID,
                     candidate: candidate,
                     prompt: prompt,
@@ -233,52 +209,14 @@ extension WorkspaceMutationClient: DependencyKey {
                         sessionID: session.id,
                         title: title
                     )
-                    return .desktop(message: nil)
+                    return
 
                 case let .cloud(accountID, remoteWorkspaceID):
-                    return try await persistSessionRename(
+                    try await persistSessionRename(
                         accountID: accountID,
                         remoteWorkspaceID: remoteWorkspaceID,
                         session: session,
                         title: title,
-                        database: database
-                    )
-                }
-            },
-            sendMessage: {
-                route,
-                canonicalWorkspaceID,
-                canonicalSessionID,
-                submittedDraft,
-                message,
-                model,
-                isFastModeEnabled,
-                mode,
-                reasoningEffort in
-                @Dependency(\.defaultDatabase) var database
-                @Dependency(\.desktopClient) var desktopClient
-
-                switch route {
-                case .desktop:
-                    _ = try await desktopClient.sendMessage(
-                        workspaceID: canonicalWorkspaceID,
-                        sessionID: canonicalSessionID,
-                        message: message,
-                        model: model,
-                        isFastModeEnabled: isFastModeEnabled,
-                        mode: mode,
-                        reasoningEffort: reasoningEffort,
-                        attemptID: UUID()
-                    )
-                    return .desktop(message: nil)
-
-                case let .cloud(accountID, remoteWorkspaceID):
-                    return try await persistSend(
-                        accountID: accountID,
-                        remoteWorkspaceID: remoteWorkspaceID,
-                        canonicalSessionID: canonicalSessionID,
-                        submittedDraft: submittedDraft,
-                        message: message,
                         database: database
                     )
                 }
@@ -322,7 +260,7 @@ extension WorkspaceMutationClient: DependencyKey {
             codexThinkingLevel: creationConfiguration.agent == .codex
                 ? creationConfiguration.effort
                 : nil,
-            isFastModeEnabled: nil,
+            isFastModeEnabled: creationConfiguration.isFastModeEnabled,
             claudeEffortLevel: creationConfiguration.agent == .claude
                 ? creationConfiguration.effort
                 : nil
@@ -332,7 +270,8 @@ extension WorkspaceMutationClient: DependencyKey {
             sessionID: remoteSessionID,
             agent: creationConfiguration.agent.rawValue,
             model: creationConfiguration.model?.rawValue,
-            effort: creationConfiguration.effort?.rawValue
+            effort: creationConfiguration.effort.rawValue,
+            fastMode: creationConfiguration.isFastModeEnabled
         )
         try await database.write { database in
             _ = try ownedWorkspace(
@@ -384,7 +323,7 @@ extension WorkspaceMutationClient: DependencyKey {
         model: Session.Model,
         reasoningEffort: Session.ReasoningEffort?,
         database: any DatabaseWriter
-    ) async throws -> WorkspaceMutationResult {
+    ) async throws {
         let configuration = try currentConfiguration(accountID: accountID)
         guard let supported = CloudCreationConfigurationCatalog.configurations
             .first(where: {
@@ -393,8 +332,13 @@ extension WorkspaceMutationClient: DependencyKey {
             }) else {
             throw WorkspaceMutationClientError.unsupportedConfiguration
         }
+        let attemptID = UUID()
+        // Workspace creation has no server idempotency key. A unique first
+        // session name gives lost-response recovery an exact server-side
+        // correlation value instead of guessing from project membership.
         let request = CloudCreateWorkspaceRequest(
             projectID: candidate.projectID,
+            sessionName: "Conductor Mobile \(attemptID.uuidString.lowercased())",
             agent: supported.agent.rawValue,
             model: model.rawValue,
             effort: reasoningEffort?.rawValue
@@ -409,6 +353,7 @@ extension WorkspaceMutationClient: DependencyKey {
             prompt: prompt
         )
         let attempt = try CloudPendingMutation(
+            attemptID: attemptID,
             accountID: accountID,
             credentialGeneration: configuration.credentialGeneration,
             operation: .createWorkspace,
@@ -429,7 +374,6 @@ extension WorkspaceMutationClient: DependencyKey {
             }
             try CloudPendingMutation.insert { attempt }.execute(database)
         }
-        return .cloud(attemptID: attempt.attemptID)
     }
 
     private static func persistWorkspaceArchive(
@@ -437,9 +381,9 @@ extension WorkspaceMutationClient: DependencyKey {
         remoteWorkspaceID: String,
         canonicalWorkspaceID: Workspace.ID,
         database: any DatabaseWriter
-    ) async throws -> WorkspaceMutationResult {
+    ) async throws {
         let configuration = try currentConfiguration(accountID: accountID)
-        return try await database.write { database in
+        try await database.write { database in
             _ = try ownedWorkspace(
                 canonicalWorkspaceID: canonicalWorkspaceID,
                 accountID: accountID,
@@ -481,7 +425,6 @@ extension WorkspaceMutationClient: DependencyKey {
                 }
                 .execute(database)
             try CloudPendingMutation.insert { attempt }.execute(database)
-            return .cloud(attemptID: attempt.attemptID)
         }
     }
 
@@ -491,9 +434,9 @@ extension WorkspaceMutationClient: DependencyKey {
         session: Session,
         title: String,
         database: any DatabaseWriter
-    ) async throws -> WorkspaceMutationResult {
+    ) async throws {
         let configuration = try currentConfiguration(accountID: accountID)
-        return try await database.write { database in
+        try await database.write { database in
             let metadata = try ownedSession(
                 canonicalSessionID: session.id,
                 accountID: accountID,
@@ -526,7 +469,6 @@ extension WorkspaceMutationClient: DependencyKey {
                 .update { $0.title = #bind(title) }
                 .execute(database)
             try CloudPendingMutation.insert { attempt }.execute(database)
-            return .cloud(attemptID: attempt.attemptID)
         }
     }
 
@@ -535,9 +477,9 @@ extension WorkspaceMutationClient: DependencyKey {
         remoteWorkspaceID: String,
         session: Session,
         database: any DatabaseWriter
-    ) async throws -> WorkspaceMutationResult {
+    ) async throws {
         let configuration = try currentConfiguration(accountID: accountID)
-        return try await database.write { database in
+        try await database.write { database in
             let metadata = try ownedSession(
                 canonicalSessionID: session.id,
                 accountID: accountID,
@@ -570,7 +512,6 @@ extension WorkspaceMutationClient: DependencyKey {
                 .update { $0.isHidden = true }
                 .execute(database)
             try CloudPendingMutation.insert { attempt }.execute(database)
-            return .cloud(attemptID: attempt.attemptID)
         }
     }
 
@@ -579,7 +520,8 @@ extension WorkspaceMutationClient: DependencyKey {
     ) -> (
         agent: Session.AgentType,
         model: Session.Model?,
-        effort: Session.ReasoningEffort?
+        effort: Session.ReasoningEffort,
+        isFastModeEnabled: Bool
     ) {
         @Shared(.mobileModelSettingsOverride) var settings
         if let settings,
@@ -591,13 +533,14 @@ extension WorkspaceMutationClient: DependencyKey {
             return (
                 supported.agent,
                 supported.model,
-                settings.defaultReasoningEffort
+                settings.defaultReasoningEffort,
+                settings.isFastModeEnabled && supported.supportsFastMode
             )
         }
         let agent: Session.AgentType = [.claude, .codex].contains(fallbackAgent)
             ? fallbackAgent
             : .claude
-        return (agent, nil, nil)
+        return (agent, nil, .high, false)
     }
 
     private static func currentConfiguration(
@@ -611,75 +554,31 @@ extension WorkspaceMutationClient: DependencyKey {
         return configuration
     }
 
-    private static func persistSend(
-        accountID: String,
-        remoteWorkspaceID: String,
-        canonicalSessionID: Session.ID,
-        submittedDraft: String,
-        message: String,
-        database: any DatabaseWriter
-    ) async throws -> WorkspaceMutationResult {
-        @Shared(.cloudConfiguration) var configuration
-        guard let configuration,
-              configuration.accountID == accountID else {
-            throw WorkspaceMutationClientError.accountChanged
-        }
-        let attemptID = UUID()
-        let stableMessageID = UUID().uuidString.lowercased()
-        let rollbackPayload = try JSONEncoder.cloudMutation.encode(
-            CloudSendDraftRollback(submittedDraft: submittedDraft)
-        )
-        try await database.write { database in
-            let session = try ownedSession(
-                canonicalSessionID: canonicalSessionID,
-                accountID: accountID,
-                remoteWorkspaceID: remoteWorkspaceID,
-                in: database
-            )
-            let attempt = try CloudPendingMutation(
-                attemptID: attemptID,
-                accountID: accountID,
-                credentialGeneration: configuration.credentialGeneration,
-                operation: .sendMessage,
-                resourceKind: .message,
-                request: CloudSendMessageRequest(
-                    messageID: stableMessageID,
-                    message: message
-                ),
-                rollbackPayload: rollbackPayload,
-                canonicalWorkspaceID: session.workspaceID,
-                remoteWorkspaceID: remoteWorkspaceID,
-                canonicalSessionID: canonicalSessionID,
-                remoteSessionID: session.cloudSessionID,
-                stableRemoteMessageID: stableMessageID
-            )
-            try CloudPendingMutation.insert { attempt }.execute(database)
-        }
-        return .cloud(attemptID: attemptID)
-    }
-
     private static func persistCancel(
         accountID: String,
         remoteWorkspaceID: String,
         canonicalSessionID: Session.ID,
         database: any DatabaseWriter
-    ) async throws -> WorkspaceMutationResult {
+    ) async throws {
         @Shared(.cloudConfiguration) var configuration
         guard let configuration,
               configuration.accountID == accountID else {
             throw WorkspaceMutationClientError.accountChanged
         }
-        return try await database.write { db in
+        try await database.write { db in
             let pendingMutations = try CloudPendingMutation.all.fetchAll(db)
-            if let existing = pendingMutations.first(
+            if pendingMutations.contains(
                 where: {
                     $0.accountID == accountID
                         && $0.canonicalSessionID == canonicalSessionID
                         && $0.mutationOperation == .cancelSession
-                        && $0.mutationState != .acknowledged
+                        && (
+                            $0.mutationState == .submitting
+                                || $0.mutationState == .indeterminate
+                        )
                 }
             ) {
-                return .cloud(attemptID: existing.attemptID)
+                return
             }
             let session = try ownedSession(
                 canonicalSessionID: canonicalSessionID,
@@ -699,7 +598,6 @@ extension WorkspaceMutationClient: DependencyKey {
                 remoteSessionID: session.cloudSessionID
             )
             try CloudPendingMutation.insert { attempt }.execute(db)
-            return .cloud(attemptID: attempt.attemptID)
         }
     }
 

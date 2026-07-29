@@ -7,6 +7,7 @@
 
 import ComposableArchitecture
 import ConductorCloud
+import ConductorDesign
 import ConductorMobileData
 import Foundation
 import SharedConductorData
@@ -48,22 +49,7 @@ struct WorkspaceChatTests {
 
             expectNotRestorable { $0.isLoadingSessions = true }
             expectNotRestorable { $0.chat?.isLoadingMessages = true }
-            expectNotRestorable {
-                $0.chat?.optimisticMessages = [
-                    WorkspaceChat.OptimisticMessage(
-                        id: UUID(0),
-                        workspaceID: workspace.id,
-                        sessionID: session.id,
-                        content: "Sending",
-                        model: session.model,
-                        isFastModeEnabled: false,
-                        mode: .sent,
-                        reasoningEffort: session.reasoningEffort,
-                        status: .sending,
-                        previousTurnID: nil
-                    ),
-                ]
-            }
+            expectNotRestorable { $0.chat?.isEnqueueInFlight = true }
             expectNotRestorable { $0.chat?.isStopInFlight = true }
             expectNotRestorable { $0.isCreatingSession = true }
             expectNotRestorable { $0.isArchivingWorkspace = true }
@@ -95,6 +81,98 @@ struct WorkspaceChatTests {
             }
             expectNotRestorable {
                 $0.chat?.queuedMessages.pendingMessageIDs = ["pending"]
+            }
+        }
+    }
+
+    @Test("Cloud configuration controls present exact informational alerts")
+    func cloudConfigurationAlerts() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "session")
+        let session = try makeSession(
+            id: "session",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.insert { workspace }.execute(database)
+                try Session.insert { session }.execute(database)
+            }
+        } operation: {
+            let routes: [WorkspaceMutationRoute?] = [
+                .cloud(
+                    accountID: "account",
+                    remoteWorkspaceID: "remote-workspace"
+                ),
+                nil,
+            ]
+            let controls: [(
+                ModelConfigurationControl,
+                title: String,
+                setting: String
+            )] = [
+                (.model, "Model can’t be changed", "model"),
+                (
+                    .reasoningEffort,
+                    "Reasoning effort can’t be changed",
+                    "reasoning effort"
+                ),
+                (.fastMode, "Fast Mode can’t be changed", "Fast Mode"),
+            ]
+
+            for route in routes {
+                for (control, title, setting) in controls {
+                    var state = WorkspaceChat.State(
+                        workspaceWithRepository: WorkspaceWithRepository(
+                            workspace: workspace,
+                            repository: nil
+                        )
+                    )
+                    state.source = .cloud
+                    state.mutationRoute = route
+                    state.chat = Chat.State(
+                        session: session,
+                        isCloudHosted: true,
+                        mutationRoute: route
+                    )
+                    let originalConfiguration = (
+                        state.chat?.selectedModel,
+                        state.chat?.selectedReasoningEffort,
+                        state.chat?.isFastModeEnabled
+                    )
+                    let store = TestStore(initialState: state) {
+                        WorkspaceChat()
+                    }
+                    let expectedAlert = AlertState<
+                        WorkspaceChat.Destination.Alert
+                    > {
+                        TextState(title)
+                    } actions: {
+                        ButtonState(role: .cancel) {
+                            TextState("OK")
+                        }
+                    } message: {
+                        TextState(
+                            "Conductor’s current Cloud API only lets apps choose "
+                                + "the \(setting) when creating a session, so it "
+                                + "can’t be changed after the session is created."
+                        )
+                    }
+
+                    await store.send(
+                        .chat(.configurationControlTapped(control))
+                    ) {
+                        $0.destination = .alert(expectedAlert)
+                    }
+                    #expect(
+                        (
+                            store.state.chat?.selectedModel,
+                            store.state.chat?.selectedReasoningEffort,
+                            store.state.chat?.isFastModeEnabled
+                        ) == originalConfiguration
+                    )
+                }
             }
         }
     }
@@ -352,14 +430,17 @@ struct WorkspaceChatTests {
         store.exhaustivity = .off(showSkippedAssertions: false)
 
         let task = await store.send(.task)
+        desktopContinuation.yield(
+            [activeDesktopSession, archivedDesktopSession]
+        )
+        for _ in 0..<1_000 {
+            await Task.yield()
+        }
         cloudContinuation.yield(
             cloudSessionSnapshot(
                 workspaceID: workspace.id,
                 sessionIDs: ["active", "archived"]
             )
-        )
-        desktopContinuation.yield(
-            [activeDesktopSession, archivedDesktopSession]
         )
 
         for _ in 0..<1_000 {
@@ -1067,6 +1148,111 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Cloud session route promotion preserves loaded chat state")
+    func cloudSessionRoutePromotionPreservesLoadedChat() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let session = Session.preview(
+            id: "session",
+            workspaceID: workspace.id,
+            status: .idle
+        )
+        let route = WorkspaceMutationRoute.cloud(
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            state.hasUserSelectedSession = true
+            state.mutationRoute = route
+            state.chat = Chat.State(
+                session: session,
+                isCloudHosted: true,
+                mutationRoute: nil
+            )
+            state.chat?.isLoadingMessages = false
+            let store = TestStore(initialState: state) {
+                WorkspaceChat()
+            }
+
+            await store.send(.loadSessionsResponse(.success([session]))) {
+                $0.chat?.mutationRoute = route
+                $0.chat?.queuedMessages.mutationRoute = route
+                $0.isLoadingSessions = false
+            }
+            #expect(store.state.chat?.isLoadingMessages == false)
+        }
+    }
+
+    @Test("Selected Cloud session snapshots refresh displayed configuration")
+    func selectedCloudSessionSnapshotRefreshesConfiguration() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let provisionalSession = Session.preview(
+            id: "session",
+            workspaceID: workspace.id,
+            model: Session.Model(rawValue: ""),
+            codexThinkingLevel: nil,
+            isFastModeEnabled: nil
+        )
+        let resolvedSession = Session.preview(
+            id: provisionalSession.id,
+            workspaceID: workspace.id,
+            model: .gpt_5_6_sol,
+            codexThinkingLevel: .high,
+            isFastModeEnabled: false
+        )
+        let route = WorkspaceMutationRoute.cloud(
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            state.hasUserSelectedSession = true
+            state.mutationRoute = route
+            state.chat = Chat.State(
+                session: provisionalSession,
+                isCloudHosted: true,
+                mutationRoute: route
+            )
+            state.chat?.isLoadingMessages = false
+            let store = TestStore(initialState: state) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .loadSessionsResponse(.success([resolvedSession]))
+            ) {
+                $0.chat?.hasObservedSessionModelChange = true
+                $0.chat?.hasObservedSessionReasoningEffortChange = true
+                $0.chat?.selectedModel = .gpt_5_6_sol
+                $0.chat?.selectedReasoningEffort = .high
+                $0.isLoadingSessions = false
+            }
+            #expect(store.state.chat?.isLoadingMessages == false)
+        }
+    }
+
     @Test("Session observation selects a creation before its response arrives")
     func sessionObservationSelectsCreation() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -1405,7 +1591,6 @@ struct WorkspaceChatTests {
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
         let selectedSession = try makeSession(id: "selected", workspaceID: workspace.id)
         let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
-
         try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { db in
@@ -1423,24 +1608,20 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             } withDependencies: {
                 $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = {
-                    workspaceID,
-                    sessionID,
-                    message,
-                    model,
-                    _,
-                    mode,
-                    _,
-                    _ in
-                    #expect(workspaceID == workspace.id)
-                    #expect(sessionID == activeSession.id)
-                    #expect(message == "Run the tests.")
-                    #expect(model == activeSession.model)
-                    #expect(mode == .sent)
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    #expect(request.canonicalWorkspaceID == workspace.id)
+                    #expect(request.canonicalSessionID == activeSession.id)
+                    #expect(request.content == "Run the tests.")
+                    #expect(request.model == activeSession.model)
+                    #expect(request.mode == .sent)
                     for await _ in responses {
-                        return .rejected(reason: TestError().localizedDescription)
+                        return makeDeliveryAttempt(
+                            session: activeSession,
+                            content: request.content,
+                            attemptID: UUID(0)
+                        )
                     }
-                    return .unknown(reason: "The response stream ended.")
+                    throw TestError()
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -1454,7 +1635,7 @@ struct WorkspaceChatTests {
             }
 
             responseContinuation.yield()
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             responseContinuation.finish()
             await store.finish()
         }
@@ -1843,9 +2024,10 @@ struct WorkspaceChatTests {
 
             await store.send(
                 .chat(
-                    .sendMessageResponse(
+                    .enqueueMessageResponse(
                         sessionID: activeSession.id,
                         submittedDraft: "message",
+                        mode: .sent,
                         result: .failure(TestError())
                     )
                 )
@@ -2126,9 +2308,10 @@ struct WorkspaceChatTests {
             )
             await store.send(
                 .chat(
-                    .sendMessageResponse(
+                    .enqueueMessageResponse(
                         sessionID: activeSession.id,
                         submittedDraft: "message",
+                        mode: .sent,
                         result: .failure(error)
                     )
                 )
@@ -2315,11 +2498,10 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("Send immediately inserts a bubble, clears the draft, scrolls, then hides progress")
+    @Test("Send immediately inserts a bubble, clears the draft, scrolls, and shows progress")
     func optimisticSendAndAcceptance() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let session = try makeSession(id: "active", workspaceID: workspace.id)
-        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -2337,12 +2519,14 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    for await _ in responses {
-                        return .accepted(messageID: "canonical")
-                    }
-                    return .unknown(reason: "The response stream ended.")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .accepted,
+                        canonicalMessageID: "canonical"
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2350,38 +2534,28 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "  Run the tests.  " }
             await store.send(.chat(.sendButtonTapped(.sent)))
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
 
             #expect(store.state.chat?.messageDraft.isEmpty == true)
             #expect(store.state.chat?.scrollToBottomRequest == 1)
             #expect(
-                store.state.optimisticMessagesBySession[session.id] == [
-                    .init(
-                        id: UUID(0),
-                        workspaceID: workspace.id,
-                        sessionID: session.id,
-                        content: "Run the tests.",
-                        model: session.model,
-                        isFastModeEnabled: false,
-                        mode: .sent,
-                        reasoningEffort: .high,
-                        status: .sending,
-                        previousTurnID: nil
-                    ),
-                ]
+                store.state.chat?.displayedDeliveryAttempts.map(\.attemptID)
+                    == [UUID(0)]
             )
-            #expect(store.state.chat?.rows?.last?.id == "human:\(UUID(0).uuidString)")
-
-            responseContinuation.yield()
-            responseContinuation.finish()
-            await store.receive(\.messageSendResponse)
-            await store.finish()
-
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.first?.status
-                    == .acceptedAwaitingObservation
+                store.state.chat?.rows?.last?.id
+                    == "turn-in-progress:\(UUID(0).uuidString)"
+            )
+            #expect(
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .accepted
             )
             #expect(store.state.chat?.isMessageSendInFlight == false)
-            #expect(store.state.chat?.rows?.last?.id == "human:\(UUID(0).uuidString)")
+            #expect(
+                store.state.chat?.rows?.last?.id
+                    == "turn-in-progress:\(UUID(0).uuidString)"
+            )
         }
     }
 
@@ -2438,22 +2612,18 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.workspaceMutationClient.sendMessage = {
-                    route,
-                    canonicalWorkspaceID,
-                    canonicalSessionID,
-                    _,
-                    message,
-                    _,
-                    _,
-                    mode,
-                    _ in
-                    #expect(canonicalWorkspaceID == workspace.id)
-                    #expect(canonicalSessionID == session.id)
-                    #expect(message == "Test")
-                    #expect(mode == .sent)
-                    receivedRoute.setValue(route)
-                    return .cloud(attemptID: UUID(0))
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    #expect(request.canonicalWorkspaceID == workspace.id)
+                    #expect(request.canonicalSessionID == session.id)
+                    #expect(request.content == "Test")
+                    #expect(request.mode == .sent)
+                    receivedRoute.setValue(request.route)
+                    return makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        route: .cloud
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2462,7 +2632,7 @@ struct WorkspaceChatTests {
             #expect(chat.isCloudHosted)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.chat.sendMessageResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
 
             #expect(
@@ -2496,9 +2666,14 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    .rejected(reason: "No.")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .rejected,
+                        resultDetail: "No."
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2506,15 +2681,15 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
 
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.first?.status
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
                     == .rejected
             )
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.first?.deliveryDetail
+                store.state.chat?.displayedDeliveryAttempts.first?.resultDetail
                     == "No."
             )
             #expect(store.state.chat?.rows?.count == 1)
@@ -2550,9 +2725,14 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    .unknown(reason: "Timed out.")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .unknown,
+                        resultDetail: "Timed out."
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2560,24 +2740,26 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
 
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.first?.status
-                    == .unconfirmed
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .unknown
             )
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.first?.deliveryDetail
+                store.state.chat?.displayedDeliveryAttempts.first?.resultDetail
                     == "Timed out."
             )
 
             await store.send(.chat(.messagesUpdated([unrelatedMessage])))
 
-            #expect(store.state.messageIDToBubbleID[unrelatedMessage.id] == nil)
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.first?.status
-                    == .unconfirmed
+                store.state.chat?.messageIDToBubbleID[unrelatedMessage.id] == nil
+            )
+            #expect(
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .unknown
             )
             #expect(store.state.chat?.rows?.count == 2)
         }
@@ -2595,7 +2777,6 @@ struct WorkspaceChatTests {
             createdAt: Date(timeIntervalSince1970: 1_783_558_800),
             turnID: "desktop-turn"
         )
-        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -2613,12 +2794,12 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    for await _ in responses {
-                        return .accepted(messageID: "canonical")
-                    }
-                    return .unknown(reason: "The response stream ended.")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0)
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2626,34 +2807,43 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Mobile message" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            let optimisticRowID = try #require(store.state.chat?.rows?.last?.id)
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
+            let optimisticRowID = "human:\(UUID(0).uuidString)"
+            let progressRowID = "turn-in-progress:\(UUID(0).uuidString)"
 
             await store.send(.chat(.messagesUpdated([desktopMessage])))
 
-            #expect(store.state.messageIDToBubbleID[desktopMessage.id] == nil)
+            #expect(
+                store.state.chat?.messageIDToBubbleID[desktopMessage.id] == nil
+            )
             #expect(
                 store.state.chat?.rows?.map(\.id)
-                    == [optimisticRowID, "human:\(desktopMessage.id)"]
+                    == [
+                        optimisticRowID,
+                        "human:\(desktopMessage.id)",
+                        progressRowID,
+                    ]
             )
-
-            responseContinuation.finish()
-            await store.receive(\.messageSendResponse)
-            await store.finish()
         }
     }
 
-    @Test("A queued send clears its original draft after switching sessions")
-    func queuedSendClearsOriginalDraftAfterSessionSwitch() async throws {
+    @Test("An accepted queued send clears its original draft")
+    func acceptedQueuedSendClearsOriginalDraft() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
-        let selectedSession = try makeSession(id: "selected", workspaceID: workspace.id)
-        let (responses, responseContinuation) =
-            AsyncStream<MessageDeliveryResult>.makeStream()
+        let attempt = makeDeliveryAttempt(
+            session: activeSession,
+            content: "Queue this",
+            attemptID: UUID(0),
+            mode: .queued,
+            state: .accepted
+        )
 
         try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
-                try Session.upsert { [activeSession, selectedSession] }.execute(database)
+                try Session.upsert { activeSession }.execute(database)
             }
         } operation: {
             let store = TestStore(
@@ -2665,91 +2855,63 @@ struct WorkspaceChatTests {
                 )
             ) {
                 WorkspaceChat()
-            } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    for await result in responses {
-                        return result
-                    }
-                    return .unknown(reason: "The response stream ended.")
-                }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
 
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Queue this" }
-            await store.send(.chat(.sendButtonTapped(.queued)))
-            await store.send(.sessionButtonTapped(selectedSession))
-
-            responseContinuation.yield(.accepted(messageID: nil))
-            responseContinuation.finish()
-            await store.receive(\.messageSendResponse)
-            await store.finish()
-
-            await store.send(.sessionButtonTapped(activeSession))
+            await store.send(.chat(.deliveryAttemptsUpdated([attempt])))
             #expect(store.state.chat?.messageDraft.isEmpty == true)
         }
     }
 
     @Test(
-        "Queued rejection and uncertainty remain distinct after switching sessions",
+        "Queued rejection and uncertainty remain distinct",
         arguments: [
-            MessageDeliveryResult.rejected(reason: "Queue rejected."),
-            .unknown(reason: "Queue result lost."),
+            MessageDeliveryAttempt.State.rejected,
+            .unknown,
         ]
     )
-    func queuedFailureAfterSessionSwitch(
-        result: MessageDeliveryResult
+    func queuedFailurePresentation(
+        deliveryState: MessageDeliveryAttempt.State
     ) async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
-        let selectedSession = try makeSession(id: "selected", workspaceID: workspace.id)
 
         try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
-                try Session.upsert { [activeSession, selectedSession] }.execute(database)
+                try Session.upsert { activeSession }.execute(database)
             }
         } operation: {
-            var state = WorkspaceChat.State(
-                workspaceWithRepository: .init(workspace: workspace, repository: nil)
-            )
-            let optimisticMessage = WorkspaceChat.OptimisticMessage(
-                id: UUID(0),
-                workspaceID: workspace.id,
-                sessionID: activeSession.id,
-                content: "Queue this",
-                model: activeSession.model,
-                isFastModeEnabled: false,
-                mode: .queued,
-                reasoningEffort: nil,
-                status: .sending,
-                previousTurnID: nil
-            )
-            state.optimisticMessagesBySession[activeSession.id] = [optimisticMessage]
-            state.chat = Chat.State(session: selectedSession)
-            let store = TestStore(initialState: state) {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
                 WorkspaceChat()
             }
 
             await store.send(
-                .messageSendResponse(
-                    .init(
-                        workspaceID: workspace.id,
-                        sessionID: activeSession.id,
-                        messageID: optimisticMessage.id
-                    ),
-                    result
+                .chat(
+                    .queuedDeliveryResult(
+                        attemptID: UUID(0),
+                        state: deliveryState,
+                        detail: "Delivery failed."
+                    )
                 )
             ) {
-                $0.optimisticMessagesBySession[activeSession.id] = nil
-                switch result {
-                case .rejected(let reason):
-                    $0.destination = .alert(.failedToQueueMessage(message: reason))
-                case .unknown(let reason):
-                    $0.destination = .alert(.messageQueueUnconfirmed(message: reason))
-                case .accepted:
-                    Issue.record("This test requires a failed delivery result")
+                if deliveryState == .rejected {
+                    $0.destination = .alert(
+                        .failedToQueueMessage(message: "Delivery failed.")
+                    )
+                } else {
+                    $0.destination = .alert(
+                        .messageQueueUnconfirmed(message: "Delivery failed.")
+                    )
                 }
             }
         }
@@ -2784,9 +2946,14 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    .accepted(messageID: message.id)
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .accepted,
+                        canonicalMessageID: message.id
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2794,15 +2961,44 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
-            let optimisticRowID = try #require(store.state.chat?.rows?.last?.id)
+            let optimisticRowID = "human:\(UUID(0).uuidString)"
+            let pendingProgressRowID =
+                "turn-in-progress:\(UUID(0).uuidString)"
 
+            await store.send(
+                .chat(
+                    .deliveryAttemptsUpdated([
+                        makeDeliveryAttempt(
+                            session: session,
+                            content: "Test",
+                            attemptID: UUID(0),
+                            state: .acknowledged,
+                            canonicalMessageID: message.id,
+                            canonicalTurnID: message.turnID
+                        ),
+                    ])
+                )
+            )
+            #expect(
+                store.state.chat?.rows?.map(\.id)
+                    == [optimisticRowID, pendingProgressRowID]
+            )
             await store.send(.chat(.messagesUpdated([message])))
 
-            #expect(store.state.optimisticMessagesBySession[session.id] == nil)
-            #expect(store.state.messageIDToBubbleID[message.id] == UUID(0))
-            #expect(store.state.chat?.rows?.map(\.id) == [optimisticRowID])
+            #expect(
+                store.state.chat?.deliveryAttempts.first?.deliveryState
+                    == .acknowledged
+            )
+            #expect(store.state.chat?.messageIDToBubbleID[message.id] == UUID(0))
+            #expect(
+                store.state.chat?.rows?.map(\.id)
+                    == [
+                        optimisticRowID,
+                        "turn-in-progress:\(try #require(message.turnID))",
+                    ]
+            )
             guard let row = store.state.chat?.rows?.first,
                   case .humanMessage = row.content else {
                 Issue.record("Expected the canonical human row")
@@ -2839,8 +3035,6 @@ struct WorkspaceChatTests {
             createdAt: Date(timeIntervalSince1970: 1_783_558_900),
             turnID: "mobile-turn"
         )
-        let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
-
         try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
@@ -2857,12 +3051,12 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    for await _ in responses {
-                        return .accepted(messageID: mobileMessage.id)
-                    }
-                    return .unknown(reason: "The response stream ended.")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0)
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2878,15 +3072,19 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            let optimisticRowID = try #require(store.state.chat?.rows?.last?.id)
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
+            let optimisticRowID = "human:\(UUID(0).uuidString)"
 
             await store.send(
                 .chat(.messagesUpdated([previousMessage, desktopMessage]))
             )
 
-            #expect(store.state.optimisticMessagesBySession[session.id]?.count == 1)
-            #expect(store.state.messageIDToBubbleID[desktopMessage.id] == nil)
-            #expect(store.state.chat?.rows?.count == 3)
+            #expect(store.state.chat?.displayedDeliveryAttempts.count == 1)
+            #expect(
+                store.state.chat?.messageIDToBubbleID[desktopMessage.id] == nil
+            )
+            #expect(store.state.chat?.rows?.count == 4)
             #expect(store.state.chat?.rows?.contains { $0.id == optimisticRowID } == true)
             #expect(
                 store.state.chat?.rows?.contains {
@@ -2894,13 +3092,23 @@ struct WorkspaceChatTests {
                 } == true
             )
 
-            responseContinuation.yield()
-            responseContinuation.finish()
-            await store.receive(\.messageSendResponse)
-            await store.finish()
-
-            #expect(store.state.optimisticMessagesBySession[session.id]?.count == 1)
-            #expect(store.state.messageIDToBubbleID[desktopMessage.id] == nil)
+            await store.send(
+                .chat(
+                    .deliveryAttemptsUpdated([
+                        makeDeliveryAttempt(
+                            session: session,
+                            content: "Test",
+                            attemptID: UUID(0),
+                            state: .acknowledged,
+                            canonicalMessageID: mobileMessage.id,
+                            canonicalTurnID: mobileMessage.turnID
+                        ),
+                    ])
+                )
+            )
+            #expect(
+                store.state.chat?.messageIDToBubbleID[desktopMessage.id] == nil
+            )
 
             await store.send(
                 .chat(
@@ -2912,10 +3120,17 @@ struct WorkspaceChatTests {
                 )
             )
 
-            #expect(store.state.optimisticMessagesBySession[session.id] == nil)
-            #expect(store.state.messageIDToBubbleID[desktopMessage.id] == nil)
-            #expect(store.state.messageIDToBubbleID[mobileMessage.id] == UUID(0))
-            #expect(store.state.chat?.rows?.count == 3)
+            #expect(
+                store.state.chat?.deliveryAttempts.first?.deliveryState
+                    == .acknowledged
+            )
+            #expect(
+                store.state.chat?.messageIDToBubbleID[desktopMessage.id] == nil
+            )
+            #expect(
+                store.state.chat?.messageIDToBubbleID[mobileMessage.id] == UUID(0)
+            )
+            #expect(store.state.chat?.rows?.count == 4)
             #expect(store.state.chat?.rows?.contains { $0.id == optimisticRowID } == true)
             #expect(
                 store.state.chat?.rows?.contains {
@@ -2954,9 +3169,14 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    .unknown(reason: "Connection lost.")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .unknown,
+                        resultDetail: "Connection lost."
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -2964,12 +3184,25 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "Test" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
+            await store.send(
+                .chat(
+                    .deliveryAttemptsUpdated([
+                        makeDeliveryAttempt(
+                            session: session,
+                            content: "Test",
+                            attemptID: UUID(0),
+                            state: .acknowledged,
+                            canonicalMessageID: message.id,
+                            canonicalTurnID: message.turnID
+                        ),
+                    ])
+                )
+            )
             await store.send(.chat(.messagesUpdated([message])))
 
-            #expect(store.state.optimisticMessagesBySession[session.id] == nil)
-            #expect(store.state.messageIDToBubbleID[message.id] == UUID(0))
+            #expect(store.state.chat?.messageIDToBubbleID[message.id] == UUID(0))
             #expect(store.state.chat?.rows?.count == 1)
         }
     }
@@ -2986,6 +3219,7 @@ struct WorkspaceChatTests {
             createdAt: Date(timeIntervalSince1970: 1_783_558_800),
             turnID: "second-turn"
         )
+        let sendCount = LockIsolated(0)
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -3003,13 +3237,20 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.uuid = .incrementing
-                $0.desktopClient.sendMessage = { _, _, message, _, _, _, _, _ in
-                    if message == "First" {
-                        .rejected(reason: "No.")
-                    } else {
-                        .accepted(messageID: "second")
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    let index = sendCount.withValue { value in
+                        let currentValue = value
+                        value += 1
+                        return currentValue
                     }
+                    return makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(index),
+                        state: index == 0 ? .rejected : .accepted,
+                        resultDetail: index == 0 ? "No." : nil,
+                        canonicalMessageID: index == 0 ? nil : secondMessage.id
+                    )
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -3017,18 +3258,40 @@ struct WorkspaceChatTests {
             let chat = try #require(store.state.chat)
             chat.$messageDraft.withLock { $0 = "First" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
+            let firstAttempt = try #require(
+                store.state.chat?.recentlyEnqueuedAttempt
+            )
+            await store.send(.chat(.deliveryAttemptsUpdated([firstAttempt])))
 
             let selectedChat = try #require(store.state.chat)
             selectedChat.$messageDraft.withLock { $0 = "Second" }
             await store.send(.chat(.sendButtonTapped(.sent)))
-            await store.receive(\.messageSendResponse)
+            await store.receive(\.chat.enqueueMessageResponse)
             await store.finish()
+            let secondAttempt = try #require(
+                store.state.chat?.recentlyEnqueuedAttempt
+            )
+            await store.send(
+                .chat(
+                    .deliveryAttemptsUpdated([
+                        firstAttempt,
+                        makeDeliveryAttempt(
+                            session: session,
+                            content: "Second",
+                            attemptID: secondAttempt.attemptID,
+                            state: .acknowledged,
+                            canonicalMessageID: secondMessage.id,
+                            canonicalTurnID: secondMessage.turnID
+                        ),
+                    ])
+                )
+            )
 
             #expect(
-                store.state.optimisticMessagesBySession[session.id]?.map(\.status)
-                    == [.rejected, .acceptedAwaitingObservation]
+                store.state.chat?.deliveryAttempts.map(\.deliveryState)
+                    == [.rejected, .acknowledged]
             )
 
             await store.send(.chat(.messagesUpdated([secondMessage])))
@@ -3038,12 +3301,14 @@ struct WorkspaceChatTests {
                     == [
                         "human:\(UUID(0).uuidString)",
                         "human:\(UUID(1).uuidString)",
+                        "turn-in-progress:\(try #require(secondMessage.turnID))",
                     ]
             )
-            guard case .optimisticMessage =
-                    store.state.chat?.rows?.first?.content,
-                  case .humanMessage =
-                    store.state.chat?.rows?.last?.content else {
+            let rows = try #require(store.state.chat?.rows)
+            guard rows.count == 3,
+                  case .optimisticMessage = rows[0].content,
+                  case .humanMessage = rows[1].content,
+                  case .turnInProgress = rows[2].content else {
                 Issue.record("Expected failed A to remain before canonical B")
                 return
             }
@@ -3056,6 +3321,35 @@ private func makeRequestLease() throws -> DesktopRequestLease {
     DesktopRequestLease(
         baseURL: try #require(URL(string: "http://desktop:3768")),
         endpointEpoch: 1
+    )
+}
+
+private func makeDeliveryAttempt(
+    session: Session,
+    content: String,
+    attemptID: UUID,
+    route: MessageDeliveryAttempt.Route = .desktop,
+    mode: MessageSendMode = .sent,
+    state: MessageDeliveryAttempt.State = .ready,
+    resultDetail: String? = nil,
+    canonicalMessageID: Message.ID? = nil,
+    canonicalTurnID: String? = nil
+) -> MessageDeliveryAttempt {
+    MessageDeliveryAttempt(
+        attemptID: attemptID,
+        route: route,
+        canonicalWorkspaceID: session.workspaceID,
+        canonicalSessionID: session.id,
+        content: content,
+        model: session.model,
+        isFastModeEnabled: false,
+        mode: mode,
+        reasoningEffort: session.reasoningEffort,
+        submittedDraft: content,
+        state: state,
+        resultDetail: resultDetail,
+        canonicalMessageID: canonicalMessageID,
+        canonicalTurnID: canonicalTurnID
     )
 }
 

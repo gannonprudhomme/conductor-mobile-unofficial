@@ -19,8 +19,8 @@ struct CloudPendingMutationTests {
             attemptID: UUID(0),
             accountID: "account",
             credentialGeneration: UUID(1),
-            operation: .sendMessage,
-            resourceKind: .message,
+            operation: .cancelSession,
+            resourceKind: .session,
             request: CloudSendMessageRequest(
                 messageID: "message",
                 message: "Hello"
@@ -61,8 +61,8 @@ struct CloudPendingMutationTests {
         let attempt = try CloudPendingMutation(
             accountID: "account",
             credentialGeneration: generation,
-            operation: .sendMessage,
-            resourceKind: .message,
+            operation: .cancelSession,
+            resourceKind: .session,
             request: CloudSendMessageRequest(
                 messageID: "stable",
                 message: "Hello"
@@ -80,12 +80,12 @@ struct CloudPendingMutationTests {
         )
     }
 
-    @Test("Workspace creation baselines and prompt handoffs round trip")
+    @Test("Workspace creation baselines and prompts round trip")
     func workspaceCreationRoundTrip() throws {
-        let capturedAt = Date(timeIntervalSince1970: 42)
         let payload = CloudWorkspaceCreationPayload(
             request: CloudCreateWorkspaceRequest(
                 projectID: "project",
+                sessionName: "Conductor Mobile recovery-token",
                 agent: "claude",
                 model: "sonnet-4-6",
                 effort: "high"
@@ -96,8 +96,7 @@ struct CloudPendingMutationTests {
             selectedModel: Session.Model(rawValue: "sonnet-4-6"),
             selectedReasoningEffort: .high,
             prompt: "Implement it",
-            baselineRemoteWorkspaceIDs: ["a", "b"],
-            baselineCapturedAt: capturedAt
+            baselineRemoteWorkspaceIDs: ["a", "b"]
         )
         let attempt = try CloudPendingMutation(
             accountID: "account",
@@ -106,25 +105,9 @@ struct CloudPendingMutationTests {
             resourceKind: .workspace,
             request: payload
         )
-        let handoff = InitialPromptHandoff(
-            creationAttemptID: attempt.attemptID,
-            accountID: attempt.accountID,
-            credentialGeneration: attempt.credentialGeneration,
-            canonicalWorkspaceID: "workspace",
-            remoteWorkspaceID: "remote-workspace",
-            canonicalSessionID: "session",
-            remoteSessionID: "remote-session",
-            originalPrompt: payload.prompt,
-            installedDraftText: "Existing\n\nImplement it",
-            state: .linked,
-            createdAt: capturedAt
-        )
-
         #expect(
             try attempt.request(as: CloudWorkspaceCreationPayload.self)
                 == payload
         )
-        #expect(handoff.handoffState == .linked)
-        #expect(handoff.installedDraftText == "Existing\n\nImplement it")
     }
 }

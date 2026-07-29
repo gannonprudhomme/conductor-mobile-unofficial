@@ -37,14 +37,21 @@ struct CloudConfigurationTests {
         }
     }
 
-    @Test("Legacy configuration receives a credential generation")
+    @Test("Legacy configuration receives a stable credential generation")
     func legacyConfigurationMigration() throws {
-        let configuration = try JSONDecoder().decode(
+        let firstConfiguration = try JSONDecoder().decode(
+            CloudConfiguration.self,
+            from: Data(#"{"accountID":"account"}"#.utf8)
+        )
+        let secondConfiguration = try JSONDecoder().decode(
             CloudConfiguration.self,
             from: Data(#"{"accountID":"account"}"#.utf8)
         )
 
-        #expect(configuration.accountID == "account")
-        #expect(configuration.credentialGeneration.uuidString.isEmpty == false)
+        #expect(firstConfiguration.accountID == "account")
+        #expect(
+            firstConfiguration.credentialGeneration
+                == secondConfiguration.credentialGeneration
+        )
     }
 }

@@ -10,17 +10,42 @@ import LucideIcons
 import SharedConductorData
 import SwiftUI
 
+public enum ModelConfigurationControl: Equatable, Sendable {
+    case model
+    case reasoningEffort
+    case fastMode
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .model:
+            "configuration.model"
+        case .reasoningEffort:
+            "configuration.reasoningEffort"
+        case .fastMode:
+            "configuration.fastMode"
+        }
+    }
+}
+
+public enum ModelConfigurationInteractionMode: Equatable, Sendable {
+    case editable
+    case readOnlyInformational
+    case hidden
+}
+
 public struct ModelAndFastModeControls: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
     let allowedModels: Set<Session.Model>?
     let availableReasoningEfforts: [Session.ReasoningEffort]
+    let interactionMode: ModelConfigurationInteractionMode
     let isFastModeEnabled: Bool
     let isFastModeButtonDisabled: Bool
     let showsFastMode: Bool
     let selectedModel: Session.Model
     let selectedReasoningEffort: Session.ReasoningEffort?
     let onFastModeTapped: @MainActor () -> Void
+    let onInformationalControlTapped: @MainActor (ModelConfigurationControl) -> Void
     let onSelectReasoningEffort: @MainActor (Session.ReasoningEffort) -> Void
     let onSelectModel: @MainActor (Session.Model) -> Void
 
@@ -29,12 +54,16 @@ public struct ModelAndFastModeControls: View {
         allowsAgentSwitching: Bool = false,
         allowedModels: Set<Session.Model>? = nil,
         availableReasoningEfforts: [Session.ReasoningEffort],
+        interactionMode: ModelConfigurationInteractionMode = .editable,
         isFastModeEnabled: Bool,
         isFastModeButtonDisabled: Bool = false,
         showsFastMode: Bool = true,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort?,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onInformationalControlTapped: @escaping @MainActor (
+            ModelConfigurationControl
+        ) -> Void = { _ in },
         onSelectReasoningEffort: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSelectModel: @escaping @MainActor (Session.Model) -> Void
     ) {
@@ -42,12 +71,14 @@ public struct ModelAndFastModeControls: View {
         self.allowsAgentSwitching = allowsAgentSwitching
         self.allowedModels = allowedModels
         self.availableReasoningEfforts = availableReasoningEfforts
+        self.interactionMode = interactionMode
         self.isFastModeEnabled = isFastModeEnabled
         self.isFastModeButtonDisabled = isFastModeButtonDisabled
         self.showsFastMode = showsFastMode
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.onFastModeTapped = onFastModeTapped
+        self.onInformationalControlTapped = onInformationalControlTapped
         self.onSelectReasoningEffort = onSelectReasoningEffort
         self.onSelectModel = onSelectModel
     }
@@ -55,47 +86,14 @@ public struct ModelAndFastModeControls: View {
     public var body: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 4) {
-                ModelPicker(
-                    agentType: agentType,
-                    allowsAgentSwitching: allowsAgentSwitching,
-                    allowedModels: allowedModels,
-                    selectedModel: selectedModel,
-                    onSelect: onSelectModel
-                )
-                .equatable()
+                modelControl
 
                 if showsFastMode {
-                    Button(action: onFastModeTapped) {
-                    Label {
-                        Text("Fast mode")
-                    } icon: {
-                        LucideIcon(Lucide.zap, style: .small)
-                    }
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(
-                        .theme(isFastModeEnabled ? .accent : .textSecondary)
-                    )
-                    .padding(8)
-                    .background(
-                        Color.theme(.highlight)
-                            .opacity(isFastModeEnabled ? 1 : 0),
-                        in: .circle
-                    )
-                    .animation(.interactiveSpring, value: isFastModeEnabled)
-                    }
-                    .buttonStyle(.spring)
-                    .disabled(isFastModeButtonDisabled)
-                    .accessibilityLabel("Fast mode")
-                    .accessibilityValue(isFastModeEnabled ? "On" : "Off")
+                    fastModeControl
                 }
 
-                if !availableReasoningEfforts.isEmpty {
-                    ReasoningEffortControl(
-                        availableEfforts: availableReasoningEfforts,
-                        selectedEffort: selectedReasoningEffort,
-                        isDisabled: isFastModeButtonDisabled,
-                        onSelect: onSelectReasoningEffort
-                    )
+                if isReasoningEffortControlVisible {
+                    reasoningEffortControl
                 }
             }
         }
@@ -103,6 +101,168 @@ public struct ModelAndFastModeControls: View {
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         .defaultScrollAnchor(.leading)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var modelControl: some View {
+        switch interactionMode {
+        case .editable:
+            ModelPicker(
+                agentType: agentType,
+                allowsAgentSwitching: allowsAgentSwitching,
+                allowedModels: allowedModels,
+                selectedModel: selectedModel,
+                onSelect: onSelectModel
+            )
+            .equatable()
+            .accessibilityIdentifier(
+                ModelConfigurationControl.model.accessibilityIdentifier
+            )
+        case .readOnlyInformational:
+            Button {
+                onInformationalControlTapped(.model)
+            } label: {
+                ModelControlLabel(
+                    agentType: displayedModelAgentType,
+                    title: displayedModelName
+                )
+            }
+            .buttonStyle(.spring)
+            .accessibilityLabel("Model")
+            .accessibilityValue(displayedModelName)
+            .accessibilityHint(readOnlyAccessibilityHint)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.model.accessibilityIdentifier
+            )
+        case .hidden:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var fastModeControl: some View {
+        switch interactionMode {
+        case .editable:
+            Button(action: onFastModeTapped) {
+                fastModeLabel
+            }
+            .buttonStyle(.spring)
+            .disabled(isDisabledDuringAction(.fastMode))
+            .accessibilityLabel("Fast mode")
+            .accessibilityValue(displayedFastModeName)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.fastMode.accessibilityIdentifier
+            )
+        case .readOnlyInformational:
+            Button {
+                onInformationalControlTapped(.fastMode)
+            } label: {
+                fastModeLabel
+            }
+            .buttonStyle(.spring)
+            .accessibilityLabel("Fast mode")
+            .accessibilityValue(displayedFastModeName)
+            .accessibilityHint(readOnlyAccessibilityHint)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.fastMode.accessibilityIdentifier
+            )
+        case .hidden:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var reasoningEffortControl: some View {
+        switch interactionMode {
+        case .editable:
+            ReasoningEffortControl(
+                availableEfforts: availableReasoningEfforts,
+                selectedEffort: selectedReasoningEffort,
+                isDisabled: isDisabledDuringAction(.reasoningEffort),
+                onSelect: onSelectReasoningEffort
+            )
+            .accessibilityIdentifier(
+                ModelConfigurationControl.reasoningEffort.accessibilityIdentifier
+            )
+        case .readOnlyInformational:
+            Button {
+                onInformationalControlTapped(.reasoningEffort)
+            } label: {
+                ReasoningEffortLabel(
+                    effort: selectedReasoningEffort,
+                    showsDefaultTitle: true
+                )
+            }
+            .buttonStyle(.spring)
+            .accessibilityLabel("Reasoning effort")
+            .accessibilityValue(displayedReasoningEffortName)
+            .accessibilityHint(readOnlyAccessibilityHint)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.reasoningEffort.accessibilityIdentifier
+            )
+        case .hidden:
+            EmptyView()
+        }
+    }
+
+    private var fastModeLabel: some View {
+        Label {
+            Text("Fast mode")
+        } icon: {
+            LucideIcon(Lucide.zap, style: .small)
+        }
+        .labelStyle(.iconOnly)
+        .foregroundStyle(
+            .theme(isFastModeEnabled ? .accent : .textSecondary)
+        )
+        .padding(8)
+        .background(
+            Color.theme(.highlight)
+                .opacity(isFastModeEnabled ? 1 : 0),
+            in: .circle
+        )
+        .animation(.interactiveSpring, value: isFastModeEnabled)
+    }
+
+    var displayedModelAgentType: Session.AgentType {
+        selectedModel.agentType ?? agentType
+    }
+
+    var displayedModelName: String {
+        selectedModel.rawValue.isEmpty
+            ? "Default"
+            : selectedModel.displayName
+    }
+
+    var displayedReasoningEffortName: String {
+        selectedReasoningEffort?.displayName ?? "Default"
+    }
+
+    var displayedFastModeName: String {
+        isFastModeEnabled ? "On" : "Off"
+    }
+
+    var isReasoningEffortControlVisible: Bool {
+        interactionMode == .readOnlyInformational
+            || !availableReasoningEfforts.isEmpty
+    }
+
+    func isDisabledDuringAction(
+        _ control: ModelConfigurationControl
+    ) -> Bool {
+        guard interactionMode == .editable else {
+            return false
+        }
+        switch control {
+        case .reasoningEffort, .fastMode:
+            return isFastModeButtonDisabled
+        case .model:
+            return false
+        }
+    }
+
+    var readOnlyAccessibilityHint: String {
+        "Double-tap to learn why this setting can’t be changed."
     }
 }
 
@@ -201,18 +361,7 @@ public struct ModelMenu<SourceLabel: View>: View {
         _ title: String,
         agentType: Session.AgentType
     ) -> some View {
-        Label {
-            Text(title)
-        } icon: {
-            AgentIcon(
-                agentType: agentType,
-                size: ThemeFontStyle.small.size,
-                relativeTo: ThemeFontStyle.small.textStyle
-            )
-        }
-        .labelStyle(.conductorExtraSmall)
-        .foregroundStyle(.theme(.textPrimary))
-        .font(.theme(.small))
+        ModelControlLabel(agentType: agentType, title: title)
     }
 }
 
@@ -273,6 +422,15 @@ public struct ModelPicker: Equatable, View {
         _ title: String,
         agentType: Session.AgentType
     ) -> some View {
+        ModelControlLabel(agentType: agentType, title: title)
+    }
+}
+
+private struct ModelControlLabel: View {
+    let agentType: Session.AgentType
+    let title: String
+
+    var body: some View {
         Label {
             Text(title)
         } icon: {

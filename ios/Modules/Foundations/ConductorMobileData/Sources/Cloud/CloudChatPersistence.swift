@@ -127,6 +127,21 @@ public enum CloudChatPersistence {
                         }
                     }
 
+                case .cancelSession:
+                    if attempt.mutationState == .accepted,
+                       status?.status == .idle
+                        || status?.status == .error {
+                        if try CloudPendingMutation.compareAndSetState(
+                            attemptID: attempt.attemptID,
+                            from: attempt.mutationState,
+                            to: .acknowledged,
+                            at: Date(),
+                            in: database
+                        ) {
+                            finalizedAttemptIDs.append(attempt.attemptID)
+                        }
+                    }
+
                 default:
                     break
                 }
@@ -263,9 +278,10 @@ public enum CloudChatPersistence {
                 in: database
             )
         }
-        try acknowledgeObservedSends(
-            eventIDs: Set(update.messages.map(\.id)),
+        try acknowledgeObservedDeliveries(
+            update.messages,
             accountID: update.accountID,
+            remoteSessionID: update.sessionID,
             canonicalSessionID: canonicalSessionID,
             in: database
         )
@@ -324,6 +340,23 @@ public enum CloudChatPersistence {
         )
     }
 
+    public static func reconcileDeliveryAttempts(
+        for canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws {
+        guard let metadata = try CloudSessionMetadata
+            .find(canonicalSessionID)
+            .fetchOne(database) else {
+            return
+        }
+        try acknowledgePersistedDeliveries(
+            accountID: metadata.accountID,
+            remoteSessionID: metadata.cloudSessionID,
+            canonicalSessionID: canonicalSessionID,
+            in: database
+        )
+    }
+
     public static func remoteSessionID(
         for canonicalSessionID: Session.ID,
         in database: Database
@@ -373,15 +406,22 @@ public enum CloudChatPersistence {
             ?? existing?.updatedAt
             ?? Date.distantPast.ISO8601Format()
         let createdAt = existing?.createdAt ?? updatedAt
-        let effort = cloudSession.effort.map(Session.ReasoningEffort.init(rawValue:))
         let agentType = Session.AgentType(rawValue: agent)
+        let effort = cloudSession.effort
+            .map(Session.ReasoningEffort.init(rawValue:))
+            ?? (
+                existing?.agentType == agentType
+                    ? existing?.reasoningEffort
+                    : nil
+            )
 
         return Session(
             id: canonicalID,
             workspaceID: workspaceID,
             title: cloudSession.name,
             agentType: agentType,
-            isHidden: cloudSession.archivedAt != nil,
+            isHidden: cloudSession.archivedAt != nil
+                || existing?.isHidden == true,
             createdAt: createdAt,
             updatedAt: updatedAt,
             lastUserMessageAt: existing?.lastUserMessageAt,
@@ -394,11 +434,12 @@ public enum CloudChatPersistence {
             contextTokenCount: existing?.contextTokenCount ?? 0,
             codexThinkingLevel: agentType == .codex
                 ? effort
-                : existing?.codexThinkingLevel,
-            isFastModeEnabled: cloudSession.fastMode,
+                : nil,
+            isFastModeEnabled: cloudSession.fastMode
+                ?? existing?.isFastModeEnabled,
             claudeEffortLevel: agentType == .claude
                 ? effort
-                : existing?.claudeEffortLevel,
+                : nil,
             queuePausedAt: existing?.queuePausedAt
         )
     }
@@ -592,25 +633,128 @@ public enum CloudChatPersistence {
         }
     }
 
-    private static func acknowledgeObservedSends(
-        eventIDs: Set<String>,
+    private static func acknowledgeObservedDeliveries(
+        _ events: [CloudTranscriptMessage],
         accountID: String,
+        remoteSessionID: String,
         canonicalSessionID: Session.ID,
         in database: Database
     ) throws {
-        let attempts = try CloudPendingMutation
+        let observedEvents = events.compactMap { event -> (
+            remoteMessageID: String,
+            canonicalMessageID: Message.ID?,
+            canonicalTurnID: String?
+        )? in
+            guard let remoteMessageID = observedRemoteMessageID(for: event) else {
+                return nil
+            }
+            let userMessage = CloudTranscriptAdapter
+                .adapt(
+                    event,
+                    accountID: accountID,
+                    remoteSessionID: remoteSessionID,
+                    canonicalSessionID: canonicalSessionID
+                )
+                .first { $0.message.role == .user }?
+                .message
+            return (
+                remoteMessageID.lowercased(),
+                userMessage?.id,
+                userMessage?.turnID
+            )
+        }
+        guard !observedEvents.isEmpty else {
+            return
+        }
+        let attempts = try MessageDeliveryAttempt
             .where {
                 $0.accountID.eq(accountID)
                     && $0.canonicalSessionID.eq(canonicalSessionID)
+                    && $0.route.eq(MessageDeliveryAttempt.Route.cloud.rawValue)
+                    && $0.state.neq(
+                        MessageDeliveryAttempt.State.acknowledged.rawValue
+                    )
             }
             .fetchAll(database)
-        for attempt in attempts
-        where attempt.mutationOperation == .sendMessage
-            && attempt.stableRemoteMessageID.map(eventIDs.contains) == true {
-            _ = try CloudPendingMutation.compareAndSetState(
+        for attempt in attempts {
+            let attemptID = attempt.attemptID.uuidString.lowercased()
+            guard let observed = observedEvents.first(where: {
+                $0.remoteMessageID == attemptID
+            }) else {
+                continue
+            }
+            _ = try MessageDeliveryAttempt.acknowledge(
                 attemptID: attempt.attemptID,
-                from: attempt.mutationState,
-                to: .acknowledged,
+                canonicalMessageID: observed.canonicalMessageID,
+                canonicalTurnID: observed.canonicalTurnID,
+                at: Date(),
+                in: database
+            )
+        }
+    }
+
+    private static func observedRemoteMessageID(
+        for event: CloudTranscriptMessage
+    ) -> String? {
+        guard case let .object(content) = event.content,
+              case .string("userMessage") = content["type"] else {
+            return nil
+        }
+        if case let .string(messageID) = content["id"] {
+            return messageID
+        } else if case let .string(turnID) = content["turnId"] {
+            return turnID
+        } else {
+            return event.id
+        }
+    }
+
+    private static func acknowledgePersistedDeliveries(
+        accountID: String,
+        remoteSessionID: String,
+        canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws {
+        let messages = try CloudMessageMetadata
+            .messages(sessionID: canonicalSessionID)
+            .fetchAll(database)
+            .filter { $0.role == .user }
+        let metadata = try CloudMessageMetadata
+            .where { $0.canonicalSessionID.eq(canonicalSessionID) }
+            .fetchAll(database)
+        let messagesByID = Dictionary(
+            uniqueKeysWithValues: messages.map { ($0.id, $0) }
+        )
+        let attempts = try MessageDeliveryAttempt
+            .where {
+                $0.accountID.eq(accountID)
+                    && $0.canonicalSessionID.eq(canonicalSessionID)
+                    && $0.route.eq(MessageDeliveryAttempt.Route.cloud.rawValue)
+                    && $0.state.neq(
+                        MessageDeliveryAttempt.State.acknowledged.rawValue
+                    )
+            }
+            .fetchAll(database)
+        for attempt in attempts {
+            let remoteMessageID = attempt.attemptID.uuidString.lowercased()
+            let canonicalRemoteTurnID = CloudCanonicalID.turn(
+                accountID: accountID,
+                remoteSessionID: remoteSessionID,
+                remoteTurnID: remoteMessageID
+            )
+            let message = messages.first {
+                $0.sdkMessageID?.lowercased() == remoteMessageID
+                    || $0.turnID == canonicalRemoteTurnID
+            } ?? metadata.first {
+                $0.cloudEventID.lowercased() == remoteMessageID
+            }.flatMap { messagesByID[$0.canonicalMessageID] }
+            guard let message else {
+                continue
+            }
+            _ = try MessageDeliveryAttempt.acknowledge(
+                attemptID: attempt.attemptID,
+                canonicalMessageID: message.id,
+                canonicalTurnID: message.turnID,
                 at: Date(),
                 in: database
             )

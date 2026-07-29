@@ -265,6 +265,7 @@ public struct ConductorSettings: Sendable {
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
     @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.cloudWorkspaceCacheClient) var cloudWorkspaceCacheClient
+    @Dependency(\.messageDeliveryOutbox) var messageDeliveryOutbox
     @Dependency(\.dismiss) var dismiss
     @Dependency(\.uuid) var uuid
 
@@ -358,11 +359,17 @@ public struct ConductorSettings: Sendable {
                         cloudCredentialClient,
                         cloudMutationRunner,
                         configuration = state.cloudConfiguration,
+                        messageDeliveryOutbox,
                     ] send in
                     await send(
                         .cloudCredentialDeleteResult(
                             await Result {
                                 if let configuration {
+                                    await messageDeliveryOutbox.cancelAndAwait(
+                                        accountID: configuration.accountID,
+                                        credentialGeneration: configuration
+                                            .credentialGeneration
+                                    )
                                     await cloudMutationRunner.cancelAndAwait(
                                         accountID: configuration.accountID,
                                         credentialGeneration: configuration
@@ -594,11 +601,17 @@ public struct ConductorSettings: Sendable {
                 cloudCredentialClient,
                 cloudMutationRunner,
                 configuration = state.cloudConfiguration,
+                messageDeliveryOutbox,
             ] send in
             let didReplaceCredential = !cloudAPIKey.isEmpty
             let result = await Result {
                 if didReplaceCredential {
                     if let configuration {
+                        await messageDeliveryOutbox.cancelAndAwait(
+                            accountID: configuration.accountID,
+                            credentialGeneration: configuration
+                                .credentialGeneration
+                        )
                         await cloudMutationRunner.cancelAndAwait(
                             accountID: configuration.accountID,
                             credentialGeneration: configuration

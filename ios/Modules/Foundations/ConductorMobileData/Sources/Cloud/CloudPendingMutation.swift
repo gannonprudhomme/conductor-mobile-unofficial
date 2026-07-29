@@ -121,7 +121,6 @@ public struct CloudPendingMutation: Equatable, Identifiable, Sendable {
             self.rawValue = rawValue
         }
 
-        public static let sendMessage = Self(rawValue: "send-message")
         public static let cancelSession = Self(rawValue: "cancel-session")
         public static let createSession = Self(rawValue: "create-session")
         public static let renameSession = Self(rawValue: "rename-session")

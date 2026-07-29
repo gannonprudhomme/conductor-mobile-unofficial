@@ -70,7 +70,7 @@ public enum CloudOwnershipCleanup {
         }
 
         let attempts = try CloudPendingMutation.all.fetchAll(database)
-        let handoffs = try InitialPromptHandoff.all.fetchAll(database)
+        let deliveryAttempts = try MessageDeliveryAttempt.all.fetchAll(database)
         let outcomes = try CloudMutationOutcome.all.fetchAll(database)
 
         if reason == .authoritativeSnapshot {
@@ -99,7 +99,7 @@ public enum CloudOwnershipCleanup {
                     workspaceID: nil,
                     sessionID: sessionID,
                     attempts: attempts,
-                    handoffs: handoffs,
+                    deliveryAttempts: deliveryAttempts,
                     outcomes: outcomes
                 )
             })
@@ -111,7 +111,7 @@ public enum CloudOwnershipCleanup {
                     workspaceID: workspaceID,
                     sessionID: nil,
                     attempts: attempts,
-                    handoffs: handoffs,
+                    deliveryAttempts: deliveryAttempts,
                     outcomes: outcomes
                 )
             })
@@ -167,17 +167,22 @@ public enum CloudOwnershipCleanup {
                 .delete()
                 .execute(database)
         }
-        for handoff in handoffs
-        where shouldDelete(
-            accountID: handoff.accountID,
-            workspaceID: handoff.canonicalWorkspaceID,
-            sessionID: handoff.canonicalSessionID,
-            accountIDs: accountIDs,
-            workspaceIDs: workspaceIDs,
-            sessionIDs: sessionIDs,
-            reason: reason
-        ) {
-            try InitialPromptHandoff.find(handoff.handoffID)
+        for deliveryAttempt in deliveryAttempts
+        where deliveryAttempt.deliveryRoute == .cloud
+            && (
+                (
+                    reason == .credentialRemoval
+                        && deliveryAttempt.accountID.map(accountIDs.contains)
+                            == true
+                )
+                    || workspaceIDs.contains(
+                        deliveryAttempt.canonicalWorkspaceID
+                    )
+                    || sessionIDs.contains(
+                        deliveryAttempt.canonicalSessionID
+                    )
+            ) {
+            try MessageDeliveryAttempt.find(deliveryAttempt.attemptID)
                 .delete()
                 .execute(database)
         }
@@ -188,6 +193,9 @@ public enum CloudOwnershipCleanup {
         }
 
         for workspaceID in workspaceIDs {
+            let metadata = allWorkspaceMetadata.first {
+                $0.workspaceID == workspaceID
+            }
             try CloudWorkspaceMetadata.find(workspaceID).delete().execute(database)
             let hasDesktopOwnership = try MobileWorkspaceState
                 .find(workspaceID)
@@ -197,6 +205,13 @@ public enum CloudOwnershipCleanup {
                 .fetchCount(database) > 0
             if !hasDesktopOwnership, !hasSessions {
                 try Workspace.find(workspaceID).delete().execute(database)
+            } else if let metadata,
+                      metadata.remoteWorkspaceID != workspaceID {
+                try rekeyDesktopWorkspace(
+                    from: workspaceID,
+                    to: metadata.remoteWorkspaceID,
+                    in: database
+                )
             } else {
                 // Retaining the Desktop row must not retain the Cloud source
                 // classification after its Cloud ownership metadata is removed.
@@ -245,33 +260,89 @@ public enum CloudOwnershipCleanup {
         }
     }
 
+    private static func rekeyDesktopWorkspace(
+        from canonicalWorkspaceID: Workspace.ID,
+        to remoteWorkspaceID: Workspace.ID,
+        in database: Database
+    ) throws {
+        guard let workspace = try Workspace
+            .find(canonicalWorkspaceID)
+            .fetchOne(database) else {
+            return
+        }
+        try Workspace
+            .upsert {
+                workspace.replacingID(with: remoteWorkspaceID)
+            }
+            .execute(database)
+        try Workspace
+            .find(remoteWorkspaceID)
+            .update {
+                $0.hostingServerURL = #bind(nil as String?)
+            }
+            .execute(database)
+
+        if let mobileState = try MobileWorkspaceState
+            .find(canonicalWorkspaceID)
+            .fetchOne(database) {
+            try MobileWorkspaceState
+                .upsert {
+                    MobileWorkspaceState(
+                        workspaceID: remoteWorkspaceID,
+                        isWorking: mobileState.isWorking,
+                        pullRequest: mobileState.pullRequestSnapshot
+                    )
+                }
+                .execute(database)
+        }
+        try Session
+            .where { $0.workspaceID.eq(canonicalWorkspaceID) }
+            .update {
+                $0.workspaceID = #bind(remoteWorkspaceID)
+            }
+            .execute(database)
+        try MessageDeliveryAttempt
+            .where {
+                $0.route.eq(MessageDeliveryAttempt.Route.desktop.rawValue)
+                    && $0.canonicalWorkspaceID.eq(canonicalWorkspaceID)
+            }
+            .update {
+                $0.canonicalWorkspaceID = #bind(remoteWorkspaceID)
+                $0.remoteWorkspaceID = #bind(remoteWorkspaceID)
+            }
+            .execute(database)
+        try Workspace.find(canonicalWorkspaceID).delete().execute(database)
+    }
+
     private static func isProtected(
         workspaceID: Workspace.ID?,
         sessionID: Session.ID?,
         attempts: [CloudPendingMutation],
-        handoffs: [InitialPromptHandoff],
+        deliveryAttempts: [MessageDeliveryAttempt],
         outcomes: [CloudMutationOutcome]
     ) throws -> Bool {
         let protectingAttempts = attempts.filter { attempt in
-            let matches = workspaceID.map {
-                attempt.canonicalWorkspaceID == $0
-            } ?? sessionID.map {
-                attempt.canonicalSessionID == $0
-            } ?? false
-            return matches
+            Self.matches(
+                workspaceID: workspaceID,
+                sessionID: sessionID,
+                attemptWorkspaceID: attempt.canonicalWorkspaceID,
+                attemptSessionID: attempt.canonicalSessionID
+            )
                 && attempt.mutationOperation != .archiveSession
                 && attempt.mutationOperation != .archiveWorkspace
         }
         if !protectingAttempts.isEmpty {
             return true
         }
-        if handoffs.contains(where: { handoff in
-            let matches = workspaceID.map {
-                handoff.canonicalWorkspaceID == $0
-            } ?? sessionID.map {
-                handoff.canonicalSessionID == $0
-            } ?? false
-            return matches && handoff.handoffState != .resolved
+        if deliveryAttempts.contains(where: { attempt in
+            attempt.deliveryRoute == .cloud
+                && Self.matches(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID,
+                    attemptWorkspaceID: attempt.canonicalWorkspaceID,
+                    attemptSessionID: attempt.canonicalSessionID
+                )
+                && attempt.deliveryState != .acknowledged
         }) {
             return true
         }
@@ -290,6 +361,21 @@ public enum CloudOwnershipCleanup {
                         )
                 )
         }
+    }
+
+    private static func matches(
+        workspaceID: Workspace.ID?,
+        sessionID: Session.ID?,
+        attemptWorkspaceID: Workspace.ID?,
+        attemptSessionID: Session.ID?
+    ) -> Bool {
+        if let workspaceID {
+            return attemptWorkspaceID == workspaceID
+        }
+        if let sessionID {
+            return attemptSessionID == sessionID
+        }
+        return false
     }
 
     private static func shouldDelete(

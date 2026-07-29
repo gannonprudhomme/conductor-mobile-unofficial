@@ -536,15 +536,16 @@ public enum CloudWorkspacePersistence {
                             && $0.consumedAt.is(nil)
                     }
                     .fetchCount(database) > 0
-                let hasUnresolvedHandoff = try InitialPromptHandoff
+                let hasUnresolvedDelivery = try MessageDeliveryAttempt
                     .where {
-                        $0.creationAttemptID.eq(attempt.attemptID)
+                        $0.canonicalWorkspaceID.eq(canonicalWorkspaceID)
                             && $0.state.neq(
-                                InitialPromptHandoff.State.resolved.rawValue
+                                MessageDeliveryAttempt.State.acknowledged
+                                    .rawValue
                             )
                     }
                     .fetchCount(database) > 0
-                if !hasUnconsumedOutcome, !hasUnresolvedHandoff {
+                if !hasUnconsumedOutcome, !hasUnresolvedDelivery {
                     try CloudPendingMutation.find(attempt.attemptID)
                         .delete()
                         .execute(database)
@@ -641,7 +642,7 @@ public enum CloudWorkspacePersistence {
     }
 }
 
-private extension Workspace {
+extension Workspace {
     func replacingID(with id: ID) -> Self {
         Self(
             id: id,
@@ -687,7 +688,7 @@ private extension Workspace {
     }
 }
 
-private extension MobileWorkspaceState {
+extension MobileWorkspaceState {
     var pullRequestSnapshot: PullRequestSnapshot? {
         guard let pullRequestURL else {
             return nil

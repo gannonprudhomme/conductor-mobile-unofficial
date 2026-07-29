@@ -768,6 +768,7 @@ struct ConductorSettingsTests {
     @Test("A same-account API key replacement is tested and persisted")
     func replaceCloudCredential() async throws {
         let cancelledConfigurations = LockIsolated<[String]>([])
+        let cancelledDeliveryConfigurations = LockIsolated<[String]>([])
         let isDismissed = LockIsolated(false)
         let testedKeys = LockIsolated<[String]>([])
         let savedKeys = LockIsolated<[String]>([])
@@ -790,6 +791,13 @@ struct ConductorSettingsTests {
             }
             $0.cloudMutationRunner.cancelAndAwait = { accountID, generation in
                 cancelledConfigurations.withValue {
+                    $0.append("\(accountID):\(generation)")
+                }
+            }
+            $0.messageDeliveryOutbox.cancelAndAwait = {
+                accountID,
+                generation in
+                cancelledDeliveryConfigurations.withValue {
                     $0.append("\(accountID):\(generation)")
                 }
             }
@@ -840,6 +848,10 @@ struct ConductorSettingsTests {
 
             expectNoDifference(
                 cancelledConfigurations.value,
+                ["synthetic-user:::\(UUID(99))"]
+            )
+            expectNoDifference(
+                cancelledDeliveryConfigurations.value,
                 ["synthetic-user:::\(UUID(99))"]
             )
             expectNoDifference(testedKeys.value, ["replacement-key"])
@@ -914,6 +926,7 @@ struct ConductorSettingsTests {
     @Test("Deleting a cloud credential leaves local pairing configured")
     func deleteCloudCredential() async throws {
         let cancelledConfigurations = LockIsolated<[String]>([])
+        let cancelledDeliveryConfigurations = LockIsolated<[String]>([])
         let deleteCount = LockIsolated(0)
         let database = try appDatabase()
 
@@ -925,6 +938,13 @@ struct ConductorSettingsTests {
             }
             $0.cloudMutationRunner.cancelAndAwait = { accountID, generation in
                 cancelledConfigurations.withValue {
+                    $0.append("\(accountID):\(generation)")
+                }
+            }
+            $0.messageDeliveryOutbox.cancelAndAwait = {
+                accountID,
+                generation in
+                cancelledDeliveryConfigurations.withValue {
                     $0.append("\(accountID):\(generation)")
                 }
             }
@@ -954,6 +974,10 @@ struct ConductorSettingsTests {
             #expect(deleteCount.value == 1)
             expectNoDifference(
                 cancelledConfigurations.value,
+                ["account:\(UUID(101))"]
+            )
+            expectNoDifference(
+                cancelledDeliveryConfigurations.value,
                 ["account:\(UUID(101))"]
             )
             expectNoDifference(store.state.storedServerAddress, "paired-mac")

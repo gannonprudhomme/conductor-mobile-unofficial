@@ -36,6 +36,10 @@ public struct CloudAPIClient: Sendable {
         _ request: CloudCreateWorkspaceRequest,
         _ persistBaseline: @escaping @Sendable (CloudWorkspaceSnapshot) async throws -> Void
     ) async throws -> CloudCreateWorkspaceResponse
+    public var recoverWorkspaceCreation: @Sendable (
+        _ expectedAccountID: String,
+        _ request: CloudWorkspaceCreationRecoveryRequest
+    ) async throws -> CloudCreateWorkspaceResponse?
     /// `GET /me`
     public var getIdentity: @Sendable () async throws -> CloudIdentity
     public var observeSessions: @Sendable (
@@ -264,6 +268,72 @@ extension CloudAPIClient: DependencyKey {
                     apiKey: key
                 )
             },
+            recoverWorkspaceCreation: { expectedAccountID, recovery in
+                let key = try await verifiedAPIKey(
+                    expectedAccountID: expectedAccountID,
+                    baseURL: baseURL,
+                    apiKey: apiKey
+                )
+                let snapshot = try await loadWorkspaceInventory(
+                    accountID: expectedAccountID,
+                    baseURL: baseURL,
+                    apiKey: key
+                )
+                let baselineWorkspaceIDs = Set(
+                    recovery.baselineWorkspaceIDs
+                )
+                let candidates = snapshot.workspaces.filter { item in
+                    !baselineWorkspaceIDs.contains(item.id)
+                        && recovery.projectID.map {
+                            item.project.id == $0
+                        } != false
+                }
+                // The initial session name is unique to the durable attempt.
+                // Project membership and creation time are deliberately
+                // insufficient because another client can create concurrently.
+                var recoveredResponses: [CloudCreateWorkspaceResponse] = []
+                for workspace in candidates {
+                    let sessions = try await allPages(
+                        pageSize: 100
+                    ) { limit, offset in
+                        try await request(
+                            CloudPage<CloudSession>.self,
+                            baseURL: baseURL,
+                            path: [
+                                "v0",
+                                "workspaces",
+                                workspace.id,
+                                "sessions",
+                            ],
+                            queryItems: [
+                                URLQueryItem(
+                                    name: "limit",
+                                    value: String(limit)
+                                ),
+                                URLQueryItem(
+                                    name: "offset",
+                                    value: String(offset)
+                                ),
+                            ],
+                            apiKey: key
+                        )
+                    }
+                    for session in sessions
+                    where session.name == recovery.sessionName {
+                        recoveredResponses.append(
+                            CloudCreateWorkspaceResponse(
+                                workspaceID: workspace.id,
+                                sessionID: session.id,
+                                deepLink: session.deepLink
+                            )
+                        )
+                    }
+                }
+                guard recoveredResponses.count == 1 else {
+                    return nil
+                }
+                return recoveredResponses[0]
+            },
             getIdentity: {
                 try await request(
                 CloudIdentity.self,
@@ -435,10 +505,12 @@ extension CloudAPIClient: DependencyKey {
                         }
                     }
                     continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    if CloudAPIClientError.isRequestCancellation(error) {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
             continuation.onTermination = { _ in observation.cancel() }
@@ -583,10 +655,12 @@ extension CloudAPIClient: DependencyKey {
                         }
                     }
                     continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    if CloudAPIClientError.isRequestCancellation(error) {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
             continuation.onTermination = { _ in observation.cancel() }
@@ -628,6 +702,7 @@ extension CloudAPIClient: DependencyKey {
         // cursor required by the next request. Keep this path serial and reject
         // repeated cursors so a malformed response cannot poll forever.
         var cursor = after
+        var seenCursors: Set<String> = [after]
         var messages: [CloudTranscriptMessage] = []
         while true {
             try Task.checkCancellation()
@@ -646,7 +721,7 @@ extension CloudAPIClient: DependencyKey {
                 return messages
             }
             guard let nextCursor = response.data.last?.id,
-                  nextCursor != cursor else {
+                  seenCursors.insert(nextCursor).inserted else {
                 throw CloudAPIClientError.invalidResponse
             }
             cursor = nextCursor
@@ -872,10 +947,12 @@ extension CloudAPIClient: DependencyKey {
                         try await clock.sleep(for: .milliseconds(2_500))
                     }
                     continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    if CloudAPIClientError.isRequestCancellation(error) {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
             continuation.onTermination = { _ in
@@ -1161,6 +1238,11 @@ private extension CloudAPIClient {
                 }
             } catch {
                 try Task.checkCancellation()
+                guard CloudAPIClientError.shouldRetryObservation(
+                    after: error
+                ) else {
+                    throw error
+                }
                 // A failed speculative window has not committed any of its
                 // pages to results. Retrying serially from nextOffset avoids
                 // discarding an otherwise usable transcript just because the

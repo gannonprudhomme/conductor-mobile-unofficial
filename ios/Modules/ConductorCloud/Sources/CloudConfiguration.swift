@@ -9,6 +9,10 @@ import Foundation
 import Sharing
 
 public struct CloudConfiguration: Codable, Equatable, Sendable {
+    private static let legacyCredentialGeneration = UUID(
+        uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+    )
+
     public var accountID: String
     public var credentialGeneration: UUID
 
@@ -27,7 +31,7 @@ public struct CloudConfiguration: Codable, Equatable, Sendable {
             try container.decodeIfPresent(
                 UUID.self,
                 forKey: .credentialGeneration
-            ) ?? UUID()
+            ) ?? Self.legacyCredentialGeneration
     }
 
     public func encode(to encoder: any Encoder) throws {

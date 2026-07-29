@@ -40,10 +40,14 @@ extension CloudMutationRunner: DependencyKey {
             },
             start: {
                 @Dependency(\.cloudAPIClient) var cloudAPIClient
+                @Dependency(\.continuousClock) var clock
                 @Dependency(\.defaultDatabase) var database
                 try await liveActor.start(
                     cloudAPIClient: cloudAPIClient,
-                    database: database
+                    database: database,
+                    sleep: { duration in
+                        try await clock.sleep(for: duration)
+                    }
                 )
             }
         )
@@ -73,43 +77,50 @@ private actor LiveCloudMutationRunner {
 
     func start(
         cloudAPIClient: CloudAPIClient,
-        database: any DatabaseWriter
+        database: any DatabaseWriter,
+        sleep: @escaping @Sendable (Duration) async throws -> Void
     ) async throws {
         guard !isStarted else {
             return
         }
-        isStarted = true
-
-        let now = Date()
-        try await database.write { database in
-            let submitting = try CloudPendingMutation
-                .where {
-                    $0.state.eq(
-                        CloudPendingMutation.State.submitting.rawValue
+        do {
+            let now = Date()
+            try await database.write { database in
+                let submitting = try CloudPendingMutation
+                    .where {
+                        $0.state.eq(
+                            CloudPendingMutation.State.submitting.rawValue
+                        )
+                            && $0.dispatchStartedAt.isNot(nil)
+                    }
+                    .fetchAll(database)
+                for attempt in submitting {
+                    guard !Self.canRecoverWorkspaceCreation(attempt) else {
+                        continue
+                    }
+                    _ = try CloudPendingMutation.compareAndSetState(
+                        attemptID: attempt.attemptID,
+                        from: .submitting,
+                        to: .indeterminate,
+                        at: now,
+                        in: database
                     )
                 }
-                .fetchAll(database)
-            for attempt in submitting {
-                _ = try CloudPendingMutation.compareAndSetState(
-                    attemptID: attempt.attemptID,
-                    from: .submitting,
-                    to: .indeterminate,
-                    at: now,
-                    in: database
-                )
             }
+        } catch {
+            isStarted = false
+            throw error
         }
+        isStarted = true
 
         observationTask = Task {
-            @Dependency(\.continuousClock) var clock
-
             while !Task.isCancelled {
                 await poll(
                     cloudAPIClient: cloudAPIClient,
                     database: database
                 )
                 do {
-                    try await clock.sleep(for: .milliseconds(250))
+                    try await sleep(.milliseconds(250))
                 } catch {
                     return
                 }
@@ -129,16 +140,36 @@ private actor LiveCloudMutationRunner {
         for match in matches.values {
             match.task.cancel()
         }
-        for match in matches {
-            await match.value.task.value
-            _ = try? await database.write { database in
-                try CloudPendingMutation.compareAndSetState(
-                    attemptID: match.key,
-                    from: .submitting,
-                    to: .indeterminate,
-                    at: Date(),
-                    in: database
-                )
+        for match in matches.values {
+            await match.task.value
+        }
+        _ = try? await database.write { database in
+            let attempts = try CloudPendingMutation
+                .where {
+                    $0.accountID.eq(accountID)
+                        && $0.credentialGeneration.eq(credentialGeneration)
+                }
+                .fetchAll(database)
+            for attempt in attempts {
+                guard attempt.mutationState == .submitting
+                        || attempt.mutationState == .indeterminate else {
+                    continue
+                }
+                if attempt.dispatchStartedAt == nil {
+                    try Self.rollback(attempt, in: database)
+                    try CloudPendingMutation
+                        .find(attempt.attemptID)
+                        .delete()
+                        .execute(database)
+                } else if attempt.mutationState == .submitting {
+                    _ = try CloudPendingMutation.compareAndSetState(
+                        attemptID: attempt.attemptID,
+                        from: .submitting,
+                        to: .indeterminate,
+                        at: Date(),
+                        in: database
+                    )
+                }
             }
         }
     }
@@ -150,7 +181,7 @@ private actor LiveCloudMutationRunner {
         let attempts: [CloudPendingMutation]
         do {
             attempts = try await database.read { database in
-                try CloudPendingMutation
+                let submitting = try CloudPendingMutation
                     .where {
                         $0.state.eq(
                             CloudPendingMutation.State.submitting.rawValue
@@ -158,6 +189,20 @@ private actor LiveCloudMutationRunner {
                     }
                     .order(by: \.createdAt)
                     .fetchAll(database)
+                let recoveryCutoff = Date().addingTimeInterval(-2.5)
+                let recoverable = try CloudPendingMutation
+                    .where {
+                        $0.state.eq(
+                            CloudPendingMutation.State.indeterminate.rawValue
+                        )
+                    }
+                    .order(by: \.createdAt)
+                    .fetchAll(database)
+                    .filter {
+                        $0.lastTransitionAt <= recoveryCutoff
+                            && Self.canRecoverWorkspaceCreation($0)
+                    }
+                return submitting + recoverable
             }
         } catch {
             return
@@ -171,7 +216,10 @@ private actor LiveCloudMutationRunner {
                     cloudAPIClient: cloudAPIClient,
                     database: database
                 )
-                didFinish(attemptID: attempt.attemptID)
+                await didFinish(
+                    attemptID: attempt.attemptID,
+                    database: database
+                )
             }
             runningAttempts[attempt.attemptID] = RunningAttempt(
                 accountID: attempt.accountID,
@@ -181,8 +229,19 @@ private actor LiveCloudMutationRunner {
         }
     }
 
-    private func didFinish(attemptID: UUID) {
+    private func didFinish(
+        attemptID: UUID,
+        database: any DatabaseReader
+    ) async {
         runningAttempts[attemptID] = nil
+        let attempt = try? await database.read { database in
+            try CloudPendingMutation.find(attemptID).fetchOne(database)
+        }
+        if let attempt,
+           attempt.mutationState == .indeterminate,
+           Self.canRecoverWorkspaceCreation(attempt) {
+            claimedAttemptIDs.remove(attemptID)
+        }
     }
 
     private func dispatch(
@@ -196,11 +255,19 @@ private actor LiveCloudMutationRunner {
                 database: database
             )
             if attempt.mutationOperation == .createWorkspace {
-                try await dispatchWorkspaceCreation(
-                    attempt,
-                    cloudAPIClient: cloudAPIClient,
-                    database: database
-                )
+                if attempt.dispatchStartedAt == nil {
+                    try await dispatchWorkspaceCreation(
+                        attempt,
+                        cloudAPIClient: cloudAPIClient,
+                        database: database
+                    )
+                } else {
+                    try await recoverWorkspaceCreation(
+                        attempt,
+                        cloudAPIClient: cloudAPIClient,
+                        database: database
+                    )
+                }
                 return
             }
             let didStart = try await database.write { database in
@@ -216,7 +283,8 @@ private actor LiveCloudMutationRunner {
 
             try await dispatch(
                 attempt,
-                cloudAPIClient: cloudAPIClient
+                cloudAPIClient: cloudAPIClient,
+                database: database
             )
             try await transitionResponse(
                 attempt: attempt,
@@ -268,7 +336,6 @@ private actor LiveCloudMutationRunner {
             preparedPayload.baselineRemoteWorkspaceIDs = snapshot.workspaces
                 .map(\.id)
                 .sorted()
-            preparedPayload.baselineCapturedAt = Date()
             let requestPayload = try JSONEncoder.cloudMutation.encode(
                 preparedPayload
             )
@@ -314,6 +381,38 @@ private actor LiveCloudMutationRunner {
         )
     }
 
+    private func recoverWorkspaceCreation(
+        _ attempt: CloudPendingMutation,
+        cloudAPIClient: CloudAPIClient,
+        database: any DatabaseWriter
+    ) async throws {
+        let payload = try attempt.request(
+            as: CloudWorkspaceCreationPayload.self
+        )
+        guard let baselineWorkspaceIDs = payload.baselineRemoteWorkspaceIDs,
+              let recoverySessionName = payload.request.sessionName,
+              !recoverySessionName.isEmpty else {
+            throw CloudAPIClientError.invalidResponse
+        }
+        let response = try await cloudAPIClient.recoverWorkspaceCreation(
+            expectedAccountID: attempt.accountID,
+            request: CloudWorkspaceCreationRecoveryRequest(
+                baselineWorkspaceIDs: baselineWorkspaceIDs,
+                projectID: payload.projectID,
+                sessionName: recoverySessionName
+            )
+        )
+        guard let response else {
+            throw WorkspaceCreationRecoveryError.notYetVisible
+        }
+        try await acceptWorkspaceCreation(
+            attempt: attempt,
+            payload: payload,
+            response: response,
+            database: database
+        )
+    }
+
     private func acceptWorkspaceCreation(
         attempt: CloudPendingMutation,
         payload: CloudWorkspaceCreationPayload,
@@ -339,7 +438,8 @@ private actor LiveCloudMutationRunner {
                 .fetchOne(database),
                   stored.credentialGeneration
                     == attempt.credentialGeneration,
-                  stored.mutationState == .submitting else {
+                  stored.mutationState == .submitting
+                    || stored.mutationState == .indeterminate else {
                 return
             }
             let workspace = Workspace(
@@ -398,17 +498,22 @@ private actor LiveCloudMutationRunner {
                 }
                 .execute(database)
             if !payload.prompt.isEmpty {
-                try InitialPromptHandoff
+                try MessageDeliveryAttempt
                     .insert {
-                        InitialPromptHandoff(
-                            creationAttemptID: attempt.attemptID,
+                        MessageDeliveryAttempt(
+                            route: .cloud,
                             accountID: attempt.accountID,
                             credentialGeneration: attempt.credentialGeneration,
                             canonicalWorkspaceID: canonicalWorkspaceID,
                             remoteWorkspaceID: response.workspaceID,
                             canonicalSessionID: canonicalSessionID,
                             remoteSessionID: response.sessionID,
-                            originalPrompt: payload.prompt,
+                            content: payload.prompt,
+                            model: payload.selectedModel,
+                            isFastModeEnabled: false,
+                            mode: .sent,
+                            reasoningEffort: payload.selectedReasoningEffort,
+                            submittedDraft: payload.prompt,
                             createdAt: now
                         )
                     }
@@ -458,7 +563,8 @@ private actor LiveCloudMutationRunner {
             try CloudPendingMutation.find(attemptID).fetchOne(database)
         }
         guard let attempt,
-              attempt.mutationState == .submitting else {
+              attempt.mutationState == .submitting
+                || Self.canRecoverWorkspaceCreation(attempt) else {
             throw CancellationError()
         }
 
@@ -473,21 +579,10 @@ private actor LiveCloudMutationRunner {
 
     private func dispatch(
         _ attempt: CloudPendingMutation,
-        cloudAPIClient: CloudAPIClient
+        cloudAPIClient: CloudAPIClient,
+        database: any DatabaseWriter
     ) async throws {
         switch attempt.mutationOperation {
-        case .sendMessage:
-            let sessionID = try required(attempt.remoteSessionID)
-            let response = try await cloudAPIClient.sendMessage(
-                expectedAccountID: attempt.accountID,
-                sessionID: sessionID,
-                request: attempt.request(as: CloudSendMessageRequest.self)
-            )
-            guard response.messageID == attempt.stableRemoteMessageID,
-                  response.state == .queued || response.state == .sent else {
-                throw CloudAPIClientError.invalidResponse
-            }
-
         case .cancelSession:
             let sessionID = try required(attempt.remoteSessionID)
             let response = try await cloudAPIClient.cancelSession(
@@ -498,6 +593,33 @@ private actor LiveCloudMutationRunner {
                   attempt.remoteWorkspaceID == nil
                     || response.workspaceID == attempt.remoteWorkspaceID else {
                 throw CloudAPIClientError.invalidResponse
+            }
+            if response.canceledQueuedMessages > 0 {
+                try await database.write { database in
+                    let canceledDeliveries = try MessageDeliveryAttempt
+                        .where {
+                            $0.accountID.eq(attempt.accountID)
+                                && $0.remoteSessionID.eq(sessionID)
+                                && $0.route.eq(
+                                    MessageDeliveryAttempt.Route.cloud.rawValue
+                                )
+                                && $0.state.eq(
+                                    MessageDeliveryAttempt.State.accepted
+                                        .rawValue
+                                )
+                                && $0.cloudDeliveryState.eq(
+                                    CloudSendMessageResponse.State.queued
+                                        .rawValue
+                                )
+                        }
+                        .fetchAll(database)
+                    for delivery in canceledDeliveries {
+                        try MessageDeliveryAttempt
+                            .find(delivery.attemptID)
+                            .delete()
+                            .execute(database)
+                    }
+                }
             }
 
         case .createSession:
@@ -517,6 +639,12 @@ private actor LiveCloudMutationRunner {
             ) else {
                 throw CloudAPIClientError.invalidResponse
             }
+            try await persistCreatedSession(
+                response,
+                request: request,
+                attempt: attempt,
+                database: database
+            )
 
         case .renameSession:
             let sessionID = try required(attempt.remoteSessionID)
@@ -558,6 +686,40 @@ private actor LiveCloudMutationRunner {
         }
     }
 
+    private func persistCreatedSession(
+        _ response: CloudSession,
+        request: CloudCreateSessionRequest,
+        attempt: CloudPendingMutation,
+        database: any DatabaseWriter
+    ) async throws {
+        guard let canonicalSessionID = attempt.canonicalSessionID else {
+            throw CloudAPIClientError.invalidResponse
+        }
+        try await database.write { database in
+            guard var session = try Session
+                .find(canonicalSessionID)
+                .fetchOne(database) else {
+                throw CloudAPIClientError.invalidResponse
+            }
+            if let model = response.model ?? response.resolvedModel {
+                session.model = Session.Model(rawValue: model)
+            }
+            let effort = Session.ReasoningEffort(
+                rawValue: response.effort ?? request.effort ?? "high"
+            )
+            if session.agentType == .codex {
+                session.codexThinkingLevel = effort
+                session.claudeEffortLevel = nil
+            } else if session.agentType == .claude {
+                session.codexThinkingLevel = nil
+                session.claudeEffortLevel = effort
+            }
+            session.isFastModeEnabled =
+                response.fastMode ?? request.fastMode ?? false
+            try Session.upsert { session }.execute(database)
+        }
+    }
+
     private func transitionResponse(
         attempt: CloudPendingMutation,
         to destination: CloudPendingMutation.State,
@@ -586,9 +748,16 @@ private actor LiveCloudMutationRunner {
         database: any DatabaseWriter
     ) async {
         _ = try? await database.write { database in
-            try CloudPendingMutation.compareAndSetState(
+            guard let attempt = try CloudPendingMutation
+                .find(attemptID)
+                .fetchOne(database),
+                  attempt.mutationState == .submitting
+                    || attempt.mutationState == .indeterminate else {
+                return false
+            }
+            return try CloudPendingMutation.compareAndSetState(
                 attemptID: attemptID,
-                from: .submitting,
+                from: attempt.mutationState,
                 to: .indeterminate,
                 at: Date(),
                 in: database
@@ -609,12 +778,7 @@ private actor LiveCloudMutationRunner {
                 return
             }
             try Self.rollback(attempt, in: database)
-            let owner = if attempt.mutationOperation == .sendMessage,
-                let sessionID = attempt.canonicalSessionID {
-                CloudMutationOutcome.OwningFeature.chat(
-                    sessionID: sessionID
-                )
-            } else if attempt.mutationOperation == .createWorkspace
+            let owner = if attempt.mutationOperation == .createWorkspace
                 || attempt.mutationOperation == .archiveWorkspace {
                 CloudMutationOutcome.OwningFeature.workspaces
             } else if let workspaceID = attempt.canonicalWorkspaceID {
@@ -704,12 +868,30 @@ private actor LiveCloudMutationRunner {
         }
     }
 
+    private nonisolated static func canRecoverWorkspaceCreation(
+        _ attempt: CloudPendingMutation
+    ) -> Bool {
+        guard attempt.mutationOperation == .createWorkspace,
+              attempt.dispatchStartedAt != nil,
+              let payload = try? attempt.request(
+                as: CloudWorkspaceCreationPayload.self
+              ) else {
+            return false
+        }
+        return payload.baselineRemoteWorkspaceIDs != nil
+            && payload.request.sessionName?.isEmpty == false
+    }
+
     private func required(_ value: String?) throws -> String {
         guard let value else {
             throw CloudAPIClientError.invalidResponse
         }
         return value
     }
+}
+
+private enum WorkspaceCreationRecoveryError: Error {
+    case notYetVisible
 }
 
 private extension CloudAPIClientError {
