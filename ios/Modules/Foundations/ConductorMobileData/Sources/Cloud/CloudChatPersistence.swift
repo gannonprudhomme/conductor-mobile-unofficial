@@ -35,6 +35,12 @@ public struct CloudCachedTranscript: Equatable, Sendable {
 }
 
 public enum CloudChatPersistence {
+    // Multi-row upserts bind every writable column once per row. Keep these
+    // counts aligned with Message and CloudMessageMetadata so a batch never
+    // exceeds the SQLite connection's runtime variable limit.
+    private static let messageArgumentsPerRow = 15
+    private static let messageMetadataArgumentsPerRow = 6
+
     public static func persist(
         _ snapshot: CloudWorkspaceSessionSnapshot,
         in database: Database
@@ -221,56 +227,48 @@ public enum CloudChatPersistence {
             throw CloudChatPersistenceError.transcriptOwnershipMismatch
         }
 
-        if update.kind == .complete {
-            let eventIDs = Set(update.messages.map(\.id))
+        let isCompleteUpdate = update.kind == .complete
+        if isCompleteUpdate {
+            // A complete response is authoritative. Removing the old
+            // projection once makes deleted and newly unsupported events
+            // disappear without a metadata SELECT for every incoming event.
             let storedMetadata = try CloudMessageMetadata
                 .where { $0.canonicalSessionID.eq(canonicalSessionID) }
                 .fetchAll(database)
-            let staleMetadata = storedMetadata.filter {
-                !eventIDs.contains($0.cloudEventID)
-            }
-            try removeMessages(staleMetadata, from: database)
+            try removeMessages(storedMetadata, from: database)
         }
 
-        var persistedMessages: [Message] = []
-        for event in update.messages {
-            let previousParts = try CloudMessageMetadata
-                .where {
-                    $0.canonicalSessionID.eq(canonicalSessionID)
-                        && $0.cloudEventID.eq(event.id)
-                }
-                .fetchAll(database)
-            try removeMessages(previousParts, from: database)
-
-            let parts = CloudTranscriptAdapter.adapt(
-                event,
+        // Unique complete events can be projected first and written in two
+        // multi-row statements. Duplicate IDs need the event-by-event path:
+        // if their final occurrence projects no message, it must remove an
+        // earlier occurrence from the same response.
+        let shouldBatchCompleteUpdate =
+            isCompleteUpdate
+            && Set(update.messages.map(\.id)).count == update.messages.count
+        let persistedMessages = if shouldBatchCompleteUpdate {
+            try persistCompleteMessages(
+                update.messages,
                 accountID: update.accountID,
                 remoteSessionID: update.sessionID,
-                canonicalSessionID: canonicalSessionID
-            )
-            for part in parts {
-                try Message.upsert { part.message }.execute(database)
-                try CloudMessageMetadata
-                    .upsert {
-                        CloudMessageMetadata(
-                            canonicalMessageID: part.message.id,
-                            cloudEventID: event.id,
-                            canonicalSessionID: canonicalSessionID,
-                            sessionIndex: event.sessionIndex,
-                            adapterPartOrder: part.order,
-                            accountID: update.accountID
-                        )
-                    }
-                    .execute(database)
-                persistedMessages.append(part.message)
-            }
-            try acknowledgeObservedSend(
-                eventID: event.id,
-                accountID: update.accountID,
                 canonicalSessionID: canonicalSessionID,
                 in: database
             )
+        } else {
+            try persistMessagesIndividually(
+                update.messages,
+                accountID: update.accountID,
+                remoteSessionID: update.sessionID,
+                canonicalSessionID: canonicalSessionID,
+                isCompleteUpdate: isCompleteUpdate,
+                in: database
+            )
         }
+        try acknowledgeObservedSends(
+            eventIDs: Set(update.messages.map(\.id)),
+            accountID: update.accountID,
+            canonicalSessionID: canonicalSessionID,
+            in: database
+        )
 
         var updatedMetadata = sessionMetadata
         updatedMetadata.transcriptCursor = update.rawCursor
@@ -446,13 +444,156 @@ public enum CloudChatPersistence {
         _ metadata: [CloudMessageMetadata],
         from database: Database
     ) throws {
-        for item in metadata {
-            try Message.find(item.canonicalMessageID).delete().execute(database)
+        // An IN clause binds one variable per ID. Use the connection's actual
+        // limit so normal transcripts delete in one statement while an
+        // unusually large cache still cannot produce invalid SQL.
+        try forEachBatch(
+            metadata.map(\.canonicalMessageID),
+            size: database.maximumStatementArgumentCount
+        ) { messageIDs in
+            try Message
+                .where { $0.id.in(messageIDs) }
+                .delete()
+                .execute(database)
         }
     }
 
-    private static func acknowledgeObservedSend(
-        eventID: String,
+    private static func persistCompleteMessages(
+        _ events: [CloudTranscriptMessage],
+        accountID: String,
+        remoteSessionID: String,
+        canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws -> [Message] {
+        // Projection is pure Swift work. Finishing it before touching SQLite
+        // lets each table use one multi-row upsert for ordinary transcripts,
+        // instead of one statement per projected message and metadata row.
+        var messages: [Message] = []
+        var metadata: [CloudMessageMetadata] = []
+        for event in events {
+            let parts = CloudTranscriptAdapter.adapt(
+                event,
+                accountID: accountID,
+                remoteSessionID: remoteSessionID,
+                canonicalSessionID: canonicalSessionID
+            )
+            for part in parts {
+                messages.append(part.message)
+                metadata.append(
+                    CloudMessageMetadata(
+                        canonicalMessageID: part.message.id,
+                        cloudEventID: event.id,
+                        canonicalSessionID: canonicalSessionID,
+                        sessionIndex: event.sessionIndex,
+                        adapterPartOrder: part.order,
+                        accountID: accountID
+                    )
+                )
+            }
+        }
+
+        let maximumArgumentCount = database.maximumStatementArgumentCount
+        let messageBatchSize = maximumRowsPerStatement(
+            maximumArgumentCount: maximumArgumentCount,
+            argumentsPerRow: messageArgumentsPerRow
+        )
+        let metadataBatchSize = maximumRowsPerStatement(
+            maximumArgumentCount: maximumArgumentCount,
+            argumentsPerRow: messageMetadataArgumentsPerRow
+        )
+        try forEachBatch(messages, size: messageBatchSize) { batch in
+            try Message.upsert { batch }.execute(database)
+        }
+        try forEachBatch(metadata, size: metadataBatchSize) { batch in
+            try CloudMessageMetadata.upsert { batch }.execute(database)
+        }
+        return messages
+    }
+
+    static func maximumRowsPerStatement(
+        maximumArgumentCount: Int,
+        argumentsPerRow: Int
+    ) -> Int {
+        // SQLite rejects a statement with more bound variables than the
+        // connection allows. Dividing by the record's column count gives the
+        // largest safe multi-row statement and avoids an arbitrary row cap.
+        max(1, maximumArgumentCount / argumentsPerRow)
+    }
+
+    private static func persistMessagesIndividually(
+        _ events: [CloudTranscriptMessage],
+        accountID: String,
+        remoteSessionID: String,
+        canonicalSessionID: Session.ID,
+        isCompleteUpdate: Bool,
+        in database: Database
+    ) throws -> [Message] {
+        var messages: [Message] = []
+        var processedCompleteEventIDs: Set<String> = []
+        for event in events {
+            // Incremental responses contain only changed events, so their old
+            // projection must be found and removed individually. Complete
+            // responses already cleared the table, except duplicate event IDs
+            // whose later occurrence must replace the earlier one.
+            let shouldRemovePreviousParts =
+                !isCompleteUpdate
+                || !processedCompleteEventIDs.insert(event.id).inserted
+            if shouldRemovePreviousParts {
+                let previousParts = try CloudMessageMetadata
+                    .where {
+                        $0.canonicalSessionID.eq(canonicalSessionID)
+                            && $0.cloudEventID.eq(event.id)
+                    }
+                    .fetchAll(database)
+                try removeMessages(previousParts, from: database)
+            }
+
+            let parts = CloudTranscriptAdapter.adapt(
+                event,
+                accountID: accountID,
+                remoteSessionID: remoteSessionID,
+                canonicalSessionID: canonicalSessionID
+            )
+            for part in parts {
+                try Message.upsert { part.message }.execute(database)
+                try CloudMessageMetadata
+                    .upsert {
+                        CloudMessageMetadata(
+                            canonicalMessageID: part.message.id,
+                            cloudEventID: event.id,
+                            canonicalSessionID: canonicalSessionID,
+                            sessionIndex: event.sessionIndex,
+                            adapterPartOrder: part.order,
+                            accountID: accountID
+                        )
+                    }
+                    .execute(database)
+                messages.append(part.message)
+            }
+        }
+        return messages
+    }
+
+    private static func forEachBatch<Element>(
+        _ elements: [Element],
+        size: Int,
+        operation: ([Element]) throws -> Void
+    ) rethrows {
+        // Callers choose size from SQLite's variable limit. Almost every real
+        // transcript therefore executes one iteration; this loop only exists
+        // so a transcript larger than one legal SQL statement remains valid.
+        for startIndex in stride(
+            from: elements.startIndex,
+            to: elements.endIndex,
+            by: size
+        ) {
+            let endIndex = min(startIndex + size, elements.endIndex)
+            try operation(Array(elements[startIndex..<endIndex]))
+        }
+    }
+
+    private static func acknowledgeObservedSends(
+        eventIDs: Set<String>,
         accountID: String,
         canonicalSessionID: Session.ID,
         in database: Database
@@ -461,11 +602,11 @@ public enum CloudChatPersistence {
             .where {
                 $0.accountID.eq(accountID)
                     && $0.canonicalSessionID.eq(canonicalSessionID)
-                    && $0.stableRemoteMessageID.eq(eventID)
             }
             .fetchAll(database)
         for attempt in attempts
-        where attempt.mutationOperation == .sendMessage {
+        where attempt.mutationOperation == .sendMessage
+            && attempt.stableRemoteMessageID.map(eventIDs.contains) == true {
             _ = try CloudPendingMutation.compareAndSetState(
                 attemptID: attempt.attemptID,
                 from: attempt.mutationState,

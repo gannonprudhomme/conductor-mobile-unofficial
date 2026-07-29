@@ -5,7 +5,11 @@
 //  Created by Gannon Prudomme on 7/14/26.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Dependencies
 import Foundation
 import Hummingbird
