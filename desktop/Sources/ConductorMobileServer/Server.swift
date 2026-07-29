@@ -77,6 +77,9 @@ public enum Server {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
         let databaseChanges = DatabaseChangeObserver(database: database)
+        let workspaceSnapshots = DatabaseSnapshotCache<String, WorkspaceListSnapshot>()
+        let sessionSnapshots = DatabaseSnapshotCache<String, [Session]>()
+        let messageSnapshots = DatabaseSnapshotCache<String, TranscriptSnapshot>()
 
         router.get("/ping") { _, _ in
             HTTPResponse.Status.noContent
@@ -168,6 +171,8 @@ public enum Server {
                     inbound: inbound,
                     outbound: outbound,
                     databaseChanges: databaseChanges,
+                    snapshotCache: workspaceSnapshots,
+                    snapshotKey: "workspaces",
                     loadSnapshot: loadSnapshot
                 )
             } else {
@@ -190,7 +195,9 @@ public enum Server {
             try await streamSnapshots(
                 inbound: inbound,
                 outbound: outbound,
-                databaseChanges: databaseChanges
+                databaseChanges: databaseChanges,
+                snapshotCache: sessionSnapshots,
+                snapshotKey: workspaceID
             ) {
                 try await database.read { database in
                     try Session.all(forWorkspaceID: workspaceID).fetchAll(database)
@@ -213,11 +220,16 @@ public enum Server {
                 inbound: inbound,
                 outbound: outbound,
                 databaseChanges: databaseChanges,
-                requestedResumeCursor: requestedResumeCursor
+                requestedResumeCursor: requestedResumeCursor,
+                snapshotCache: messageSnapshots,
+                snapshotKey: "\(workspaceID)/\(sessionID)"
             ) {
                 try await database.read { database in
-                    try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
-                        .fetchAll(database)
+                    TranscriptSnapshot(
+                        messages: try Message
+                            .all(forWorkspaceID: workspaceID, sessionID: sessionID)
+                            .fetchAll(database)
+                    )
                 }
             }
         }
@@ -452,52 +464,59 @@ public enum Server {
     ///
     /// Workspace and session WebSocket routes call this because their entire selected state is
     /// small enough to replace on every change.
-    private static func streamSnapshots<Snapshot>(
+    private static func streamSnapshots<Key, Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
+        snapshotCache: DatabaseSnapshotCache<Key, Snapshot>,
+        snapshotKey: Key,
         loadSnapshot: @escaping @Sendable () async throws -> Snapshot
-    ) async throws where Snapshot: Encodable & Equatable & Sendable {
+    ) async throws where Key: Hashable & Sendable, Snapshot: Encodable & Equatable & Sendable {
         let changes = try await databaseChanges.changes()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            // Phone -> desktop: discard application data while waiting for close or failure.
-            group.addTask {
-                for try await _ in inbound {}
-            }
-
-            // Desktop -> phone: send current state immediately, then watch Conductor's database
-            // and push each changed route-specific snapshot.
-            group.addTask {
-                let encoder = JSONEncoder.conductor
-                var previousSnapshot = try await loadSnapshot()
-
-                // Every subscriber receives state immediately instead of waiting for a write.
-                try await outbound.writeTextMessage(
-                    String(decoding: try encoder.encode(previousSnapshot), as: UTF8.self)
-                )
-
-                // One observer polls SQLite for every socket. Slow snapshot consumers retain only
-                // the newest pending change instead of creating an unbounded update backlog.
-                for try await _ in changes {
-                    let snapshot = try await loadSnapshot()
-
-                    // data_version covers the whole database, so an unrelated table write can
-                    // wake this route. Only send when this route's actual snapshot changed.
-                    guard snapshot != previousSnapshot else {
-                        // No changes to the table(s) we're observing, ignore
-                        continue
-                    }
-
-                    try await outbound.writeTextMessage(
-                        String(decoding: try encoder.encode(snapshot), as: UTF8.self)
-                    )
-                    previousSnapshot = snapshot
+        try await snapshotCache.withSubscriber(for: snapshotKey) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                // Phone -> desktop: discard application data while waiting for close or failure.
+                group.addTask {
+                    for try await _ in inbound {}
                 }
-            }
 
-            // Return as soon as one direction closes or fails, then stop its surviving sibling.
-            defer { group.cancelAll() }
-            _ = try await group.next()
+                // Desktop -> phone: send current state immediately, then watch Conductor's database
+                // and push each changed route-specific snapshot.
+                group.addTask {
+                    let encoder = JSONEncoder.conductor
+                    var previousRevision: UInt64?
+
+                    // One observer polls SQLite for every socket. Slow snapshot consumers retain
+                    // only the newest pending change instead of creating an unbounded update
+                    // backlog. The cache gives slightly staggered sockets for the same resource
+                    // one shared SQLite read per change.
+                    for try await generation in changes {
+                        let value = try await snapshotCache.value(
+                            for: snapshotKey,
+                            generation: generation,
+                            load: loadSnapshot
+                        )
+
+                        // data_version covers the whole database, so an unrelated table write can
+                        // wake this route. Only send when this route's actual snapshot changed.
+                        guard value.revision != previousRevision else {
+                            continue
+                        }
+                        previousRevision = value.revision
+
+                        try await outbound.writeTextMessage(
+                            String(
+                                decoding: try encoder.encode(value.snapshot),
+                                as: UTF8.self
+                            )
+                        )
+                    }
+                }
+
+                // Return as soon as one direction closes or fails, then stop its surviving sibling.
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
         }
     }
 
@@ -556,100 +575,119 @@ public enum Server {
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
         requestedResumeCursor: Message.ID?,
-        loadMessages: @escaping @Sendable () async throws -> [Message]
+        snapshotCache: DatabaseSnapshotCache<String, TranscriptSnapshot>,
+        snapshotKey: String,
+        loadSnapshot: @escaping @Sendable () async throws -> TranscriptSnapshot
     ) async throws {
         let changes = try await databaseChanges.changes()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for try await _ in inbound {}
-            }
-
-            group.addTask {
-                let encoder = JSONEncoder.conductor
-                var previousState = TranscriptSnapshot(messages: try await loadMessages())
-                let initialEvent: MessageSyncEvent
-                // Only a cursor found in completed history can anchor an incremental suffix.
-                // Missing, malformed, queued, and unknown IDs intentionally take the snapshot
-                // branch so a client with no trustworthy baseline can recover in one event.
-                if let requestedResumeCursor,
-                   let cursorIndex = previousState.history.firstIndex(where: {
-                       RawUTF8Key($0.id) == RawUTF8Key(requestedResumeCursor)
-                   }) {
-                    initialEvent = .changes(
-                        upserting: Array(
-                            previousState.history[
-                                previousState.history.index(after: cursorIndex)...
-                            ]
-                        ),
-                        cursor: previousState.cursor,
-                        queuedMessages: previousState.queue
-                    )
-                } else {
-                    initialEvent = .snapshot(
-                        previousState.history,
-                        cursor: previousState.cursor,
-                        queuedMessages: previousState.queue
-                    )
+        try await snapshotCache.withSubscriber(for: snapshotKey) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for try await _ in inbound {}
                 }
-                try await outbound.writeTextMessage(
-                    String(
-                        decoding: try encoder.encode(initialEvent),
-                        as: UTF8.self
-                    )
-                )
 
-                for try await _ in changes {
-                    let state = TranscriptSnapshot(messages: try await loadMessages())
-                    // History is append-only while disconnected for v1, but mutations observed
-                    // on this live connection still need upsert/delete events. Queue state is
-                    // mutable, so any queue difference sends the entire current queue.
-                    let previousMessagesByID = Dictionary(
-                        uniqueKeysWithValues: previousState.history.map {
-                            (RawUTF8Key($0.id), $0)
-                        }
-                    )
-                    let messageIDs = Set(state.history.map {
-                        RawUTF8Key($0.id)
-                    })
-                    let changedMessages = state.history.filter {
-                        guard let previous = previousMessagesByID[RawUTF8Key($0.id)] else {
-                            return true
-                        }
-                        return $0 != previous
-                    }
-                    let deletedMessageIDs = previousMessagesByID.keys
-                        .filter { !messageIDs.contains($0) }
-                        .sorted()
-                        .compactMap { previousMessagesByID[$0]?.id }
-                    let queuedMessages = state.hasSameQueue(as: previousState)
-                        ? nil
-                        : state.queue
-                    previousState = state
+                group.addTask {
+                    let encoder = JSONEncoder.conductor
+                    var previousRevision: UInt64?
+                    var previousState: TranscriptSnapshot?
 
-                    guard !changedMessages.isEmpty
-                            || !deletedMessageIDs.isEmpty
-                            || queuedMessages != nil else {
-                        continue
-                    }
-
-                    try await outbound.writeTextMessage(
-                        String(
-                            decoding: try encoder.encode(
-                                MessageSyncEvent.changes(
-                                    upserting: changedMessages,
-                                    deleting: deletedMessageIDs,
-                                    cursor: state.cursor,
-                                    queuedMessages: queuedMessages
-                                )
-                            ),
-                            as: UTF8.self
+                    for try await generation in changes {
+                        let value = try await snapshotCache.value(
+                            for: snapshotKey,
+                            generation: generation,
+                            load: loadSnapshot
                         )
-                    )
-                }
-            }
+                        guard value.revision != previousRevision else {
+                            continue
+                        }
+                        previousRevision = value.revision
+                        let state = value.snapshot
+                        guard let priorState = previousState else {
+                            let initialEvent: MessageSyncEvent
+                            // Only a cursor found in completed history can anchor an incremental
+                            // suffix. Missing, malformed, queued, and unknown IDs intentionally
+                            // take the snapshot branch so an untrusted baseline recovers at once.
+                            if let requestedResumeCursor,
+                               let cursorIndex = state.history.firstIndex(where: {
+                                   RawUTF8Key($0.id) == RawUTF8Key(requestedResumeCursor)
+                               }) {
+                                initialEvent = .changes(
+                                    upserting: Array(
+                                        state.history[
+                                            state.history.index(after: cursorIndex)...
+                                        ]
+                                    ),
+                                    cursor: state.cursor,
+                                    queuedMessages: state.queue
+                                )
+                            } else {
+                                initialEvent = .snapshot(
+                                    state.history,
+                                    cursor: state.cursor,
+                                    queuedMessages: state.queue
+                                )
+                            }
+                            try await outbound.writeTextMessage(
+                                String(
+                                    decoding: try encoder.encode(initialEvent),
+                                    as: UTF8.self
+                                )
+                            )
+                            previousState = state
+                            continue
+                        }
 
-            defer { group.cancelAll() }
-            _ = try await group.next()
+                        // History is append-only while disconnected for v1, but mutations observed
+                        // on this live connection still need upsert/delete events. Queue state is
+                        // mutable, so any queue difference sends the entire current queue.
+                        let previousMessagesByID = Dictionary(
+                            uniqueKeysWithValues: priorState.history.map {
+                                (RawUTF8Key($0.id), $0)
+                            }
+                        )
+                        let messageIDs = Set(state.history.map {
+                            RawUTF8Key($0.id)
+                        })
+                        let changedMessages = state.history.filter {
+                            guard let previous = previousMessagesByID[RawUTF8Key($0.id)] else {
+                                return true
+                            }
+                            return $0 != previous
+                        }
+                        let deletedMessageIDs = previousMessagesByID.keys
+                            .filter { !messageIDs.contains($0) }
+                            .sorted()
+                            .compactMap { previousMessagesByID[$0]?.id }
+                        let queuedMessages = state.hasSameQueue(as: priorState)
+                            ? nil
+                            : state.queue
+                        previousState = state
+
+                        guard !changedMessages.isEmpty
+                                || !deletedMessageIDs.isEmpty
+                                || queuedMessages != nil else {
+                            continue
+                        }
+
+                        try await outbound.writeTextMessage(
+                            String(
+                                decoding: try encoder.encode(
+                                    MessageSyncEvent.changes(
+                                        upserting: changedMessages,
+                                        deleting: deletedMessageIDs,
+                                        cursor: state.cursor,
+                                        queuedMessages: queuedMessages
+                                    )
+                                ),
+                                as: UTF8.self
+                            )
+                        )
+                    }
+                }
+
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
         }
     }
 
@@ -823,7 +861,7 @@ public enum Server {
     ///
     /// `streamMessages` creates one after every database invalidation, then diffs it against the
     /// preceding value. The queue predicate is shared with mobile persistence through `isQueued`.
-    private struct TranscriptSnapshot {
+    private struct TranscriptSnapshot: Equatable, Sendable {
         let history: [Message]
         let queue: [Message]
 
@@ -847,18 +885,43 @@ public enum Server {
         /// A raw-ID replacement must send a queue snapshot even when the two IDs are canonically
         /// equivalent as Swift strings.
         func hasSameQueue(as other: Self) -> Bool {
-            queue.count == other.queue.count
-                && zip(queue, other.queue).allSatisfy { lhs, rhs in
-                    RawUTF8Key(lhs.id) == RawUTF8Key(rhs.id) && lhs == rhs
-                }
+            Self.haveSameMessages(queue, other.queue)
         }
 
-        /// Orders completed history by the resume protocol's timestamp/raw-ID rule.
+        /// Makes cache revisions sensitive to raw identifier bytes, not canonical Unicode equality.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            haveSameMessages(lhs.history, rhs.history)
+                && haveSameMessages(lhs.queue, rhs.queue)
+        }
+
+        /// Orders completed history by actual send time and deterministic fallback values.
         private static func historyPrecedes(_ lhs: Message, _ rhs: Message) -> Bool {
+            if lhs.sentAt != rhs.sentAt {
+                switch (lhs.sentAt, rhs.sentAt) {
+                case let (lhs?, rhs?):
+                    return lhs < rhs
+                case (.some, nil):
+                    return true
+                case (nil, .some):
+                    return false
+                case (nil, nil):
+                    break
+                }
+            }
             if lhs.createdAt != rhs.createdAt {
                 return lhs.createdAt < rhs.createdAt
             }
             return RawUTF8Key(lhs.id) < RawUTF8Key(rhs.id)
+        }
+
+        private static func haveSameMessages(
+            _ lhs: [Message],
+            _ rhs: [Message]
+        ) -> Bool {
+            lhs.count == rhs.count
+                && zip(lhs, rhs).allSatisfy { lhs, rhs in
+                    RawUTF8Key(lhs.id) == RawUTF8Key(rhs.id) && lhs == rhs
+                }
         }
 
         /// Orders mutable rows by queue position with deterministic fallbacks for malformed ties.

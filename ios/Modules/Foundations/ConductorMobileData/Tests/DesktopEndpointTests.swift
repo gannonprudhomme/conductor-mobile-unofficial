@@ -65,8 +65,10 @@ struct DesktopEndpointTests {
 
     @Test("Request leases stop persistence after the configured endpoint changes")
     func requestLeasePersistenceBoundary() throws {
+        let firstAddress = "first-\(UUID().uuidString).example:3768"
+        let secondAddress = "second-\(UUID().uuidString).example:3768"
         let firstLifecycle = DesktopLeaseAuthority.shared.transition(
-            to: "first-\(UUID().uuidString).example:3768"
+            to: firstAddress
         )
         let firstEndpoint = try #require(firstLifecycle.configuredEndpoint)
         let requestLease = DesktopRequestLease(
@@ -75,16 +77,25 @@ struct DesktopEndpointTests {
         )
         var value = 0
 
-        let currentResult = requestLease.performIfCurrent {
+        let currentResult: Void? = requestLease.performIfCurrent(
+            serverAddress: firstAddress
+        ) {
             value = 1
         }
         #expect(currentResult != nil)
         #expect(value == 1)
 
-        _ = DesktopLeaseAuthority.shared.transition(
-            to: "second-\(UUID().uuidString).example:3768"
+        // Do not explicitly transition the authority: validation must synchronously apply the
+        // persisted address instead of waiting for a WebSocket observation callback.
+        #expect(
+            !DesktopLeaseAuthority.shared.isValid(
+                requestLease,
+                serverAddress: secondAddress
+            )
         )
-        let staleResult = requestLease.performIfCurrent {
+        let staleResult: Void? = requestLease.performIfCurrent(
+            serverAddress: secondAddress
+        ) {
             value = 2
         }
         #expect(staleResult == nil)

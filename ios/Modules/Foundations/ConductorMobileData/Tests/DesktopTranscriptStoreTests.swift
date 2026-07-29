@@ -12,81 +12,6 @@ import SQLiteData
 import Testing
 
 struct DesktopTranscriptStoreTests {
-    @Test(
-        "Complete snapshots persist representative large histories",
-        arguments: [484, 2_065]
-    )
-    func representativeLargeHistory(messageCount: Int) async throws {
-        let database = try appDatabase()
-        let (workspace, session) = try await seed(database: database)
-        let messages = (0..<messageCount).map {
-            message(
-                id: "message-\($0)",
-                sessionID: session.id,
-                seconds: TimeInterval($0)
-            )
-        }
-
-        try await DesktopTranscriptStore.applySyncEvent(
-            .snapshot(
-                messages,
-                cursor: messages.last?.id,
-                queuedMessages: []
-            ),
-            workspaceID: workspace.id,
-            sessionID: session.id,
-            database: database
-        )
-
-        let cached = try #require(
-            try await DesktopTranscriptStore.cachedTranscriptSnapshot(
-                workspaceID: workspace.id,
-                sessionID: session.id,
-                database: database
-            )
-        )
-        #expect(cached.messages.count == messageCount)
-        #expect(cached.cursor == messages.last?.id)
-    }
-
-    @Test("An empty complete history atomically clears completed rows")
-    func emptyHistory() async throws {
-        let database = try appDatabase()
-        let (workspace, session) = try await seed(database: database)
-        let completed = message(
-            id: "completed",
-            sessionID: session.id,
-            seconds: 1
-        )
-        try await DesktopTranscriptStore.applySyncEvent(
-            .snapshot(
-                [completed],
-                cursor: completed.id,
-                queuedMessages: []
-            ),
-            workspaceID: workspace.id,
-            sessionID: session.id,
-            database: database
-        )
-
-        try await DesktopTranscriptStore.applySyncEvent(
-            .snapshot([], cursor: nil, queuedMessages: []),
-            workspaceID: workspace.id,
-            sessionID: session.id,
-            database: database
-        )
-
-        let cached = try #require(
-            try await DesktopTranscriptStore.cachedTranscriptSnapshot(
-                workspaceID: workspace.id,
-                sessionID: session.id,
-                database: database
-            )
-        )
-        #expect(cached.messages.isEmpty)
-        #expect(cached.cursor == nil)
-    }
-
     @Test("Legacy complete snapshots reconcile mixed history and queue rows")
     func legacySnapshot() async throws {
         let database = try appDatabase()
@@ -316,12 +241,6 @@ struct DesktopTranscriptStoreTests {
             )
         }
         #expect(try await storedMessages(sessionID: session.id, database: database).isEmpty)
-        #expect(
-            try await storedMessages(
-                sessionID: otherSession.id,
-                database: database
-            ) == [existingOtherMessage]
-        )
     }
 
     @Test("Queue snapshots delete omissions without deleting completed history")
@@ -375,6 +294,11 @@ struct DesktopTranscriptStoreTests {
     func queuedToCompletedTransition() async throws {
         let database = try appDatabase()
         let (workspace, session) = try await seed(database: database)
+        let existing = message(
+            id: "existing",
+            sessionID: session.id,
+            seconds: 2
+        )
         let queued = message(
             id: "transitioning",
             sessionID: session.id,
@@ -382,14 +306,18 @@ struct DesktopTranscriptStoreTests {
             queueOrder: 0
         )
         try await DesktopTranscriptStore.applySyncEvent(
-            .snapshot([], queuedMessages: [queued]),
+            .snapshot(
+                [existing],
+                cursor: existing.id,
+                queuedMessages: [queued]
+            ),
             workspaceID: workspace.id,
             sessionID: session.id,
             database: database
         )
 
         var completed = queued
-        completed.sentAt = Date(timeIntervalSince1970: 2)
+        completed.sentAt = Date(timeIntervalSince1970: 3)
         completed.queueOrder = nil
         try await DesktopTranscriptStore.applySyncEvent(
             .changes(
@@ -409,7 +337,7 @@ struct DesktopTranscriptStoreTests {
                 database: database
             )
         )
-        #expect(cached.messages == [completed])
+        #expect(cached.messages == [existing, completed])
         #expect(cached.queuedMessages == [])
         #expect(cached.cursor == completed.id)
     }

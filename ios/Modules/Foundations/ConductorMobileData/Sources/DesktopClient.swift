@@ -326,11 +326,18 @@ extension DesktopClient: DependencyKey {
                 isFastModeEnabled: settings.defaultFastMode ?? false
             )
         } isRequestLeaseValid: { lease in
-            DesktopLeaseAuthority.shared.isValid(lease)
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            return DesktopLeaseAuthority.shared.isValid(
+                lease,
+                serverAddress: desktopServerAddress
+            )
         } persistCreatedSession: { session, requestLease in
             @Dependency(\.defaultDatabase) var database
             try await database.write { database in
-                let persistenceResult: Void? = try requestLease.performIfCurrent {
+                @Shared(.desktopServerAddress) var desktopServerAddress
+                let persistenceResult: Void? = try requestLease.performIfCurrent(
+                    serverAddress: desktopServerAddress
+                ) {
                     try Session.upsert { session }.execute(database)
                 }
                 guard persistenceResult != nil else {
@@ -340,7 +347,10 @@ extension DesktopClient: DependencyKey {
         } persistCreatedWorkspace: { createdWorkspace, requestLease in
             @Dependency(\.defaultDatabase) var database
             try await database.write { database in
-                let persistenceResult: Void? = try requestLease.performIfCurrent {
+                @Shared(.desktopServerAddress) var desktopServerAddress
+                let persistenceResult: Void? = try requestLease.performIfCurrent(
+                    serverAddress: desktopServerAddress
+                ) {
                     try Workspace.upsert {
                         createdWorkspace.workspace
                     }
@@ -483,6 +493,17 @@ extension DesktopClient: DependencyKey {
             return lease.baseURL
         }
         @Shared(.desktopServerAddress) var desktopServerAddress
+        // A task-local lease pins multi-request workflows to their starting endpoint. Checking it
+        // before each request prevents a later step from silently switching to a new desktop.
+        if let lease = DesktopRequestLeaseContext.current {
+            guard DesktopLeaseAuthority.shared.isValid(
+                lease,
+                serverAddress: desktopServerAddress
+            ) else {
+                throw DesktopClientError.staleRequestLease
+            }
+            return lease.baseURL
+        }
         guard let desktopServerAddress,
               let baseURL = serverURL(scheme: "http", address: desktopServerAddress)
         else {

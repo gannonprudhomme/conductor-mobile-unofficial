@@ -140,10 +140,12 @@ public struct DesktopRequestLease: Equatable, Sendable {
     /// transaction. The authority lock makes endpoint transition and persistence linearizable,
     /// closing the check-then-write race that a separate `isRequestLeaseValid` check would leave.
     public func performIfCurrent<Value>(
+        serverAddress: String?,
         _ operation: () throws -> Value
     ) rethrows -> Value? {
         try DesktopLeaseAuthority.shared.withValidRequestLease(
             self,
+            serverAddress: serverAddress,
             operation: operation
         )
     }
@@ -198,31 +200,11 @@ final class DesktopLeaseAuthority: @unchecked Sendable {
     /// Desktop observation pipelines call this for every persisted address emission. Advancing the
     /// epoch also invalidates every message-connection generation.
     func transition(to rawAddress: String?) -> DesktopEndpointLifecycle {
-        lock.withLock {
-            let nextIdentity = rawAddress.flatMap {
-                DesktopEndpoint(rawAddress: $0)
-            }
-            let hasSameIdentity: Bool
-            switch (lifecycle, nextIdentity) {
-            case (.unavailable, nil):
-                hasSameIdentity = true
-            case let (.configured(current, _), next?):
-                hasSameIdentity = current == next
-            default:
-                hasSameIdentity = false
-            }
-            guard !hasSameIdentity else {
-                return lifecycle
-            }
-
-            let epoch = lifecycle.endpointEpoch &+ 1
-            generations.removeAll()
-            if let endpoint = nextIdentity {
-                lifecycle = .configured(endpoint: endpoint, endpointEpoch: epoch)
-            } else {
-                lifecycle = .unavailable(endpointEpoch: epoch)
-            }
-            return lifecycle
+        let nextIdentity = rawAddress.flatMap {
+            DesktopEndpoint(rawAddress: $0)
+        }
+        return lock.withLock {
+            transition(to: nextIdentity)
         }
     }
 
@@ -264,11 +246,17 @@ final class DesktopLeaseAuthority: @unchecked Sendable {
     /// Runs one synchronous HTTP-workflow transaction only while its endpoint lease is current.
     func withValidRequestLease<Value>(
         _ lease: DesktopRequestLease,
+        serverAddress: String?,
         operation: () throws -> Value
     ) rethrows -> Value? {
-        try lock.withLock {
-            guard case let .configured(_, currentEpoch) = lifecycle,
-                  currentEpoch == lease.endpointEpoch else {
+        let currentIdentity = serverAddress.flatMap {
+            DesktopEndpoint(rawAddress: $0)
+        }
+        return try lock.withLock {
+            let currentLifecycle = transition(to: currentIdentity)
+            guard case let .configured(endpoint, currentEpoch) = currentLifecycle,
+                  currentEpoch == lease.endpointEpoch,
+                  endpoint.url(scheme: "http") == lease.baseURL else {
                 return nil
             }
             return try operation()
@@ -276,13 +264,48 @@ final class DesktopLeaseAuthority: @unchecked Sendable {
     }
 
     /// Checks whether a delayed response may still be published to feature state.
-    func isValid(_ lease: DesktopRequestLease) -> Bool {
-        lock.withLock {
-            guard case let .configured(_, currentEpoch) = lifecycle else {
+    func isValid(
+        _ lease: DesktopRequestLease,
+        serverAddress: String?
+    ) -> Bool {
+        let currentIdentity = serverAddress.flatMap {
+            DesktopEndpoint(rawAddress: $0)
+        }
+        return lock.withLock {
+            let currentLifecycle = transition(to: currentIdentity)
+            guard case let .configured(endpoint, currentEpoch) = currentLifecycle else {
                 return false
             }
             return currentEpoch == lease.endpointEpoch
+                && endpoint.url(scheme: "http") == lease.baseURL
         }
+    }
+
+    /// Advances the authority to one canonical identity while its lock is held.
+    private func transition(
+        to nextIdentity: DesktopEndpoint?
+    ) -> DesktopEndpointLifecycle {
+        let hasSameIdentity: Bool
+        switch (lifecycle, nextIdentity) {
+        case (.unavailable, nil):
+            hasSameIdentity = true
+        case let (.configured(current, _), next?):
+            hasSameIdentity = current == next
+        default:
+            hasSameIdentity = false
+        }
+        guard !hasSameIdentity else {
+            return lifecycle
+        }
+
+        let epoch = lifecycle.endpointEpoch &+ 1
+        generations.removeAll()
+        if let endpoint = nextIdentity {
+            lifecycle = .configured(endpoint: endpoint, endpointEpoch: epoch)
+        } else {
+            lifecycle = .unavailable(endpointEpoch: epoch)
+        }
+        return lifecycle
     }
 }
 

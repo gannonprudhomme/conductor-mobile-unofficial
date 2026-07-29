@@ -171,21 +171,21 @@ private extension DesktopTranscriptStore {
             throw ApplyError.missingSession
         }
 
-        if !event.isSnapshot {
-            let oldMetadata = try DesktopTranscriptMetadata.find(sessionID).fetchOne(database)
-            let historyTailID = try completedHistoryTailID(
-                sessionID: sessionID,
-                database: database
+        let oldMetadata = try DesktopTranscriptMetadata.find(sessionID).fetchOne(database)
+        let oldMessages = try loadMessagesInResumeOrder(
+            sessionID: sessionID,
+            database: database
+        )
+        // A suffix is meaningful only when a prior complete-baseline marker exists and its stored
+        // cursor still describes the rows the suffix would extend.
+        let hasCompleteBaseline = oldMetadata.map {
+            cursorMatchesCompletedHistoryTail(
+                $0.transcriptCursor,
+                in: oldMessages
             )
-            // A suffix is meaningful only when a prior complete-baseline marker exists and its
-            // stored cursor still describes the rows the suffix would extend.
-            guard let oldMetadata,
-                  cursorMatchesCompletedHistoryTail(
-                    oldMetadata.transcriptCursor,
-                    historyTailID: historyTailID
-                  ) else {
-                throw ApplyError.incompleteBaseline
-            }
+        } ?? false
+        guard event.isSnapshot || hasCompleteBaseline else {
+            throw ApplyError.incompleteBaseline
         }
 
         let upsertedMessages = event.messages + (event.queuedMessages ?? [])
@@ -195,16 +195,16 @@ private extension DesktopTranscriptStore {
             database: database
         )
         if event.isSnapshot {
-            // A complete event is authoritative. One set deletion avoids loading every old payload
-            // and issuing a delete for each omission before the replacement upsert.
-            try deleteCompletedHistory(
-                sessionID: sessionID,
+            try deleteCompletedHistoryOmissions(
+                retaining: event.messages,
+                from: oldMessages,
                 database: database
             )
-        } else if !event.deletedMessageIDs.isEmpty {
+        }
+        if !event.deletedMessageIDs.isEmpty {
             try deleteCompletedHistoryRows(
                 event.deletedMessageIDs,
-                sessionID: sessionID,
+                from: oldMessages,
                 database: database
             )
         }
@@ -224,7 +224,7 @@ private extension DesktopTranscriptStore {
         }
         guard cursorMatchesCompletedHistoryTail(
             event.cursor,
-            historyTailID: try completedHistoryTailID(
+            in: try loadMessagesInResumeOrder(
                 sessionID: sessionID,
                 database: database
             )
@@ -296,49 +296,39 @@ private extension DesktopTranscriptStore {
         sessionID: Session.ID,
         database: Database
     ) throws {
-        guard !messages.isEmpty else {
-            return
-        }
-        let storedSessionIDs = try Message
-            .where { $0.id.in(messages.map(\.id)) }
-            .select(\.sessionID)
-            .fetchAll(database)
-        for storedSessionID in storedSessionIDs {
-            guard storedSessionID.map(RawUTF8Key.init) == RawUTF8Key(sessionID) else {
+        for message in messages {
+            guard let existing = try Message.find(message.id).fetchOne(database) else {
+                continue
+            }
+            guard existing.sessionID.map(RawUTF8Key.init) == RawUTF8Key(sessionID) else {
                 throw ApplyError.messageMoved
             }
         }
     }
 
-    /// Deletes completed history without touching rows that still satisfy the queue predicate.
-    static func deleteCompletedHistory(
-        sessionID: Session.ID,
+    /// Deletes completed rows omitted by an authoritative full history snapshot.
+    static func deleteCompletedHistoryOmissions(
+        retaining messages: [Message],
+        from storedMessages: [Message],
         database: Database
     ) throws {
-        try Message
-            .where {
-                $0.sessionID.eq(sessionID)
-                    && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-            }
-            .delete()
-            .execute(database)
+        let messageIDs = Set(messages.map { RawUTF8Key($0.id) })
+        for message in storedMessages
+        where !message.isQueued && !messageIDs.contains(RawUTF8Key(message.id)) {
+            try Message.find(message.id).delete().execute(database)
+        }
     }
 
     /// Applies explicit live-history deletions without allowing that field to mutate queue rows.
     static func deleteCompletedHistoryRows(
         _ messageIDs: [Message.ID],
-        sessionID: Session.ID,
+        from storedMessages: [Message],
         database: Database
     ) throws {
-        for messageID in messageIDs {
-            try Message
-                .where {
-                    $0.sessionID.eq(sessionID)
-                        && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-                        && $0.id.eq(messageID)
-                }
-                .delete()
-                .execute(database)
+        let deletionIDs = Set(messageIDs.map(RawUTF8Key.init))
+        for message in storedMessages
+        where !message.isQueued && deletionIDs.contains(RawUTF8Key(message.id)) {
+            try Message.find(message.id).delete().execute(database)
         }
     }
 
@@ -351,41 +341,21 @@ private extension DesktopTranscriptStore {
         sessionID: Session.ID,
         database: Database
     ) throws {
-        // History upserts run first, so a queued-to-completed row no longer matches this deletion.
-        // Replacing the remaining queue in one statement is cheaper than loading full payloads and
-        // deleting omissions one at a time.
-        try Message
+        let queuedIDs = Set(queuedMessages.map { RawUTF8Key($0.id) })
+        let storedQueuedMessages = try Message
             .where {
                 $0.sessionID.eq(sessionID)
                     && $0.sentAt.is(nil)
                     && $0.queueOrder.isNot(nil)
             }
-            .delete()
-            .execute(database)
+            .fetchAll(database)
+        for message in storedQueuedMessages
+        where !queuedIDs.contains(RawUTF8Key(message.id)) {
+            try Message.find(message.id).delete().execute(database)
+        }
         if !queuedMessages.isEmpty {
             try Message.upsert { queuedMessages }.execute(database)
         }
-    }
-
-    /// Fetches only the completed-history ID required to validate a cursor.
-    static func completedHistoryTailID(
-        sessionID: Session.ID,
-        database: Database
-    ) throws -> Message.ID? {
-        try Message
-            .where {
-                $0.sessionID.eq(sessionID)
-                    && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-            }
-            .order {
-                (
-                    $0.createdAt.desc(),
-                    // SQLite BINARY collation compares the same raw UTF-8 bytes as RawUTF8Key.
-                    $0.id.desc()
-                )
-            }
-            .select { $0.id }
-            .fetchOne(database)
     }
 
     /// Loads one session in the exact order used to define the completed-history cursor.
@@ -400,8 +370,20 @@ private extension DesktopTranscriptStore {
             .sorted(by: isEarlierInCompletedHistory)
     }
 
-    /// Breaks equal timestamps with raw bytes so cache order matches server resume order.
+    /// Matches the server's actual-send-time order used to define resume suffixes.
     static func isEarlierInCompletedHistory(_ lhs: Message, _ rhs: Message) -> Bool {
+        if lhs.sentAt != rhs.sentAt {
+            switch (lhs.sentAt, rhs.sentAt) {
+            case let (lhs?, rhs?):
+                return lhs < rhs
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            case (nil, nil):
+                break
+            }
+        }
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt < rhs.createdAt
         }
@@ -429,16 +411,7 @@ private extension DesktopTranscriptStore {
         _ cursor: Message.ID?,
         in messages: [Message]
     ) -> Bool {
-        cursorMatchesCompletedHistoryTail(
-            cursor,
-            historyTailID: messages.last(where: { !$0.isQueued })?.id
-        )
-    }
-
-    static func cursorMatchesCompletedHistoryTail(
-        _ cursor: Message.ID?,
-        historyTailID: Message.ID?
-    ) -> Bool {
+        let historyTailID = messages.last(where: { !$0.isQueued })?.id
         switch (cursor, historyTailID) {
         case (nil, nil):
             return true

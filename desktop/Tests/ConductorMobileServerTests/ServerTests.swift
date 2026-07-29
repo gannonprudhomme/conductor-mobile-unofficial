@@ -477,7 +477,7 @@ struct ServerTests {
                       ),
                       (
                         'queued', 'session', 'user', 'Queued',
-                        '2026-07-29T00:00:03Z', NULL, 0
+                        '2026-07-29T00:00:00Z', NULL, 0
                       );
                     """,
                 arguments: [composedID, decomposedID]
@@ -724,6 +724,145 @@ struct ServerTests {
                     from: try #require(await iterator.next())
                 )
                 #expect(malformedCursor.isSnapshot)
+            }
+        }
+    }
+
+    @Test("Multiple message clients remain connected through unrelated database changes")
+    func multipleWebSocketClients() async throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appending(path: "\(UUID().uuidString)-conductor.db")
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+
+        var configuration = Configuration()
+        configuration.busyMode = .timeout(5)
+        configuration.prepareDatabase { database in
+            try database.execute(sql: "PRAGMA journal_mode = WAL")
+        }
+        let writer = try DatabaseQueue(
+            path: databaseURL.path,
+            configuration: configuration
+        )
+        try await writer.write { database in
+            try createTestConductorSchema(in: database)
+        }
+        let date = Date(timeIntervalSince1970: 1_783_555_200)
+        let workspace = Workspace(
+            id: "workspace",
+            createdAt: date,
+            updatedAt: date,
+            workspaceName: "revision-0"
+        )
+        let session = Session(
+            id: "session",
+            workspaceID: workspace.id,
+            title: "Large transcript",
+            agentType: .codex,
+            isHidden: false,
+            createdAt: "2026-07-29T00:00:00Z",
+            updatedAt: "2026-07-29T00:00:00Z",
+            lastUserMessageAt: nil,
+            status: .idle,
+            model: .gpt_5_6_sol,
+            unreadCount: 0,
+            freshlyCompacted: 0,
+            contextTokenCount: 0
+        )
+        let content = String(repeating: "x", count: 8_192)
+        let messages = (0..<2_000).map { index in
+            Message(
+                id: "message-\(index)",
+                sessionID: session.id,
+                role: .assistant,
+                content: content,
+                createdAt: date.addingTimeInterval(TimeInterval(index)),
+                sentAt: date.addingTimeInterval(TimeInterval(index))
+            )
+        }
+        try await writer.write { database in
+            try Workspace.insert { workspace }.execute(database)
+            try Session.insert { session }.execute(database)
+            try Message.insert { messages }.execute(database)
+        }
+
+        let database = try ConductorDatabase.open(at: databaseURL)
+        let writerJournalMode = try await writer.read { database in
+            try #sql("PRAGMA journal_mode", as: String.self).fetchOne(database)
+        }
+        let readerJournalMode = try await database.read { database in
+            try #sql("PRAGMA journal_mode", as: String.self).fetchOne(database)
+        }
+        #expect(writerJournalMode == "wal")
+        #expect(readerJournalMode == "wal")
+        let application = Server.makeApplication(
+            database: database,
+            port: 0,
+            allowedOrigin: "ws://localhost"
+        )
+        let connectedClientIDs = LockIsolated<Set<Int>>([])
+        let clientCount = 12
+        let unrelatedRevisionCount = 20
+
+        try await application.test(.live) { client in
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for clientID in 0..<clientCount {
+                    group.addTask {
+                        try await client.ws(
+                            "/workspaces/\(workspace.id)/sessions/\(session.id)/messages"
+                        ) { inbound, _, _ in
+                            var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                            let initial = try decode(
+                                MessageSyncEvent.self,
+                                from: try #require(await iterator.next())
+                            )
+                            #expect(initial.messages.count == messages.count)
+                            connectedClientIDs.withValue {
+                                _ = $0.insert(clientID)
+                            }
+
+                            while let message = try await iterator.next() {
+                                let event = try decode(
+                                    MessageSyncEvent.self,
+                                    from: message
+                                )
+                                if event.messages.first?.content == "final revision" {
+                                    return
+                                }
+                            }
+
+                            Issue.record("Client \(clientID) disconnected before the final revision.")
+                        }
+                    }
+                }
+
+                let clock = ContinuousClock()
+                let connectionDeadline = clock.now.advanced(by: .seconds(10))
+                while connectedClientIDs.value.count < clientCount,
+                      clock.now < connectionDeadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(connectedClientIDs.value.count == clientCount)
+
+                for revision in 1...unrelatedRevisionCount {
+                    let workspaceName = "revision-\(revision)"
+                    try await writer.write { database in
+                        try Workspace
+                            .find(workspace.id)
+                            .update { $0.workspaceName = #bind(workspaceName) }
+                            .execute(database)
+                    }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+
+                let finalMessageID = try #require(messages.last?.id)
+                try await writer.write { database in
+                    try Message
+                        .find(finalMessageID)
+                        .update { $0.content = #bind("final revision") }
+                        .execute(database)
+                }
+
+                try await group.waitForAll()
             }
         }
     }

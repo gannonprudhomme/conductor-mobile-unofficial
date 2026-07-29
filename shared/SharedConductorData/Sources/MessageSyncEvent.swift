@@ -26,8 +26,9 @@ public struct MessageSyncEvent: Codable, Equatable, Sendable {
 
     /// The opaque ID at the tail of completed history after applying this event.
     ///
-    /// The tail is determined by `createdAt`, then raw UTF-8 ID bytes. A reconnect sends this value
-    /// as `after`; it is not a count, digest, or timestamp. It is `nil` when history is empty.
+    /// The tail is determined by `sentAt`, then `createdAt` and raw UTF-8 ID bytes. A reconnect
+    /// sends this value as `after`; it is not a count, digest, or timestamp. It is `nil` when
+    /// history is empty.
     public let cursor: Message.ID?
 
     /// The complete current queue, or `nil` when queue state is unchanged.
