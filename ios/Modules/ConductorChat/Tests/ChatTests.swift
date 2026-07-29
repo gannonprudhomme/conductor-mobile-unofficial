@@ -823,6 +823,7 @@ struct ChatTests {
                 $0.turns = Turn.parse(messages: [message])
                 $0.initializeIdleBaseline()
                 $0.updateRows()
+                $0.isLoadingMessages = false
             }
             try expectHumanPresentationCaches(
                 store.state,
@@ -879,7 +880,7 @@ struct ChatTests {
         }
     }
 
-    @Test("An empty initial response replaces cached presentation and shows the empty state")
+    @Test("Persisted presentation remains visible until an empty initial response replaces it")
     func emptyInitialResponse() async throws {
         let session = try makeSession()
         let message: Message = .init(
@@ -915,9 +916,10 @@ struct ChatTests {
                 $0.turns = Turn.parse(messages: messages)
                 $0.initializeIdleBaseline()
                 $0.updateRows()
+                $0.isLoadingMessages = false
             }
             expectNoDifference(store.state.messages, [message])
-            #expect(store.state.isLoadingMessages)
+            #expect(!store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
 
             let task = await store.send(.task)
@@ -1056,7 +1058,9 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.messagesUpdated([message]))
+            await store.send(.messagesUpdated([message])) {
+                $0.isLoadingMessages = false
+            }
             await store.send(.sessionStatusChanged(.working)) {
                 $0.sessionStatusChanged(.working)
             }

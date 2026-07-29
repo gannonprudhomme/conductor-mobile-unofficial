@@ -1712,6 +1712,31 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
     }
 }
 
+private struct ChatTaskOwner<Content: View>: View {
+    @Bindable var store: StoreOf<WorkspaceChat>
+    let content: Content
+
+    init(
+        store: StoreOf<WorkspaceChat>,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.store = store
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .task(id: store.chat?.sessionID) {
+                guard store.chat != nil else {
+                    return
+                }
+                let action = WorkspaceChat.Action.chat(.task)
+                let task = store.send(action)
+                await task.finish()
+            }
+    }
+}
+
 public struct WorkspaceChatView: View {
     @Environment(\.openURL) private var openURL
     @Bindable var store: StoreOf<WorkspaceChat>
@@ -1723,7 +1748,7 @@ public struct WorkspaceChatView: View {
     }
 
     public var body: some View {
-        Group {
+        ChatTaskOwner(store: store) {
             if let chatStore = store.scope(state: \.chat, action: \.chat) {
                 ChatView(
                     store: chatStore,
