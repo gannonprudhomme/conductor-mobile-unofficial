@@ -1187,9 +1187,11 @@ struct WorkspaceChatTests {
 
             await store.send(.loadSessionsResponse(.success([session]))) {
                 $0.chat?.mutationRoute = route
-                $0.chat?.queuedMessages.mutationRoute = route
                 $0.isLoadingSessions = false
             }
+            #expect(
+                store.state.chat?.queuedMessages.mutationRoute == .desktop
+            )
             #expect(store.state.chat?.isLoadingMessages == false)
         }
     }

@@ -220,6 +220,9 @@ struct ChatTests {
                     )
                     return AsyncThrowingStream { _ in }
                 }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
             }
             store.exhaustivity = .off
 
@@ -229,6 +232,183 @@ struct ChatTests {
                 $0.isLoadingMessages = false
             }
             await task.cancel()
+        }
+    }
+
+    @Test("Cloud chats observe their queue through the paired desktop session")
+    func cloudQueueObservation() async throws {
+        let database = try appDatabase()
+        let canonicalWorkspaceID = "cloud-workspace"
+        let remoteWorkspaceID = "remote-workspace"
+        let remoteSessionID = "remote-session:/+"
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: remoteSessionID
+        )
+        let session = Session.preview(
+            id: canonicalSessionID,
+            workspaceID: canonicalWorkspaceID
+        )
+        let queuedMessage = Message(
+            id: "queued",
+            sessionID: remoteSessionID,
+            role: .user,
+            content: "Queued",
+            createdAt: .distantPast,
+            queueOrder: 1
+        )
+        try await database.write { database in
+            try Session.insert { session }.execute(database)
+            try CloudSessionMetadata
+                .insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: canonicalSessionID,
+                        cloudSessionID: remoteSessionID,
+                        workspaceID: session.workspaceID,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation",
+                        hasCompleteTranscript: true,
+                        transcriptProjectionVersion: CloudTranscriptAdapter
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
+                    )
+                }
+                .execute(database)
+        }
+        let (stream, continuation) = AsyncThrowingStream<
+            MessageSyncEvent,
+            any Error
+        >.makeStream()
+
+        let store = TestStore(
+            initialState: Chat.State(
+                session: session,
+                isCloudHosted: true,
+                mutationRoute: .cloud(
+                    accountID: "account",
+                    remoteWorkspaceID: remoteWorkspaceID
+                )
+            )
+        ) {
+            Chat()
+        } withDependencies: {
+            $0.defaultDatabase = database
+            $0.cloudAPIClient.observeTranscript = { _, _ in
+                AsyncThrowingStream { _ in }
+            }
+            $0.desktopClient.observeMessageEvents = { workspaceID, sessionID in
+                #expect(workspaceID == remoteWorkspaceID)
+                #expect(sessionID == remoteSessionID)
+                return stream
+            }
+        }
+        store.exhaustivity = .off
+        #expect(store.state.queuedMessages.desktopSessionID == remoteSessionID)
+        #expect(
+            store.state.queuedMessages.desktopWorkspaceID
+                == remoteWorkspaceID
+        )
+
+        let task = await store.send(.task)
+        await store.receive(\.initialMessagesResponse) {
+            $0.isMessageSnapshotEmpty = true
+            $0.isLoadingMessages = false
+        }
+        continuation.yield(
+            .snapshot(
+                [],
+                queuedMessages: [queuedMessage]
+            )
+        )
+
+        var storedMessage: Message?
+        for _ in 0..<1_000 where storedMessage == nil {
+            storedMessage = try await database.read { database in
+                try Message.find(queuedMessage.id).fetchOne(database)
+            }
+            await Task.yield()
+        }
+        #expect(storedMessage == queuedMessage)
+
+        await task.cancel()
+    }
+
+    @Test("A same-account credential generation restarts transcript observation")
+    func credentialGenerationRestartsTranscriptObservation() async throws {
+        let database = try appDatabase()
+        let sessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "remote-session"
+        )
+        let session = Session.preview(id: sessionID)
+        try await database.write { db in
+            try Session.insert { session }.execute(db)
+            try CloudSessionMetadata.insert {
+                CloudSessionMetadata(
+                    canonicalSessionID: sessionID,
+                    cloudSessionID: "remote-session",
+                    workspaceID: session.workspaceID,
+                    accountID: "account",
+                    listOrder: 0,
+                    refreshGeneration: "generation"
+                )
+            }
+            .execute(db)
+        }
+
+        await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(1)
+                )
+            }
+            let connectionCount = LockIsolated(0)
+            let (stream, continuation) = AsyncThrowingStream<
+                CloudTranscriptUpdate,
+                any Error
+            >.makeStream()
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.cloudAPIClient.observeTranscript = { _, _ in
+                    connectionCount.withValue { $0 += 1 }
+                    return stream
+                }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let task = await store.send(.task)
+            for _ in 0..<1_000 where connectionCount.value < 1 {
+                await Task.yield()
+            }
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(2)
+                )
+            }
+            await store.receive(\.cloudConfigurationChanged)
+            for _ in 0..<10_000 where connectionCount.value < 2 {
+                await Task.yield()
+            }
+            #expect(connectionCount.value == 2)
+
+            await task.cancel()
+            continuation.finish()
         }
     }
 
@@ -293,6 +473,9 @@ struct ChatTests {
                         )
                         continuation.finish()
                     }
+                }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
                 }
             }
             store.exhaustivity = .off
@@ -368,6 +551,9 @@ struct ChatTests {
                     )
                 }
                 $0.cloudAPIClient.observeTranscript = { _, _ in stream }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
             }
             store.exhaustivity = .off
 

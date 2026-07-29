@@ -331,7 +331,6 @@ public struct WorkspaceChat: Sendable {
                 )
                 state.mutationRoute = mutationRoute
                 state.chat?.mutationRoute = mutationRoute
-                state.chat?.queuedMessages.mutationRoute = mutationRoute
                 guard configuration != nil,
                       state.source == .cloud else {
                     return .cancel(id: CancelID.sessionObservation)
@@ -1282,7 +1281,6 @@ public struct WorkspaceChat: Sendable {
             if currentChat.mutationRoute == nil,
                selectedSession.status.rawValue != "creating" {
                 reconciledChat.mutationRoute = mutationRoute
-                reconciledChat.queuedMessages.mutationRoute = mutationRoute
             } else {
                 reconciledChat.mutationRoute = currentChat.mutationRoute
             }

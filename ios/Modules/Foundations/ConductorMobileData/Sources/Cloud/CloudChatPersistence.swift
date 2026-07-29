@@ -190,7 +190,7 @@ public enum CloudChatPersistence {
         return canonicalSessions
     }
 
-    /// Applies Desktop-only visibility changes to Cloud canonical session rows.
+    /// Applies Desktop-owned visibility and queue state to Cloud canonical session rows.
     ///
     /// Raw Desktop identifiers are used only for matching and are never persisted as duplicates.
     public static func reconcileSessionVisibility(
@@ -216,9 +216,11 @@ public enum CloudChatPersistence {
                 .fetchOne(database) else {
                 continue
             }
-            if let desktopSession = desktopSessionsByID[item.cloudSessionID],
-               canonicalSession.isHidden != desktopSession.isHidden {
+            if let desktopSession = desktopSessionsByID[item.cloudSessionID] {
                 canonicalSession.isHidden = desktopSession.isHidden
+                // A matching desktop row authoritatively owns queue state, including clearing
+                // a previously cached pause timestamp with nil.
+                canonicalSession.queuePausedAt = desktopSession.queuePausedAt
                 try Session.upsert { canonicalSession }.execute(database)
             }
             canonicalSessions.append(canonicalSession)
