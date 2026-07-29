@@ -475,11 +475,11 @@ struct QueuedMessagesTests {
             }
 
             await store.send(.messageTapped(message.id)) {
-                $0.isEditStartInFlight = true
+                $0.editStartInFlightMessageID = message.id
             }
             await store.receive(\.beginEditResponse) {
                 $0.editingMessageID = message.id
-                $0.isEditStartInFlight = false
+                $0.editStartInFlightMessageID = nil
                 $0.editDraft = "Original"
                 $0.shouldResumeAfterEditing = true
             }

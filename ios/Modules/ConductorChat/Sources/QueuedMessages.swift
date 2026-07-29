@@ -63,10 +63,10 @@ public struct QueuedMessages: Sendable {
     public struct State: Equatable {
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
+        var editStartInFlightMessageID: Message.ID?
         var editingMessageID: Message.ID?
         var editDraft = ""
         var isEditInFlight = false
-        var isEditStartInFlight = false
         var isExpanded = false
         var messageActionInFlightID: Message.ID?
         var isReorderInFlight = false
@@ -93,12 +93,20 @@ public struct QueuedMessages: Sendable {
             editingMessageID != nil
         }
 
+        var isEditStartInFlight: Bool {
+            editStartInFlightMessageID != nil
+        }
+
         var isInteractionEnabled: Bool {
             !isEditStartInFlight
                 && !isEditing
                 && messageActionInFlightID == nil
                 && !isReorderInFlight
                 && !isResumeInFlight
+        }
+
+        var menuActionInFlightMessageID: Message.ID? {
+            editStartInFlightMessageID ?? messageActionInFlightID
         }
 
         var sessionID: Session.ID {
@@ -250,7 +258,7 @@ public struct QueuedMessages: Sendable {
                     return .none
                 }
 
-                state.isEditStartInFlight = true
+                state.editStartInFlightMessageID = messageID
                 return .run {
                     [
                         sessionID = state.session.id,
@@ -272,11 +280,12 @@ public struct QueuedMessages: Sendable {
                 }
 
             case let .beginEditResponse(sessionID, messageID, result):
-                guard sessionID == state.sessionID else {
+                guard sessionID == state.sessionID,
+                      messageID == state.editStartInFlightMessageID else {
                     return .none
                 }
 
-                state.isEditStartInFlight = false
+                state.editStartInFlightMessageID = nil
                 guard case let .success(edit) = result,
                       edit.message.id == messageID,
                       edit.message.sessionID == sessionID else {
@@ -530,6 +539,7 @@ struct QueuedMessagesView: View {
             } label: {
                 header
             }
+            .disabled(store.isEditing)
 
             if store.isExpanded {
                 expandedContent
@@ -701,11 +711,30 @@ struct QueuedMessagesView: View {
     private var messageList: some View {
         List {
             ForEach(store.displayedMessages) { message in
+                let isEditing = store.editingMessageID == message.id
+                let menuActionInFlightMessageID =
+                    store.menuActionInFlightMessageID
+                let isMenuActionInFlight =
+                    menuActionInFlightMessageID == message.id
+                let isMenuActionDimmed =
+                    menuActionInFlightMessageID != nil
+                        && !isMenuActionInFlight
+
                 QueuedMessageRow(
                     message: message,
+                    isDimmed: store.isEditing && !isEditing,
+                    isEditing: isEditing,
+                    isFinishEditEnabled: isEditing
+                        && !store.editDraft
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .isEmpty
+                        && !store.isEditInFlight,
                     isInteractionEnabled: store.isInteractionEnabled,
+                    isMenuActionDimmed: isMenuActionDimmed,
+                    isMenuActionInFlight: isMenuActionInFlight,
                     delete: { store.send(.deleteButtonTapped(message.id)) },
                     edit: { store.send(.messageTapped(message.id)) },
+                    finishEdit: { store.send(.finishEditButtonTapped) },
                     steer: { store.send(.steerButtonTapped(message.id)) }
                 )
                 .frame(height: rowHeight)
@@ -761,23 +790,28 @@ struct QueuedMessagesView: View {
 
 private struct QueuedMessageRow: View {
     let message: Message
+    let isDimmed: Bool
+    let isEditing: Bool
+    let isFinishEditEnabled: Bool
     let isInteractionEnabled: Bool
+    let isMenuActionDimmed: Bool
+    let isMenuActionInFlight: Bool
     let delete: @MainActor () -> Void
     let edit: @MainActor () -> Void
+    let finishEdit: @MainActor () -> Void
     let steer: @MainActor () -> Void
 
-    @ViewBuilder
     var body: some View {
-        if isInteractionEnabled {
-            row
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        row
+            .swipeActions(
+                edge: .trailing,
+                allowsFullSwipe: isInteractionEnabled
+            ) {
+                if isInteractionEnabled {
                     deleteButton(color: .theme(.foreground))
                         .tint(.theme(.destructive))
                 }
-        } else {
-            row
-                .disabled(true)
-        }
+            }
     }
 
     private var row: some View {
@@ -785,6 +819,53 @@ private struct QueuedMessageRow: View {
             messageLabel
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            trailingAction
+                .padding(.trailing, 8)
+                .animation(.default, value: isEditing)
+                .animation(.default, value: isMenuActionInFlight)
+        }
+        .opacity(isDimmed ? 0.5 : 1)
+        .animation(.default, value: isDimmed)
+    }
+
+    private var messageLabel: some View {
+        Text(message.content ?? "")
+            .font(.theme(.small))
+            .foregroundStyle(.theme(.textPrimary))
+            .lineLimit(1)
+            .contentShape(.rect)
+    }
+
+    @ViewBuilder
+    private var trailingAction: some View {
+        if isEditing {
+            Button(action: finishEdit) {
+                Label {
+                    Text("Save queued message")
+                } icon: {
+                    LucideIcon(Lucide.check, style: .body)
+                }
+                .labelStyle(.iconOnly)
+                .foregroundStyle(.theme(.sidebarMutedForeground))
+                .frame(height: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .disabled(!isFinishEditEnabled)
+            .accessibilityIdentifier("chat.queue.message.\(message.id).save")
+            .transition(.blurReplace.combined(with: .scale(0.8)))
+        } else if isMenuActionInFlight {
+            ProgressView()
+                .progressViewStyle(.network)
+                .tint(.theme(.sidebarMutedForeground))
+                .controlSize(.mini)
+                .frame(height: 44)
+                .accessibilityLabel("Queued message action in progress")
+                .accessibilityIdentifier(
+                    "chat.queue.message.\(message.id).action-in-flight"
+                )
+                .transition(.blurReplace.combined(with: .scale(0.8)))
+        } else {
             Menu {
                 editButton
 
@@ -799,17 +880,12 @@ private struct QueuedMessageRow: View {
                     // .frame(width: 44, height: 44)
                     .contentShape(.rect)
             }
+            .disabled(!isInteractionEnabled)
+            .opacity(isMenuActionDimmed ? 0.5 : 1)
             .accessibilityLabel("Queued message actions")
-            .padding(.trailing, 8)
+            .transition(.blurReplace.combined(with: .scale(0.8)))
+            .animation(.default, value: isMenuActionDimmed)
         }
-    }
-
-    private var messageLabel: some View {
-        Text(message.content ?? "")
-            .font(.theme(.small))
-            .foregroundStyle(.theme(.textPrimary))
-            .lineLimit(1)
-            .contentShape(.rect)
     }
 
     private var editButton: some View {

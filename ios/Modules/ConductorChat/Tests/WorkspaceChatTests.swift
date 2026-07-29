@@ -76,7 +76,7 @@ struct WorkspaceChatTests {
             expectNotRestorable { $0.renamingSession = session }
             expectNotRestorable { $0.destination = .renameBranch }
             expectNotRestorable {
-                $0.chat?.queuedMessages.isEditStartInFlight = true
+                $0.chat?.queuedMessages.editStartInFlightMessageID = "editing"
             }
             expectNotRestorable {
                 $0.chat?.queuedMessages.editingMessageID = "editing"
