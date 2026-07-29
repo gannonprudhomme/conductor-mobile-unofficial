@@ -122,10 +122,7 @@ public struct Chat: Sendable {
                 && !displayedDeliveryAttempts.contains {
                     $0.messageMode == .sent
                         && $0.deliveryState != .rejected
-                        && (
-                            $0.deliveryState != .acknowledged
-                                || !hasCanonicalMessage(for: $0)
-                        )
+                        && !hasCanonicalMessage(for: $0)
                 }
         }
 
@@ -158,10 +155,7 @@ public struct Chat: Sendable {
         var hasOptimisticMessages: Bool {
             displayedDeliveryAttempts.contains {
                 $0.messageMode == .sent
-                    && (
-                        $0.deliveryState != .acknowledged
-                            || !hasCanonicalMessage(for: $0)
-                    )
+                    && !hasCanonicalMessage(for: $0)
             }
         }
 
@@ -337,10 +331,7 @@ public struct Chat: Sendable {
             let optimisticRows = displayedDeliveryAttempts
                 .filter {
                     $0.messageMode == .sent
-                        && (
-                            $0.deliveryState != .acknowledged
-                                || !hasCanonicalMessage(for: $0)
-                        )
+                        && !hasCanonicalMessage(for: $0)
                 }
                 .map { attempt -> (Turn.ID?, DisplayedChatRowWithPadding) in
                     let status: DisplayedChatRow.OptimisticMessage.Status
@@ -1211,10 +1202,12 @@ public struct Chat: Sendable {
     ) {
         let userMessages = messages.filter { $0.role == .user }
         var aliases = state.messageIDToBubbleID
+        var claimedAttemptIDs = Set(aliases.values)
         for message in userMessages where aliases[message.id] == nil {
             guard let attempt = state.displayedDeliveryAttempts.first(where: {
                 let attemptID = $0.attemptID.uuidString.lowercased()
                 return $0.messageMode == .sent
+                    && !claimedAttemptIDs.contains($0.attemptID)
                     && (
                         $0.canonicalMessageID == message.id
                             || (
@@ -1228,6 +1221,7 @@ public struct Chat: Sendable {
                 continue
             }
             aliases[message.id] = attempt.attemptID
+            claimedAttemptIDs.insert(attempt.attemptID)
             if let turnID = message.turnID {
                 state.observeCorrelatedTurn(
                     turnID,

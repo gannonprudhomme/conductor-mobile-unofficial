@@ -3007,6 +3007,171 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Canonical observation replaces an accepted bubble before acknowledgement")
+    func canonicalObservationBeforeAcknowledgement() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let message = Message(
+            id: "canonical",
+            sessionID: session.id,
+            role: .user,
+            content: "Test",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: "canonical-turn"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .accepted,
+                        canonicalMessageID: message.id
+                    )
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let chat = try #require(store.state.chat)
+            chat.$messageDraft.withLock { $0 = "Test" }
+            await store.send(.chat(.sendButtonTapped(.sent)))
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
+
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .accepted
+            )
+            #expect(store.state.chat?.messageIDToBubbleID[message.id] == UUID(0))
+            #expect(
+                store.state.chat?.rows?.map(\.id)
+                    == [
+                        "human:\(UUID(0).uuidString)",
+                        "turn-in-progress:\(try #require(message.turnID))",
+                    ]
+            )
+            guard let row = store.state.chat?.rows?.first,
+                  case .humanMessage = row.content else {
+                Issue.record("Expected the canonical row to replace the optimistic row")
+                return
+            }
+        }
+    }
+
+    @Test("Cloud canonical observation replaces an accepted bubble")
+    func cloudCanonicalObservationBeforeAcknowledgement() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            activeSessionID: "canonical-session",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let session = Session.preview(
+            id: "canonical-session",
+            workspaceID: workspace.id
+        )
+        let metadata = CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
+        let message = Message(
+            id: "canonical",
+            sessionID: session.id,
+            role: .user,
+            content: "Test",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            sdkMessageID: UUID(0).uuidString.lowercased(),
+            turnID: "canonical-turn"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.upsert { workspace }.execute(database)
+                try Session.upsert { session }.execute(database)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(database)
+                try CloudSessionMetadata.insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: session.id,
+                        cloudSessionID: "remote-session",
+                        workspaceID: workspace.id,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation"
+                    )
+                }
+                .execute(database)
+            }
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(
+                        workspace: workspace,
+                        repository: nil,
+                        cloudMetadata: metadata
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        route: .cloud,
+                        state: .accepted
+                    )
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let chat = try #require(store.state.chat)
+            chat.$messageDraft.withLock { $0 = "Test" }
+            await store.send(.chat(.sendButtonTapped(.sent)))
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
+
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .accepted
+            )
+            #expect(store.state.chat?.messageIDToBubbleID[message.id] == UUID(0))
+            let rows = try #require(store.state.chat?.rows)
+            #expect(Set(rows.map(\.id)).count == rows.count)
+            guard let row = rows.first,
+                  case .humanMessage = row.content else {
+                Issue.record("Expected the Cloud canonical row to replace the optimistic row")
+                return
+            }
+        }
+    }
+
     @Test("Identical desktop text cannot claim a pending mobile bubble")
     func identicalDesktopMessageDoesNotReconcilePendingMobileMessage() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
