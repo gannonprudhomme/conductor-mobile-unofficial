@@ -517,20 +517,7 @@ public struct Chat: Sendable {
             } else {
                 FetchAll(
                     wrappedValue: messages,
-                    Message
-                        .where {
-                            $0.sessionID.eq(session.id)
-                                && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-                        }
-                        .order {
-                            (
-                                $0.sentAt.asc(nulls: .last),
-                                $0.createdAt,
-                                // SQLite's default BINARY collation preserves the protocol's raw
-                                // UTF-8 tie-break when timestamps match.
-                                $0.id
-                            )
-                        }
+                    ChatMessageCache.localMessages(sessionID: session.id)
                 )
             }
             self._fetchedDeliveryAttempts = FetchAll(
@@ -651,11 +638,10 @@ public struct Chat: Sendable {
     }
 
     @Dependency(\.defaultDatabase) var database
-    @Dependency(\.cloudAPIClient) var cloudAPIClient
+    @Dependency(\.chatSyncClient) var chatSyncClient
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.messageDeliveryOutbox) var messageDeliveryOutbox
     @Dependency(\.workspaceMutationClient) var workspaceMutationClient
-    private let messagePersistence = MessagePersistencePipeline()
 
     init() { }
 
@@ -956,10 +942,14 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case let .loadMessagesFailed(sessionID, _):
+            case let .loadMessagesFailed(sessionID, error):
                 guard sessionID == state.sessionID else {
                     return .none
                 }
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
+                    return .none
+                }
+                state.isLoadingMessages = false
                 return .none
 
             case .configurationControlTapped,
@@ -1026,129 +1016,62 @@ public struct Chat: Sendable {
         return .none
     }
 
-    /// Starts the hosting-specific transcript observation used by the feature task.
-    ///
-    /// Desktop observations distinguish events already persisted by the lease-protected socket
-    /// from legacy mocks that still require feature-owned persistence. Cloud observations have
-    /// their own account-scoped cache contract.
+    /// Records selected-chat intent and waits for the shared sync worker to make the cache usable.
     private func observeMessages(_ state: State) -> Effect<Action> {
-        if state.source == .cloud {
-            return observeCloudMessages(state)
-        }
         return .run {
             [
-                sessionID = state.session.id,
-                workspaceID = state.session.workspaceID,
-            ] send in
-            var isAwaitingInitialResponse = true
-            await StreamObservation.observe {
-                desktopClient.observeMessages(
-                    workspaceID: workspaceID,
-                    sessionID: sessionID
-                )
-            } onValue: { observation in
-                switch observation {
-                case let .persisted(event):
-                    // A usable cache and a cursorless recovery are both emitted as complete
-                    // snapshots. Persisted rows can dismiss the presentation loader independently,
-                    // but only a complete event settles this observation's initial handshake.
-                    if isAwaitingInitialResponse, event.isSnapshot {
-                        isAwaitingInitialResponse = false
-                        await send(
-                            .initialMessagesResponse(
-                                sessionID: sessionID,
-                                messages: event.messages
-                            )
-                        )
-                    }
-
-                case let .requiresPersistence(event):
-                    let persistedEvent = try await messagePersistence.apply(
-                        event,
-                        sessionID: sessionID,
-                        database: database
-                    )
-                    if isAwaitingInitialResponse, event.isSnapshot {
-                        isAwaitingInitialResponse = false
-                        await send(
-                            .initialMessagesResponse(
-                                sessionID: sessionID,
-                                messages: persistedEvent.messages
-                            )
-                        )
-                    }
-
-                }
-            } onFailure: { error in
-                Logger.chat.error("Failed to load messages: \(error)")
-                await send(
-                    .loadMessagesFailed(
-                        sessionID: sessionID,
-                        error: error
-                    )
-                )
-            }
-        }
-        .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
-    }
-
-    private func observeCloudMessages(_ state: State) -> Effect<Action> {
-        .run {
-            [
+                isCloudHosted = state.isCloudHosted,
                 sessionID = state.session.id,
             ] send in
-            var isAwaitingInitialResponse = true
-            do {
-                let cache = try await database.write { database in
-                    try CloudChatPersistence.reconcileDeliveryAttempts(
-                        for: sessionID,
-                        in: database
-                    )
-                    return try CloudChatPersistence.cachedTranscript(
-                        for: sessionID,
-                        in: database
-                    )
-                }
-                if isAwaitingInitialResponse, cache.checkpoint != nil {
-                    isAwaitingInitialResponse = false
-                    await send(
-                        .initialMessagesResponse(
-                            sessionID: sessionID,
-                            messages: cache.messages
-                        )
-                    )
-                }
-                let updates = cloudAPIClient.observeTranscript(
-                    sessionID: cache.remoteSessionID,
-                    checkpoint: cache.checkpoint
-                )
-                for try await update in updates {
-                    let messages = try await database.write { database in
-                        _ = try CloudChatPersistence.persist(update, in: database)
-                        return try CloudMessageMetadata
-                            .messages(sessionID: sessionID)
-                            .fetchAll(database)
-                    }
-                    if isAwaitingInitialResponse, update.kind == .complete {
-                        isAwaitingInitialResponse = false
+            for await event in chatSyncClient.observeSelected(sessionID: sessionID) {
+                switch event {
+                case .ready:
+                    do {
+                        let messages = try await database.write { database in
+                            if isCloudHosted {
+                                try CloudChatPersistence.reconcileDeliveryAttempts(
+                                    for: sessionID,
+                                    in: database
+                                )
+                            }
+                            return try ChatMessageCache.messages(
+                                sessionID: sessionID,
+                                isCloudHosted: isCloudHosted,
+                                in: database
+                            )
+                        }
                         await send(
                             .initialMessagesResponse(
                                 sessionID: sessionID,
                                 messages: messages
                             )
                         )
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        Logger.chat.error("Failed to read initial messages: \(error)")
+                        await send(
+                            .loadMessagesFailed(
+                                sessionID: sessionID,
+                                error: error
+                            )
+                        )
+                        return
                     }
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                Logger.chat.error("Failed to load Cloud messages: \(error)")
-                await send(
-                    .loadMessagesFailed(
-                        sessionID: sessionID,
-                        error: error
+
+                case let .failure(error):
+                    if error is CancellationError {
+                        return
+                    }
+                    Logger.chat.error("Failed to load messages: \(error)")
+                    await send(
+                        .loadMessagesFailed(
+                            sessionID: sessionID,
+                            error: error
+                        )
                     )
-                )
+                    return
+                }
             }
         }
         .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
@@ -1248,53 +1171,6 @@ public struct Chat: Sendable {
 
     private enum CancelID: Hashable {
         case messageObservation
-    }
-}
-
-private actor MessagePersistencePipeline {
-    func apply(
-        _ event: MessageSyncEvent,
-        sessionID: Session.ID,
-        database: any DatabaseWriter
-    ) async throws -> MessageSyncEvent {
-        try await database.write { database in
-            if event.isSnapshot {
-                let messageIDs = Set(event.messages.map(\.id))
-                let storedMessages = try Message
-                    .where { $0.sessionID.eq(sessionID) }
-                    .fetchAll(database)
-                for message in storedMessages where !messageIDs.contains(message.id) {
-                    try Message
-                        .where {
-                            $0.id.eq(message.id)
-                                && $0.sessionID.eq(sessionID)
-                        }
-                        .delete()
-                        .execute(database)
-                }
-            }
-
-            for messageID in event.deletedMessageIDs {
-                try Message
-                    .where {
-                        $0.id.eq(messageID)
-                            && $0.sessionID.eq(sessionID)
-                    }
-                    .delete()
-                    .execute(database)
-            }
-
-            if !event.messages.isEmpty {
-                try Message.upsert { event.messages }
-                    .execute(database)
-            }
-            try MessageDeliveryAttempt.acknowledgeDesktopMessages(
-                event.messages,
-                sessionID: sessionID,
-                in: database
-            )
-        }
-        return event
     }
 }
 
@@ -1778,10 +1654,8 @@ private struct ChatPreview: View {
                 try Message.upsert { content.messages + queuedMessages }
                     .execute(db)
             }
-            $0.desktopClient.observeMessages = { _, _ in
-                AsyncThrowingStream { continuation in
-                    continuation.yield(.persisted(.snapshot([])))
-                }
+            $0.chatSyncClient.observeSelected = { _ in
+                AsyncStream { $0.yield(.ready) }
             }
             $0.desktopClient.resumeQueuedMessages = { _, _ in }
         }
