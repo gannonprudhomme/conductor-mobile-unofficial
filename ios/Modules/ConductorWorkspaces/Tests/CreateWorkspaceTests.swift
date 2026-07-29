@@ -66,7 +66,7 @@ struct CreateWorkspaceTests {
             repositoryID: repository.id
         )
         let database = try appDatabase()
-        await withDependencies {
+        try await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
             var state = CreateWorkspace.State(repositories: [repository])
@@ -75,11 +75,13 @@ struct CreateWorkspaceTests {
             state.selectedModel = .gpt_5_6_terra
             state.selectedReasoningEffort = .ultra
             state.$prompt.withLock { $0 = "  Run the tests.  " }
+            let requestLease = try makeRequestLease()
             let store = TestStore(initialState: state) {
                 CreateWorkspace()
             } withDependencies: {
                 $0.defaultDatabase = database
                 $0.uuid = .incrementing
+                $0.desktopClient.acquireRequestLease = { requestLease }
                 $0.desktopClient.createWorkspace = {
                     requestedWorkspaceID,
                     repositoryID,
@@ -112,6 +114,14 @@ struct CreateWorkspaceTests {
                     #expect(attemptID == UUID(1))
                     return .accepted(messageID: "message")
                 }
+                $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
+                $0.desktopClient.persistCreatedWorkspace = { created, lease in
+                    #expect(lease == requestLease)
+                    try await database.write { database in
+                        try Workspace.upsert { created.workspace }.execute(database)
+                        try Session.upsert { created.session }.execute(database)
+                    }
+                }
             }
 
             await store.send(.createButtonTapped) {
@@ -133,6 +143,7 @@ struct CreateWorkspaceTests {
                         ),
                         selectedModel: .gpt_5_6_terra,
                         selectedReasoningEffort: .ultra,
+                        requestLease: requestLease,
                         workspace: WorkspaceWithRepository(
                             workspace: workspace,
                             repository: repository
@@ -164,24 +175,33 @@ struct CreateWorkspaceTests {
         )
         let database = try appDatabase()
 
-        await withDependencies {
+        try await withDependencies {
             $0.defaultFileStorage = .inMemory
         } operation: {
             let state = CreateWorkspace.State(repositories: [repository])
             state.$prompt.withLock { $0 = "Run it." }
+            let requestLease = try makeRequestLease()
             let store = TestStore(initialState: state) {
                 CreateWorkspace()
             } withDependencies: {
                 $0.defaultDatabase = database
                 $0.uuid = .incrementing
+                $0.desktopClient.acquireRequestLease = { requestLease }
                 $0.desktopClient.createWorkspace = { _, _, _, _, _ in
                     CreatedWorkspace(workspace: workspace, session: session)
                 }
                 $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
                     deliveryResult
                 }
+                $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
+                $0.desktopClient.persistCreatedWorkspace = { created, lease in
+                    #expect(lease == requestLease)
+                    try await database.write { database in
+                        try Workspace.upsert { created.workspace }.execute(database)
+                        try Session.upsert { created.session }.execute(database)
+                    }
+                }
             }
-
             await store.send(.createButtonTapped) {
                 $0.isCreateAPIInFlight = true
                 $0.workspaceID = workspaceID
@@ -201,6 +221,7 @@ struct CreateWorkspaceTests {
                         ),
                         selectedModel: state.selectedModel,
                         selectedReasoningEffort: state.selectedReasoningEffort,
+                        requestLease: requestLease,
                         workspace: WorkspaceWithRepository(
                             workspace: workspace,
                             repository: repository
@@ -219,14 +240,17 @@ struct CreateWorkspaceTests {
             let repository = Repository.preview()
             let state = CreateWorkspace.State(repositories: [repository])
             let database = try appDatabase()
+            let requestLease = try makeRequestLease()
             let store = TestStore(initialState: state) {
                 CreateWorkspace()
             } withDependencies: {
                 $0.defaultDatabase = database
                 $0.uuid = .incrementing
+                $0.desktopClient.acquireRequestLease = { requestLease }
                 $0.desktopClient.createWorkspace = { _, _, _, _, _ in
                     throw TestError()
                 }
+                $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
             }
 
             await store.send(.createButtonTapped) {
@@ -465,6 +489,13 @@ private func firstTextView(in view: UIView) -> UITextView? {
         }
     }
     return nil
+}
+
+private func makeRequestLease() throws -> DesktopRequestLease {
+    DesktopRequestLease(
+        baseURL: try #require(URL(string: "http://desktop:3768")),
+        endpointEpoch: 1
+    )
 }
 
 private struct TestError: LocalizedError {

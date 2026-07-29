@@ -403,6 +403,25 @@ func appDatabaseMigrator() -> DatabaseMigrator {
         .execute(db)
     }
 
+    // A metadata row is the durable marker that one session has a complete transcript baseline.
+    // Its nullable cursor distinguishes complete empty history from a missing, unusable baseline.
+    migrator.registerMigration("Create desktop transcript sync metadata") { db in
+        try #sql(
+            """
+            CREATE TABLE "desktop_transcript_metadata" (
+              "session_id" TEXT PRIMARY KEY
+                REFERENCES "sessions" ("id") ON DELETE CASCADE,
+              "transcript_cursor" TEXT,
+              CHECK (
+                "transcript_cursor" IS NULL
+                OR length(CAST("transcript_cursor" AS BLOB)) >= 1
+              )
+            );
+            """
+        )
+        .execute(db)
+    }
+
     return migrator
 }
 

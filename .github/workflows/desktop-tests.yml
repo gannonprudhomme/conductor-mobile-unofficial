@@ -17,3 +17,5 @@ jobs:
           apt-get install --yes libsqlite3-dev
       - name: Run desktop tests
         run: swift test --package-path desktop
+      - name: Run shared tests
+        run: swift test --package-path shared
