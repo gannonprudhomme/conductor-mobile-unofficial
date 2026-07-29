@@ -171,7 +171,7 @@ struct ToolCallRowView: View {
         case .listFiles(_, let path):
             somethingText(fileName(from: path ?? "."))
         case .bash(_, let command):
-            somethingText(command)
+            somethingText(shellCommandForDisplay(command))
         case .runLocalCommand(_, let command, _, _):
             somethingText(command)
         case .toolSearch:
@@ -214,6 +214,29 @@ struct ToolCallRowView: View {
             ?? withoutProvider
         return Session.Model(rawValue: normalized).displayName
     }
+}
+
+func shellCommandForDisplay(_ command: String) -> String {
+    let wrapperPrefixes = [
+        "/bin/bash -lc ",
+        "bash -lc ",
+        "/bin/zsh -lc ",
+        "zsh -lc ",
+        "/bin/sh -c ",
+        "sh -c ",
+    ]
+    guard let wrapperPrefix = wrapperPrefixes.first(where: command.hasPrefix) else {
+        return command
+    }
+
+    let wrappedCommand = command.dropFirst(wrapperPrefix.count)
+    guard let openingQuote = wrappedCommand.first,
+          openingQuote == "'" || openingQuote == "\"",
+          wrappedCommand.last == openingQuote else {
+        return command
+    }
+
+    return String(wrappedCommand.dropFirst().dropLast())
 }
 
 extension DisplayedChatRow.TurnSummary.ToolIcon {
