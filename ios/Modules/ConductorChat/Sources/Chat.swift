@@ -416,20 +416,7 @@ public struct Chat: Sendable {
             } else {
                 FetchAll(
                     wrappedValue: messages,
-                    Message
-                        .where {
-                            $0.sessionID.eq(session.id)
-                                && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-                        }
-                        .order {
-                            (
-                                $0.sentAt.asc(nulls: .last),
-                                $0.createdAt,
-                                // SQLite's default BINARY collation preserves the protocol's raw
-                                // UTF-8 tie-break when timestamps match.
-                                $0.id
-                            )
-                        }
+                    ChatMessageCache.localMessages(sessionID: session.id)
                 )
             }
             self.hasUserSelectedModel = selectedModel != nil
@@ -731,10 +718,14 @@ public struct Chat: Sendable {
                 state.isStopInFlight = false
                 return .none
 
-            case let .loadMessagesFailed(sessionID, _):
+            case let .loadMessagesFailed(sessionID, error):
                 guard sessionID == state.sessionID else {
                     return .none
                 }
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
+                    return .none
+                }
+                state.isLoadingMessages = false
                 return .none
 
             case .sendButtonTapped:
@@ -756,21 +747,37 @@ public struct Chat: Sendable {
             for await event in chatSyncClient.observeSelected(sessionID: sessionID) {
                 switch event {
                 case .ready:
-                    let messages = try await database.read { database in
-                        try Self.initialMessages(
-                            sessionID: sessionID,
-                            isCloudHosted: isCloudHosted,
-                            database: database
+                    do {
+                        let messages = try await database.read { database in
+                            try ChatMessageCache.messages(
+                                sessionID: sessionID,
+                                isCloudHosted: isCloudHosted,
+                                in: database
+                            )
+                        }
+                        await send(
+                            .initialMessagesResponse(
+                                sessionID: sessionID,
+                                messages: messages
+                            )
                         )
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        Logger.chat.error("Failed to read initial messages: \(error)")
+                        await send(
+                            .loadMessagesFailed(
+                                sessionID: sessionID,
+                                error: error
+                            )
+                        )
+                        return
                     }
-                    await send(
-                        .initialMessagesResponse(
-                            sessionID: sessionID,
-                            messages: messages
-                        )
-                    )
 
                 case let .failure(error):
+                    if error is CancellationError {
+                        return
+                    }
                     Logger.chat.error("Failed to load messages: \(error)")
                     await send(
                         .loadMessagesFailed(
@@ -783,31 +790,6 @@ public struct Chat: Sendable {
             }
         }
         .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
-    }
-
-    private static func initialMessages(
-        sessionID: Session.ID,
-        isCloudHosted: Bool,
-        database: Database
-    ) throws -> [Message] {
-        if isCloudHosted {
-            return try CloudMessageMetadata
-                .messages(sessionID: sessionID)
-                .fetchAll(database)
-        }
-        return try Message
-            .where {
-                $0.sessionID.eq(sessionID)
-                    && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-            }
-            .order {
-                (
-                    $0.sentAt.asc(nulls: .last),
-                    $0.createdAt,
-                    $0.id
-                )
-            }
-            .fetchAll(database)
     }
 
     private func observePersistedMessages(_ state: State) -> Effect<Action> {

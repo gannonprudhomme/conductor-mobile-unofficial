@@ -65,6 +65,55 @@ struct ChatSyncClientTests {
         #expect(!workspaces.map(\.id).contains("archiving"))
     }
 
+    @Test("Local session reconciliation preserves transcript metadata and removes stale sessions")
+    func localSessionReconciliationPreservesMetadataAndRemovesStaleSessions() throws {
+        let database = try appDatabase()
+        let workspace = Workspace.preview(id: "workspace")
+        let kept = Session.preview(id: "kept", workspaceID: workspace.id)
+        let stale = Session.preview(id: "stale", workspaceID: workspace.id)
+        let refreshed = Session.preview(
+            id: kept.id,
+            workspaceID: workspace.id,
+            title: "Refreshed"
+        )
+        try database.write { database in
+            try Workspace.insert { workspace }.execute(database)
+            try Session.insert { [kept, stale] }.execute(database)
+            try DesktopTranscriptMetadata.insert {
+                [
+                    DesktopTranscriptMetadata(
+                        sessionID: kept.id,
+                        transcriptCursor: "cursor"
+                    ),
+                    DesktopTranscriptMetadata(
+                        sessionID: stale.id,
+                        transcriptCursor: "stale-cursor"
+                    ),
+                ]
+            }
+            .execute(database)
+
+            try WorkspaceSessionPersistence.reconcileLocalSnapshot(
+                [refreshed],
+                workspaceID: workspace.id,
+                in: database
+            )
+        }
+
+        let stored = try database.read { database in
+            (
+                try Session.find(kept.id).fetchOne(database),
+                try Session.find(stale.id).fetchOne(database),
+                try DesktopTranscriptMetadata.find(kept.id).fetchOne(database),
+                try DesktopTranscriptMetadata.find(stale.id).fetchOne(database)
+            )
+        }
+        #expect(stored.0?.title == "Refreshed")
+        #expect(stored.1 == nil)
+        #expect(stored.2?.transcriptCursor == "cursor")
+        #expect(stored.3 == nil)
+    }
+
     @Test("Workspace discovery starts local and Cloud transcript streams")
     func workspaceDiscoveryStartsTranscriptStreams() async throws {
         let database = try appDatabase()
@@ -194,29 +243,36 @@ struct ChatSyncClientTests {
                 accountID: "account",
                 remoteSessionID: "remote-session"
             )
-            var localCache: MessageSyncEvent?
-            var cloudCache: CloudCachedTranscript?
-            for _ in 0..<10_000 {
-                localCache = try await DesktopTranscriptStore
+            await waitUntil {
+                let localCache = try? await DesktopTranscriptStore
                     .cachedTranscriptSnapshot(
                         workspaceID: localWorkspace.id,
                         sessionID: localSession.id,
                         database: database
                     )
-                cloudCache = try await database.read { database in
+                let cloudCache = try? await database.read { database in
                     try CloudChatPersistence.cachedTranscript(
                         for: cloudSessionID,
                         in: database
                     )
                 }
-                if localCache?.messages == [localMessage],
-                   cloudCache?.messages.map(\.content) == ["Cloud"],
-                   cloudCache?.checkpoint?.rawCursor == cloudMessage.id {
-                    break
-                }
-                await Task.yield()
+                return localCache?.messages == [localMessage]
+                    && cloudCache?.messages.map(\.content) == ["Cloud"]
+                    && cloudCache?.checkpoint?.rawCursor == cloudMessage.id
             }
 
+            let localCache = try await DesktopTranscriptStore
+                .cachedTranscriptSnapshot(
+                    workspaceID: localWorkspace.id,
+                    sessionID: localSession.id,
+                    database: database
+                )
+            let cloudCache = try await database.read { database in
+                try CloudChatPersistence.cachedTranscript(
+                    for: cloudSessionID,
+                    in: database
+                )
+            }
             #expect(localCache?.messages == [localMessage])
             #expect(cloudCache?.messages.map(\.content) == ["Cloud"])
             #expect(cloudCache?.checkpoint?.rawCursor == cloudMessage.id)
@@ -256,9 +312,6 @@ struct ChatSyncClientTests {
             defer { foreground.cancel() }
 
             await waitUntil { observedSessionIDs.value == [visible.id] }
-            for _ in 0..<100 {
-                await Task.yield()
-            }
 
             #expect(observedSessionIDs.value == [visible.id])
         }
@@ -410,9 +463,6 @@ struct ChatSyncClientTests {
             defer { missingTask.cancel() }
 
             await waitUntil { missingContinuation.value != nil }
-            for _ in 0..<100 {
-                await Task.yield()
-            }
             #expect(missingEvents.value.isEmpty)
 
             missingContinuation.value?.yield(
@@ -420,6 +470,97 @@ struct ChatSyncClientTests {
             )
             await waitUntil { missingEvents.value.contains { $0.isReady } }
             #expect(missingEvents.value.contains { $0.isReady })
+        }
+    }
+
+    @Test("Readiness arriving during selected registration is delivered once")
+    func readinessDuringRegistrationIsDeliveredOnce() async throws {
+        let database = try appDatabase()
+        let (workspace, session) = try await seedLocalSession(in: database)
+        let transcriptContinuation = LockIsolated<
+            AsyncThrowingStream<DesktopMessageObservation, any Error>.Continuation?
+        >(nil)
+        let events = LockIsolated<[ChatSyncEvent]>([])
+
+        await withDependencies {
+            $0.continuousClock = TestClock()
+            $0.defaultDatabase = database
+            $0.desktopClient.observeSessions = { _ in
+                AsyncThrowingStream { continuation in
+                    continuation.yield([session])
+                }
+            }
+            $0.desktopClient.observeMessages = { _, _ in
+                AsyncThrowingStream { continuation in
+                    transcriptContinuation.setValue(continuation)
+                }
+            }
+        } operation: {
+            let client = ChatSyncClient.live()
+            let foreground = Task { await client.runForeground() }
+            defer {
+                foreground.cancel()
+                transcriptContinuation.value?.finish()
+            }
+            await waitUntil { transcriptContinuation.value != nil }
+
+            let selected = Task {
+                for await event in client.observeSelected(sessionID: session.id) {
+                    events.withValue { $0.append(event) }
+                }
+            }
+            defer { selected.cancel() }
+
+            transcriptContinuation.value?.yield(
+                .persisted(.snapshot([], cursor: nil, queuedMessages: []))
+            )
+            await waitUntil { events.value.contains { $0.isReady } }
+            transcriptContinuation.value?.yield(
+                .persisted(.snapshot([], cursor: nil, queuedMessages: []))
+            )
+            try? await ContinuousClock().sleep(for: .milliseconds(50))
+
+            #expect(events.value.filter(\.isReady).count == 1)
+            #expect(workspace.id == session.workspaceID)
+        }
+    }
+
+    @Test("Immediately cancelled selected observations do not retain workers")
+    func immediatelyCancelledSelectedObservationDoesNotLeak() async throws {
+        let database = try appDatabase()
+        let (workspace, session) = try await seedLocalSession(in: database)
+        let connections = LockIsolated(0)
+        let cancellations = LockIsolated(0)
+
+        await withDependencies {
+            $0.defaultDatabase = database
+            $0.desktopClient.observeMessages = { workspaceID, sessionID in
+                #expect(workspaceID == workspace.id)
+                #expect(sessionID == session.id)
+                return AsyncThrowingStream { continuation in
+                    connections.withValue { $0 += 1 }
+                    continuation.onTermination = { termination in
+                        if case .cancelled = termination {
+                            cancellations.withValue { $0 += 1 }
+                        }
+                    }
+                }
+            }
+        } operation: {
+            let client = ChatSyncClient.live()
+            let first = Task {
+                for await _ in client.observeSelected(sessionID: session.id) { }
+            }
+            first.cancel()
+            await waitUntil { connections.value == cancellations.value }
+
+            let second = Task {
+                for await _ in client.observeSelected(sessionID: session.id) { }
+            }
+            defer { second.cancel() }
+
+            await waitUntil { connections.value == cancellations.value + 1 }
+            #expect(connections.value == cancellations.value + 1)
         }
     }
 

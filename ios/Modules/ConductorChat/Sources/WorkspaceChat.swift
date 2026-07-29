@@ -324,7 +324,6 @@ public struct WorkspaceChat: Sendable {
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.date.now) var now
-    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.uuid) var uuid
 
@@ -785,6 +784,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .loadSessionsResponse(.failure(error)):
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
+                    return .none
+                }
                 Logger.chat.error("Failed to load sessions: \(error)")
                 if let apiError = error as? CloudAPIClientError,
                    apiError.isAuthenticationFailure {
@@ -1013,6 +1015,9 @@ public struct WorkspaceChat: Sendable {
 
             case let .chat(.loadMessagesFailed(sessionID, error)):
                 guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
                     return .none
                 }
                 if let apiError = error as? CloudAPIClientError,
@@ -1509,80 +1514,55 @@ public struct WorkspaceChat: Sendable {
         workspaceID: String,
         isCloudHosted: Bool
     ) -> Effect<Action> {
-        if isCloudHosted {
-            return observeCloudSessions(workspaceID: workspaceID)
-        }
-        return .run { send in
-            await StreamObservation.observe {
-                desktopClient.observeSessions(workspaceID: workspaceID)
-            } onValue: { sessions in
-                try await database.write { db in
-                    try Session
-                        .where { $0.workspaceID.eq(workspaceID) }
-                        .delete()
-                        .execute(db)
+        .merge(
+            .run { send in
+                for await event in WorkspaceSessionObservation.observe(
+                    workspaceID: workspaceID,
+                    isCloudHosted: isCloudHosted
+                ) {
+                    switch event {
+                    case let .snapshot(sessions):
+                        await send(.sessionSnapshotPersisted)
+                        await send(.loadSessionsResponse(.success(sessions)))
 
-                    try Session.upsert { sessions }
-                        .execute(db)
+                    case let .failure(error):
+                        await send(.loadSessionsResponse(.failure(error)))
+                    }
                 }
-                await send(.sessionSnapshotPersisted)
-                await send(.loadSessionsResponse(.success(sessions)))
-            } onFailure: { error in
-                await send(.loadSessionsResponse(.failure(error)))
-            }
-        }
+            },
+            isCloudHosted ? observeCloudSessionVisibility(workspaceID) : .none
+        )
         .cancellable(id: CancelID.sessionObservation, cancelInFlight: true)
     }
 
-    private func observeCloudSessions(
-        workspaceID: String
+    private func observeCloudSessionVisibility(
+        _ workspaceID: Workspace.ID
     ) -> Effect<Action> {
-        .merge(
-            .run { send in
-                do {
-                    for try await snapshot in cloudAPIClient.observeSessions(
-                        workspaceID: workspaceID
-                    ) {
-                        let sessions = try await database.write { database in
-                            try CloudChatPersistence.persist(snapshot, in: database)
-                        }
-                        await send(.loadSessionsResponse(.success(sessions)))
-                        await send(.sessionSnapshotPersisted)
-                    }
-                } catch {
-                    guard !CloudAPIClientError.isRequestCancellation(error) else {
-                        return
-                    }
-                    await send(.loadSessionsResponse(.failure(error)))
-                }
-            },
-            .run { send in
-                await StreamObservation.observe(
-                    retrying: {
-                        desktopClient.observeSessions(workspaceID: workspaceID)
-                    },
-                    retryDelays: [.seconds(10)]
-                ) { desktopSessions in
-                    let sessions = try await database.write { database in
-                        try CloudChatPersistence.reconcileSessionVisibility(
-                            from: desktopSessions,
-                            workspaceID: workspaceID,
-                            in: database
-                        )
-                    }
-                    guard !sessions.isEmpty else {
-                        return
-                    }
-                    await send(.loadSessionsResponse(.success(sessions)))
-                    await send(.sessionSnapshotPersisted)
-                } onFailure: { error in
-                    Logger.chat.error(
-                        "Failed to reconcile Cloud session visibility: \(error)"
+        .run { send in
+            await StreamObservation.observe(
+                retrying: {
+                    desktopClient.observeSessions(workspaceID: workspaceID)
+                },
+                retryDelays: [.seconds(10)]
+            ) { desktopSessions in
+                let sessions = try await database.write { database in
+                    try CloudChatPersistence.reconcileSessionVisibility(
+                        from: desktopSessions,
+                        workspaceID: workspaceID,
+                        in: database
                     )
                 }
+                guard !sessions.isEmpty else {
+                    return
+                }
+                await send(.loadSessionsResponse(.success(sessions)))
+                await send(.sessionSnapshotPersisted)
+            } onFailure: { error in
+                Logger.chat.error(
+                    "Failed to reconcile Cloud session visibility: \(error)"
+                )
             }
-        )
-        .cancellable(id: CancelID.sessionObservation, cancelInFlight: true)
+        }
     }
 
     private func mutationSessionID(

@@ -137,56 +137,29 @@ private actor ChatSyncCoordinator {
     }
 
     private func observeSessions(_ workspace: Workspace) async {
-        if workspace.isCloudHosted {
-            await observeCloudSessions(workspaceID: workspace.id)
-        } else {
-            await observeLocalSessions(workspaceID: workspace.id)
-        }
+        await observeWorkspaceSessions(workspace)
         guard !Task.isCancelled else {
             return
         }
         removeWorkspace(workspace.id)
     }
 
-    private func observeLocalSessions(workspaceID: Workspace.ID) async {
-        @Dependency(\.defaultDatabase) var database
-        @Dependency(\.desktopClient) var desktopClient
-
-        await StreamObservation.observe {
-            desktopClient.observeSessions(workspaceID: workspaceID)
-        } onValue: { sessions in
-            try await database.write { database in
-                try Session.where { $0.workspaceID.eq(workspaceID) }
-                    .delete().execute(database)
-                try Session.upsert { sessions }.execute(database)
+    private func observeWorkspaceSessions(_ workspace: Workspace) async {
+        for await event in WorkspaceSessionObservation.observe(workspace: workspace) {
+            guard !Task.isCancelled else {
+                return
             }
-            await self.setForegroundSessions(
-                sessions.filter { !$0.isHidden }.map(\.id),
-                workspaceID: workspaceID
-            )
-        } onFailure: { _ in }
-    }
+            switch event {
+            case let .snapshot(sessions):
+                await setForegroundSessions(
+                    sessions.filter { !$0.isHidden }.map(\.id),
+                    workspaceID: workspace.id
+                )
 
-    private func observeCloudSessions(workspaceID: Workspace.ID) async {
-        @Dependency(\.defaultDatabase) var database
-        @Dependency(\.cloudAPIClient) var cloudAPIClient
-
-        await StreamObservation.observe(
-            retrying: {
-                cloudAPIClient.observeSessions(workspaceID: workspaceID)
-            },
-            shouldRetry: {
-                CloudAPIClientError.shouldRetryObservation(after: $0)
+            case .failure:
+                continue
             }
-        ) { snapshot in
-            let sessions = try await database.write { database in
-                try CloudChatPersistence.persist(snapshot, in: database)
-            }
-            await self.setForegroundSessions(
-                sessions.filter { !$0.isHidden }.map(\.id),
-                workspaceID: workspaceID
-            )
-        } onFailure: { _ in }
+        }
     }
 
     private func setForegroundSessions(_ sessionIDs: [Session.ID], workspaceID: Workspace.ID) async {
@@ -207,12 +180,17 @@ private actor ChatSyncCoordinator {
         sessionID: Session.ID,
         continuation: AsyncStream<ChatSyncEvent>.Continuation
     ) async {
-        let isReady = await isCacheReady(sessionID: sessionID)
-        observers[sessionID, default: [:]][observerID] = (continuation, isReady)
-        if isReady {
-            continuation.yield(.ready)
+        guard !Task.isCancelled else {
+            return
         }
+        observers[sessionID, default: [:]][observerID] = (continuation, false)
         ensureTranscript(sessionID: sessionID)
+
+        let isReady = await isCacheReady(sessionID: sessionID)
+        guard isReady, !Task.isCancelled else {
+            return
+        }
+        markReady(sessionID: sessionID)
     }
 
     private func removeSelected(observerID: UUID, sessionID: Session.ID) {
@@ -221,6 +199,51 @@ private actor ChatSyncCoordinator {
             observers[sessionID] = nil
         }
         stopTranscriptIfUnused(sessionID: sessionID)
+    }
+
+    private func markReady(sessionID: Session.ID) {
+        guard var sessionObservers = observers[sessionID] else {
+            return
+        }
+        let observerIDs = sessionObservers.compactMap { observerID, observer in
+            observer.isReady ? nil : observerID
+        }
+        for observerID in observerIDs {
+            sessionObservers[observerID]?.continuation.yield(.ready)
+            sessionObservers[observerID]?.isReady = true
+        }
+        observers[sessionID] = sessionObservers
+    }
+
+    private func failSelected(sessionID: Session.ID, error: any Error & Sendable) {
+        guard let sessionObservers = observers.removeValue(forKey: sessionID) else {
+            return
+        }
+        for observer in sessionObservers.values {
+            observer.continuation.yield(.failure(error))
+            observer.continuation.finish()
+        }
+        stopTranscriptIfUnused(sessionID: sessionID)
+    }
+
+    private func isCacheReady(sessionID: Session.ID) async -> Bool {
+        do {
+            let route = try await route(for: sessionID)
+            @Dependency(\.defaultDatabase) var database
+            if route.isCloudHosted {
+                return try await database.read { database in
+                    try CloudChatPersistence.cachedTranscript(for: sessionID, in: database)
+                        .checkpoint != nil
+                }
+            }
+            return try await DesktopTranscriptStore.cachedTranscriptSnapshot(
+                workspaceID: route.workspaceID,
+                sessionID: sessionID,
+                database: database
+            ) != nil
+        } catch {
+            return false
+        }
     }
 
     private func ensureTranscript(sessionID: Session.ID) {
@@ -323,55 +346,14 @@ private actor ChatSyncCoordinator {
                 guard !CloudAPIClientError.shouldRetryObservation(after: error) else { return }
                 await self.failSelected(
                     sessionID: route.sessionID,
-                    error: ChatSyncError.transcriptFailed
+                    error: sendableObservationError(error)
                 )
             }
         } catch {
-            failSelected(sessionID: route.sessionID, error: ChatSyncError.transcriptFailed)
-        }
-    }
-
-    private func markReady(sessionID: Session.ID) {
-        guard var sessionObservers = observers[sessionID] else {
-            return
-        }
-        let observerIDs = sessionObservers.compactMap { observerID, observer in
-            observer.isReady ? nil : observerID
-        }
-        for observerID in observerIDs {
-            sessionObservers[observerID]?.continuation.yield(.ready)
-            sessionObservers[observerID]?.isReady = true
-        }
-        observers[sessionID] = sessionObservers
-    }
-
-    private func failSelected(sessionID: Session.ID, error: any Error & Sendable) {
-        guard let sessionObservers = observers.removeValue(forKey: sessionID) else {
-            return
-        }
-        for observer in sessionObservers.values {
-            observer.continuation.yield(.failure(error))
-            observer.continuation.finish()
-        }
-    }
-
-    private func isCacheReady(sessionID: Session.ID) async -> Bool {
-        do {
-            let route = try await route(for: sessionID)
-            @Dependency(\.defaultDatabase) var database
-            if route.isCloudHosted {
-                return try await database.read { database in
-                    try CloudChatPersistence.cachedTranscript(for: sessionID, in: database)
-                        .checkpoint != nil
-                }
-            }
-            return try await DesktopTranscriptStore.cachedTranscriptSnapshot(
-                workspaceID: route.workspaceID,
-                sessionID: sessionID,
-                database: database
-            ) != nil
-        } catch {
-            return false
+            failSelected(
+                sessionID: route.sessionID,
+                error: sendableObservationError(error)
+            )
         }
     }
 
@@ -411,5 +393,4 @@ extension Workspace {
 
 private enum ChatSyncError: Error, Sendable {
     case missingSession
-    case transcriptFailed
 }

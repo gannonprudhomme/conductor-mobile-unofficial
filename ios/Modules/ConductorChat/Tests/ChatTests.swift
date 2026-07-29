@@ -48,14 +48,14 @@ struct ChatTests {
             let deadline = clock.now.advanced(by: .seconds(1))
             while firstTextInputResponder(in: hostingController.view) == nil,
                   clock.now < deadline {
-                await Task.yield()
+                try? await clock.sleep(for: .milliseconds(10))
             }
 
             let responder = try #require(firstTextInputResponder(in: hostingController.view))
             responder.insertText("Test message")
 
             while store.state.messageDraft != "Test message", clock.now < deadline {
-                await Task.yield()
+                try? await clock.sleep(for: .milliseconds(10))
             }
             #expect(store.state.messageDraft == "Test message")
         }
@@ -131,7 +131,7 @@ struct ChatTests {
             let deadline = clock.now.advanced(by: .seconds(1))
             while queuedRowFrame.value == nil, clock.now < deadline {
                 hostingController.view.layoutIfNeeded()
-                await Task.yield()
+                try? await clock.sleep(for: .milliseconds(10))
             }
 
             let rowFrame = try #require(queuedRowFrame.value)
@@ -283,9 +283,7 @@ struct ChatTests {
             store.exhaustivity = .off(showSkippedAssertions: false)
 
             let task = await store.send(.task)
-            for _ in 0..<1_000 where selectionCount.value < 1 {
-                await Task.yield()
-            }
+            await waitUntil { selectionCount.value >= 1 }
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
@@ -293,9 +291,7 @@ struct ChatTests {
                 )
             }
             await store.receive(\.cloudConfigurationChanged)
-            for _ in 0..<10_000 where selectionCount.value < 2 {
-                await Task.yield()
-            }
+            await waitUntil { selectionCount.value >= 2 }
             #expect(selectionCount.value == 2)
 
             await task.cancel()
@@ -447,9 +443,7 @@ struct ChatTests {
             await store.receive(\.initialMessagesResponse)
             continuation.yield(.failure(CloudChatPersistenceError.transcriptOwnershipMismatch))
             await store.receive(\.loadMessagesFailed)
-            for _ in 0..<100 {
-                await Task.yield()
-            }
+            try? await ContinuousClock().sleep(for: .milliseconds(50))
 
             let cache = try await database.read { db in
                 try CloudChatPersistence.cachedTranscript(
@@ -459,6 +453,67 @@ struct ChatTests {
             }
             #expect(cache.checkpoint?.rawCursor == "committed")
             await task.cancel()
+        }
+    }
+
+    @Test("Initial message database failures clear loading")
+    func initialMessageDatabaseFailureClearsLoading() async throws {
+        let database = try appDatabase()
+        let session = try makeSession()
+        let (stream, continuation) = AsyncStream<ChatSyncEvent>.makeStream()
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(session: session)
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.chatSyncClient.observeSelected = { _ in stream }
+            }
+            store.exhaustivity = .off
+
+            let task = await store.send(.task)
+            try await database.write { database in
+                try #sql("DROP TABLE \"session_messages\"")
+                    .execute(database)
+            }
+            continuation.yield(.ready)
+            await store.receive(\.loadMessagesFailed) {
+                $0.isLoadingMessages = false
+            }
+
+            await task.cancel()
+            continuation.finish()
+        }
+    }
+
+    @Test("Cancellation load failures do not dismiss loading")
+    func cancellationLoadFailureDoesNotDismissLoading() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .loadMessagesFailed(
+                    sessionID: session.id,
+                    error: CancellationError()
+                )
+            )
+            #expect(store.state.isLoadingMessages)
         }
     }
 
@@ -683,9 +738,7 @@ struct ChatTests {
             }
 
             await task.cancel()
-            for _ in 0..<1_000 where !didCancelSelection.value {
-                await Task.yield()
-            }
+            await waitUntil { didCancelSelection.value }
             #expect(didCancelSelection.value)
         }
     }
@@ -739,12 +792,9 @@ struct ChatTests {
         }
 
         let task = store.send(.task)
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
-        while humanMessageContent(in: store.state, id: lateMessage.id)
-            != lateMessage.content,
-              clock.now < deadline {
-            await Task.yield()
+        await waitUntil {
+            humanMessageContent(in: store.state, id: lateMessage.id)
+                == lateMessage.content
         }
         try expectHumanPresentationCaches(
             store.state,
@@ -761,14 +811,10 @@ struct ChatTests {
             try Message.upsert { updatedEarlyMessage }.execute(db)
         }
         continuation.yield(.ready)
-        let loadingDeadline = clock.now.advanced(by: .seconds(5))
-        while store.state.isLoadingMessages, clock.now < loadingDeadline {
-            await Task.yield()
-        }
-        while humanMessageContent(in: store.state, id: earlyMessage.id)
-            != updatedEarlyMessage.content,
-              clock.now < deadline {
-            await Task.yield()
+        await waitUntil { !store.state.isLoadingMessages }
+        await waitUntil {
+            humanMessageContent(in: store.state, id: earlyMessage.id)
+                == updatedEarlyMessage.content
         }
         #expect(!store.state.isLoadingMessages)
         try expectHumanPresentationCaches(
@@ -783,10 +829,9 @@ struct ChatTests {
         try await database.write { db in
             try Message.upsert { updatedLateMessage }.execute(db)
         }
-        while humanMessageContent(in: store.state, id: lateMessage.id)
-            != updatedLateMessage.content,
-              clock.now < deadline {
-            await Task.yield()
+        await waitUntil {
+            humanMessageContent(in: store.state, id: lateMessage.id)
+                == updatedLateMessage.content
         }
         try expectHumanPresentationCaches(
             store.state,
@@ -1916,6 +1961,24 @@ private struct TestError: LocalizedError {
     var errorDescription: String? {
         "Something went wrong."
     }
+}
+
+private func waitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if await condition() {
+            return
+        }
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
+    }
+    Issue.record("Timed out waiting for an asynchronous test condition.")
 }
 
 private enum DisplayedRowProjection: Equatable {
