@@ -1989,6 +1989,7 @@ struct WorkspaceChatTests {
                     )
                 )
             ) {
+                $0.chat?.isLoadingMessages = false
                 $0.destination = .alert(
                     .failedToLoadMessages(message: TestError().localizedDescription)
                 )
@@ -2262,7 +2263,9 @@ struct WorkspaceChatTests {
                         error: error
                     )
                 )
-            )
+            ) {
+                $0.chat?.isLoadingMessages = false
+            }
             await store.send(
                 .chat(
                     .stopSessionResponse(
