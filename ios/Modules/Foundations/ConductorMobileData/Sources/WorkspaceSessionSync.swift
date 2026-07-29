@@ -185,13 +185,13 @@ private actor WorkspaceSessionObservationStore {
                     in: database
                 )
             }
-            await self.publish(
+            self.publish(
                 .snapshot(sessions),
                 key: key,
                 entryID: entryID
             )
         } onFailure: { error in
-            await self.publish(
+            self.publish(
                 .failure(sendableObservationError(error)),
                 key: key,
                 entryID: entryID
@@ -218,13 +218,13 @@ private actor WorkspaceSessionObservationStore {
             let sessions = try await database.write { database in
                 try CloudChatPersistence.persist(snapshot, in: database)
             }
-            await self.publish(
+            self.publish(
                 .snapshot(sessions),
                 key: key,
                 entryID: entryID
             )
         } onFailure: { error in
-            await self.publish(
+            self.publish(
                 .failure(sendableObservationError(error)),
                 key: key,
                 entryID: entryID
@@ -266,7 +266,13 @@ private actor WorkspaceSessionObservationStore {
 }
 
 func sendableObservationError(_ error: any Error) -> any Error & Sendable {
-    if let error = error as? any Error & Sendable {
+    if let error = error as? CloudAPIClientError {
+        return error
+    }
+    if let error = error as? DesktopClientError {
+        return error
+    }
+    if let error = error as? URLError {
         return error
     }
     return NonSendableObservationError(error)
