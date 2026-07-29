@@ -1783,7 +1783,7 @@ public struct WorkspaceChatView: View {
                 ChatView(
                     store: chatStore,
                     directoryName: store.workspace.emptyChatDirectoryName,
-                    showsLoadingIndicator: false
+                    showsLoadingIndicator: true
                 )
                     // Treat each session as distinct content so view-local scroll state resets.
                     .id(chatStore.sessionID)
@@ -1901,12 +1901,7 @@ public struct WorkspaceChatView: View {
     }
 
     private var shouldShowLoadingIndicator: Bool {
-        guard let chat = store.chat else {
-            return true
-        }
-
-        return store.isLoadingSessions
-            || (chat.isLoadingMessages && !chat.hasOptimisticMessages)
+        store.isLoadingSessions || store.chat == nil
     }
 
     private var isRenameBranchPresented: Binding<Bool> {

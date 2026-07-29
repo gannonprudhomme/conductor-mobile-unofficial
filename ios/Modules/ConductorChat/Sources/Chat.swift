@@ -66,6 +66,8 @@ public struct Chat: Sendable {
         var isFastModeEnabled: Bool
         var mutationRoute: WorkspaceMutationRoute?
         var source: WorkspaceSource
+        var hasDemoChatLoadingDelayElapsed = false
+        var hasLoadedMessageSnapshot = false
         var isEnqueueInFlight = false
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
@@ -222,6 +224,14 @@ public struct Chat: Sendable {
                 baselineTurnID: turns?.last?.id,
                 correlatedTurnID: correlatedTurnID
             )
+        }
+
+        mutating func finishLoadingMessagesForDemoIfReady() {
+            guard hasDemoChatLoadingDelayElapsed,
+                  hasLoadedMessageSnapshot else {
+                return
+            }
+            isLoadingMessages = false
         }
 
         mutating func observeCorrelatedTurn(
@@ -556,6 +566,9 @@ public struct Chat: Sendable {
                 && lhs.mutationRoute == rhs.mutationRoute
                 && lhs.source == rhs.source
                 && lhs.messageDraft == rhs.messageDraft
+                && lhs.hasDemoChatLoadingDelayElapsed
+                    == rhs.hasDemoChatLoadingDelayElapsed
+                && lhs.hasLoadedMessageSnapshot == rhs.hasLoadedMessageSnapshot
                 && lhs.isEnqueueInFlight == rhs.isEnqueueInFlight
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
@@ -587,6 +600,7 @@ public struct Chat: Sendable {
     public enum Action {
         case cloudConfigurationChanged(CloudConfiguration?)
         case configurationControlTapped(ModelConfigurationControl)
+        case demoChatLoadingDelayElapsed(sessionID: Session.ID)
         case task
         case modelSettingsFetched(DesktopClient.ModelSettings)
         case fastModeButtonTapped
@@ -644,7 +658,21 @@ public struct Chat: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
+                state.hasDemoChatLoadingDelayElapsed = false
+                state.hasLoadedMessageSnapshot = false
+                state.isLoadingMessages = true
                 let cloudConfiguration = state.$cloudConfiguration
+                let demoLoadingDelay: Effect<Action> = .run {
+                    [sessionID = state.sessionID] send in
+                    try await Task.sleep(for: .seconds(10))
+                    await send(
+                        .demoChatLoadingDelayElapsed(sessionID: sessionID)
+                    )
+                }
+                .cancellable(
+                    id: CancelID.demoChatLoadingDelay,
+                    cancelInFlight: true
+                )
                 let messageObservation: Effect<Action> = .merge(
                     observeMessages(state),
                     observePersistedMessages(state)
@@ -657,6 +685,7 @@ public struct Chat: Sendable {
                                 .dropFirst()
                                 .map(Action.cloudConfigurationChanged)
                         },
+                        demoLoadingDelay,
                         messageObservation,
                         observeDeliveryAttempts(state)
                     )
@@ -668,9 +697,18 @@ public struct Chat: Sendable {
                         }
                         await send(.modelSettingsFetched(settings))
                     },
+                    demoLoadingDelay,
                     messageObservation,
                     observeDeliveryAttempts(state)
                 )
+
+            case let .demoChatLoadingDelayElapsed(sessionID):
+                guard sessionID == state.sessionID else {
+                    return .none
+                }
+                state.hasDemoChatLoadingDelayElapsed = true
+                state.finishLoadingMessagesForDemoIfReady()
+                return .none
 
             case let .cloudConfigurationChanged(configuration):
                 guard state.source == .cloud else {
@@ -729,11 +767,8 @@ public struct Chat: Sendable {
                     state.initializeIdleBaseline()
                 }
                 if !messages.isEmpty {
-                    // Persisted rows are already usable presentation even when the cache does not
-                    // yet have a complete resume marker. Keep recovering the authoritative
-                    // snapshot in the observation effect, but do not hide these rows behind its
-                    // loader while the user switches sessions.
-                    state.isLoadingMessages = false
+                    state.hasLoadedMessageSnapshot = true
+                    state.finishLoadingMessagesForDemoIfReady()
                 }
                 return .none
 
@@ -757,7 +792,8 @@ public struct Chat: Sendable {
                 state.isMessageSnapshotEmpty = transcriptMessages.isEmpty
                 reconcileCanonicalMessages(transcriptMessages, state: &state)
                 state.initializeIdleBaseline()
-                state.isLoadingMessages = false
+                state.hasLoadedMessageSnapshot = true
+                state.finishLoadingMessagesForDemoIfReady()
                 return .none
 
             case .sessionStatusChanged(let status):
@@ -940,7 +976,8 @@ public struct Chat: Sendable {
                 guard !CloudAPIClientError.isRequestCancellation(error) else {
                     return .none
                 }
-                state.isLoadingMessages = false
+                state.hasLoadedMessageSnapshot = true
+                state.finishLoadingMessagesForDemoIfReady()
                 return .none
 
             case .configurationControlTapped,
@@ -1164,6 +1201,7 @@ public struct Chat: Sendable {
     }
 
     private enum CancelID: Hashable {
+        case demoChatLoadingDelay
         case messageObservation
     }
 }
@@ -1246,8 +1284,7 @@ struct ChatView: View {
             )
             .overlay {
                 if showsLoadingIndicator
-                    && store.isLoadingMessages
-                    && !store.hasOptimisticMessages {
+                    && store.isLoadingMessages {
                     ChatLoadingView()
                 } else if store.shouldShowEmptyChat {
                     EmptyChatView(directoryName: directoryName)

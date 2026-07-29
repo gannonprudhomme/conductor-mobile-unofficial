@@ -528,8 +528,6 @@ extension DesktopClient: DependencyKey {
         )
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: request)
-        // Demo only: keep network loading indicators visible before exposing any response.
-        try await Task.sleep(for: .seconds(10))
         try validateSuccessfulHTTPResponse(response, data: data)
     }
 
@@ -783,8 +781,6 @@ extension DesktopClient: DependencyKey {
 
         do {
             let result = try await session.data(for: request)
-            // Demo only: keep network loading indicators visible before exposing any response.
-            try await Task.sleep(for: .seconds(10))
             $connectionStatus.withLock { $0 = .connected }
             return result
         } catch {

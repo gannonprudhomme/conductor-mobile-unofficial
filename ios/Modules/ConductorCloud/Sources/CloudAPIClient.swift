@@ -1143,8 +1143,6 @@ extension CloudAPIClient: DependencyKey {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await transport.data(request: request)
-        // Demo only: keep network loading indicators visible before exposing any response.
-        try await Task.sleep(for: .seconds(10))
         guard (200..<300).contains(response.statusCode) else {
             throw CloudAPIClientError.requestFailed(
                 statusCode: response.statusCode,
