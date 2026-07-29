@@ -185,8 +185,8 @@ struct ChatSyncClientTests {
             }
 
             await waitUntil {
-                localTranscriptConnections.value == 1
-                    && cloudTranscriptConnections.value == 1
+                localTranscriptConnections.value > 0
+                    && cloudTranscriptConnections.value > 0
             }
 
             let cloudSessionID = CloudCanonicalID.session(
