@@ -1104,9 +1104,6 @@ struct ChatView: View {
         .onChange(of: store.session.reasoningEffort) { _, reasoningEffort in
             store.send(.sessionReasoningEffortChanged(reasoningEffort))
         }
-        .task(id: store.session.id) {
-            await store.send(.task).finish()
-        }
         .preferredColorScheme(.dark)
     }
 
