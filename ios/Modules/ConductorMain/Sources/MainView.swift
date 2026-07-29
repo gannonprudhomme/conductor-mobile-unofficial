@@ -56,6 +56,7 @@ public struct Main: Sendable {
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
     @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.desktopClient) var desktopClient
 
     public init() {
     }
@@ -180,6 +181,13 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceCreated(creation)):
+                    if let requestLease = creation.requestLease {
+                        guard desktopClient.isRequestLeaseValid(
+                            lease: requestLease
+                        ) else {
+                            return .none
+                        }
+                    }
                     let alreadyPresented = state.path.contains { destination in
                         guard case let .workspaceChat(workspaceChat) = destination else {
                             return false

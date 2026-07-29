@@ -454,7 +454,9 @@ public struct Chat: Sendable {
                             (
                                 $0.sentAt.asc(nulls: .last),
                                 $0.createdAt,
-                                $0.id // IDs provide stable ordering when Conductor gives multiple messages identical timestamps.
+                                // SQLite's default BINARY collation preserves the protocol's raw
+                                // UTF-8 tie-break when timestamps match.
+                                $0.id
                             )
                         }
                 )
@@ -981,8 +983,8 @@ public struct Chat: Sendable {
                     messages
                 } else {
                     messages
-                        .filter(Self.isTranscriptMessage)
-                        .sorted(by: Self.areMessagesInTranscriptOrder)
+                        .filter(Self.isCompletedHistoryMessage)
+                        .sorted(by: Self.isEarlierInCompletedHistory)
                 }
                 state.isMessageSnapshotEmpty = transcriptMessages.isEmpty
                 state.turns = Turn.parse(
@@ -1270,6 +1272,11 @@ public struct Chat: Sendable {
         )
     }
 
+    /// Starts the hosting-specific transcript observation used by the feature task.
+    ///
+    /// Desktop observations distinguish events already persisted by the lease-protected socket
+    /// from legacy mocks that still require feature-owned persistence. Cloud observations have
+    /// their own account-scoped cache contract.
     private func observeMessages(_ state: State) -> Effect<Action> {
         if state.source == .cloud {
             return observeCloudMessages(state)
@@ -1286,20 +1293,37 @@ public struct Chat: Sendable {
                     workspaceID: workspaceID,
                     sessionID: sessionID
                 )
-            } onValue: { event in
-                let persistedEvent = try await messagePersistence.apply(
-                    event,
-                    sessionID: sessionID,
-                    database: database
-                )
-                if isAwaitingInitialResponse, event.isSnapshot {
-                    isAwaitingInitialResponse = false
-                    await send(
-                        .initialMessagesResponse(
-                            sessionID: sessionID,
-                            messages: persistedEvent.messages
+            } onValue: { observation in
+                switch observation {
+                case let .persisted(event):
+                    // A usable cache and a cursorless recovery are both emitted as complete
+                    // snapshots. Incremental frames must not dismiss loading on their own.
+                    if isAwaitingInitialResponse, event.isSnapshot {
+                        isAwaitingInitialResponse = false
+                        await send(
+                            .initialMessagesResponse(
+                                sessionID: sessionID,
+                                messages: event.messages
+                            )
                         )
+                    }
+
+                case let .requiresPersistence(event):
+                    let persistedEvent = try await messagePersistence.apply(
+                        event,
+                        sessionID: sessionID,
+                        database: database
                     )
+                    if isAwaitingInitialResponse, event.isSnapshot {
+                        isAwaitingInitialResponse = false
+                        await send(
+                            .initialMessagesResponse(
+                                sessionID: sessionID,
+                                messages: persistedEvent.messages
+                            )
+                        )
+                    }
+
                 }
             } onFailure: { error in
                 Logger.chat.error("Failed to load messages: \(error)")
@@ -1444,30 +1468,20 @@ public struct Chat: Sendable {
         }
     }
 
-    private static func isTranscriptMessage(_ message: Message) -> Bool {
-        message.sentAt != nil || message.queueOrder == nil
+    /// Mirrors the protocol's completed-history partition for legacy direct-persistence events.
+    private static func isCompletedHistoryMessage(_ message: Message) -> Bool {
+        !message.isQueued
     }
 
-    private static func areMessagesInTranscriptOrder(
+    /// Matches the desktop resume protocol's completed-history ordering exactly.
+    private static func isEarlierInCompletedHistory(
         _ lhs: Message,
         _ rhs: Message
     ) -> Bool {
-        if lhs.sentAt != rhs.sentAt {
-            switch (lhs.sentAt, rhs.sentAt) {
-            case let (lhs?, rhs?):
-                return lhs < rhs
-            case (.some, nil):
-                return true
-            case (nil, .some):
-                return false
-            case (nil, nil):
-                break
-            }
-        }
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt < rhs.createdAt
         }
-        return lhs.id < rhs.id
+        return RawUTF8Key(lhs.id) < RawUTF8Key(rhs.id)
     }
 
     private func reconcileSession(_ session: Session) async throws {
@@ -1692,11 +1706,13 @@ struct ChatView: View {
                     controlRow(isExpanded: queuedMessagesStore.isExpanded)
                 }
 
-                queuedMessagesView(queuedMessagesStore)
-                    .fixedSize(
-                        horizontal: !queuedMessagesStore.isExpanded,
-                        vertical: false
-                    )
+                if !store.isLoadingMessages {
+                    queuedMessagesView(queuedMessagesStore)
+                        .fixedSize(
+                            horizontal: !queuedMessagesStore.isExpanded,
+                            vertical: false
+                        )
+                }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
 
@@ -1873,7 +1889,8 @@ struct ChatView: View {
         safeAreaBottom: CGFloat,
         queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> CGFloat {
-        let queueHeight = if queuedMessagesStore.displayedMessages.isEmpty {
+        let queueHeight = if store.isLoadingMessages
+            || queuedMessagesStore.displayedMessages.isEmpty {
             CGFloat.zero
         } else {
             queuedMessagesHeight
@@ -2040,7 +2057,7 @@ private struct ChatPreview: View {
             }
             $0.desktopClient.observeMessages = { _, _ in
                 AsyncThrowingStream { continuation in
-                    continuation.yield(.snapshot([]))
+                    continuation.yield(.persisted(.snapshot([])))
                 }
             }
             $0.desktopClient.resumeQueuedMessages = { _, _ in }

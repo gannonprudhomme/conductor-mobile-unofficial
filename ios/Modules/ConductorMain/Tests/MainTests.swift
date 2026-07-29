@@ -169,6 +169,8 @@ struct MainTests {
         } operation: {
             let store = TestStore(initialState: Main.State()) {
                 Main()
+            } withDependencies: {
+                $0.desktopClient.isRequestLeaseValid = { _ in true }
             }
 
             await store.send(.workspaces(.workspaceTapped(item))) {
@@ -251,6 +253,10 @@ struct MainTests {
         let workspace = Workspace.preview(activeSessionID: "active")
         let session = Session.preview(id: "active", workspaceID: workspace.id)
         let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
+        let requestLease = DesktopRequestLease(
+            baseURL: try #require(URL(string: "http://test:3768")),
+            endpointEpoch: 0
+        )
         let creation = WorkspaceCreationResult(
             initialPrompt: .init(
                 attemptID: UUID(42),
@@ -259,6 +265,7 @@ struct MainTests {
             ),
             selectedModel: .gpt_5_6_terra,
             selectedReasoningEffort: .ultra,
+            requestLease: requestLease,
             workspace: item
         )
 
@@ -270,6 +277,8 @@ struct MainTests {
         } operation: {
             let store = TestStore(initialState: Main.State()) {
                 Main()
+            } withDependencies: {
+                $0.desktopClient.isRequestLeaseValid = { _ in true }
             }
 
             await store.send(.workspaces(.workspaceCreated(creation))) {
@@ -307,8 +316,13 @@ struct MainTests {
             workspace: workspace,
             repository: repository
         )
+        let requestLease = DesktopRequestLease(
+            baseURL: try #require(URL(string: "http://test:3768")),
+            endpointEpoch: 0
+        )
         let creation = WorkspaceCreationResult(
             selectedModel: session.model,
+            requestLease: requestLease,
             workspace: item
         )
         let database = try appDatabase()
@@ -323,6 +337,7 @@ struct MainTests {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
             $0.defaultInMemoryStorage = InMemoryStorage()
+            $0.desktopClient.isRequestLeaseValid = { _ in true }
             $0.desktopClient.observeMessages = { _, _ in
                 AsyncThrowingStream { $0.finish() }
             }
@@ -415,7 +430,7 @@ struct MainTests {
             any Error
         >.makeStream()
         let (messages, messagesContinuation) = AsyncThrowingStream<
-            MessageSyncEvent,
+            DesktopMessageObservation,
             any Error
         >.makeStream()
         let workspaceConnectionCount = LockIsolated(0)

@@ -13,6 +13,10 @@ import SharedConductorData
 import SQLiteData
 
 public enum Server {
+    /// Runs the LAN mobile API and loopback browser-hook listener for the desktop companion.
+    ///
+    /// The executable calls this once. Both listeners retry independently so losing the browser
+    /// hook does not take down mobile reads, and a transient bind failure does not exit the app.
     public static func run(
         databaseURL: URL,
         workspaceUIHookSource: String
@@ -50,6 +54,11 @@ public enum Server {
         }
     }
 
+    /// Builds the LAN API used by every mobile HTTP and WebSocket client endpoint.
+    ///
+    /// `run` starts the returned application; server tests call this directly with an isolated
+    /// database and port. The message WebSocket route delegates its stateful protocol to
+    /// `streamMessages`.
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
         // Five seconds tolerates a slow Conductor UI command without holding the request indefinitely.
@@ -68,6 +77,9 @@ public enum Server {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
         let databaseChanges = DatabaseChangeObserver(database: database)
+        let workspaceSnapshots = DatabaseSnapshotCache<String, WorkspaceListSnapshot>()
+        let sessionSnapshots = DatabaseSnapshotCache<String, [Session]>()
+        let messageSnapshots = DatabaseSnapshotCache<String, TranscriptSnapshot>()
 
         router.get("/ping") { _, _ in
             HTTPResponse.Status.noContent
@@ -159,6 +171,8 @@ public enum Server {
                     inbound: inbound,
                     outbound: outbound,
                     databaseChanges: databaseChanges,
+                    snapshotCache: workspaceSnapshots,
+                    snapshotKey: "workspaces",
                     loadSnapshot: loadSnapshot
                 )
             } else {
@@ -181,7 +195,9 @@ public enum Server {
             try await streamSnapshots(
                 inbound: inbound,
                 outbound: outbound,
-                databaseChanges: databaseChanges
+                databaseChanges: databaseChanges,
+                snapshotCache: sessionSnapshots,
+                snapshotKey: workspaceID
             ) {
                 try await database.read { database in
                     try Session.all(forWorkspaceID: workspaceID).fetchAll(database)
@@ -195,14 +211,25 @@ public enum Server {
         ) { inbound, outbound, context in
             let workspaceID = try context.requestContext.parameters.require("workspaceID")
             let sessionID = try context.requestContext.parameters.require("sessionID")
+            let requestedResumeCursor = resumeCursor(
+                fromPercentEncodedQuery: context.request.uri.query.map { query in
+                    String(query)
+                }
+            )
             try await streamMessages(
                 inbound: inbound,
                 outbound: outbound,
-                databaseChanges: databaseChanges
+                databaseChanges: databaseChanges,
+                requestedResumeCursor: requestedResumeCursor,
+                snapshotCache: messageSnapshots,
+                snapshotKey: "\(workspaceID)/\(sessionID)"
             ) {
                 try await database.read { database in
-                    try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
-                        .fetchAll(database)
+                    TranscriptSnapshot(
+                        messages: try Message
+                            .all(forWorkspaceID: workspaceID, sessionID: sessionID)
+                            .fetchAll(database)
+                    )
                 }
             }
         }
@@ -358,6 +385,10 @@ public enum Server {
         )
     }
 
+    /// Builds the loopback-only bridge that lets the desktop browser UI execute supported writes.
+    ///
+    /// `run` hosts this separately from the LAN API because its JavaScript and command-result
+    /// endpoints must never be exposed to other devices.
     static func makeWorkspaceUIHookApplication( // only non-private for tests
         hookSource: String,
         port: Int = 3_769
@@ -404,6 +435,10 @@ public enum Server {
         )
     }
 
+    /// Restarts one long-lived listener after transient startup or runtime failures.
+    ///
+    /// `run` wraps both applications with this helper so either listener can recover without
+    /// cancelling its sibling.
     private static func retryingServer(
         name: String,
         onFailure: @Sendable () async -> Void = {},
@@ -425,55 +460,70 @@ public enum Server {
         }
     }
 
-    private static func streamSnapshots<Snapshot>(
+    /// Sends an initial route snapshot and each distinct snapshot after a SQLite invalidation.
+    ///
+    /// Workspace and session WebSocket routes call this because their entire selected state is
+    /// small enough to replace on every change.
+    private static func streamSnapshots<Key, Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
+        snapshotCache: DatabaseSnapshotCache<Key, Snapshot>,
+        snapshotKey: Key,
         loadSnapshot: @escaping @Sendable () async throws -> Snapshot
-    ) async throws where Snapshot: Encodable & Equatable & Sendable {
+    ) async throws where Key: Hashable & Sendable, Snapshot: Encodable & Equatable & Sendable {
         let changes = try await databaseChanges.changes()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            // Phone -> desktop: discard application data while waiting for close or failure.
-            group.addTask {
-                for try await _ in inbound {}
-            }
-
-            // Desktop -> phone: send current state immediately, then watch Conductor's database
-            // and push each changed route-specific snapshot.
-            group.addTask {
-                let encoder = JSONEncoder.conductor
-                var previousSnapshot = try await loadSnapshot()
-
-                // Every subscriber receives state immediately instead of waiting for a write.
-                try await outbound.writeTextMessage(
-                    String(decoding: try encoder.encode(previousSnapshot), as: UTF8.self)
-                )
-
-                // One observer polls SQLite for every socket. Slow snapshot consumers retain only
-                // the newest pending change instead of creating an unbounded update backlog.
-                for try await _ in changes {
-                    let snapshot = try await loadSnapshot()
-
-                    // data_version covers the whole database, so an unrelated table write can
-                    // wake this route. Only send when this route's actual snapshot changed.
-                    guard snapshot != previousSnapshot else {
-                        // No changes to the table(s) we're observing, ignore
-                        continue
-                    }
-
-                    try await outbound.writeTextMessage(
-                        String(decoding: try encoder.encode(snapshot), as: UTF8.self)
-                    )
-                    previousSnapshot = snapshot
+        try await snapshotCache.withSubscriber(for: snapshotKey) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                // Phone -> desktop: discard application data while waiting for close or failure.
+                group.addTask {
+                    for try await _ in inbound {}
                 }
-            }
 
-            // Return as soon as one direction closes or fails, then stop its surviving sibling.
-            defer { group.cancelAll() }
-            _ = try await group.next()
+                // Desktop -> phone: send current state immediately, then watch Conductor's database
+                // and push each changed route-specific snapshot.
+                group.addTask {
+                    let encoder = JSONEncoder.conductor
+                    var previousRevision: UInt64?
+
+                    // One observer polls SQLite for every socket. Slow snapshot consumers retain
+                    // only the newest pending change instead of creating an unbounded update
+                    // backlog. The cache gives slightly staggered sockets for the same resource
+                    // one shared SQLite read per change.
+                    for try await generation in changes {
+                        let value = try await snapshotCache.value(
+                            for: snapshotKey,
+                            generation: generation,
+                            load: loadSnapshot
+                        )
+
+                        // data_version covers the whole database, so an unrelated table write can
+                        // wake this route. Only send when this route's actual snapshot changed.
+                        guard value.revision != previousRevision else {
+                            continue
+                        }
+                        previousRevision = value.revision
+
+                        try await outbound.writeTextMessage(
+                            String(
+                                decoding: try encoder.encode(value.snapshot),
+                                as: UTF8.self
+                            )
+                        )
+                    }
+                }
+
+                // Return as soon as one direction closes or fails, then stop its surviving sibling.
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
         }
     }
 
+    /// Sends an initial route snapshot and polls sources SQLite cannot invalidate.
+    ///
+    /// The workspace list uses this when pull-request cache files can change independently of the
+    /// database observer used by `streamSnapshots`.
     private static func streamPolledSnapshots<Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
@@ -513,9 +563,9 @@ public enum Server {
     }
 
     /// Runs for each accepted `/workspaces/{workspaceID}/sessions/{sessionID}/messages`
-    /// WebSocket connection. It immediately sends the session's complete message history, then
-    /// reloads that history after each database invalidation and sends messages that were added,
-    /// updated, or deleted.
+    /// WebSocket connection. It immediately sends a complete history or the suffix after a valid
+    /// cursor, together with the complete queue. It then reloads selected rows after each database
+    /// invalidation and sends completed-history changes or a changed complete queue.
     ///
     /// This is separate from `streamSnapshots` because message histories continually grow. Sending
     /// only incremental batches after the initial snapshot avoids repeatedly transferring and
@@ -524,61 +574,162 @@ public enum Server {
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
-        loadMessages: @escaping @Sendable () async throws -> [Message]
+        requestedResumeCursor: Message.ID?,
+        snapshotCache: DatabaseSnapshotCache<String, TranscriptSnapshot>,
+        snapshotKey: String,
+        loadSnapshot: @escaping @Sendable () async throws -> TranscriptSnapshot
     ) async throws {
         let changes = try await databaseChanges.changes()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for try await _ in inbound {}
-            }
-
-            group.addTask {
-                let encoder = JSONEncoder.conductor
-                var previousMessages = try await loadMessages()
-                try await outbound.writeTextMessage(
-                    String(
-                        decoding: try encoder.encode(
-                            MessageSyncEvent.snapshot(previousMessages)
-                        ),
-                        as: UTF8.self
-                    )
-                )
-
-                for try await _ in changes {
-                    let messages = try await loadMessages()
-                    let previousMessagesByID = Dictionary(
-                        uniqueKeysWithValues: previousMessages.map { ($0.id, $0) }
-                    )
-                    let messageIDs = Set(messages.map(\.id))
-                    let changedMessages = messages.filter {
-                        previousMessagesByID[$0.id] != $0
-                    }
-                    let deletedMessageIDs = previousMessagesByID.keys
-                        .filter { !messageIDs.contains($0) }
-                        .sorted()
-                    previousMessages = messages
-
-                    guard !changedMessages.isEmpty || !deletedMessageIDs.isEmpty else {
-                        continue
-                    }
-
-                    try await outbound.writeTextMessage(
-                        String(
-                            decoding: try encoder.encode(
-                                MessageSyncEvent.changes(
-                                    upserting: changedMessages,
-                                    deleting: deletedMessageIDs
-                                )
-                            ),
-                            as: UTF8.self
-                        )
-                    )
+        try await snapshotCache.withSubscriber(for: snapshotKey) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for try await _ in inbound {}
                 }
-            }
 
-            defer { group.cancelAll() }
-            _ = try await group.next()
+                group.addTask {
+                    let encoder = JSONEncoder.conductor
+                    var previousRevision: UInt64?
+                    var previousState: TranscriptSnapshot?
+
+                    for try await generation in changes {
+                        let value = try await snapshotCache.value(
+                            for: snapshotKey,
+                            generation: generation,
+                            load: loadSnapshot
+                        )
+                        guard value.revision != previousRevision else {
+                            continue
+                        }
+                        previousRevision = value.revision
+                        let state = value.snapshot
+                        guard let priorState = previousState else {
+                            let initialEvent: MessageSyncEvent
+                            // Only a cursor found in completed history can anchor an incremental
+                            // suffix. Missing, malformed, queued, and unknown IDs intentionally
+                            // take the snapshot branch so an untrusted baseline recovers at once.
+                            if let requestedResumeCursor,
+                               let cursorIndex = state.history.firstIndex(where: {
+                                   RawUTF8Key($0.id) == RawUTF8Key(requestedResumeCursor)
+                               }) {
+                                initialEvent = .changes(
+                                    upserting: Array(
+                                        state.history[
+                                            state.history.index(after: cursorIndex)...
+                                        ]
+                                    ),
+                                    cursor: state.cursor,
+                                    queuedMessages: state.queue
+                                )
+                            } else {
+                                initialEvent = .snapshot(
+                                    state.history,
+                                    cursor: state.cursor,
+                                    queuedMessages: state.queue
+                                )
+                            }
+                            try await outbound.writeTextMessage(
+                                String(
+                                    decoding: try encoder.encode(initialEvent),
+                                    as: UTF8.self
+                                )
+                            )
+                            previousState = state
+                            continue
+                        }
+
+                        // History is append-only while disconnected for v1, but mutations observed
+                        // on this live connection still need upsert/delete events. Queue state is
+                        // mutable, so any queue difference sends the entire current queue.
+                        let previousMessagesByID = Dictionary(
+                            uniqueKeysWithValues: priorState.history.map {
+                                (RawUTF8Key($0.id), $0)
+                            }
+                        )
+                        let messageIDs = Set(state.history.map {
+                            RawUTF8Key($0.id)
+                        })
+                        let changedMessages = state.history.filter {
+                            guard let previous = previousMessagesByID[RawUTF8Key($0.id)] else {
+                                return true
+                            }
+                            return $0 != previous
+                        }
+                        let deletedMessageIDs = previousMessagesByID.keys
+                            .filter { !messageIDs.contains($0) }
+                            .sorted()
+                            .compactMap { previousMessagesByID[$0]?.id }
+                        let queuedMessages = state.hasSameQueue(as: priorState)
+                            ? nil
+                            : state.queue
+                        previousState = state
+
+                        guard !changedMessages.isEmpty
+                                || !deletedMessageIDs.isEmpty
+                                || queuedMessages != nil else {
+                            continue
+                        }
+
+                        try await outbound.writeTextMessage(
+                            String(
+                                decoding: try encoder.encode(
+                                    MessageSyncEvent.changes(
+                                        upserting: changedMessages,
+                                        deleting: deletedMessageIDs,
+                                        cursor: state.cursor,
+                                        queuedMessages: queuedMessages
+                                    )
+                                ),
+                                as: UTF8.self
+                            )
+                        )
+                    }
+                }
+
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
         }
+    }
+
+    /// Extracts the optional `after` ID used by the message WebSocket route.
+    ///
+    /// Returning nil is deliberate: an absent, empty, duplicate, or malformed value
+    /// makes `streamMessages` send a recoverable full snapshot. Parsing manually avoids assigning
+    /// untrusted malformed percent escapes to `URLComponents.percentEncodedQuery`, which can trap.
+    private static func resumeCursor(
+        fromPercentEncodedQuery percentEncodedQuery: String?
+    ) -> Message.ID? {
+        guard let percentEncodedQuery else {
+            return nil
+        }
+
+        var values: [String] = []
+        for item in percentEncodedQuery.split(
+            separator: "&",
+            omittingEmptySubsequences: false
+        ) {
+            let pair = item.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard let name = String(pair[0]).removingPercentEncoding,
+                  name == "after" else {
+                continue
+            }
+            guard pair.count == 2,
+                  let value = String(pair[1]).removingPercentEncoding else {
+                return nil
+            }
+            values.append(value)
+        }
+
+        guard values.count == 1,
+              let cursor = values.first,
+              !cursor.isEmpty else {
+            return nil
+        }
+        return cursor
     }
 
     /// Requires an exact Origin match. Production passes `nil`, so optional equality
@@ -590,6 +741,10 @@ public enum Server {
         request.headers[.origin] == allowedOrigin
     }
 
+    /// Resolves the effective model defaults served by the mobile `/settings` route.
+    ///
+    /// `makeApplication` calls this per request so edits to user or managed TOML take effect
+    /// without restarting the companion.
     private static func modelSettings(
         userSettingsURL: URL,
         managedSettingsURL: URL
@@ -624,6 +779,10 @@ public enum Server {
         )
     }
 
+    /// Parses only the TOML keys the mobile settings response needs.
+    ///
+    /// The two-file resolver above calls this for user and managed settings, then applies managed
+    /// precedence. Avoiding a general TOML dependency keeps this narrow desktop helper lightweight.
     private static func modelSettings(from settingsURL: URL) throws -> ParsedModelSettings {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else {
             return ParsedModelSettings()
@@ -698,10 +857,89 @@ public enum Server {
         let defaultReasoningEffort: String
     }
 
+    /// A deterministic partition of the rows selected for one message-stream refresh.
+    ///
+    /// `streamMessages` creates one after every database invalidation, then diffs it against the
+    /// preceding value. The queue predicate is shared with mobile persistence through `isQueued`.
+    private struct TranscriptSnapshot: Equatable, Sendable {
+        let history: [Message]
+        let queue: [Message]
+
+        /// The opaque ID mobile sends back as `after`; nil means completed history is empty.
+        var cursor: Message.ID? {
+            history.last?.id
+        }
+
+        /// Separates mutable queue rows and establishes stable protocol order for both partitions.
+        init(messages: [Message]) {
+            history = messages
+                .filter { !$0.isQueued }
+                .sorted(by: Self.historyPrecedes)
+            queue = messages
+                .filter(\.isQueued)
+                .sorted(by: Self.queuePrecedes)
+        }
+
+        /// Compares queues without Swift's Unicode-normalized identifier equality.
+        ///
+        /// A raw-ID replacement must send a queue snapshot even when the two IDs are canonically
+        /// equivalent as Swift strings.
+        func hasSameQueue(as other: Self) -> Bool {
+            Self.haveSameMessages(queue, other.queue)
+        }
+
+        /// Makes cache revisions sensitive to raw identifier bytes, not canonical Unicode equality.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            haveSameMessages(lhs.history, rhs.history)
+                && haveSameMessages(lhs.queue, rhs.queue)
+        }
+
+        /// Orders completed history by actual send time and deterministic fallback values.
+        private static func historyPrecedes(_ lhs: Message, _ rhs: Message) -> Bool {
+            if lhs.sentAt != rhs.sentAt {
+                switch (lhs.sentAt, rhs.sentAt) {
+                case let (lhs?, rhs?):
+                    return lhs < rhs
+                case (.some, nil):
+                    return true
+                case (nil, .some):
+                    return false
+                case (nil, nil):
+                    break
+                }
+            }
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            return RawUTF8Key(lhs.id) < RawUTF8Key(rhs.id)
+        }
+
+        private static func haveSameMessages(
+            _ lhs: [Message],
+            _ rhs: [Message]
+        ) -> Bool {
+            lhs.count == rhs.count
+                && zip(lhs, rhs).allSatisfy { lhs, rhs in
+                    RawUTF8Key(lhs.id) == RawUTF8Key(rhs.id) && lhs == rhs
+                }
+        }
+
+        /// Orders mutable rows by queue position with deterministic fallbacks for malformed ties.
+        private static func queuePrecedes(_ lhs: Message, _ rhs: Message) -> Bool {
+            if let lhsOrder = lhs.queueOrder,
+               let rhsOrder = rhs.queueOrder,
+               lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            return historyPrecedes(lhs, rhs)
+        }
+    }
+
     struct RequestContext: Hummingbird.RequestContext, WebSocketRequestContext {
         var coreContext: CoreRequestContextStorage
         let webSocket: WebSocketHandlerReference<Self>
 
+        /// Gives each Hummingbird request the storage and WebSocket upgrade reference it requires.
         init(source: Source) {
             coreContext = .init(source: source)
             webSocket = .init()

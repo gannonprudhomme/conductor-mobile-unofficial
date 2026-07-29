@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+import Foundation
 import SharedConductorData
 import SQLiteData
 @testable import ConductorMobileData
@@ -107,6 +108,23 @@ struct MigrationsTests {
                 try CloudSessionMetadata.find(session.id).fetchOne(db)
             )
         }
+        let desktopTranscriptMetadataColumns = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM pragma_table_info('desktop_transcript_metadata')"
+            )
+        }
+        let desktopTranscriptTables = try database.read { db in
+            try String.fetchAll(
+                db,
+                sql: """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name LIKE 'desktop_%'
+                    ORDER BY name
+                    """
+            )
+        }
 
         #expect(workspaces == 0)
         #expect(mobileWorkspaceStates == 0)
@@ -151,6 +169,13 @@ struct MigrationsTests {
         #expect(!cloudSessionMetadataDefaults.hasCompleteTranscript)
         #expect(cloudSessionMetadataDefaults.transcriptProjectionVersion == 0)
         #expect(cloudSessionMetadataDefaults.lastFullTranscriptRefreshAt == nil)
+        #expect(
+            desktopTranscriptMetadataColumns == [
+                "session_id",
+                "transcript_cursor",
+            ]
+        )
+        #expect(desktopTranscriptTables == ["desktop_transcript_metadata"])
     }
 
     @Test("Checkpoint migration defaults existing Cloud session metadata")
@@ -219,5 +244,94 @@ struct MigrationsTests {
         #expect(metadata.transcriptProjectionVersion == 0)
         #expect(metadata.lastFullTranscriptRefreshAt == nil)
         #expect(workspaceMetadata.remoteWorkspaceID == workspace.id)
+    }
+
+    @Test("A cursorless desktop transcript row represents a complete empty baseline")
+    func desktopTranscriptMetadataDefaults() throws {
+        let database = try appDatabase()
+        let workspace = Workspace.preview()
+        let session = Session.preview()
+        let metadata = try database.write { database in
+            try Workspace.insert { workspace }.execute(database)
+            try Session.insert { session }.execute(database)
+            try database.execute(
+                sql: """
+                    INSERT INTO desktop_transcript_metadata (session_id)
+                    VALUES (?)
+                    """,
+                arguments: [session.id]
+            )
+            return try #require(
+                try DesktopTranscriptMetadata.find(session.id).fetchOne(database)
+            )
+        }
+
+        #expect(metadata.transcriptCursor == nil)
+    }
+
+    @Test("Desktop metadata migration preserves unrelated message rows")
+    func desktopTranscriptMetadataPreservesMessages() throws {
+        let database = try SQLiteData.defaultDatabase()
+        let migrator = appDatabaseMigrator()
+        try migrator.migrate(
+            database,
+            upTo: "Add cloud transcript checkpoint"
+        )
+        let orphan = Message(
+            id: "orphan",
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+        try database.write { database in
+            try Message.insert { orphan }.execute(database)
+        }
+
+        try migrator.migrate(database)
+
+        #expect(
+            try database.read { database in
+                try Message.find(orphan.id).fetchOne(database)
+            } == orphan
+        )
+    }
+
+    @Test("Desktop transcript metadata enforces constraints and cascades")
+    func desktopTranscriptMetadataConstraints() throws {
+        let database = try appDatabase()
+        let workspace = Workspace.preview()
+        let session = Session.preview()
+        try database.write { db in
+            try Workspace.insert { workspace }.execute(db)
+            try Session.insert { session }.execute(db)
+            try db.execute(
+                sql: """
+                    INSERT INTO desktop_transcript_metadata (
+                      session_id, transcript_cursor
+                    ) VALUES (?, 'message-1')
+                    """,
+                arguments: [session.id]
+            )
+        }
+
+        #expect(throws: (any Error).self) {
+            try database.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE desktop_transcript_metadata
+                        SET transcript_cursor = ''
+                        WHERE session_id = ?
+                        """,
+                    arguments: [session.id]
+                )
+            }
+        }
+
+        try database.write { db in
+            try Session.find(session.id).delete().execute(db)
+            try Workspace.find(workspace.id).delete().execute(db)
+        }
+        let count = try database.read { db in
+            try DesktopTranscriptMetadata.fetchCount(db)
+        }
+        #expect(count == 0)
     }
 }

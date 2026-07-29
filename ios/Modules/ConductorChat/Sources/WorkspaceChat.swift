@@ -277,6 +277,12 @@ public struct WorkspaceChat: Sendable {
         case createSessionResponse(
             Result<WorkspaceSessionCreationResult, any Error>
         )
+        case createSessionLeasedResponse(
+            requestLease: DesktopRequestLease,
+            session: Session
+        )
+        /// Clears in-flight UI when the desktop address changed during session creation.
+        case createSessionDiscardedForStaleEndpoint
         case destination(PresentationAction<Destination.Action>)
         case loadSessionsResponse(Result<[Session], any Error>)
         case hostingSourceChanged(WorkspaceSource)
@@ -743,24 +749,79 @@ public struct WorkspaceChat: Sendable {
 
                 state.isCreatingSession = true
                 state.sessionIDsBeforeCreation = Set(state.activeSessions.map(\.id))
-                return .run {
-                    [
-                        fallbackAgent = state.chat?.session.agentType ?? .claude,
-                        mutationRoute,
-                        workspaceID = state.workspace.id,
-                    ] send in
-                    await send(
-                        .createSessionResponse(
-                            Result {
-                                try await workspaceMutationClient.createSession(
-                                    route: mutationRoute,
-                                    canonicalWorkspaceID: workspaceID,
-                                    fallbackAgent: fallbackAgent
+                switch mutationRoute {
+                case .desktop:
+                    return .run { [workspaceID = state.workspace.id] send in
+                        do {
+                            // Session creation may finish after Settings switches desktops. Pin
+                            // the request, database write, and reducer response to one endpoint
+                            // epoch.
+                            let requestLease = try desktopClient.acquireRequestLease()
+                            let session = try await DesktopRequestLeaseContext.$current
+                                .withValue(requestLease) {
+                                    try await desktopClient.createSession(
+                                        workspaceID: workspaceID
+                                    )
+                                }
+                            try await desktopClient.persistCreatedSession(
+                                session: session,
+                                requestLease: requestLease
+                            )
+                            await send(
+                                .createSessionLeasedResponse(
+                                    requestLease: requestLease,
+                                    session: session
                                 )
-                            }
+                            )
+                        } catch DesktopClientError.staleRequestLease {
+                            await send(.createSessionDiscardedForStaleEndpoint)
+                        } catch {
+                            await send(.createSessionResponse(.failure(error)))
+                        }
+                    }
+
+                case .cloud:
+                    return .run {
+                        [
+                            fallbackAgent = state.chat?.session.agentType ?? .claude,
+                            mutationRoute,
+                            workspaceID = state.workspace.id,
+                        ] send in
+                        await send(
+                            .createSessionResponse(
+                                Result {
+                                    try await workspaceMutationClient.createSession(
+                                        route: mutationRoute,
+                                        canonicalWorkspaceID: workspaceID,
+                                        fallbackAgent: fallbackAgent
+                                    )
+                                }
+                            )
+                        )
+                    }
+                }
+
+            case let .createSessionLeasedResponse(requestLease, session):
+                guard desktopClient.isRequestLeaseValid(lease: requestLease) else {
+                    state.isCreatingSession = false
+                    state.sessionIDsBeforeCreation = nil
+                    return .none
+                }
+                return .send(
+                    .createSessionResponse(
+                        .success(
+                            WorkspaceSessionCreationResult(
+                                session: session,
+                                attemptID: nil
+                            )
                         )
                     )
-                }
+                )
+
+            case .createSessionDiscardedForStaleEndpoint:
+                state.isCreatingSession = false
+                state.sessionIDsBeforeCreation = nil
+                return .none
 
             case let .createSessionResponse(.success(result)):
                 let session = result.session
@@ -1673,8 +1734,6 @@ public struct WorkspaceChat: Sendable {
             await StreamObservation.observe {
                 desktopClient.observeSessions(workspaceID: workspaceID)
             } onValue: { sessions in
-                await send(.loadSessionsResponse(.success(sessions)))
-
                 try await database.write { db in
                     try Session
                         .where { $0.workspaceID.eq(workspaceID) }
@@ -1685,6 +1744,7 @@ public struct WorkspaceChat: Sendable {
                         .execute(db)
                 }
                 await send(.sessionSnapshotPersisted)
+                await send(.loadSessionsResponse(.success(sessions)))
             } onFailure: { error in
                 await send(.loadSessionsResponse(.failure(error)))
             }
@@ -2592,8 +2652,10 @@ public struct WorkspaceChatView: View {
         $0.desktopClient.observeMessages = { _, sessionID in
             AsyncThrowingStream { continuation in
                 continuation.yield(
-                    .snapshot(
-                        content.messages.filter { $0.sessionID == sessionID }
+                    .persisted(
+                        .snapshot(
+                            content.messages.filter { $0.sessionID == sessionID }
+                        ),
                     )
                 )
             }

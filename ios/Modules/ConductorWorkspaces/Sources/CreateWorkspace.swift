@@ -134,11 +134,14 @@ public struct CreateWorkspace: Sendable {
         case alert(PresentationAction<Alert>)
         case binding(BindingAction<State>)
         case createButtonTapped
+        /// Clears in-flight UI when the desktop address changed during creation.
+        case createWorkspaceDiscardedForStaleEndpoint
         case createWorkspaceFailed(String)
         case createWorkspaceSucceeded(
             CreatedWorkspace,
             selectedModel: Session.Model,
             selectedReasoningEffort: Session.ReasoningEffort?,
+            requestLease: DesktopRequestLease,
             initialPrompt: WorkspaceCreationResult.InitialPrompt?
         )
         case modelSettingsFetched(DesktopClient.ModelSettings)
@@ -154,7 +157,6 @@ public struct CreateWorkspace: Sendable {
         }
     }
 
-    @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.uuid) var uuid
 
@@ -220,33 +222,41 @@ public struct CreateWorkspace: Sendable {
                         workspaceID,
                     ] send in
                     do {
-                        let createdWorkspace = try await desktopClient.createWorkspace(
-                            workspaceID: workspaceID,
-                            repositoryID: repositoryID,
-                            agentType: agentType,
-                            model: model,
-                            isFastModeEnabled: isFastModeEnabled
-                        )
-                        try await database.write { database in
-                            try Workspace.upsert { createdWorkspace.workspace }.execute(database)
-                            try Session.upsert { createdWorkspace.session }.execute(database)
-                        }
+                        // Workspace creation and optional prompt delivery are one endpoint-pinned
+                        // workflow. The lease prevents any obsolete-address result from entering the
+                        // durable cache or navigation state after Settings changes the address.
+                        let requestLease = try desktopClient.acquireRequestLease()
+                        let createdWorkspace = try await DesktopRequestLeaseContext.$current
+                            .withValue(requestLease) {
+                                try await desktopClient.createWorkspace(
+                                    workspaceID: workspaceID,
+                                    repositoryID: repositoryID,
+                                    agentType: agentType,
+                                    model: model,
+                                    isFastModeEnabled: isFastModeEnabled
+                                )
+                            }
                         let initialPrompt: WorkspaceCreationResult.InitialPrompt?
                         if let promptMessageID {
                             let result: MessageDeliveryResult
                             do {
-                                result = try await desktopClient.sendMessage(
-                                    workspaceID: createdWorkspace.workspace.id,
-                                    sessionID: createdWorkspace.session.id,
-                                    message: prompt,
-                                    model: model,
-                                    isFastModeEnabled: isFastModeEnabled,
-                                    mode: .sent,
-                                    reasoningEffort: reasoningEffort,
-                                    attemptID: promptMessageID
-                                )
+                                result = try await DesktopRequestLeaseContext.$current
+                                    .withValue(requestLease) {
+                                        try await desktopClient.sendMessage(
+                                            workspaceID: createdWorkspace.workspace.id,
+                                            sessionID: createdWorkspace.session.id,
+                                            message: prompt,
+                                            model: model,
+                                            isFastModeEnabled: isFastModeEnabled,
+                                            mode: .sent,
+                                            reasoningEffort: reasoningEffort,
+                                            attemptID: promptMessageID
+                                        )
+                                    }
                             } catch is CancellationError {
                                 throw CancellationError()
+                            } catch DesktopClientError.staleRequestLease {
+                                throw DesktopClientError.staleRequestLease
                             } catch {
                                 result = .unknown(
                                     reason: "Prompt delivery could not be determined."
@@ -260,16 +270,23 @@ public struct CreateWorkspace: Sendable {
                         } else {
                             initialPrompt = nil
                         }
+                        try await desktopClient.persistCreatedWorkspace(
+                            createdWorkspace: createdWorkspace,
+                            requestLease: requestLease
+                        )
                         await send(
                             .createWorkspaceSucceeded(
                                 createdWorkspace,
                                 selectedModel: model,
                                 selectedReasoningEffort: reasoningEffort,
+                                requestLease: requestLease,
                                 initialPrompt: initialPrompt
                             )
                         )
                     } catch is CancellationError {
                         return
+                    } catch DesktopClientError.staleRequestLease {
+                        await send(.createWorkspaceDiscardedForStaleEndpoint)
                     } catch {
                         await send(.createWorkspaceFailed(error.localizedDescription))
                     }
@@ -304,8 +321,13 @@ public struct CreateWorkspace: Sendable {
                 createdWorkspace,
                 selectedModel,
                 selectedReasoningEffort,
+                requestLease,
                 initialPrompt
             ):
+                guard desktopClient.isRequestLeaseValid(lease: requestLease) else {
+                    state.isCreateAPIInFlight = false
+                    return .none
+                }
                 state.isCreateAPIInFlight = false
                 state.$prompt.withLock { $0 = "" }
                 let repository = state.repositories.first {
@@ -318,6 +340,7 @@ public struct CreateWorkspace: Sendable {
                                 initialPrompt: initialPrompt,
                                 selectedModel: selectedModel,
                                 selectedReasoningEffort: selectedReasoningEffort,
+                                requestLease: requestLease,
                                 workspace: WorkspaceWithRepository(
                                     workspace: createdWorkspace.workspace,
                                     repository: repository
@@ -326,6 +349,10 @@ public struct CreateWorkspace: Sendable {
                         )
                     )
                 )
+
+            case .createWorkspaceDiscardedForStaleEndpoint:
+                state.isCreateAPIInFlight = false
+                return .none
 
             case let .modelSettingsFetched(settings):
                 guard state.mode == .local else {
@@ -400,18 +427,28 @@ public struct CloudWorkspaceCreationForm: Equatable, Sendable {
     }
 }
 
+/// The fully reconciled result handed from `CreateWorkspace` to its parent features.
+///
+/// `Workspaces` inserts the new item into navigation state, while `Main` uses the same value to
+/// open chat and optionally surface an uncertain initial-prompt delivery. Local results carry a
+/// request lease so consumers can reject them if Settings changed desktops after the child reducer
+/// emitted them; Cloud results are account-scoped and do not need a desktop lease.
 public struct WorkspaceCreationResult: Equatable, Sendable {
     public let completionID: UUID?
     public let initialPrompt: InitialPrompt?
     public let selectedModel: Session.Model
     public let selectedReasoningEffort: Session.ReasoningEffort?
+    /// Endpoint identity on which local creation and its atomic persistence completed.
+    public let requestLease: DesktopRequestLease?
     public let selectedSessionID: Session.ID?
     public let workspace: WorkspaceWithRepository
 
+    /// Packages creation state for the parent delegate action after persistence has succeeded.
     public init(
         initialPrompt: InitialPrompt? = nil,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort? = nil,
+        requestLease: DesktopRequestLease? = nil,
         workspace: WorkspaceWithRepository,
         selectedSessionID: Session.ID? = nil,
         completionID: UUID? = nil
@@ -420,6 +457,7 @@ public struct WorkspaceCreationResult: Equatable, Sendable {
         self.initialPrompt = initialPrompt
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
+        self.requestLease = requestLease
         self.selectedSessionID = selectedSessionID
         self.workspace = workspace
     }

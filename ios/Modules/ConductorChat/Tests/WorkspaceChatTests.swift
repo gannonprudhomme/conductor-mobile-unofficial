@@ -934,18 +934,18 @@ struct WorkspaceChatTests {
             let task = await store.send(.task)
 
             continuation.yield([session])
-            await store.receive(\.loadSessionsResponse.success) {
-                $0.isLoadingSessions = false
-            }
             await store.receive(\.sessionSnapshotPersisted) {
                 $0.hasPersistedInitialSessionSnapshot = true
             }
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
+            }
 
             continuation.yield([replacement])
+            await store.receive(\.sessionSnapshotPersisted)
             await store.receive(\.loadSessionsResponse.success) {
                 $0.chat = Chat.State(session: replacement)
             }
-            await store.receive(\.sessionSnapshotPersisted)
             #expect(connectionCount.value == 1)
 
             let storedSessionIDs = try await database.read { db in
@@ -1001,6 +1001,7 @@ struct WorkspaceChatTests {
         let createdSession = try makeSession(id: "created", workspaceID: workspace.id)
         let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
         let requestCount = LockIsolated(0)
+        let requestLease = try makeRequestLease()
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -1018,6 +1019,7 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
+                $0.desktopClient.acquireRequestLease = { requestLease }
                 $0.desktopClient.createSession = { workspaceID in
                     #expect(workspaceID == workspace.id)
                     requestCount.withValue { $0 += 1 }
@@ -1026,8 +1028,12 @@ struct WorkspaceChatTests {
                     }
                     throw TestError()
                 }
+                $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
+                $0.desktopClient.persistCreatedSession = { session, lease in
+                    #expect(session == createdSession)
+                    #expect(lease == requestLease)
+                }
             }
-
             await store.send(.createSessionButtonTapped) {
                 $0.isCreatingSession = true
                 $0.sessionIDsBeforeCreation = [activeSession.id]
@@ -1036,6 +1042,7 @@ struct WorkspaceChatTests {
             #expect(requestCount.value == 1)
 
             responseContinuation.yield()
+            await store.receive(\.createSessionLeasedResponse)
             await store.receive(\.createSessionResponse.success) {
                 $0.hasUserSelectedSession = true
                 $0.isCreatingSession = false
@@ -1066,6 +1073,7 @@ struct WorkspaceChatTests {
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
         let createdSession = try makeSession(id: "created", workspaceID: workspace.id)
         let (responses, responseContinuation) = AsyncStream<Void>.makeStream()
+        let requestLease = try makeRequestLease()
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -1083,14 +1091,19 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
+                $0.desktopClient.acquireRequestLease = { requestLease }
                 $0.desktopClient.createSession = { _ in
                     for await _ in responses {
                         return createdSession
                     }
                     throw TestError()
                 }
+                $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
+                $0.desktopClient.persistCreatedSession = { session, lease in
+                    #expect(session == createdSession)
+                    #expect(lease == requestLease)
+                }
             }
-
             await store.send(.createSessionButtonTapped) {
                 $0.isCreatingSession = true
                 $0.sessionIDsBeforeCreation = [activeSession.id]
@@ -1110,6 +1123,7 @@ struct WorkspaceChatTests {
             #expect(store.state.chat?.sessionID == createdSession.id)
 
             responseContinuation.yield()
+            await store.receive(\.createSessionLeasedResponse)
             await store.receive(\.createSessionResponse.success) {
                 $0.isCreatingSession = false
             }
@@ -1121,6 +1135,7 @@ struct WorkspaceChatTests {
     func sessionCreationFailure() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
         let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+        let requestLease = try makeRequestLease()
 
         try await withDependencies {
             try $0.bootstrapDatabase()
@@ -1138,9 +1153,11 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
+                $0.desktopClient.acquireRequestLease = { requestLease }
                 $0.desktopClient.createSession = { _ in
                     throw TestError()
                 }
+                $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
             }
 
             await store.send(.createSessionButtonTapped) {
@@ -2206,11 +2223,11 @@ struct WorkspaceChatTests {
 
             await clock.advance(by: .seconds(1))
             secondContinuation.yield([activeSession])
-            await store.receive(\.loadSessionsResponse.success) {
-                $0.isLoadingSessions = false
-            }
             await store.receive(\.sessionSnapshotPersisted) {
                 $0.hasPersistedInitialSessionSnapshot = true
+            }
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
             }
             #expect(connectionCount.value == 2)
 
@@ -3033,6 +3050,13 @@ struct WorkspaceChatTests {
         }
     }
 
+}
+
+private func makeRequestLease() throws -> DesktopRequestLease {
+    DesktopRequestLease(
+        baseURL: try #require(URL(string: "http://desktop:3768")),
+        endpointEpoch: 1
+    )
 }
 
 private func makeSession(
