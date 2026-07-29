@@ -871,7 +871,7 @@ private struct QueuedMessageRow: View {
 
                 steerButton
 
-                deleteButton(color: .theme(.destructive))
+                deleteButton(color: Color(uiColor: .systemRed))
             } label: {
                 LucideIcon(Lucide.ellipsis, style: .body)
                     .foregroundStyle(.theme(.sidebarMutedForeground))
