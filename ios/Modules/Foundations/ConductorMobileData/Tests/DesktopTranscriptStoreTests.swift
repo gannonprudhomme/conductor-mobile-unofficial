@@ -12,22 +12,6 @@ import SQLiteData
 import Testing
 
 struct DesktopTranscriptStoreTests {
-    @Test("Maximum rows per statement respect SQLite's argument limit")
-    func maximumRowsPerStatement() {
-        #expect(
-            DesktopTranscriptStore.maximumRowsPerStatement(
-                maximumArgumentCount: 500_000,
-                argumentsPerRow: 15
-            ) == 33_333
-        )
-        #expect(
-            DesktopTranscriptStore.maximumRowsPerStatement(
-                maximumArgumentCount: 1_000,
-                argumentsPerRow: 15
-            ) == 66
-        )
-    }
-
     @Test(
         "Complete snapshots persist representative large histories",
         arguments: [484, 2_065]

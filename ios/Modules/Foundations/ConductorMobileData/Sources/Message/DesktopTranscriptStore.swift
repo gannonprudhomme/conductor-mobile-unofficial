@@ -14,11 +14,6 @@ import SQLiteData
 /// mutation here ensures the history rows, queue rows, and resume cursor change in one database
 /// transaction.
 enum DesktopTranscriptStore {
-    // A Message upsert binds every persisted column once per row. Deriving the
-    // batch size from the connection keeps large transcripts legal without an
-    // arbitrary row limit.
-    private static let messageArgumentsPerRow = 15
-
     /// Builds the complete cached snapshot shown before the WebSocket returns its first event.
     ///
     /// The client also resumes from this snapshot's cursor. Returning nil means the cache is
@@ -107,13 +102,6 @@ enum DesktopTranscriptStore {
             }
             return result
         }
-    }
-
-    static func maximumRowsPerStatement(
-        maximumArgumentCount: Int,
-        argumentsPerRow: Int
-    ) -> Int {
-        max(1, maximumArgumentCount / argumentsPerRow)
     }
 
     /// Rejections that protect the local cache from an invalid envelope or obsolete connection.
@@ -224,7 +212,9 @@ private extension DesktopTranscriptStore {
         // History is upserted first on purpose. When a queued row becomes completed, this clears
         // its queue markers before authoritative queue-omission reconciliation runs, preventing
         // the newly completed row from being deleted as a stale queue entry.
-        try upsertMessages(event.messages, database: database)
+        if !event.messages.isEmpty {
+            try Message.upsert { event.messages }.execute(database)
+        }
         if let queuedMessages = event.queuedMessages {
             try reconcileQueue(
                 queuedMessages,
@@ -306,18 +296,16 @@ private extension DesktopTranscriptStore {
         sessionID: Session.ID,
         database: Database
     ) throws {
-        try forEachBatch(
-            messages.map(\.id),
-            size: database.maximumStatementArgumentCount
-        ) { messageIDs in
-            let storedOwnership = try Message
-                .where { $0.id.in(messageIDs) }
-                .select { ($0.id, $0.sessionID) }
-                .fetchAll(database)
-            for (_, storedSessionID) in storedOwnership {
-                guard storedSessionID.map(RawUTF8Key.init) == RawUTF8Key(sessionID) else {
-                    throw ApplyError.messageMoved
-                }
+        guard !messages.isEmpty else {
+            return
+        }
+        let storedSessionIDs = try Message
+            .where { $0.id.in(messages.map(\.id)) }
+            .select(\.sessionID)
+            .fetchAll(database)
+        for storedSessionID in storedSessionIDs {
+            guard storedSessionID.map(RawUTF8Key.init) == RawUTF8Key(sessionID) else {
+                throw ApplyError.messageMoved
             }
         }
     }
@@ -342,21 +330,12 @@ private extension DesktopTranscriptStore {
         sessionID: Session.ID,
         database: Database
     ) throws {
-        var seenMessageIDs: Set<RawUTF8Key> = []
-        let uniqueMessageIDs = messageIDs.filter {
-            seenMessageIDs.insert(RawUTF8Key($0)).inserted
-        }
-        // The session predicate consumes one bound variable in addition to the
-        // IDs carried by the IN clause.
-        try forEachBatch(
-            uniqueMessageIDs,
-            size: max(1, database.maximumStatementArgumentCount - 1)
-        ) { batch in
+        for messageID in messageIDs {
             try Message
                 .where {
                     $0.sessionID.eq(sessionID)
                         && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
-                        && $0.id.in(batch)
+                        && $0.id.eq(messageID)
                 }
                 .delete()
                 .execute(database)
@@ -383,37 +362,8 @@ private extension DesktopTranscriptStore {
             }
             .delete()
             .execute(database)
-        try upsertMessages(queuedMessages, database: database)
-    }
-
-    /// Upserts as many rows as the active SQLite connection legally permits in each statement.
-    static func upsertMessages(
-        _ messages: [Message],
-        database: Database
-    ) throws {
-        try forEachBatch(
-            messages,
-            size: maximumRowsPerStatement(
-                maximumArgumentCount: database.maximumStatementArgumentCount,
-                argumentsPerRow: messageArgumentsPerRow
-            )
-        ) { batch in
-            try Message.upsert { batch }.execute(database)
-        }
-    }
-
-    static func forEachBatch<Element>(
-        _ elements: [Element],
-        size: Int,
-        operation: ([Element]) throws -> Void
-    ) rethrows {
-        for startIndex in stride(
-            from: elements.startIndex,
-            to: elements.endIndex,
-            by: size
-        ) {
-            let endIndex = min(startIndex + size, elements.endIndex)
-            try operation(Array(elements[startIndex..<endIndex]))
+        if !queuedMessages.isEmpty {
+            try Message.upsert { queuedMessages }.execute(database)
         }
     }
 
