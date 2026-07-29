@@ -93,6 +93,10 @@ actor DatabaseChangeObserver {
         // new change and all subscribers compare against the same version.
         if pollingTask == nil {
             databaseVersion = try readDatabaseVersion()
+            // A route cache can briefly outlive the final change-stream subscriber. Give every
+            // polling lifetime a distinct initial generation so a reconnect cannot reuse a
+            // snapshot from before this new baseline.
+            generation &+= 1
             hasPendingChange = false
             nextBroadcastInstant = nil
         }

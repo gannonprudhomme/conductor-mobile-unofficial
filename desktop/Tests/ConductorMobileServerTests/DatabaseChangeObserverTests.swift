@@ -44,8 +44,35 @@ struct DatabaseChangeObserverTests {
         dataVersion.withLock { $0 = 1 }
 
         let generations = try await (firstChange, secondChange)
-        expectNoDifference(generations.0, 1)
-        expectNoDifference(generations.1, 1)
+        expectNoDifference(generations.0, 2)
+        expectNoDifference(generations.1, 2)
+    }
+
+    @Test("A new polling lifetime advances the initial generation")
+    func advancesGenerationForNewPollingLifetime() async throws {
+        let observer = DatabaseChangeObserver(pollInterval: .seconds(60)) {
+            0
+        }
+        let firstChanges = try await observer.changes()
+        let firstGeneration = Mutex<DatabaseChangeObserver.Generation?>(nil)
+        let consumer = Task {
+            for try await generation in firstChanges {
+                firstGeneration.withLock { $0 = generation }
+            }
+        }
+        while firstGeneration.withLock({ $0 }) == nil {
+            await Task.yield()
+        }
+        consumer.cancel()
+        _ = await consumer.result
+        try await Task.sleep(for: .milliseconds(20))
+
+        let secondChanges = try await observer.changes()
+        var secondIterator = secondChanges.makeAsyncIterator()
+        let secondGeneration = try #require(await secondIterator.next())
+
+        expectNoDifference(firstGeneration.withLock { $0 }, 1)
+        expectNoDifference(secondGeneration, 2)
     }
 
     @Test("Changes during the cooldown collapse into one trailing invalidation")
@@ -60,11 +87,11 @@ struct DatabaseChangeObserverTests {
         let changes = try await observer.changes()
         var iterator = changes.makeAsyncIterator()
         let initialGeneration = try await iterator.next()
-        expectNoDifference(try #require(initialGeneration), 0)
+        expectNoDifference(try #require(initialGeneration), 1)
 
         dataVersion.withLock { $0 = 1 }
         let firstGeneration = try await iterator.next()
-        expectNoDifference(try #require(firstGeneration), 1)
+        expectNoDifference(try #require(firstGeneration), 2)
 
         let clock = ContinuousClock()
         let start = clock.now
@@ -73,7 +100,7 @@ struct DatabaseChangeObserverTests {
         dataVersion.withLock { $0 = 3 }
 
         let secondGeneration = try await iterator.next()
-        expectNoDifference(try #require(secondGeneration), 2)
+        expectNoDifference(try #require(secondGeneration), 3)
         #expect(start.duration(to: clock.now) >= .milliseconds(50))
     }
 }
