@@ -87,7 +87,7 @@ struct WorkspacesTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 1
+                    credentialGeneration: UUID(1)
                 )
             }
             let connectionCount = LockIsolated(0)
@@ -113,7 +113,7 @@ struct WorkspacesTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 2
+                    credentialGeneration: UUID(2)
                 )
             }
             await store.receive(\.cloudConfigurationChanged)
@@ -132,6 +132,11 @@ struct WorkspacesTests {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Repository
+                    .insert { Repository.preview(id: "repo-1") }
+                    .execute(database)
+            }
         } operation: {
             let initialState = Workspaces.State()
             initialState.$grouping.withLock { $0 = .project }
@@ -678,6 +683,46 @@ struct WorkspacesTests {
             )
 
             await task.cancel()
+        }
+    }
+
+    @Test("A removed duplicate repository cannot strand the persisted filter")
+    func removedRepositoryClearsPersistedFilter() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.selectedRepositoryID) var selectedRepositoryID
+            $selectedRepositoryID.withLock {
+                $0 = "removed-duplicate-repository"
+            }
+
+            let state = Workspaces.State()
+
+            #expect(state.selectedRepositoryID == nil)
+        }
+    }
+
+    @Test("Repository consolidation clears an active duplicate filter")
+    func repositoryConsolidationClearsActiveFilter() async throws {
+        let repository = Repository.preview(id: "duplicate-repository")
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Repository.insert { repository }.execute(database)
+            }
+        } operation: {
+            let state = Workspaces.State()
+            state.$selectedRepositoryID.withLock { $0 = repository.id }
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(.repositoriesChanged([])) {
+                $0.$selectedRepositoryID.withLock { $0 = nil }
+            }
+            await store.finish()
         }
     }
 

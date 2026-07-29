@@ -49,6 +49,28 @@ public struct Workspaces: Sendable {
         )
         public var repositoriesAvailableForWorkspaceCreation: [Repository] = []
 
+        @FetchAll(
+            CloudProjectRepositoryMapping.all,
+            animation: .default
+        )
+        public var cloudProjectMappings: [CloudProjectRepositoryMapping] = []
+
+        @FetchAll(
+            CloudMutationOutcome
+                .where {
+                    $0.owningFeature.eq(
+                        CloudMutationOutcome.OwningFeature.workspaces.rawValue
+                    )
+                        && $0.consumedAt.is(nil)
+                }
+                .order(by: \.createdAt),
+            animation: .default
+        )
+        var cloudMutationOutcomes: [CloudMutationOutcome] = []
+
+        @Shared(.createWorkspacePrompt)
+        var createWorkspacePrompt
+
         @Shared(.collapsedWorkspaceSectionIDs)
         var collapsedSectionIDs
 
@@ -89,13 +111,44 @@ public struct Workspaces: Sendable {
             sections.contains { !$0.items.isEmpty }
         }
 
+        var cloudWorkspaceCreationCandidates: [CloudWorkspaceCreationCandidate] {
+            guard let accountID = cloudConfiguration?.accountID else {
+                return []
+            }
+            return cloudProjectMappings.compactMap { mapping in
+                guard mapping.accountID == accountID,
+                      let repository = repositories.first(where: {
+                          $0.id == mapping.canonicalRepositoryID
+                      }) else {
+                    return nil
+                }
+                return CloudWorkspaceCreationCandidate(
+                    repository: repository,
+                    projectID: mapping.cloudProjectID,
+                    repositoryURL: URL(string: mapping.gitRemote)
+                )
+            }
+        }
+
+        var canCreateWorkspace: Bool {
+            !repositoriesAvailableForWorkspaceCreation.isEmpty
+                || !cloudWorkspaceCreationCandidates.isEmpty
+        }
+
         public init() {
             @Shared(.cloudConfiguration) var cloudConfiguration
             @Shared(.desktopServerAddress) var desktopServerAddress
+            @Shared(.selectedRepositoryID) var selectedRepositoryID
             self.cloudObservationStatus = cloudConfiguration != nil
                 ? .loading
                 : .disconnected
             self.isLoadingWorkspaces = desktopServerAddress != nil
+            if let selectedRepositoryID,
+               !repositories.contains(where: {
+                   $0.id == selectedRepositoryID
+               }) {
+                $selectedRepositoryID.withLock { $0 = nil }
+            }
             _workspaces = FetchAll(
                 WorkspaceWithRepository.all(
                     repositoryID: selectedRepositoryID,
@@ -273,6 +326,12 @@ public struct Workspaces: Sendable {
         case cloudConfigurationChanged(CloudConfiguration?)
         case cloudObservationFailed(CloudFailure)
         case cloudSnapshotReceived
+        case cloudWorkspaceCompletionResolved(
+            UUID,
+            CloudWorkspaceCreationCompletionPayload,
+            WorkspaceWithRepository?
+        )
+        case cloudMutationOutcomesChanged([CloudMutationOutcome])
         case createButtonTapped
         case createWorkspaceSheetDismissed
         case desktopConfigurationChanged(String?)
@@ -281,6 +340,7 @@ public struct Workspaces: Sendable {
         case initialWorkspacesResponse
         case loadWorkspacesFailed(any Error)
         case repositoryFilterButtonTapped(String?)
+        case repositoriesChanged([Repository])
         case sortButtonTapped(WorkspaceWithRepository.Sort)
         /// Note: `MainView` handles this action so we can keep this module decoupled from `ConductorSettings`
         case settingsButtonTapped
@@ -302,6 +362,7 @@ public struct Workspaces: Sendable {
     @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.date.now) var now
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.workspaceMutationClient) var workspaceMutationClient
 
     public init() {
     }
@@ -313,6 +374,8 @@ public struct Workspaces: Sendable {
                 let cloudConfiguration = state.$cloudConfiguration
                 let desktopServerAddress = state.$desktopServerAddress
                 let grouping = state.$grouping
+                let mutationOutcomes = state.$cloudMutationOutcomes
+                let repositories = state.$repositories
                 let workspaces = state.$workspaces
                 // Shared publishers immediately replay their current values. `State.init`
                 // already used those values to build sections, so observe only later changes.
@@ -336,6 +399,18 @@ public struct Workspaces: Sendable {
                             .map(Action.groupingChanged)
                     },
                     .publisher {
+                        mutationOutcomes.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.cloudMutationOutcomesChanged)
+                    },
+                    .publisher {
+                        repositories.publisher
+                            .removeDuplicates()
+                            .dropFirst()
+                            .map(Action.repositoriesChanged)
+                    },
+                    .publisher {
                         workspaces.publisher
                             .removeDuplicates()
                             .dropFirst()
@@ -349,7 +424,14 @@ public struct Workspaces: Sendable {
                             monitorConnection(),
                             observeLocalWorkspaces(state)
                         )
-                        : clearDesktopObservation()
+                        : clearDesktopObservation(),
+                    state.cloudMutationOutcomes.isEmpty
+                        ? .none
+                        : .send(
+                            .cloudMutationOutcomesChanged(
+                                state.cloudMutationOutcomes
+                            )
+                        )
                 )
 
             case .appBecameActive:
@@ -461,13 +543,15 @@ public struct Workspaces: Sendable {
 
             case .createButtonTapped:
                 let repositories = state.repositoriesAvailableForWorkspaceCreation
-                guard !repositories.isEmpty else {
+                let cloudCandidates = state.cloudWorkspaceCreationCandidates
+                guard !repositories.isEmpty || !cloudCandidates.isEmpty else {
                     return .none
                 }
 
                 state.destination = .createWorkspace(
                     CreateWorkspace.State(
                         repositories: repositories,
+                        cloudCandidates: cloudCandidates,
                         selectedRepositoryIDFilter: state.selectedRepositoryID
                     )
                 )
@@ -491,6 +575,109 @@ public struct Workspaces: Sendable {
                 state.destination = nil
                 state.pendingWorkspaceCreation = creation
                 return .none
+
+            case let .destination(
+                .presented(
+                    .createWorkspace(
+                        .delegate(.cloudWorkspaceSubmitted(form))
+                    )
+                )
+            ):
+                guard let accountID = state.cloudConfiguration?.accountID else {
+                    return .none
+                }
+                state.destination = nil
+                return .run { send in
+                    do {
+                        _ = try await workspaceMutationClient.createWorkspace(
+                            route: .cloud(accountID: accountID),
+                            candidate: form.candidate,
+                            prompt: form.prompt,
+                            model: form.selectedModel,
+                            reasoningEffort: form.selectedReasoningEffort
+                        )
+                        await send(.createWorkspaceSheetDismissed)
+                    } catch {
+                        await send(.workspaceMutationFailed(error))
+                    }
+                }
+
+            case let .cloudMutationOutcomesChanged(outcomes):
+                guard let outcome = outcomes.first else {
+                    return .none
+                }
+                if outcome.kind
+                    == CloudMutationOutcome.Kind.workspaceCreationCompleted.rawValue {
+                    return .run { send in
+                        do {
+                            let payload = try outcome.decodedPayload(
+                                as: CloudWorkspaceCreationCompletionPayload.self
+                            )
+                            let workspace = try await database.read { database in
+                                try WorkspaceWithRepository
+                                    .all(workspaceID: payload.canonicalWorkspaceID)
+                                    .fetchOne(database)
+                            }
+                            await send(
+                                .cloudWorkspaceCompletionResolved(
+                                    outcome.outcomeID,
+                                    payload,
+                                    workspace
+                                )
+                            )
+                        } catch {
+                            await send(.workspaceMutationFailed(error))
+                        }
+                    }
+                }
+                return .run { send in
+                    do {
+                        let rejection = try outcome.decodedPayload(
+                            as: CloudMutationRejectionPayload.self
+                        )
+                        await send(
+                            .workspaceMutationFailed(
+                                CloudWorkspaceMutationPresentationError(
+                                    message: rejection.message
+                                )
+                            )
+                        )
+                        try await database.write { database in
+                            try CloudMutationOutcome
+                                .find(outcome.outcomeID)
+                                .update {
+                                    $0.consumedAt = #bind(Date())
+                                }
+                                .execute(database)
+                        }
+                    } catch {
+                        await send(.workspaceMutationFailed(error))
+                    }
+                }
+
+            case let .cloudWorkspaceCompletionResolved(
+                completionID,
+                payload,
+                workspace
+            ):
+                guard let workspace else {
+                    return .none
+                }
+                if state.createWorkspacePrompt == payload.submittedPrompt {
+                    state.$createWorkspacePrompt.withLock { $0 = "" }
+                }
+                return .send(
+                    .workspaceCreated(
+                        WorkspaceCreationResult(
+                            selectedModel: payload.selectedModel,
+                            selectedReasoningEffort:
+                                payload.selectedReasoningEffort,
+                            workspace: workspace,
+                            selectedSessionID: payload.canonicalSessionID,
+                            completionID: completionID
+                        )
+                    )
+                )
 
             case .destination(.presented(.alert(.openSettings))):
                 return .send(.settingsButtonTapped)
@@ -519,6 +706,16 @@ public struct Workspaces: Sendable {
                 state.$selectedRepositoryID.withLock { $0 = repositoryID }
                 return reloadWorkspaces(state)
 
+            case let .repositoriesChanged(repositories):
+                guard let selectedRepositoryID = state.selectedRepositoryID,
+                      !repositories.contains(where: {
+                          $0.id == selectedRepositoryID
+                      }) else {
+                    return .none
+                }
+                state.$selectedRepositoryID.withLock { $0 = nil }
+                return reloadWorkspaces(state)
+
             case let .sortButtonTapped(sort):
                 state.$sort.withLock { $0 = sort }
                 return reloadWorkspaces(state)
@@ -533,9 +730,23 @@ public struct Workspaces: Sendable {
                 return .none
 
             case let .workspaceArchiveButtonTapped(item):
+                guard let route = item.mutationRoute(
+                    cloudConfiguration: state.cloudConfiguration
+                ) else {
+                    return .send(
+                        .workspaceArchiveFailed(
+                            CloudWorkspaceMutationPresentationError(
+                                message: "This workspace is read-only."
+                            )
+                        )
+                    )
+                }
                 return .run { send in
                     do {
-                        try await desktopClient.archiveWorkspace(workspaceID: item.id)
+                        _ = try await workspaceMutationClient.archiveWorkspace(
+                            route: route,
+                            canonicalWorkspaceID: item.id
+                        )
                     } catch {
                         Logger.workspace.error("Failed to archive workspace: \(error)")
                         await send(.workspaceArchiveFailed(error))
@@ -555,6 +766,11 @@ public struct Workspaces: Sendable {
                 return .none
 
             case let .workspacePinnedButtonTapped(item):
+                guard item.mutationRoute(
+                    cloudConfiguration: state.cloudConfiguration
+                )?.capabilities.canPin == true else {
+                    return .none
+                }
                 let isPinned = item.workspace.pinnedAt == nil
                 let previousPinnedAt = item.workspace.pinnedAt
                 let pinnedAt = isPinned ? now.ISO8601Format() : nil
@@ -587,6 +803,11 @@ public struct Workspaces: Sendable {
                 }
 
             case let .workspaceStatusButtonTapped(item, status):
+                guard item.mutationRoute(
+                    cloudConfiguration: state.cloudConfiguration
+                )?.capabilities.canSetStatus == true else {
+                    return .none
+                }
                 guard item.workspace.status != status else {
                     return .none
                 }
@@ -620,6 +841,11 @@ public struct Workspaces: Sendable {
                 }
 
             case let .workspaceUnreadButtonTapped(item):
+                guard item.mutationRoute(
+                    cloudConfiguration: state.cloudConfiguration
+                )?.capabilities.canMarkUnread == true else {
+                    return .none
+                }
                 let isUnread = (item.workspace.unread ?? 0) == 0
                 let previousUnread = item.workspace.unread
                 let unread = isUnread ? 1 : 0
@@ -729,26 +955,10 @@ public struct Workspaces: Sendable {
                 desktopClient.observeWorkspaces()
             } onValue: { snapshot in
                 try await database.write { db in
-                    try Repository
-                        .upsert { snapshot.repositories }
-                        .execute(db)
-                    try CloudWorkspacePersistence.persistDesktopWorkspaces(
-                        snapshot.workspaces.map(\.workspace),
+                    try CloudWorkspacePersistence.persistDesktopSnapshot(
+                        snapshot,
                         in: db
                     )
-
-                    // The desktop snapshot is authoritative for this source-specific table.
-                    try MobileWorkspaceState.delete().execute(db)
-                    try MobileWorkspaceState.upsert {
-                        snapshot.workspaces.map {
-                            MobileWorkspaceState(
-                                workspaceID: $0.workspace.id,
-                                isWorking: $0.isWorking,
-                                pullRequest: snapshot.pullRequests[$0.workspace.id]
-                            )
-                        }
-                    }
-                    .execute(db)
                 }
 
                 if isAwaitingInitialResponse {
@@ -848,6 +1058,14 @@ public struct Workspaces: Sendable {
     }
 }
 
+private struct CloudWorkspaceMutationPresentationError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
 extension Workspaces.Destination.State: Equatable {}
 
 extension AlertState where Action == Workspaces.Destination.Alert {
@@ -939,12 +1157,16 @@ public struct WorkspacesView: View {
             if store.hasVisibleWorkspaces {
                 ForEach(store.sections) { section in
                     if section.isPinned {
-                        PinnedSectionView(section: section) { item, action in
+                        PinnedSectionView(
+                            section: section,
+                            cloudConfiguration: store.cloudConfiguration
+                        ) { item, action in
                             workspaceRowAction(action, item: item)
                         }
                     } else {
                         WorkspaceSectionView(
                             section: section,
+                            cloudConfiguration: store.cloudConfiguration,
                             showsRepositoryIcon: store.grouping == .status
                                 && store.selectedRepositoryID == nil,
                             isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
@@ -958,6 +1180,11 @@ public struct WorkspacesView: View {
 
         }
         .contentMargins(.top, 0)
+        .accessibilityIdentifier(
+            store.hasLocalConfiguration && !store.isLoadingWorkspaces
+                ? "workspaces.local-loaded"
+                : "workspaces"
+        )
         .listStyle(.plain)
         .animation(.default, value: store.sections)
         .listSectionSpacing(0)
@@ -1034,7 +1261,7 @@ public struct WorkspacesView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.theme(.foreground))
                 .foregroundStyle(.theme(.background))
-                .disabled(store.repositoriesAvailableForWorkspaceCreation.isEmpty)
+                .disabled(!store.canCreateWorkspace)
                 .accessibilityHint("Creates a new Conductor workspace")
                 .sheet(
                     item: $store.scope(
@@ -1199,8 +1426,22 @@ public struct WorkspacesView: View {
                 }
                 .labelStyle(.conductorExtraSmall)
                 .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier(accessibilityIdentifier)
                 .accessibilityLabel(displayName)
                 .accessibilityValue(accessibilityValue)
+            }
+
+            private var accessibilityIdentifier: String {
+                switch status {
+                case .connected:
+                    "local-status.connected"
+
+                case .connecting:
+                    "local-status.connecting"
+
+                case .disconnected:
+                    "local-status.disconnected"
+                }
             }
 
             private var accessibilityValue: String {
@@ -1291,6 +1532,7 @@ public struct WorkspacesView: View {
 
     private struct PinnedSectionView: View {
         let section: Workspaces.State.WorkspaceSection
+        let cloudConfiguration: CloudConfiguration?
         let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
         @ScaledMetric(relativeTo: .body) private var iconSize = 13.2
 
@@ -1301,6 +1543,7 @@ public struct WorkspacesView: View {
                     // Pinned mixes repositories, so always show the icon and keep rows flush left.
                     showsRepositoryIcon: true,
                     isIndented: false,
+                    cloudConfiguration: cloudConfiguration,
                     action: action
                 )
             } header: {
@@ -1316,6 +1559,7 @@ public struct WorkspacesView: View {
 
     private struct WorkspaceSectionView: View {
         let section: Workspaces.State.WorkspaceSection
+        let cloudConfiguration: CloudConfiguration?
         let showsRepositoryIcon: Bool
 
         @Binding var isExpanded: Bool
@@ -1327,6 +1571,7 @@ public struct WorkspacesView: View {
                 WorkspaceRows(
                     items: section.items,
                     showsRepositoryIcon: showsRepositoryIcon,
+                    cloudConfiguration: cloudConfiguration,
                     action: action
                 )
             } header: {
@@ -1388,6 +1633,7 @@ public struct WorkspacesView: View {
         let items: [WorkspaceWithRepository]
         let showsRepositoryIcon: Bool
         var isIndented = true
+        let cloudConfiguration: CloudConfiguration?
         let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
 
         var body: some View {
@@ -1395,6 +1641,11 @@ public struct WorkspacesView: View {
                 WorkspaceRow(
                     item: item,
                     showsRepositoryIcon: showsRepositoryIcon,
+                    capabilities: item
+                        .mutationRoute(
+                            cloudConfiguration: cloudConfiguration
+                        )
+                        .capabilities,
                     action: rowAction(for: item)
                 )
                 .padding(.leading, isIndented ? 12 : 0)

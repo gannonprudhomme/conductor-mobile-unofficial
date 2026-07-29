@@ -181,7 +181,8 @@ struct ChatTests {
                         transcriptCursor: nil,
                         hasCompleteTranscript: true,
                         transcriptProjectionVersion: CloudTranscriptAdapter
-                            .projectionVersion
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
                     )
                 }
                 .execute(db)
@@ -206,18 +207,15 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = {
-                    remoteSessionID,
-                    workspaceID,
-                    checkpoint in
+                $0.cloudAPIClient.observeTranscript = { remoteSessionID, checkpoint in
                     #expect(remoteSessionID == "remote-session")
-                    #expect(workspaceID == session.workspaceID)
                     #expect(
                         checkpoint
                             == CloudTranscriptCheckpoint(
                                 accountID: "account",
                                 remoteSessionID: "remote-session",
-                                rawCursor: nil
+                                rawCursor: nil,
+                                lastFullTranscriptRefreshAt: .distantFuture
                             )
                     )
                     return AsyncThrowingStream { _ in }
@@ -231,89 +229,6 @@ struct ChatTests {
                 $0.isLoadingMessages = false
             }
             await task.cancel()
-        }
-    }
-
-    @Test("A same-account credential revision restarts transcript observation")
-    func credentialRevisionRestartsTranscriptObservation() async throws {
-        let database = try appDatabase()
-        let sessionID = CloudCanonicalID.session(
-            accountID: "account",
-            remoteSessionID: "remote-session"
-        )
-        let session = Session.preview(id: sessionID)
-        try await database.write { db in
-            try Session.insert { session }.execute(db)
-            try CloudSessionMetadata.insert {
-                CloudSessionMetadata(
-                    canonicalSessionID: sessionID,
-                    cloudSessionID: "remote-session",
-                    workspaceID: session.workspaceID,
-                    accountID: "account",
-                    listOrder: 0,
-                    refreshGeneration: "generation"
-                )
-            }
-            .execute(db)
-        }
-
-        await withDependencies {
-            $0.defaultDatabase = database
-        } operation: {
-            @Shared(.cloudConfiguration) var cloudConfiguration
-            $cloudConfiguration.withLock {
-                $0 = CloudConfiguration(
-                    accountID: "account",
-                    credentialRevision: 1
-                )
-            }
-            let connectionCount = LockIsolated(0)
-            let (stream, continuation) = AsyncThrowingStream<
-                CloudTranscriptUpdate,
-                any Error
-            >.makeStream()
-            let store = TestStore(
-                initialState: Chat.State(
-                    session: session,
-                    isCloudHosted: true
-                )
-            ) {
-                Chat()
-            } withDependencies: {
-                $0.defaultDatabase = database
-                $0.cloudAPIClient.observeTranscript = { _, _, _ in
-                    connectionCount.withValue { $0 += 1 }
-                    return stream
-                }
-                $0.desktopClient.fetchModelSettings = {
-                    DesktopClient.ModelSettings(
-                        defaultModel: session.model,
-                        defaultReasoningEffort:
-                            session.model.defaultReasoningEffort,
-                        isFastModeEnabled: false
-                    )
-                }
-            }
-            store.exhaustivity = .off(showSkippedAssertions: false)
-
-            let task = await store.send(.task)
-            for _ in 0..<1_000 where connectionCount.value < 1 {
-                await Task.yield()
-            }
-            $cloudConfiguration.withLock {
-                $0 = CloudConfiguration(
-                    accountID: "account",
-                    credentialRevision: 2
-                )
-            }
-            await store.receive(\.cloudConfigurationChanged)
-            for _ in 0..<10_000 where connectionCount.value < 2 {
-                await Task.yield()
-            }
-            #expect(connectionCount.value == 2)
-
-            await task.cancel()
-            continuation.finish()
         }
     }
 
@@ -363,12 +278,8 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = {
-                    remoteSessionID,
-                    workspaceID,
-                    checkpoint in
+                $0.cloudAPIClient.observeTranscript = { remoteSessionID, checkpoint in
                     #expect(remoteSessionID == "remote-session")
-                    #expect(workspaceID == session.workspaceID)
                     #expect(checkpoint == nil)
                     return AsyncThrowingStream { continuation in
                         continuation.yield(
@@ -426,7 +337,8 @@ struct ChatTests {
                         transcriptCursor: "committed",
                         hasCompleteTranscript: true,
                         transcriptProjectionVersion: CloudTranscriptAdapter
-                            .projectionVersion
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
                     )
                 }
                 .execute(db)
@@ -455,7 +367,7 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = { _, _, _ in stream }
+                $0.cloudAPIClient.observeTranscript = { _, _ in stream }
             }
             store.exhaustivity = .off
 
@@ -544,22 +456,14 @@ struct ChatTests {
 
             emptySnapshot.isLoadingMessages = false
             #expect(emptySnapshot.allowsAgentSwitching)
-            emptySnapshot.optimisticMessages = [
-                .init(
-                    id: UUID(),
-                    workspaceID: emptySnapshot.session.workspaceID,
-                    sessionID: emptySnapshot.sessionID,
-                    content: "Sending",
-                    model: emptySnapshot.selectedModel,
-                    isFastModeEnabled: emptySnapshot.isFastModeEnabled,
-                    mode: .sent,
-                    reasoningEffort: emptySnapshot.selectedReasoningEffort,
-                    status: .sending,
-                    previousTurnID: nil
-                ),
-            ]
+            emptySnapshot.recentlyEnqueuedAttempt = makeDeliveryAttempt(
+                session: emptySnapshot.session,
+                content: "Sending",
+                state: .ready
+            )
             #expect(!emptySnapshot.allowsAgentSwitching)
-            emptySnapshot.optimisticMessages[0].status = .rejected
+            emptySnapshot.recentlyEnqueuedAttempt?.state =
+                MessageDeliveryAttempt.State.rejected.rawValue
             #expect(emptySnapshot.allowsAgentSwitching)
         }
     }
@@ -721,6 +625,7 @@ struct ChatTests {
                     }
                 }
             }
+            store.exhaustivity = .off(showSkippedAssertions: false)
 
             let task = await store.send(.task)
 
@@ -1063,6 +968,41 @@ struct ChatTests {
         }
     }
 
+    @Test("An accepted local send starts elapsed time before session status refreshes")
+    func localSendStartsProgressImmediately() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let attemptID = UUID(0)
+            let startedAt = Date(timeIntervalSince1970: 1_783_558_800)
+            let attempt = makeDeliveryAttempt(
+                session: session,
+                content: "Run it",
+                attemptID: attemptID,
+                state: .ready,
+                createdAt: startedAt
+            )
+            var state = Chat.State(session: session)
+            state.recentlyEnqueuedAttempt = attempt
+
+            state.beginSendCycle(attemptID: attemptID)
+            state.updateRows()
+
+            #expect(state.displayedSessionStatus == .idle)
+            expectNoDifference(
+                try #require(state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: attemptID.uuidString, content: "Run it"),
+                    .turnInProgress(
+                        id: attemptID.uuidString,
+                        startedAt: startedAt
+                    ),
+                ]
+            )
+        }
+    }
+
     @Test("An initially working chat treats its latest turn as active")
     func initiallyWorkingChatUsesLatestTurn() throws {
         try withDependencies {
@@ -1119,10 +1059,6 @@ struct ChatTests {
             }
 
             await store.send(.messagesUpdated([message])) {
-                $0.isMessageSnapshotEmpty = false
-                $0.turns = Turn.parse(messages: [message])
-                $0.initializeIdleBaseline()
-                $0.updateRows()
                 $0.isLoadingMessages = false
             }
             await store.send(.sessionStatusChanged(.working)) {
@@ -1166,20 +1102,13 @@ struct ChatTests {
             )
             var state = Chat.State(session: session)
             state.turns = Turn.parse(messages: [previousMessage])
-            state.optimisticMessages = [
-                .init(
-                    id: UUID(0),
-                    workspaceID: session.workspaceID,
-                    sessionID: session.id,
-                    content: "Unconfirmed",
-                    model: session.model,
-                    isFastModeEnabled: false,
-                    mode: .sent,
-                    reasoningEffort: nil,
-                    status: .unconfirmed,
-                    previousTurnID: "previous-turn"
-                ),
-            ]
+            state.recentlyEnqueuedAttempt = makeDeliveryAttempt(
+                session: session,
+                content: "Unconfirmed",
+                attemptID: UUID(0),
+                state: .unknown,
+                previousTurnID: "previous-turn"
+            )
             state.initializeIdleBaseline()
             state.beginSendCycle(attemptID: UUID(0))
             state.sessionStatusChanged(.working)
@@ -1400,7 +1329,7 @@ struct ChatTests {
                 $0.selectedModel = .gpt_5_6_sol
                 $0.selectedReasoningEffort = .low
             }
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+            await store.send(.modelSelected(.gpt_5_6_terra)) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
@@ -1538,11 +1467,11 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+            await store.send(.modelSelected(.gpt_5_6_terra)) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
-            await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
+            await store.send(.modelSelected(.gpt5_5)) {
                 $0.selectedModel = .gpt5_5
             }
             await store.send(
@@ -1581,7 +1510,7 @@ struct ChatTests {
                     )
                 )
             )
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+            await store.send(.modelSelected(.gpt_5_6_terra)) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
@@ -1615,6 +1544,167 @@ struct ChatTests {
             await store.send(.sessionFastModeChanged(true)) {
                 $0.isFastModeEnabled = true
             }
+        }
+    }
+
+    @Test("Cloud configuration actions are read-only for available and missing routes")
+    func cloudConfigurationActionsAreReadOnly() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: .gpt5_5,
+                codexThinkingLevel: .high,
+                isFastModeEnabled: false
+            )
+            let routes: [WorkspaceMutationRoute?] = [
+                .cloud(
+                    accountID: "account",
+                    remoteWorkspaceID: "remote-workspace"
+                ),
+                nil,
+            ]
+
+            for route in routes {
+                let store = TestStore(
+                    initialState: Chat.State(
+                        session: session,
+                        isCloudHosted: true,
+                        mutationRoute: route
+                    )
+                ) {
+                    Chat()
+                }
+
+                #expect(
+                    store.state.configurationInteractionMode
+                        == .readOnlyInformational
+                )
+                await store.send(.modelSelected(.gpt_5_6_terra))
+                await store.send(.reasoningEffortSelected(.medium))
+                await store.send(.fastModeButtonTapped)
+                #expect(store.state.selectedModel == .gpt5_5)
+                #expect(store.state.selectedReasoningEffort == .high)
+                #expect(!store.state.isFastModeEnabled)
+                #expect(!store.state.hasUserSelectedModel)
+                #expect(!store.state.hasUserSelectedReasoningEffort)
+                #expect(!store.state.hasUserSelectedFastMode)
+            }
+        }
+    }
+
+    @Test("Desktop configuration actions require an available mutation route")
+    func unavailableDesktopConfigurationActionsAreRejected() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = Chat.State(
+                session: .preview(
+                    model: .gpt5_5,
+                    codexThinkingLevel: .high,
+                    isFastModeEnabled: false
+                )
+            )
+            state.mutationRoute = nil
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            #expect(store.state.configurationInteractionMode == .hidden)
+            await store.send(.modelSelected(.gpt_5_6_terra))
+            await store.send(.reasoningEffortSelected(.medium))
+            await store.send(.fastModeButtonTapped)
+            #expect(store.state.selectedModel == .gpt5_5)
+            #expect(store.state.selectedReasoningEffort == .high)
+            #expect(!store.state.isFastModeEnabled)
+        }
+    }
+
+    @Test("Missing Cloud configuration stays Default and off")
+    func missingCloudConfigurationIsNotInferred() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: Session.Model(rawValue: ""),
+                codexThinkingLevel: nil,
+                isFastModeEnabled: nil
+            )
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            }
+
+            #expect(store.state.selectedModel.rawValue.isEmpty)
+            #expect(store.state.selectedReasoningEffort == nil)
+            #expect(!store.state.isFastModeEnabled)
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .medium,
+                        isFastModeEnabled: true
+                    )
+                )
+            )
+            #expect(store.state.selectedModel.rawValue.isEmpty)
+            #expect(store.state.selectedReasoningEffort == nil)
+            #expect(!store.state.isFastModeEnabled)
+        }
+    }
+
+    @Test("Cloud synchronization replaces defaults and preserves unknown values")
+    func cloudConfigurationFollowsSynchronization() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let futureModel = Session.Model(rawValue: "future-model")
+            let futureEffort = Session.ReasoningEffort(
+                rawValue: "future-effort"
+            )
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: .preview(
+                        model: Session.Model(rawValue: ""),
+                        codexThinkingLevel: nil,
+                        isFastModeEnabled: nil
+                    ),
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            }
+
+            await store.send(.sessionModelChanged(.gpt5_5)) {
+                $0.hasObservedSessionModelChange = true
+                $0.selectedModel = .gpt5_5
+            }
+            await store.send(.sessionReasoningEffortChanged(.high)) {
+                $0.hasObservedSessionReasoningEffortChange = true
+                $0.selectedReasoningEffort = .high
+            }
+            await store.send(.sessionFastModeChanged(true)) {
+                $0.hasObservedSessionFastModeChange = true
+                $0.isFastModeEnabled = true
+            }
+
+            await store.send(.sessionModelChanged(futureModel)) {
+                $0.selectedModel = futureModel
+            }
+            #expect(store.state.availableReasoningEfforts.isEmpty)
+            await store.send(.sessionReasoningEffortChanged(futureEffort)) {
+                $0.selectedReasoningEffort = futureEffort
+            }
+            #expect(store.state.selectedModel.rawValue == "future-model")
+            #expect(
+                store.state.selectedReasoningEffort?.rawValue
+                    == "future-effort"
+            )
         }
     }
 
@@ -1698,12 +1788,12 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_luna))) {
+            await store.send(.modelSelected(.gpt_5_6_luna)) {
                 $0.selectedModel = .gpt_5_6_luna
                 $0.selectedReasoningEffort = .medium
                 $0.hasUserSelectedModel = true
             }
-            await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
+            await store.send(.modelSelected(.gpt5_5)) {
                 $0.selectedModel = .gpt5_5
             }
         }
@@ -1987,6 +2077,33 @@ private func makeSession(
             }
             """.utf8
         )
+    )
+}
+
+private func makeDeliveryAttempt(
+    session: Session,
+    content: String,
+    attemptID: UUID = UUID(),
+    state: MessageDeliveryAttempt.State,
+    previousTurnID: String? = nil,
+    dispatchStartedAt: Date? = nil,
+    createdAt: Date = Date()
+) -> MessageDeliveryAttempt {
+    MessageDeliveryAttempt(
+        attemptID: attemptID,
+        route: .desktop,
+        canonicalWorkspaceID: session.workspaceID,
+        canonicalSessionID: session.id,
+        content: content,
+        model: session.model,
+        isFastModeEnabled: false,
+        mode: .sent,
+        reasoningEffort: session.reasoningEffort,
+        submittedDraft: content,
+        previousTurnID: previousTurnID,
+        state: state,
+        dispatchStartedAt: dispatchStartedAt,
+        createdAt: createdAt
     )
 }
 

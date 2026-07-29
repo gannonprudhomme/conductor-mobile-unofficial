@@ -27,7 +27,9 @@ public struct CreateWorkspace: Sendable {
         public var hasUserSelectedReasoningEffort = false
         public var isCreateAPIInFlight = false
         public var isFastModeEnabled = false
+        public var mode: Mode
         public let repositories: [Repository]
+        public let cloudCandidates: [CloudWorkspaceCreationCandidate]
 
         @Shared(.createWorkspacePrompt)
         public var prompt
@@ -42,7 +44,13 @@ public struct CreateWorkspace: Sendable {
         var workspaceID: Workspace.ID?
 
         var availableReasoningEfforts: [Session.ReasoningEffort] {
-            Session.availableReasoningEfforts(
+            if mode == .cloud {
+                return CloudCreationConfigurationCatalog.configurations
+                    .first(where: { $0.model == selectedModel })?
+                    .efforts
+                    ?? []
+            }
+            return Session.availableReasoningEfforts(
                 agentType: agentType,
                 model: selectedModel
             )
@@ -61,14 +69,20 @@ public struct CreateWorkspace: Sendable {
 
         public init(
             repositories: [Repository],
+            cloudCandidates: [CloudWorkspaceCreationCandidate] = [],
             selectedRepositoryIDFilter: Repository.ID? = nil
         ) {
-            precondition(!repositories.isEmpty, "CreateWorkspace requires a repository")
+            precondition(
+                !repositories.isEmpty || !cloudCandidates.isEmpty,
+                "CreateWorkspace requires a local or Cloud repository"
+            )
             self.repositories = repositories
+            self.cloudCandidates = cloudCandidates
+            self.mode = repositories.isEmpty ? .cloud : .local
             self.selectedRepositoryID = repositories
-                .first { $0.id == selectedRepositoryIDFilter }?
-                .id
-                ?? repositories[0].id
+                .first { $0.id == selectedRepositoryIDFilter }?.id
+                ?? repositories.first?.id
+                ?? cloudCandidates[0].id
             let modelSettings =
                 mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
             if let agentType = modelSettings.defaultModel.agentType {
@@ -78,7 +92,41 @@ public struct CreateWorkspace: Sendable {
                 self.isFastModeEnabled = modelSettings.isFastModeEnabled
                 self.reconcileSelectedReasoningEffort()
             }
+            if mode == .cloud {
+                self.applyCloudConfigurationDefault()
+            }
         }
+
+        mutating func applyCloudConfigurationDefault() {
+            let configuration = CloudCreationConfigurationCatalog.configurations
+                .first(where: {
+                    $0.model == selectedModel
+                        && selectedReasoningEffort.map(
+                            $0.efforts.contains
+                        ) != false
+                })
+                ?? CloudCreationConfigurationCatalog.defaultConfiguration
+            agentType = configuration.agent
+            selectedModel = configuration.model
+            selectedReasoningEffort = selectedReasoningEffort.flatMap {
+                configuration.efforts.contains($0) ? $0 : nil
+            } ?? configuration.efforts.first
+            isFastModeEnabled = false
+        }
+
+        var displayedRepositories: [Repository] {
+            switch mode {
+            case .local:
+                repositories
+            case .cloud:
+                cloudCandidates.map(\.repository)
+            }
+        }
+    }
+
+    public enum Mode: Equatable, Sendable {
+        case local
+        case cloud
     }
 
     public enum Action: BindableAction {
@@ -93,21 +141,23 @@ public struct CreateWorkspace: Sendable {
             CreatedWorkspace,
             selectedModel: Session.Model,
             selectedReasoningEffort: Session.ReasoningEffort?,
-            requestLease: DesktopRequestLease,
-            initialPrompt: WorkspaceCreationResult.InitialPrompt?
+            requestLease: DesktopRequestLease
         )
         case modelSettingsFetched(DesktopClient.ModelSettings)
+        case modeSelected(Mode)
         case reasoningEffortSelected(Session.ReasoningEffort)
         case delegate(Delegate)
 
         public enum Alert: Equatable {}
 
         public enum Delegate: Equatable {
+            case cloudWorkspaceSubmitted(CloudWorkspaceCreationForm)
             case workspaceCreated(WorkspaceCreationResult)
         }
     }
 
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.defaultDatabase) var database
     @Dependency(\.uuid) var uuid
 
     public init() {}
@@ -118,6 +168,9 @@ public struct CreateWorkspace: Sendable {
         Reduce { state, action in
             switch action {
             case .task:
+                guard state.mode == .local else {
+                    return .none
+                }
                 return .run { send in
                     guard let settings = try? await desktopClient.fetchModelSettings() else {
                         return
@@ -128,6 +181,29 @@ public struct CreateWorkspace: Sendable {
             case .createButtonTapped:
                 guard !state.isCreateAPIInFlight else {
                     return .none
+                }
+                if state.mode == .cloud {
+                    guard let candidate = state.cloudCandidates.first(
+                        where: { $0.id == state.selectedRepositoryID }
+                    ) else {
+                        return .none
+                    }
+                    return .send(
+                        .delegate(
+                            .cloudWorkspaceSubmitted(
+                                CloudWorkspaceCreationForm(
+                                    candidate: candidate,
+                                    prompt: state.prompt
+                                        .trimmingCharacters(
+                                            in: .whitespacesAndNewlines
+                                        ),
+                                    selectedModel: state.selectedModel,
+                                    selectedReasoningEffort:
+                                        state.selectedReasoningEffort
+                                )
+                            )
+                        )
+                    )
                 }
                 let workspaceID = state.workspaceID ?? uuid().uuidString.lowercased()
                 let prompt = state.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -146,9 +222,9 @@ public struct CreateWorkspace: Sendable {
                         workspaceID,
                     ] send in
                     do {
-                        // Workspace creation and optional prompt delivery are one endpoint-pinned
-                        // workflow. The lease prevents any obsolete-address result from entering the
-                        // durable cache or navigation state after Settings changes the address.
+                        // Workspace creation and its durable initial-prompt handoff are pinned to
+                        // one endpoint. The lease prevents an old-address result from entering
+                        // navigation after Settings changes the desktop address.
                         let requestLease = try desktopClient.acquireRequestLease()
                         let createdWorkspace = try await DesktopRequestLeaseContext.$current
                             .withValue(requestLease) {
@@ -160,51 +236,42 @@ public struct CreateWorkspace: Sendable {
                                     isFastModeEnabled: isFastModeEnabled
                                 )
                             }
-                        let initialPrompt: WorkspaceCreationResult.InitialPrompt?
-                        if let promptMessageID {
-                            let result: MessageDeliveryResult
-                            do {
-                                result = try await DesktopRequestLeaseContext.$current
-                                    .withValue(requestLease) {
-                                        try await desktopClient.sendMessage(
-                                            workspaceID: createdWorkspace.workspace.id,
-                                            sessionID: createdWorkspace.session.id,
-                                            message: prompt,
-                                            model: model,
-                                            isFastModeEnabled: isFastModeEnabled,
-                                            mode: .sent,
-                                            reasoningEffort: reasoningEffort,
-                                            attemptID: promptMessageID
-                                        )
-                                    }
-                            } catch is CancellationError {
-                                throw CancellationError()
-                            } catch DesktopClientError.staleRequestLease {
-                                throw DesktopClientError.staleRequestLease
-                            } catch {
-                                result = .unknown(
-                                    reason: "Prompt delivery could not be determined."
-                                )
-                            }
-                            initialPrompt = WorkspaceCreationResult.InitialPrompt(
-                                attemptID: promptMessageID,
-                                content: prompt,
-                                deliveryResult: result
-                            )
-                        } else {
-                            initialPrompt = nil
-                        }
                         try await desktopClient.persistCreatedWorkspace(
                             createdWorkspace: createdWorkspace,
                             requestLease: requestLease
                         )
+                        if let promptMessageID {
+                            try await database.write { database in
+                                try MessageDeliveryAttempt
+                                    .insert {
+                                        MessageDeliveryAttempt(
+                                            attemptID: promptMessageID,
+                                            route: .desktop,
+                                            desktopEndpoint:
+                                                requestLease.baseURL
+                                                    .absoluteString,
+                                            canonicalWorkspaceID:
+                                                createdWorkspace.workspace.id,
+                                            canonicalSessionID:
+                                                createdWorkspace.session.id,
+                                            content: prompt,
+                                            model: model,
+                                            isFastModeEnabled:
+                                                isFastModeEnabled,
+                                            mode: .sent,
+                                            reasoningEffort: reasoningEffort,
+                                            submittedDraft: prompt
+                                        )
+                                    }
+                                    .execute(database)
+                            }
+                        }
                         await send(
                             .createWorkspaceSucceeded(
                                 createdWorkspace,
                                 selectedModel: model,
                                 selectedReasoningEffort: reasoningEffort,
-                                requestLease: requestLease,
-                                initialPrompt: initialPrompt
+                                requestLease: requestLease
                             )
                         )
                     } catch is CancellationError {
@@ -245,8 +312,7 @@ public struct CreateWorkspace: Sendable {
                 createdWorkspace,
                 selectedModel,
                 selectedReasoningEffort,
-                requestLease,
-                initialPrompt
+                requestLease
             ):
                 guard desktopClient.isRequestLeaseValid(lease: requestLease) else {
                     state.isCreateAPIInFlight = false
@@ -261,7 +327,6 @@ public struct CreateWorkspace: Sendable {
                     .delegate(
                         .workspaceCreated(
                             WorkspaceCreationResult(
-                                initialPrompt: initialPrompt,
                                 selectedModel: selectedModel,
                                 selectedReasoningEffort: selectedReasoningEffort,
                                 requestLease: requestLease,
@@ -279,6 +344,9 @@ public struct CreateWorkspace: Sendable {
                 return .none
 
             case let .modelSettingsFetched(settings):
+                guard state.mode == .local else {
+                    return .none
+                }
                 let settings = state.mobileModelSettingsOverride ?? settings
                 if !state.hasUserSelectedModel {
                     let model = settings.defaultModel
@@ -299,6 +367,28 @@ public struct CreateWorkspace: Sendable {
                 state.reconcileSelectedReasoningEffort()
                 return .none
 
+            case let .modeSelected(mode):
+                guard state.mode != mode else {
+                    return .none
+                }
+                state.mode = mode
+                switch mode {
+                case .local:
+                    guard let repository = state.repositories.first else {
+                        return .none
+                    }
+                    state.selectedRepositoryID = repository.id
+                    return .send(.task)
+
+                case .cloud:
+                    guard let candidate = state.cloudCandidates.first else {
+                        return .none
+                    }
+                    state.selectedRepositoryID = candidate.id
+                    state.applyCloudConfigurationDefault()
+                    return .none
+                }
+
             case .alert, .binding, .delegate:
                 return .none
             }
@@ -307,49 +397,57 @@ public struct CreateWorkspace: Sendable {
     }
 }
 
+public struct CloudWorkspaceCreationForm: Equatable, Sendable {
+    public let candidate: CloudWorkspaceCreationCandidate
+    public let prompt: String
+    public let selectedModel: Session.Model
+    public let selectedReasoningEffort: Session.ReasoningEffort?
+
+    public init(
+        candidate: CloudWorkspaceCreationCandidate,
+        prompt: String,
+        selectedModel: Session.Model,
+        selectedReasoningEffort: Session.ReasoningEffort?
+    ) {
+        self.candidate = candidate
+        self.prompt = prompt
+        self.selectedModel = selectedModel
+        self.selectedReasoningEffort = selectedReasoningEffort
+    }
+}
+
 /// The fully reconciled result handed from `CreateWorkspace` to its parent features.
 ///
 /// `Workspaces` inserts the new item into navigation state, while `Main` uses the same value to
-/// open chat and optionally surface an uncertain initial-prompt delivery. The request lease lets
-/// those consumers reject a result if Settings changed desktops after the child reducer emitted it.
+/// open chat and optionally surface an uncertain initial-prompt delivery. Local results carry a
+/// request lease so consumers can reject them if Settings changed desktops after the child reducer
+/// emitted them; Cloud results are account-scoped and do not need a desktop lease.
 public struct WorkspaceCreationResult: Equatable, Sendable {
-    public let initialPrompt: InitialPrompt?
+    public let completionID: UUID?
     public let selectedModel: Session.Model
     public let selectedReasoningEffort: Session.ReasoningEffort?
-    /// Endpoint identity on which creation and its atomic local persistence completed.
-    public let requestLease: DesktopRequestLease
+    /// Endpoint identity on which local creation and its atomic persistence completed.
+    public let requestLease: DesktopRequestLease?
+    public let selectedSessionID: Session.ID?
     public let workspace: WorkspaceWithRepository
 
     /// Packages creation state for the parent delegate action after persistence has succeeded.
     public init(
-        initialPrompt: InitialPrompt? = nil,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort? = nil,
-        requestLease: DesktopRequestLease,
-        workspace: WorkspaceWithRepository
+        requestLease: DesktopRequestLease? = nil,
+        workspace: WorkspaceWithRepository,
+        selectedSessionID: Session.ID? = nil,
+        completionID: UUID? = nil
     ) {
-        self.initialPrompt = initialPrompt
+        self.completionID = completionID
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.requestLease = requestLease
+        self.selectedSessionID = selectedSessionID
         self.workspace = workspace
     }
 
-    public struct InitialPrompt: Equatable, Sendable {
-        public let attemptID: UUID
-        public let content: String
-        public let deliveryResult: MessageDeliveryResult
-
-        public init(
-            attemptID: UUID,
-            content: String,
-            deliveryResult: MessageDeliveryResult
-        ) {
-            self.attemptID = attemptID
-            self.content = content
-            self.deliveryResult = deliveryResult
-        }
-    }
 }
 
 extension AlertState where Action == CreateWorkspace.Action.Alert {
@@ -382,7 +480,25 @@ public struct CreateWorkspaceView: View {
     }
 
     private var content: some View {
-        promptEditor
+        VStack(spacing: 0) {
+            if !store.repositories.isEmpty,
+               !store.cloudCandidates.isEmpty {
+                Picker(
+                    "Workspace location",
+                    selection: Binding(
+                        get: { store.mode },
+                        set: { store.send(.modeSelected($0)) }
+                    )
+                ) {
+                    Text("Local").tag(CreateWorkspace.Mode.local)
+                    Text("Cloud").tag(CreateWorkspace.Mode.cloud)
+                }
+                .pickerStyle(.segmented)
+                .padding(.bottom, 12)
+            }
+
+            promptEditor
+        }
             .padding(.horizontal, 16)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -418,7 +534,7 @@ public struct CreateWorkspaceView: View {
 
         return Menu {
             RepositoryPicker(
-                store.repositories,
+                store.displayedRepositories,
                 selection: $store.selectedRepositoryID
             )
         } label: {
@@ -469,11 +585,22 @@ public struct CreateWorkspaceView: View {
             ModelAndFastModeControls(
                 agentType: store.agentType,
                 allowsAgentSwitching: true,
+                allowedModels: store.mode == .cloud
+                    ? Set(
+                        CloudCreationConfigurationCatalog.configurations
+                            .map(\.model)
+                    )
+                    : nil,
                 availableReasoningEfforts: store.availableReasoningEfforts,
                 isFastModeEnabled: store.isFastModeEnabled,
+                showsFastMode: store.mode == .local,
                 selectedModel: store.selectedModel,
                 selectedReasoningEffort: store.selectedReasoningEffort,
-                onFastModeTapped: { store.isFastModeEnabled.toggle() },
+                onFastModeTapped: {
+                    if store.mode == .local {
+                        store.isFastModeEnabled.toggle()
+                    }
+                },
                 onSelectReasoningEffort: {
                     store.send(.reasoningEffortSelected($0))
                 },
@@ -515,12 +642,16 @@ public struct CreateWorkspaceView: View {
                 }
         }
         .buttonStyle(.spring)
+        .accessibilityIdentifier("create-workspace.submit")
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.5)
     }
 
     private var selectedRepository: Repository? {
         store.repositories
+            .first(where: { $0.id == store.selectedRepositoryID })
+            ?? store.cloudCandidates
+            .map(\.repository)
             .first(where: { $0.id == store.selectedRepositoryID })
     }
 }
