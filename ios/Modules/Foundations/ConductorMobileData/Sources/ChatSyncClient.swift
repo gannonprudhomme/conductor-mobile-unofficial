@@ -10,6 +10,7 @@ import Dependencies
 import DependenciesMacros
 import Foundation
 import SharedConductorData
+import Sharing
 import SQLiteData
 
 public enum ChatSyncEvent: Sendable {
@@ -50,6 +51,12 @@ public extension DependencyValues {
 private actor ChatSyncCoordinator {
     private typealias Observer = (continuation: AsyncStream<ChatSyncEvent>.Continuation, isReady: Bool)
 
+    private struct WorkspaceRoute: Sendable {
+        let workspace: Workspace
+        let observationWorkspaceID: Workspace.ID
+        let credentialGeneration: UUID?
+    }
+
     private struct Route: Sendable {
         let sessionID: Session.ID
         let workspaceID: Workspace.ID
@@ -57,9 +64,13 @@ private actor ChatSyncCoordinator {
     }
 
     private var foregroundSessionsByWorkspace: [Workspace.ID: Set<Session.ID>] = [:]
+    private var hasObservedCredentialGeneration = false
+    private var observedCredentialGeneration: UUID?
     private var observers: [Session.ID: [UUID: Observer]] = [:]
     private var transcriptTasks: [Session.ID: Task<Void, Never>] = [:]
-    private var workspaceTasks: [Workspace.ID: (workspace: Workspace, task: Task<Void, Never>)] = [:]
+    private var workspaceTasks: [
+        Workspace.ID: (route: WorkspaceRoute, task: Task<Void, Never>)
+    ] = [:]
 
     nonisolated func observeSelected(sessionID: Session.ID) -> AsyncStream<ChatSyncEvent> {
         AsyncStream { continuation in
@@ -99,25 +110,51 @@ private actor ChatSyncCoordinator {
 
     private func reconcileForeground() async throws {
         @Dependency(\.defaultDatabase) var database
+        @Shared(.cloudConfiguration) var cloudConfiguration
 
-        let workspaces = try await database.read {
-            try Workspace.chatSyncPrefetchCandidates(in: $0)
+        let credentialGeneration = cloudConfiguration?.credentialGeneration
+        reconcileCredentialGeneration(credentialGeneration)
+
+        let routes = try await database.read { database in
+            try Workspace.chatSyncPrefetchCandidates(in: database).map { workspace in
+                let observationWorkspaceID = if workspace.isCloudHosted {
+                    try CloudWorkspaceMetadata
+                        .find(workspace.id)
+                        .fetchOne(database)?
+                        .remoteWorkspaceID
+                        ?? workspace.id
+                } else {
+                    workspace.id
+                }
+                return WorkspaceRoute(
+                    workspace: workspace,
+                    observationWorkspaceID: observationWorkspaceID,
+                    credentialGeneration: workspace.isCloudHosted
+                        ? credentialGeneration
+                        : nil
+                )
+            }
         }
-        let workspaceIDs = Set(workspaces.map(\.id))
+        let workspaceIDs = Set(routes.map(\.workspace.id))
 
         for workspaceID in Array(workspaceTasks.keys) where !workspaceIDs.contains(workspaceID) {
             removeWorkspace(workspaceID)
         }
 
-        for workspace in workspaces {
-            if let observation = workspaceTasks[workspace.id],
-               observation.workspace.isCloudHosted == workspace.isCloudHosted {
+        for route in routes {
+            if let observation = workspaceTasks[route.workspace.id],
+               observation.route.workspace.isCloudHosted
+                == route.workspace.isCloudHosted,
+               observation.route.observationWorkspaceID
+                == route.observationWorkspaceID,
+               observation.route.credentialGeneration
+                == route.credentialGeneration {
                 continue
             }
-            removeWorkspace(workspace.id)
-            workspaceTasks[workspace.id] = (
-                workspace,
-                Task { await self.observeSessions(workspace) }
+            removeWorkspace(route.workspace.id)
+            workspaceTasks[route.workspace.id] = (
+                route,
+                Task { await self.observeSessions(route) }
             )
         }
     }
@@ -136,16 +173,19 @@ private actor ChatSyncCoordinator {
         }
     }
 
-    private func observeSessions(_ workspace: Workspace) async {
-        await observeWorkspaceSessions(workspace)
+    private func observeSessions(_ route: WorkspaceRoute) async {
+        await observeWorkspaceSessions(route)
         guard !Task.isCancelled else {
             return
         }
-        removeWorkspace(workspace.id)
+        removeWorkspace(route.workspace.id)
     }
 
-    private func observeWorkspaceSessions(_ workspace: Workspace) async {
-        for await event in WorkspaceSessionObservation.observe(workspace: workspace) {
+    private func observeWorkspaceSessions(_ route: WorkspaceRoute) async {
+        for await event in WorkspaceSessionObservation.observe(
+            workspaceID: route.observationWorkspaceID,
+            isCloudHosted: route.workspace.isCloudHosted
+        ) {
             guard !Task.isCancelled else {
                 return
             }
@@ -153,7 +193,7 @@ private actor ChatSyncCoordinator {
             case let .snapshot(sessions):
                 await setForegroundSessions(
                     sessions.filter { !$0.isHidden }.map(\.id),
-                    workspaceID: workspace.id
+                    workspaceID: route.workspace.id
                 )
 
             case .failure:
@@ -180,9 +220,12 @@ private actor ChatSyncCoordinator {
         sessionID: Session.ID,
         continuation: AsyncStream<ChatSyncEvent>.Continuation
     ) async {
+        @Shared(.cloudConfiguration) var cloudConfiguration
+
         guard !Task.isCancelled else {
             return
         }
+        reconcileCredentialGeneration(cloudConfiguration?.credentialGeneration)
         observers[sessionID, default: [:]][observerID] = (continuation, false)
         ensureTranscript(sessionID: sessionID)
 
@@ -195,6 +238,31 @@ private actor ChatSyncCoordinator {
             return
         }
         markReady(sessionID: sessionID)
+    }
+
+    private func reconcileCredentialGeneration(
+        _ credentialGeneration: UUID?
+    ) {
+        guard hasObservedCredentialGeneration else {
+            hasObservedCredentialGeneration = true
+            observedCredentialGeneration = credentialGeneration
+            return
+        }
+        guard credentialGeneration != observedCredentialGeneration else {
+            return
+        }
+        observedCredentialGeneration = credentialGeneration
+
+        let sessionIDs = Set(transcriptTasks.keys)
+            .union(observers.keys)
+            .union(foregroundSessionsByWorkspace.values.joined())
+        for task in transcriptTasks.values {
+            task.cancel()
+        }
+        transcriptTasks.removeAll()
+        for sessionID in sessionIDs {
+            ensureTranscript(sessionID: sessionID)
+        }
     }
 
     private func removeSelected(observerID: UUID, sessionID: Session.ID) {
@@ -308,6 +376,13 @@ private actor ChatSyncCoordinator {
                     database: database
                 )
             }
+            try await database.write { database in
+                try MessageDeliveryAttempt.acknowledgeDesktopMessages(
+                    event.messages,
+                    sessionID: route.sessionID,
+                    in: database
+                )
+            }
             if event.isSnapshot {
                 self.markReady(sessionID: route.sessionID)
             }
@@ -319,8 +394,12 @@ private actor ChatSyncCoordinator {
         @Dependency(\.cloudAPIClient) var cloudAPIClient
 
         do {
-            let cache = try await database.read { database in
-                try CloudChatPersistence.cachedTranscript(
+            let cache = try await database.write { database in
+                try CloudChatPersistence.reconcileDeliveryAttempts(
+                    for: route.sessionID,
+                    in: database
+                )
+                return try CloudChatPersistence.cachedTranscript(
                     for: route.sessionID,
                     in: database
                 )
@@ -332,7 +411,6 @@ private actor ChatSyncCoordinator {
                 retrying: {
                     cloudAPIClient.observeTranscript(
                         sessionID: cache.remoteSessionID,
-                        workspaceID: route.workspaceID,
                         checkpoint: cache.checkpoint
                     )
                 },

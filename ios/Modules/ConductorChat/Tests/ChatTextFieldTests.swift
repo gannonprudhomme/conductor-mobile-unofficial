@@ -28,7 +28,7 @@ struct ChatTextFieldTests {
                 isSendInFlight: false,
                 isStopInFlight: false,
                 isWorking: false,
-                selectedModel: .constant(.gpt_5_6_sol),
+                selectedModel: .gpt_5_6_sol,
                 selectedReasoningEffort: nil,
                 availableReasoningEfforts: [],
                 shouldFocusOnAppear: true,

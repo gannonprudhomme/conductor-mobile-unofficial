@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/28/26.
 //
 
+import Foundation
 import SharedConductorData
 import SQLiteData
 
@@ -28,6 +29,8 @@ public struct CloudSessionMetadata: Equatable, Identifiable, Sendable {
     public var hasCompleteTranscript: Bool
     @Column("transcript_projection_version")
     public var transcriptProjectionVersion: Int
+    @Column("last_full_transcript_refresh_at")
+    public var lastFullTranscriptRefreshAt: Date?
 
     public init(
         canonicalSessionID: Session.ID,
@@ -38,7 +41,8 @@ public struct CloudSessionMetadata: Equatable, Identifiable, Sendable {
         refreshGeneration: String,
         transcriptCursor: String? = nil,
         hasCompleteTranscript: Bool = false,
-        transcriptProjectionVersion: Int = 0
+        transcriptProjectionVersion: Int = 0,
+        lastFullTranscriptRefreshAt: Date? = nil
     ) {
         self.canonicalSessionID = canonicalSessionID
         self.cloudSessionID = cloudSessionID
@@ -49,6 +53,7 @@ public struct CloudSessionMetadata: Equatable, Identifiable, Sendable {
         self.transcriptCursor = transcriptCursor
         self.hasCompleteTranscript = hasCompleteTranscript
         self.transcriptProjectionVersion = transcriptProjectionVersion
+        self.lastFullTranscriptRefreshAt = lastFullTranscriptRefreshAt
     }
 
     public var id: Session.ID { canonicalSessionID }

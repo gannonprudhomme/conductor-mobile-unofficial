@@ -9,6 +9,7 @@ import ConductorCloud
 import Dependencies
 import Foundation
 import SharedConductorData
+import Sharing
 import SQLiteData
 
 public enum WorkspaceSessionSyncEvent: Sendable {
@@ -45,21 +46,16 @@ public enum WorkspaceSessionPersistence {
 
 public enum WorkspaceSessionObservation {
     public static func observe(
-        workspace: Workspace
-    ) -> AsyncStream<WorkspaceSessionSyncEvent> {
-        observe(
-            workspaceID: workspace.id,
-            isCloudHosted: workspace.isCloudHosted
-        )
-    }
-
-    public static func observe(
         workspaceID: Workspace.ID,
         isCloudHosted: Bool
     ) -> AsyncStream<WorkspaceSessionSyncEvent> {
-        WorkspaceSessionObservationStore.shared.observe(
+        @Shared(.cloudConfiguration) var cloudConfiguration
+        return WorkspaceSessionObservationStore.shared.observe(
             workspaceID: workspaceID,
-            isCloudHosted: isCloudHosted
+            isCloudHosted: isCloudHosted,
+            credentialGeneration: isCloudHosted
+                ? cloudConfiguration?.credentialGeneration
+                : nil
         )
     }
 }
@@ -70,6 +66,7 @@ private actor WorkspaceSessionObservationStore {
     private struct Key: Hashable {
         let workspaceID: Workspace.ID
         let isCloudHosted: Bool
+        let credentialGeneration: UUID?
     }
 
     private struct Entry {
@@ -85,11 +82,13 @@ private actor WorkspaceSessionObservationStore {
 
     nonisolated func observe(
         workspaceID: Workspace.ID,
-        isCloudHosted: Bool
+        isCloudHosted: Bool,
+        credentialGeneration: UUID?
     ) -> AsyncStream<WorkspaceSessionSyncEvent> {
         let key = Key(
             workspaceID: workspaceID,
-            isCloudHosted: isCloudHosted
+            isCloudHosted: isCloudHosted,
+            credentialGeneration: credentialGeneration
         )
         return AsyncStream { continuation in
             let observerID = UUID()

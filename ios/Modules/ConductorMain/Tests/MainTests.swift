@@ -278,180 +278,6 @@ struct MainTests {
         }
     }
 
-    @Test("Popping and reopening a workspace restores its warm chat state")
-    func reopeningWorkspaceRestoresWarmChatState() async throws {
-        let workspace = Workspace.preview(
-            id: "workspace",
-            activeSessionID: "session",
-            derivedStatus: Workspace.Status.inProgress.rawValue
-        )
-        let item = WorkspaceWithRepository(
-            workspace: workspace,
-            repository: .preview()
-        )
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-            try await database.write { database in
-                try Workspace.upsert { workspace }.execute(database)
-                try Session.upsert {
-                    Session.preview(
-                        id: "session",
-                        workspaceID: workspace.id
-                    )
-                }.execute(database)
-            }
-
-            var initialState = Main.State()
-            var workspaceChat = WorkspaceChat.State(
-                workspaceWithRepository: item
-            )
-            workspaceChat.isLoadingSessions = false
-            workspaceChat.chat?.isLoadingMessages = false
-            initialState.path.append(.workspaceChat(workspaceChat))
-            let pathID = try #require(initialState.path.ids.first)
-            let store = TestStore(initialState: initialState) {
-                Main()
-            }
-
-            await store.send(.path(.popFrom(id: pathID))) {
-                $0.cachedWorkspaceChat = workspaceChat
-                $0.path.pop(from: pathID)
-            }
-            await store.send(.workspaces(.workspaceTapped(item))) {
-                $0.cachedWorkspaceChat = nil
-                $0.path.append(.workspaceChat(workspaceChat))
-            }
-        }
-    }
-
-    @Test("Cloud credential deletion invalidates warm chat presentation")
-    func logoutClearsWarmCloudChat() async throws {
-        let workspace = Workspace.preview(
-            id: "cloud-workspace",
-            activeSessionID: "session",
-            derivedStatus: Workspace.Status.inProgress.rawValue,
-            hostingServerURL: Workspace.conductorCloudHostingServerURL
-        )
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-            try await database.write { database in
-                try Workspace.upsert { workspace }.execute(database)
-                try Session.upsert {
-                    Session.preview(
-                        id: "session",
-                        workspaceID: workspace.id
-                    )
-                }
-                .execute(database)
-            }
-
-            var initialState = Main.State()
-            initialState.settings = ConductorSettings.State()
-            initialState.cachedWorkspaceChat = WorkspaceChat.State(
-                workspaceWithRepository: WorkspaceWithRepository(
-                    workspace: workspace,
-                    repository: nil
-                )
-            )
-            let store = TestStore(initialState: initialState) {
-                Main()
-            } withDependencies: {
-                $0.cloudWorkspaceCacheClient.clear = { _ in }
-            }
-
-            await store.send(
-                .settings(
-                    .presented(
-                        .cloudCredentialDeleteResult(.success(()))
-                    )
-                )
-            ) {
-                $0.cachedWorkspaceChat = nil
-            }
-            await store.receive(
-                \.settings.presented.cloudCacheCleanupResult
-            )
-        }
-    }
-
-    @Test("A Cloud chat popped after logout is not cached or reopened")
-    func logoutThenPopDoesNotRestoreCloudChat() async throws {
-        let workspace = Workspace.preview(
-            id: "cloud-workspace",
-            activeSessionID: "session",
-            hostingServerURL: Workspace.conductorCloudHostingServerURL
-        )
-        let item = WorkspaceWithRepository(
-            workspace: workspace,
-            repository: nil
-        )
-        let session = Session.preview(
-            id: "session",
-            workspaceID: workspace.id
-        )
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Shared(.cloudConfiguration) var cloudConfiguration
-            $cloudConfiguration.withLock {
-                $0 = CloudConfiguration(accountID: "account")
-            }
-
-            var workspaceChat = WorkspaceChat.State(
-                workspaceWithRepository: item
-            )
-            workspaceChat.chat = Chat.State(
-                session: session,
-                isCloudHosted: true
-            )
-            workspaceChat.chat?.isLoadingMessages = false
-            workspaceChat.isLoadingSessions = false
-            workspaceChat.transcriptCopyCount = 42
-
-            var initialState = Main.State()
-            initialState.settings = ConductorSettings.State()
-            initialState.path.append(.workspaceChat(workspaceChat))
-            let pathID = try #require(initialState.path.ids.first)
-            let store = TestStore(initialState: initialState) {
-                Main()
-            } withDependencies: {
-                $0.cloudWorkspaceCacheClient.clear = { _ in }
-            }
-            store.exhaustivity = .off(showSkippedAssertions: false)
-
-            await store.send(
-                .settings(
-                    .presented(
-                        .cloudCredentialDeleteResult(.success(()))
-                    )
-                )
-            )
-            #expect(store.state.cloudConfiguration == nil)
-            await store.receive(
-                \.settings.presented.cloudCacheCleanupResult
-            )
-
-            await store.send(.path(.popFrom(id: pathID)))
-            #expect(store.state.cachedWorkspaceChat == nil)
-            #expect(store.state.path.isEmpty)
-
-            await store.send(.workspaces(.workspaceTapped(item)))
-            guard case let .workspaceChat(reopened)? = store.state.path.last
-            else {
-                Issue.record("Expected the workspace chat to reopen.")
-                return
-            }
-            #expect(reopened.transcriptCopyCount == 0)
-        }
-    }
-
     @Test("Archived workspace delegate pops its chat")
     func archivedWorkspacePopsChat() async throws {
         let item = WorkspaceWithRepository(
@@ -494,11 +320,6 @@ struct MainTests {
             endpointEpoch: 0
         )
         let creation = WorkspaceCreationResult(
-            initialPrompt: .init(
-                attemptID: UUID(42),
-                content: "Run the tests.",
-                deliveryResult: .unknown(reason: "Delivery unconfirmed.")
-            ),
             selectedModel: .gpt_5_6_terra,
             selectedReasoningEffort: .ultra,
             requestLease: requestLease,
@@ -524,13 +345,6 @@ struct MainTests {
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
                             selectedReasoningEffort: .ultra,
-                            initialMessage: .init(
-                                id: UUID(42),
-                                content: "Run the tests.",
-                                deliveryResult: .unknown(
-                                    reason: "Delivery unconfirmed."
-                                )
-                            ),
                             shouldFocusMessageField: true
                         )
                     )

@@ -31,12 +31,14 @@ struct WorkspaceRow: View {
     private let repository: Repository?
     private let showsRepositoryIcon: Bool
     private let action: (@MainActor (WorkspaceRowAction) -> Void)?
+    private let capabilities: WorkspaceCapabilities
 
-    @ScaledMetric(relativeTo: .body) private var iconSize = 20
+    @ScaledMetric(relativeTo: .body) private var iconSize = 18
 
     init(
         item: WorkspaceWithRepository,
         showsRepositoryIcon: Bool,
+        capabilities: WorkspaceCapabilities = .desktop,
         action: (@MainActor (WorkspaceRowAction) -> Void)?
     ) {
         self.item = item
@@ -51,6 +53,7 @@ struct WorkspaceRow: View {
         self.pullRequestStatus = item.pullRequestStatus
         self.repository = item.repository
         self.showsRepositoryIcon = showsRepositoryIcon
+        self.capabilities = capabilities
         self.action = action
     }
 
@@ -64,26 +67,30 @@ struct WorkspaceRow: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier(accessibilityIdentifier)
             .contextMenu {
-                contextMenu(action: action)
+                contextMenu(action: action, capabilities: capabilities)
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button {
-                    action(.toggleUnread)
-                } label: {
-                    Label(
-                        isUnread ? "Read" : "Unread",
-                        systemImage: isUnread ? "envelope.open" : "envelope"
-                    )
+                if capabilities.canMarkUnread {
+                    Button {
+                        action(.toggleUnread)
+                    } label: {
+                        Label(
+                            isUnread ? "Read" : "Unread",
+                            systemImage: isUnread ? "envelope.open" : "envelope"
+                        )
+                    }
+                    .tint(.theme(.planBorder))
                 }
-                .tint(.theme(.planBorder))
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button(role: .destructive) {
-                    action(.archive)
-                } label: {
-                    Label("Archive", systemImage: "archivebox")
+                if capabilities.canArchiveWorkspace {
+                    Button(role: .destructive) {
+                        action(.archive)
+                    } label: {
+                        Label("Archive", systemImage: "archivebox")
+                    }
+                    .tint(.theme(.destructive))
                 }
-                .tint(.theme(.destructive))
             }
         } else {
             rowLabel
@@ -99,7 +106,7 @@ struct WorkspaceRow: View {
                     .lineLimit(1)
 
                 if isCloudHosted {
-                    CloudWorkspaceIcon(size: 16)
+                    CloudWorkspaceIcon(size: 18)
                         .accessibilityLabel("Cloud workspace")
                 }
             }
@@ -107,7 +114,7 @@ struct WorkspaceRow: View {
             .fontWeight(isUnread ? .semibold : .regular)
         } icon: {
             if showsRepositoryIcon {
-                RepositoryIcon(repository: repository, size: 20, relativeTo: .body)
+                RepositoryIcon(repository: repository, size: 18, relativeTo: .body)
                     .foregroundStyle(.theme(.textSecondary))
             }
 
@@ -120,12 +127,12 @@ struct WorkspaceRow: View {
             } else if let pullRequestStatus {
                 PullRequestStatusIcon(
                     status: pullRequestStatus,
-                    size: 20,
+                    size: 18,
                     relativeTo: .body
                 )
                 .accessibilityLabel(pullRequestStatus.accessibilityLabel)
             } else {
-                LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
+                LucideIcon(Lucide.gitBranch, size: 18, relativeTo: .body)
                     .foregroundStyle(.theme(.textSecondary))
             }
         }
@@ -138,78 +145,90 @@ struct WorkspaceRow: View {
 
     @ViewBuilder
     private func contextMenu(
-        action: @escaping @MainActor (WorkspaceRowAction) -> Void
+        action: @escaping @MainActor (WorkspaceRowAction) -> Void,
+        capabilities: WorkspaceCapabilities
     ) -> some View {
-        Button {
-            // The section animation makes this menu action visually jump, so update it instantly.
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                action(.toggleUnread)
-            }
-        } label: {
-            Label {
-                Text(isUnread ? "Mark as read" : "Mark as unread")
-            } icon: {
-                ColoredMenuImage(isUnread ? Lucide.mailOpen : Lucide.mail)
-            }
-        }
-
-        Button {
-            action(.togglePinned)
-        } label: {
-            Label {
-                Text(isPinned ? "Unpin" : "Pin")
-            } icon: {
-                ColoredMenuImage(isPinned ? Lucide.pinOff : Lucide.pin)
-            }
-        }
-
-        Menu {
-            Picker(
-                "Status",
-                selection: Binding(
-                    get: { item?.workspace.status ?? .inProgress },
-                    set: { action(.setStatus($0)) }
-                )
-            ) {
-                ForEach(statuses) { status in
-                    Label {
-                        Text(status.title)
-                    } icon: {
-                        LinearStatusIcon(
-                            status: status,
-                            size: iconSize,
-                            preservesColor: true
-                        )
-                    }
-                    .tag(status)
+        if capabilities.canMarkUnread {
+            Button {
+                // The section animation makes this menu action visually jump, so update it instantly.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    action(.toggleUnread)
                 }
-            }
-            .labelsHidden()
-            .pickerStyle(.inline)
-        } label: {
-            Label {
-                Text("Set status")
-            } icon: {
-                LinearStatusIcon(
-                    status: item?.workspace.status ?? .inProgress,
-                    size: iconSize,
-                    preservesColor: true
-                )
-            }
-
-            Text((item?.workspace.status ?? .inProgress).title)
-        }
-
-        Section {
-            Button(role: .destructive) {
-                action(.archive)
             } label: {
                 Label {
-                    Text("Archive")
+                    Text(isUnread ? "Mark as read" : "Mark as unread")
                 } icon: {
-                    ColoredMenuImage(Lucide.archive, color: .theme(.destructive))
+                    ColoredMenuImage(isUnread ? Lucide.mailOpen : Lucide.mail)
+                }
+            }
+        }
+
+        if capabilities.canPin {
+            Button {
+                action(.togglePinned)
+            } label: {
+                Label {
+                    Text(isPinned ? "Unpin" : "Pin")
+                } icon: {
+                    ColoredMenuImage(isPinned ? Lucide.pinOff : Lucide.pin)
+                }
+            }
+        }
+
+        if capabilities.canSetStatus {
+            Menu {
+                Picker(
+                    "Status",
+                    selection: Binding(
+                        get: { item?.workspace.status ?? .inProgress },
+                        set: { action(.setStatus($0)) }
+                    )
+                ) {
+                    ForEach(statuses) { status in
+                        Label {
+                            Text(status.title)
+                        } icon: {
+                            LinearStatusIcon(
+                                status: status,
+                                size: iconSize,
+                                preservesColor: true
+                            )
+                        }
+                        .tag(status)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.inline)
+            } label: {
+                Label {
+                    Text("Set status")
+                } icon: {
+                    LinearStatusIcon(
+                        status: item?.workspace.status ?? .inProgress,
+                        size: iconSize,
+                        preservesColor: true
+                    )
+                }
+
+                Text((item?.workspace.status ?? .inProgress).title)
+            }
+        }
+
+        if capabilities.canArchiveWorkspace {
+            Section {
+                Button(role: .destructive) {
+                    action(.archive)
+                } label: {
+                    Label {
+                        Text("Archive")
+                    } icon: {
+                        ColoredMenuImage(
+                            Lucide.archive,
+                            color: .theme(.destructive)
+                        )
+                    }
                 }
             }
         }

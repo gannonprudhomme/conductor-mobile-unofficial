@@ -204,6 +204,20 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: build.conductor.mobile.ConductorSettingsTests
         PRODUCT_NAME: $(TARGET_NAME)
+  ConductorMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: ConductorMobileUITests
+    dependencies:
+      - target: ConductorMobile
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.UITests
+        PRODUCT_NAME: $(TARGET_NAME)
+        TEST_TARGET_NAME: ConductorMobile
 schemes:
   ConductorMobile:
     build:
@@ -265,3 +279,11 @@ schemes:
     test:
       targets:
         - ConductorSettingsTests
+  ConductorMobileUITests:
+    build:
+      targets:
+        ConductorMobile: all
+        ConductorMobileUITests: test
+    test:
+      targets:
+        - ConductorMobileUITests

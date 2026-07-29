@@ -64,7 +64,7 @@ public struct ReasoningEffortMenu<SourceLabel: View>: View {
         .menuOrder(.fixed)
         .disabled(isDisabled)
         .accessibilityLabel("Reasoning effort")
-        .accessibilityValue(selectedEffort?.displayName ?? "Unavailable")
+        .accessibilityValue(selectedEffort?.displayName ?? "Default")
     }
 }
 
@@ -125,23 +125,43 @@ public struct ReasoningEffortControl: View {
     }
 
     private func effortLabel(for effort: Session.ReasoningEffort) -> some View {
+        ReasoningEffortLabel(
+            effort: effort,
+            showsDefaultTitle: false
+        )
+    }
+}
+
+struct ReasoningEffortLabel: View {
+    let effort: Session.ReasoningEffort?
+    let showsDefaultTitle: Bool
+
+    private var displayedEffort: Session.ReasoningEffort {
+        effort ?? .none
+    }
+
+    var body: some View {
         Label {
-            if effort != .none {
-                Text(effort.displayName)
+            if showsDefaultTitle || displayedEffort != .none {
+                Text(displayedEffort.displayName)
             }
         } icon: {
             ReasoningEffortIcon(
-                activeBarCount: effort.activeBarCount,
-                usesUltraAppearance: effort.usesUltraAppearance
+                activeBarCount: displayedEffort.activeBarCount,
+                usesUltraAppearance: displayedEffort.usesUltraAppearance
             )
         }
         .font(.theme(.small))
         .foregroundStyle(
-            .theme(effort.usesUltraAppearance ? .textPrimary : .textSecondary)
+            .theme(
+                displayedEffort.usesUltraAppearance
+                    ? .textPrimary
+                    : .textSecondary
+            )
         )
         .padding(EdgeInsets(vertical: 6, horizontal: 8))
         .background(
-            effort.usesUltraAppearance
+            displayedEffort.usesUltraAppearance
                 ? AnyShapeStyle(LinearGradient.reasoningUltra)
                 : AnyShapeStyle(Color.clear),
             in: .capsule

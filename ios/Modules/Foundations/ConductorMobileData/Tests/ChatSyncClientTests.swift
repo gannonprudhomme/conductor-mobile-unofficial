@@ -9,6 +9,7 @@ import ConductorCloud
 import Dependencies
 import Foundation
 import SharedConductorData
+import Sharing
 import SQLiteData
 @testable import ConductorMobileData
 import Testing
@@ -118,8 +119,13 @@ struct ChatSyncClientTests {
     func workspaceDiscoveryStartsTranscriptStreams() async throws {
         let database = try appDatabase()
         let localWorkspace = Workspace.preview(id: "local-workspace")
+        let remoteCloudWorkspaceID = "remote-cloud-workspace"
+        let canonicalCloudWorkspaceID = CloudCanonicalID.workspace(
+            accountID: "account",
+            remoteWorkspaceID: remoteCloudWorkspaceID
+        )
         let cloudWorkspace = Workspace.preview(
-            id: "cloud-workspace",
+            id: canonicalCloudWorkspaceID,
             hostingServerURL: Workspace.conductorCloudHostingServerURL,
             updatedAt: Date(timeIntervalSince1970: 2)
         )
@@ -139,6 +145,15 @@ struct ChatSyncClientTests {
         try await database.write { database in
             try Workspace.insert { [localWorkspace, cloudWorkspace] }
                 .execute(database)
+            try CloudWorkspaceMetadata.insert {
+                CloudWorkspaceMetadata(
+                    workspaceID: canonicalCloudWorkspaceID,
+                    accountID: "account",
+                    remoteWorkspaceID: remoteCloudWorkspaceID,
+                    lastSeenGeneration: "generation"
+                )
+            }
+            .execute(database)
         }
         let localTranscriptConnections = LockIsolated(0)
         let cloudTranscriptConnections = LockIsolated(0)
@@ -182,13 +197,13 @@ struct ChatSyncClientTests {
                 }
             }
             $0.cloudAPIClient.observeSessions = { workspaceID in
-                #expect(workspaceID == cloudWorkspace.id)
+                #expect(workspaceID == remoteCloudWorkspaceID)
                 return AsyncThrowingStream { continuation in
                     continuation.yield(
                         CloudWorkspaceSessionSnapshot(
                             accountID: "account",
                             workspace: CloudWorkspace(
-                                id: cloudWorkspace.id,
+                                id: remoteCloudWorkspaceID,
                                 name: "Cloud",
                                 createdAt: .now
                             ),
@@ -206,9 +221,8 @@ struct ChatSyncClientTests {
                     )
                 }
             }
-            $0.cloudAPIClient.observeTranscript = { sessionID, workspaceID, checkpoint in
+            $0.cloudAPIClient.observeTranscript = { sessionID, checkpoint in
                 #expect(sessionID == "remote-session")
-                #expect(workspaceID == cloudWorkspace.id)
                 #expect(checkpoint == nil)
                 return AsyncThrowingStream { continuation in
                     cloudTranscriptConnections.withValue { $0 += 1 }
@@ -346,6 +360,76 @@ struct ChatSyncClientTests {
 
             await waitUntil { connections.value == 1 }
             #expect(connections.value == 1)
+        }
+    }
+
+    @Test("A credential generation change restarts a shared Cloud transcript stream")
+    func credentialGenerationRestartsCloudTranscriptStream() async throws {
+        let database = try appDatabase()
+        let workspace = Workspace.preview(
+            id: "cloud-workspace",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let sessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "remote-session"
+        )
+        let session = Session.preview(
+            id: sessionID,
+            workspaceID: workspace.id
+        )
+        try await database.write { database in
+            try Workspace.insert { workspace }.execute(database)
+            try Session.insert { session }.execute(database)
+            try CloudSessionMetadata.insert {
+                CloudSessionMetadata(
+                    canonicalSessionID: sessionID,
+                    cloudSessionID: "remote-session",
+                    workspaceID: workspace.id,
+                    accountID: "account",
+                    listOrder: 0,
+                    refreshGeneration: "generation"
+                )
+            }
+            .execute(database)
+        }
+        let connections = LockIsolated(0)
+
+        await withDependencies {
+            $0.defaultDatabase = database
+            $0.defaultFileStorage = .inMemory
+            $0.cloudAPIClient.observeTranscript = { _, _ in
+                connections.withValue { $0 += 1 }
+                return AsyncThrowingStream { _ in }
+            }
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(1)
+                )
+            }
+            let client = ChatSyncClient.live()
+            let first = Task {
+                for await _ in client.observeSelected(sessionID: sessionID) { }
+            }
+            defer { first.cancel() }
+
+            await waitUntil { connections.value == 1 }
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(2)
+                )
+            }
+            let second = Task {
+                for await _ in client.observeSelected(sessionID: sessionID) { }
+            }
+            defer { second.cancel() }
+
+            await waitUntil { connections.value == 2 }
+            #expect(connections.value == 2)
         }
     }
 
