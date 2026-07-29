@@ -612,6 +612,13 @@ public struct Chat: Sendable {
                     state.initializeIdleBaseline()
                 }
                 state.updateRows()
+                if !messages.isEmpty {
+                    // Persisted rows are already usable presentation even when the cache does not
+                    // yet have a complete resume marker. Keep recovering the authoritative
+                    // snapshot in the observation effect, but do not hide these rows behind its
+                    // loader while the user switches sessions.
+                    state.isLoadingMessages = false
+                }
                 return .none
 
             case let .initialMessagesResponse(sessionID, messages):
@@ -758,11 +765,10 @@ public struct Chat: Sendable {
         }
         return .run {
             [
-                initiallyIsLoadingMessages = state.isLoadingMessages,
                 sessionID = state.session.id,
                 workspaceID = state.session.workspaceID,
             ] send in
-            var isAwaitingInitialResponse = initiallyIsLoadingMessages
+            var isAwaitingInitialResponse = true
             await StreamObservation.observe {
                 desktopClient.observeMessages(
                     workspaceID: workspaceID,
@@ -772,7 +778,8 @@ public struct Chat: Sendable {
                 switch observation {
                 case let .persisted(event):
                     // A usable cache and a cursorless recovery are both emitted as complete
-                    // snapshots. Incremental frames must not dismiss loading on their own.
+                    // snapshots. Persisted rows can dismiss the presentation loader independently,
+                    // but only a complete event settles this observation's initial handshake.
                     if isAwaitingInitialResponse, event.isSnapshot {
                         isAwaitingInitialResponse = false
                         await send(
@@ -816,11 +823,10 @@ public struct Chat: Sendable {
     private func observeCloudMessages(_ state: State) -> Effect<Action> {
         .run {
             [
-                initiallyIsLoadingMessages = state.isLoadingMessages,
                 sessionID = state.session.id,
                 workspaceID = state.session.workspaceID,
             ] send in
-            var isAwaitingInitialResponse = initiallyIsLoadingMessages
+            var isAwaitingInitialResponse = true
             do {
                 let cache = try await database.read { database in
                     try CloudChatPersistence.cachedTranscript(
