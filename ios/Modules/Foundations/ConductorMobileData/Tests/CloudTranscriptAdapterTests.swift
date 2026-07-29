@@ -12,6 +12,70 @@ import SharedConductorData
 import Testing
 
 struct CloudTranscriptAdapterTests {
+    @Test("Native Claude agent events retain their normalized payload")
+    func nativeClaudeEvent() throws {
+        let assistant = event(
+            id: "assistant-event",
+            index: 9,
+            content: .object([
+                "type": .string("agent"),
+                "turnId": .string("turn-1"),
+                "rawPayload": .object([
+                    "type": .string("assistant"),
+                    "message": .object([
+                        "id": .string("message-1"),
+                        "model": .string("claude-opus-5"),
+                        "role": .string("assistant"),
+                        "usage": .object(["input_tokens": .integer(42)]),
+                        "content": .array([
+                            .object([
+                                "type": .string("text"),
+                                "text": .string("The missing answer is visible."),
+                            ]),
+                        ]),
+                    ]),
+                    "session_id": .string("session"),
+                ]),
+            ])
+        )
+
+        let parts = CloudTranscriptAdapter.adapt(
+            assistant,
+            accountID: "account",
+            remoteSessionID: "session",
+            canonicalSessionID: "canonical-session"
+        )
+
+        let part = try #require(parts.first)
+        #expect(parts.count == 1)
+        #expect(part.message.role == .assistant)
+        #expect(
+            part.message.turnID
+                == CloudCanonicalID.turn(
+                    accountID: "account",
+                    remoteSessionID: "session",
+                    remoteTurnID: "turn-1"
+                )
+        )
+        let content = try #require(part.message.content)
+        guard case let .assistant(agentEvent) = try JSONDecoder().decode(
+            AgentEvent.self,
+            from: Data(content.utf8)
+        ) else {
+            Issue.record("Expected a native Claude assistant event.")
+            return
+        }
+        guard case let .text(textBlock) = try #require(
+            agentEvent.message.content.first
+        ) else {
+            Issue.record("Expected Claude assistant text.")
+            return
+        }
+        #expect(textBlock.text == "The missing answer is visible.")
+        #expect(agentEvent.message.id == "message-1")
+        #expect(agentEvent.message.model == "claude-opus-5")
+    }
+
     @Test("User and agent tool events adapt into canonical message rows")
     func understoodEvents() throws {
         let user = event(

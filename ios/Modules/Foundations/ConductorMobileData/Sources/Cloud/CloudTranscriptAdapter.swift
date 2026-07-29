@@ -10,7 +10,7 @@ import Foundation
 import SharedConductorData
 
 public enum CloudTranscriptAdapter {
-    public static let projectionVersion = 1
+    public static let projectionVersion = 2
 
     public struct Part: Equatable, Sendable {
         public let message: Message
@@ -74,17 +74,29 @@ public enum CloudTranscriptAdapter {
             )
 
         case "agent":
-            guard let rawPayload = content["rawPayload"]?.objectValue,
-                  let agentEvent = rawPayload["event"]?.objectValue else {
+            guard let rawPayload = content["rawPayload"]?.objectValue else {
                 return []
             }
-            return adaptAgentEvent(
-                agentEvent,
+            if let agentEvent = rawPayload["event"]?.objectValue {
+                return adaptAgentEvent(
+                    agentEvent,
+                    event: event,
+                    accountID: accountID,
+                    remoteSessionID: remoteSessionID,
+                    canonicalSessionID: canonicalSessionID,
+                    turnID: turnID
+                )
+            }
+
+            // Claude Cloud already supplies the normalized AgentEvent envelope directly.
+            // Preserve it unchanged so the shared desktop/mobile parser sees the same payload.
+            return agentParts(
                 event: event,
                 accountID: accountID,
                 remoteSessionID: remoteSessionID,
                 canonicalSessionID: canonicalSessionID,
-                turnID: turnID
+                turnID: turnID,
+                payloads: [rawPayload]
             )
 
         case "toolResult":

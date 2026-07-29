@@ -577,7 +577,8 @@ struct CloudChatPersistenceTests {
             var metadata = try #require(
                 try CloudSessionMetadata.find(canonicalSessionID).fetchOne(db)
             )
-            metadata.transcriptProjectionVersion = 0
+            metadata.transcriptProjectionVersion =
+                CloudTranscriptAdapter.projectionVersion - 1
             try CloudSessionMetadata.upsert { metadata }.execute(db)
         }
 
