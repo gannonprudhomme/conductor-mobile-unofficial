@@ -891,6 +891,7 @@ struct ChatTests {
 
     @Test("An empty initial response replaces cached presentation and shows the empty state")
     func emptyInitialResponse() async throws {
+        let database = try appDatabase()
         let session = try makeSession()
         let message: Message = .init(
             id: "cached",
@@ -902,12 +903,12 @@ struct ChatTests {
         )
         let (stream, continuation) = AsyncStream<ChatSyncEvent>
             .makeStream()
+        try await database.write { db in
+            try Message.upsert { message }.execute(db)
+        }
 
         try await withDependencies {
-            try $0.bootstrapDatabase()
-            try $0.defaultDatabase.write { db in
-                try Message.upsert { message }.execute(db)
-            }
+            $0.defaultDatabase = database
         } operation: {
             let state = Chat.State(session: session)
             try await state.$messages.load()
@@ -915,6 +916,7 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
+                $0.defaultDatabase = database
                 $0.chatSyncClient.observeSelected = { _ in stream }
             }
 
