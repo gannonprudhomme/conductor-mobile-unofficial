@@ -313,6 +313,8 @@ extension DesktopClient {
                 do {
                     while !Task.isCancelled {
                         let message = try await task.receive()
+                        // Demo only: keep network loading indicators visible before each frame.
+                        try await Task.sleep(for: .seconds(10))
                         guard !Task.isCancelled else {
                             return
                         }
