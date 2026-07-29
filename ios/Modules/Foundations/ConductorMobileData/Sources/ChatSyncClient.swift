@@ -187,7 +187,11 @@ private actor ChatSyncCoordinator {
         ensureTranscript(sessionID: sessionID)
 
         let isReady = await isCacheReady(sessionID: sessionID)
-        guard isReady, !Task.isCancelled else {
+        guard !Task.isCancelled else {
+            removeSelected(observerID: observerID, sessionID: sessionID)
+            return
+        }
+        guard isReady else {
             return
         }
         markReady(sessionID: sessionID)
@@ -305,7 +309,7 @@ private actor ChatSyncCoordinator {
                 )
             }
             if event.isSnapshot {
-                await self.markReady(sessionID: route.sessionID)
+                self.markReady(sessionID: route.sessionID)
             }
         } onFailure: { _ in }
     }
@@ -322,7 +326,7 @@ private actor ChatSyncCoordinator {
                 )
             }
             if cache.checkpoint != nil {
-                await markReady(sessionID: route.sessionID)
+                markReady(sessionID: route.sessionID)
             }
             await StreamObservation.observe(
                 retrying: {
@@ -340,11 +344,11 @@ private actor ChatSyncCoordinator {
                     try CloudChatPersistence.persist(update, in: database)
                 }
                 if update.kind == .complete {
-                    await self.markReady(sessionID: route.sessionID)
+                    self.markReady(sessionID: route.sessionID)
                 }
             } onFailure: { error in
                 guard !CloudAPIClientError.shouldRetryObservation(after: error) else { return }
-                await self.failSelected(
+                self.failSelected(
                     sessionID: route.sessionID,
                     error: sendableObservationError(error)
                 )

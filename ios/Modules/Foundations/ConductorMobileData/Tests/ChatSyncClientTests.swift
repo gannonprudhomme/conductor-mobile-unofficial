@@ -477,47 +477,34 @@ struct ChatSyncClientTests {
     func readinessDuringRegistrationIsDeliveredOnce() async throws {
         let database = try appDatabase()
         let (workspace, session) = try await seedLocalSession(in: database)
-        let transcriptContinuation = LockIsolated<
-            AsyncThrowingStream<DesktopMessageObservation, any Error>.Continuation?
-        >(nil)
+        let connections = LockIsolated(0)
         let events = LockIsolated<[ChatSyncEvent]>([])
 
         await withDependencies {
             $0.continuousClock = TestClock()
             $0.defaultDatabase = database
-            $0.desktopClient.observeSessions = { _ in
-                AsyncThrowingStream { continuation in
-                    continuation.yield([session])
-                }
-            }
             $0.desktopClient.observeMessages = { _, _ in
                 AsyncThrowingStream { continuation in
-                    transcriptContinuation.setValue(continuation)
+                    connections.withValue { $0 += 1 }
+                    continuation.yield(
+                        .persisted(.snapshot([], cursor: nil, queuedMessages: []))
+                    )
                 }
             }
         } operation: {
             let client = ChatSyncClient.live()
-            let foreground = Task { await client.runForeground() }
-            defer {
-                foreground.cancel()
-                transcriptContinuation.value?.finish()
-            }
-            await waitUntil { transcriptContinuation.value != nil }
-
+            let stream = client.observeSelected(sessionID: session.id)
             let selected = Task {
-                for await event in client.observeSelected(sessionID: session.id) {
+                for await event in stream {
                     events.withValue { $0.append(event) }
                 }
             }
             defer { selected.cancel() }
 
-            transcriptContinuation.value?.yield(
-                .persisted(.snapshot([], cursor: nil, queuedMessages: []))
-            )
-            await waitUntil { events.value.contains { $0.isReady } }
-            transcriptContinuation.value?.yield(
-                .persisted(.snapshot([], cursor: nil, queuedMessages: []))
-            )
+            await waitUntil {
+                connections.value == 1
+                    && events.value.contains { $0.isReady }
+            }
             try? await ContinuousClock().sleep(for: .milliseconds(50))
 
             #expect(events.value.filter(\.isReady).count == 1)
@@ -548,19 +535,25 @@ struct ChatSyncClientTests {
             }
         } operation: {
             let client = ChatSyncClient.live()
+            let firstStream = client.observeSelected(sessionID: session.id)
             let first = Task {
-                for await _ in client.observeSelected(sessionID: session.id) { }
+                for await _ in firstStream { }
             }
             first.cancel()
+            try? await ContinuousClock().sleep(for: .milliseconds(50))
             await waitUntil { connections.value == cancellations.value }
+            let baselineConnections = connections.value
+            let baselineCancellations = cancellations.value
 
+            let secondStream = client.observeSelected(sessionID: session.id)
             let second = Task {
-                for await _ in client.observeSelected(sessionID: session.id) { }
+                for await _ in secondStream { }
             }
             defer { second.cancel() }
 
-            await waitUntil { connections.value == cancellations.value + 1 }
-            #expect(connections.value == cancellations.value + 1)
+            await waitUntil { connections.value == baselineConnections + 1 }
+            #expect(connections.value == baselineConnections + 1)
+            #expect(cancellations.value == baselineCancellations)
         }
     }
 
