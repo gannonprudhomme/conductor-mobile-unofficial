@@ -400,6 +400,174 @@ func appDatabaseMigrator() -> DatabaseMigrator {
             ADD COLUMN "transcript_projection_version" INTEGER NOT NULL DEFAULT 0;
             """
         )
+            .execute(db)
+    }
+
+    migrator.registerMigration("Add Cloud remote IDs and transcript refresh") { db in
+        try #sql(
+            """
+            ALTER TABLE "cloud_workspace_metadata"
+            ADD COLUMN "remote_workspace_id" TEXT;
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            UPDATE "cloud_workspace_metadata"
+            SET "remote_workspace_id" = "workspace_id";
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            ALTER TABLE "cloud_session_metadata"
+            ADD COLUMN "last_full_transcript_refresh_at" TEXT;
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create Cloud mutation ledger") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_pending_mutations" (
+              "attempt_id" TEXT PRIMARY KEY,
+              "account_id" TEXT NOT NULL,
+              "credential_generation" TEXT NOT NULL,
+              "operation" TEXT NOT NULL,
+              "resource_kind" TEXT NOT NULL,
+              "request_version" INTEGER NOT NULL,
+              "request_payload" BLOB NOT NULL,
+              "rollback_payload" BLOB,
+              "canonical_workspace_id" TEXT,
+              "remote_workspace_id" TEXT,
+              "canonical_session_id" TEXT,
+              "remote_session_id" TEXT,
+              "canonical_message_id" TEXT,
+              "stable_remote_message_id" TEXT,
+              "state" TEXT NOT NULL,
+              "dispatch_started_at" TEXT,
+              "created_at" TEXT NOT NULL,
+              "last_transition_at" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_pending_mutations_state_created"
+            ON "cloud_pending_mutations" ("state", "created_at");
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_pending_mutations_account_generation"
+            ON "cloud_pending_mutations" (
+              "account_id",
+              "credential_generation"
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE TABLE "cloud_mutation_outcomes" (
+              "outcome_id" TEXT PRIMARY KEY,
+              "attempt_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "credential_generation" TEXT NOT NULL,
+              "owning_feature" TEXT NOT NULL,
+              "kind" TEXT NOT NULL,
+              "version" INTEGER NOT NULL,
+              "payload" BLOB NOT NULL,
+              "created_at" TEXT NOT NULL,
+              "consumed_at" TEXT
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_mutation_outcomes_owner_consumed"
+            ON "cloud_mutation_outcomes" (
+              "owning_feature",
+              "consumed_at"
+            );
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create Cloud project repository mappings") { db in
+        try #sql(
+            """
+            CREATE TABLE "cloud_project_repository_mappings" (
+              "id" TEXT PRIMARY KEY,
+              "account_id" TEXT NOT NULL,
+              "cloud_project_id" TEXT NOT NULL,
+              "canonical_repository_id" TEXT NOT NULL
+                REFERENCES "repos" ("id"),
+              "project_name" TEXT NOT NULL,
+              "git_remote" TEXT NOT NULL,
+              "refresh_generation" TEXT NOT NULL,
+              UNIQUE ("account_id", "cloud_project_id")
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "cloud_project_repository_mappings_account_generation"
+            ON "cloud_project_repository_mappings" (
+              "account_id",
+              "refresh_generation"
+            );
+            """
+        )
+        .execute(db)
+    }
+
+    migrator.registerMigration("Create initial prompt handoffs") { db in
+        try #sql(
+            """
+            CREATE TABLE "initial_prompt_handoffs" (
+              "handoff_id" TEXT PRIMARY KEY,
+              "creation_attempt_id" TEXT NOT NULL,
+              "account_id" TEXT NOT NULL,
+              "credential_generation" TEXT NOT NULL,
+              "canonical_workspace_id" TEXT NOT NULL,
+              "remote_workspace_id" TEXT NOT NULL,
+              "canonical_session_id" TEXT NOT NULL,
+              "remote_session_id" TEXT NOT NULL,
+              "original_prompt" TEXT NOT NULL,
+              "stable_remote_message_id" TEXT NOT NULL,
+              "send_attempt_id" TEXT,
+              "installed_draft_text" TEXT,
+              "state" TEXT NOT NULL,
+              "created_at" TEXT NOT NULL,
+              "last_transition_at" TEXT NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "initial_prompt_handoffs_session_state"
+            ON "initial_prompt_handoffs" (
+              "canonical_session_id",
+              "state"
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE UNIQUE INDEX "initial_prompt_handoffs_send_attempt"
+            ON "initial_prompt_handoffs" ("send_attempt_id")
+            WHERE "send_attempt_id" IS NOT NULL;
+            """
+        )
         .execute(db)
     }
 
@@ -420,6 +588,262 @@ func appDatabaseMigrator() -> DatabaseMigrator {
             """
         )
         .execute(db)
+    }
+
+    migrator.registerMigration("Create unified message delivery outbox") { db in
+        try #sql(
+            """
+            CREATE TABLE "message_delivery_attempts" (
+              "attempt_id" TEXT PRIMARY KEY,
+              "route" TEXT NOT NULL,
+              "account_id" TEXT,
+              "credential_generation" TEXT,
+              "desktop_endpoint" TEXT,
+              "cloud_delivery_state" TEXT,
+              "canonical_workspace_id" TEXT NOT NULL,
+              "remote_workspace_id" TEXT,
+              "canonical_session_id" TEXT NOT NULL,
+              "remote_session_id" TEXT,
+              "content" TEXT NOT NULL,
+              "model" TEXT NOT NULL,
+              "is_fast_mode_enabled" INTEGER NOT NULL,
+              "mode" TEXT NOT NULL,
+              "reasoning_effort" TEXT,
+              "submitted_draft" TEXT NOT NULL,
+              "previous_turn_id" TEXT,
+              "state" TEXT NOT NULL,
+              "result_detail" TEXT,
+              "canonical_message_id" TEXT,
+              "canonical_turn_id" TEXT,
+              "dispatch_started_at" TEXT,
+              "result_presented_at" TEXT,
+              "created_at" TEXT NOT NULL,
+              "last_transition_at" TEXT NOT NULL,
+              "acknowledged_at" TEXT
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "message_delivery_attempts_state_created"
+            ON "message_delivery_attempts" ("state", "created_at");
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "message_delivery_attempts_session_created"
+            ON "message_delivery_attempts" (
+              "canonical_session_id",
+              "created_at"
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            CREATE INDEX "message_delivery_attempts_account_generation"
+            ON "message_delivery_attempts" (
+              "account_id",
+              "credential_generation"
+            );
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            INSERT OR IGNORE INTO "message_delivery_attempts" (
+              "attempt_id",
+              "route",
+              "account_id",
+              "credential_generation",
+              "desktop_endpoint",
+              "cloud_delivery_state",
+              "canonical_workspace_id",
+              "remote_workspace_id",
+              "canonical_session_id",
+              "remote_session_id",
+              "content",
+              "model",
+              "is_fast_mode_enabled",
+              "mode",
+              "reasoning_effort",
+              "submitted_draft",
+              "previous_turn_id",
+              "state",
+              "result_detail",
+              "canonical_message_id",
+              "canonical_turn_id",
+              "dispatch_started_at",
+              "result_presented_at",
+              "created_at",
+              "last_transition_at",
+              "acknowledged_at"
+            )
+            SELECT
+              COALESCE("stable_remote_message_id", "attempt_id"),
+              'cloud',
+              "account_id",
+              "credential_generation",
+              NULL,
+              NULL,
+              COALESCE("canonical_workspace_id", ''),
+              "remote_workspace_id",
+              COALESCE("canonical_session_id", ''),
+              "remote_session_id",
+              COALESCE(
+                json_extract(CAST("request_payload" AS TEXT), '$.message'),
+                ''
+              ),
+              '',
+              0,
+              'sent',
+              NULL,
+              COALESCE(
+                json_extract(
+                  CAST("rollback_payload" AS TEXT),
+                  '$.submittedDraft'
+                ),
+                json_extract(CAST("request_payload" AS TEXT), '$.message'),
+                ''
+              ),
+              NULL,
+              CASE
+                WHEN "state" = 'submitting'
+                  AND "dispatch_started_at" IS NULL THEN 'ready'
+                WHEN "state" = 'accepted' THEN 'accepted'
+                ELSE 'unknown'
+              END,
+              CASE
+                WHEN "state" = 'submitting'
+                  AND "dispatch_started_at" IS NULL THEN NULL
+                WHEN "state" = 'accepted' THEN NULL
+                ELSE 'Delivery could not be determined before migration.'
+              END,
+              "canonical_message_id",
+              NULL,
+              "dispatch_started_at",
+              NULL,
+              "created_at",
+              "last_transition_at",
+              NULL
+            FROM "cloud_pending_mutations"
+            WHERE "operation" = 'send-message'
+              AND "state" != 'acknowledged';
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            INSERT OR IGNORE INTO "message_delivery_attempts" (
+              "attempt_id",
+              "route",
+              "account_id",
+              "credential_generation",
+              "desktop_endpoint",
+              "cloud_delivery_state",
+              "canonical_workspace_id",
+              "remote_workspace_id",
+              "canonical_session_id",
+              "remote_session_id",
+              "content",
+              "model",
+              "is_fast_mode_enabled",
+              "mode",
+              "reasoning_effort",
+              "submitted_draft",
+              "previous_turn_id",
+              "state",
+              "result_detail",
+              "canonical_message_id",
+              "canonical_turn_id",
+              "dispatch_started_at",
+              "result_presented_at",
+              "created_at",
+              "last_transition_at",
+              "acknowledged_at"
+            )
+            SELECT
+              "handoff"."stable_remote_message_id",
+              'cloud',
+              "handoff"."account_id",
+              "handoff"."credential_generation",
+              NULL,
+              NULL,
+              "handoff"."canonical_workspace_id",
+              "handoff"."remote_workspace_id",
+              "handoff"."canonical_session_id",
+              "handoff"."remote_session_id",
+              "handoff"."original_prompt",
+              '',
+              0,
+              'sent',
+              NULL,
+              COALESCE(
+                "handoff"."installed_draft_text",
+                "handoff"."original_prompt"
+              ),
+              NULL,
+              CASE
+                WHEN "handoff"."state" = 'ready' THEN 'ready'
+                WHEN "outcome"."outcome_id" IS NOT NULL THEN 'rejected'
+                ELSE 'unknown'
+              END,
+              CASE
+                WHEN "handoff"."state" = 'ready' THEN NULL
+                WHEN "outcome"."outcome_id" IS NOT NULL
+                  THEN 'Cloud rejected this message before migration.'
+                ELSE 'Delivery could not be determined before migration.'
+              END,
+              NULL,
+              NULL,
+              NULL,
+              NULL,
+              "handoff"."created_at",
+              "handoff"."last_transition_at",
+              NULL
+            FROM "initial_prompt_handoffs" AS "handoff"
+            LEFT JOIN "cloud_pending_mutations" AS "mutation"
+              ON "mutation"."attempt_id" = "handoff"."send_attempt_id"
+            LEFT JOIN "cloud_mutation_outcomes" AS "outcome"
+              ON "outcome"."attempt_id" = "handoff"."send_attempt_id"
+              AND "outcome"."kind" = 'rejected-mutation'
+            WHERE "handoff"."state" = 'ready'
+              OR (
+                "handoff"."state" = 'linked'
+                AND "mutation"."attempt_id" IS NULL
+              );
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            DELETE FROM "cloud_mutation_outcomes"
+            WHERE "attempt_id" IN (
+              SELECT "attempt_id"
+              FROM "cloud_pending_mutations"
+              WHERE "operation" = 'send-message'
+              UNION
+              SELECT "send_attempt_id"
+              FROM "initial_prompt_handoffs"
+              WHERE "send_attempt_id" IS NOT NULL
+            );
+            """
+        )
+        .execute(db)
+        try #sql(
+            """
+            DELETE FROM "cloud_pending_mutations"
+            WHERE "operation" = 'send-message';
+            """
+        )
+        .execute(db)
+        try #sql("DROP TABLE \"initial_prompt_handoffs\"")
+            .execute(db)
     }
 
     return migrator

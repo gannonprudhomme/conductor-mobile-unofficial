@@ -95,25 +95,6 @@ struct CreateWorkspaceTests {
                     #expect(isFastModeEnabled)
                     return CreatedWorkspace(workspace: workspace, session: session)
                 }
-                $0.desktopClient.sendMessage = {
-                    requestedWorkspaceID,
-                    sessionID,
-                    message,
-                    model,
-                    isFastModeEnabled,
-                    mode,
-                    reasoningEffort,
-                    attemptID in
-                    #expect(requestedWorkspaceID == workspaceID)
-                    #expect(sessionID == session.id)
-                    #expect(message == "Run the tests.")
-                    #expect(model == .gpt_5_6_terra)
-                    #expect(isFastModeEnabled)
-                    #expect(mode == .sent)
-                    #expect(reasoningEffort == .ultra)
-                    #expect(attemptID == UUID(1))
-                    return .accepted(messageID: "message")
-                }
                 $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
                 $0.desktopClient.persistCreatedWorkspace = { created, lease in
                     #expect(lease == requestLease)
@@ -136,11 +117,6 @@ struct CreateWorkspaceTests {
                 \.delegate,
                 .workspaceCreated(
                     WorkspaceCreationResult(
-                        initialPrompt: .init(
-                            attemptID: UUID(1),
-                            content: "Run the tests.",
-                            deliveryResult: .accepted(messageID: "message")
-                        ),
                         selectedModel: .gpt_5_6_terra,
                         selectedReasoningEffort: .ultra,
                         requestLease: requestLease,
@@ -152,19 +128,29 @@ struct CreateWorkspaceTests {
                 )
             )
 
+            let attempt = try await database.read { database in
+                try #require(
+                    try MessageDeliveryAttempt.find(UUID(1))
+                        .fetchOne(database)
+                )
+            }
+            #expect(attempt.deliveryRoute == .desktop)
+            #expect(attempt.deliveryState == .ready)
+            #expect(
+                attempt.desktopEndpoint
+                    == requestLease.baseURL.absoluteString
+            )
+            #expect(attempt.canonicalWorkspaceID == workspace.id)
+            #expect(attempt.canonicalSessionID == session.id)
+            #expect(attempt.content == "Run the tests.")
+            #expect(attempt.selectedModel == .gpt_5_6_terra)
+            #expect(attempt.isFastModeEnabled)
+            #expect(attempt.selectedReasoningEffort == .ultra)
         }
     }
 
-    @Test(
-        "An unsuccessful initial prompt does not relabel workspace creation as failed",
-        arguments: [
-            MessageDeliveryResult.rejected(reason: "Prompt rejected."),
-            .unknown(reason: "Prompt delivery unconfirmed."),
-        ]
-    )
-    func promptFailureDoesNotFailCreation(
-        deliveryResult: MessageDeliveryResult
-    ) async throws {
+    @Test("Initial prompt creation does not wait for transport")
+    func initialPromptDoesNotWaitForTransport() async throws {
         let repository = Repository.preview()
         let workspaceID = UUID(0).uuidString.lowercased()
         let session = Session.preview(id: "session", workspaceID: workspaceID)
@@ -190,9 +176,6 @@ struct CreateWorkspaceTests {
                 $0.desktopClient.createWorkspace = { _, _, _, _, _ in
                     CreatedWorkspace(workspace: workspace, session: session)
                 }
-                $0.desktopClient.sendMessage = { _, _, _, _, _, _, _, _ in
-                    deliveryResult
-                }
                 $0.desktopClient.isRequestLeaseValid = { $0 == requestLease }
                 $0.desktopClient.persistCreatedWorkspace = { created, lease in
                     #expect(lease == requestLease)
@@ -214,11 +197,6 @@ struct CreateWorkspaceTests {
                 \.delegate,
                 .workspaceCreated(
                     WorkspaceCreationResult(
-                        initialPrompt: .init(
-                            attemptID: UUID(1),
-                            content: "Run it.",
-                            deliveryResult: deliveryResult
-                        ),
                         selectedModel: state.selectedModel,
                         selectedReasoningEffort: state.selectedReasoningEffort,
                         requestLease: requestLease,
@@ -229,6 +207,14 @@ struct CreateWorkspaceTests {
                     )
                 )
             )
+            let attempt = try await database.read { database in
+                try #require(
+                    try MessageDeliveryAttempt.find(UUID(1))
+                        .fetchOne(database)
+                )
+            }
+            #expect(attempt.deliveryState == .ready)
+            #expect(attempt.content == "Run it.")
         }
     }
 

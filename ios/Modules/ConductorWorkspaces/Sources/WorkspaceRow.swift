@@ -32,7 +32,7 @@ struct WorkspaceRow: View {
     private let showsRepositoryIcon: Bool
     private let action: (@MainActor (WorkspaceRowAction) -> Void)?
 
-    @ScaledMetric(relativeTo: .body) private var iconSize = 20
+    @ScaledMetric(relativeTo: .body) private var iconSize = 18
 
     init(
         item: WorkspaceWithRepository,
@@ -99,7 +99,7 @@ struct WorkspaceRow: View {
                     .lineLimit(1)
 
                 if isCloudHosted {
-                    CloudWorkspaceIcon(size: 16)
+                    CloudWorkspaceIcon(size: 18)
                         .accessibilityLabel("Cloud workspace")
                 }
             }
@@ -107,7 +107,7 @@ struct WorkspaceRow: View {
             .fontWeight(isUnread ? .semibold : .regular)
         } icon: {
             if showsRepositoryIcon {
-                RepositoryIcon(repository: repository, size: 20, relativeTo: .body)
+                RepositoryIcon(repository: repository, size: 18, relativeTo: .body)
                     .foregroundStyle(.theme(.textSecondary))
             }
 
@@ -120,12 +120,12 @@ struct WorkspaceRow: View {
             } else if let pullRequestStatus {
                 PullRequestStatusIcon(
                     status: pullRequestStatus,
-                    size: 20,
+                    size: 18,
                     relativeTo: .body
                 )
                 .accessibilityLabel(pullRequestStatus.accessibilityLabel)
             } else {
-                LucideIcon(Lucide.gitBranch, size: 20, relativeTo: .body)
+                LucideIcon(Lucide.gitBranch, size: 18, relativeTo: .body)
                     .foregroundStyle(.theme(.textSecondary))
             }
         }
@@ -209,7 +209,10 @@ struct WorkspaceRow: View {
                 Label {
                     Text("Archive")
                 } icon: {
-                    ColoredMenuImage(Lucide.archive, color: .theme(.destructive))
+                    ColoredMenuImage(
+                        Lucide.archive,
+                        color: .theme(.destructive)
+                    )
                 }
             }
         }

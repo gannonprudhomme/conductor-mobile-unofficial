@@ -48,14 +48,14 @@ struct ChatTests {
             let deadline = clock.now.advanced(by: .seconds(1))
             while firstTextInputResponder(in: hostingController.view) == nil,
                   clock.now < deadline {
-                await Task.yield()
+                try? await clock.sleep(for: .milliseconds(10))
             }
 
             let responder = try #require(firstTextInputResponder(in: hostingController.view))
             responder.insertText("Test message")
 
             while store.state.messageDraft != "Test message", clock.now < deadline {
-                await Task.yield()
+                try? await clock.sleep(for: .milliseconds(10))
             }
             #expect(store.state.messageDraft == "Test message")
         }
@@ -105,8 +105,8 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.desktopClient.observeMessages = { _, _ in
-                    AsyncThrowingStream { _ in }
+                $0.chatSyncClient.observeSelected = { _ in
+                    AsyncStream { _ in }
                 }
             }
             let queuedRowFrame = LockIsolated<CGRect?>(nil)
@@ -131,7 +131,7 @@ struct ChatTests {
             let deadline = clock.now.advanced(by: .seconds(1))
             while queuedRowFrame.value == nil, clock.now < deadline {
                 hostingController.view.layoutIfNeeded()
-                await Task.yield()
+                try? await clock.sleep(for: .milliseconds(10))
             }
 
             let rowFrame = try #require(queuedRowFrame.value)
@@ -181,7 +181,8 @@ struct ChatTests {
                         transcriptCursor: nil,
                         hasCompleteTranscript: true,
                         transcriptProjectionVersion: CloudTranscriptAdapter
-                            .projectionVersion
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
                     )
                 }
                 .execute(db)
@@ -206,21 +207,11 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = {
-                    remoteSessionID,
-                    workspaceID,
-                    checkpoint in
-                    #expect(remoteSessionID == "remote-session")
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(
-                        checkpoint
-                            == CloudTranscriptCheckpoint(
-                                accountID: "account",
-                                remoteSessionID: "remote-session",
-                                rawCursor: nil
-                            )
-                    )
-                    return AsyncThrowingStream { _ in }
+                $0.chatSyncClient.observeSelected = { selectedSessionID in
+                    #expect(selectedSessionID == session.id)
+                    return AsyncStream { continuation in
+                        continuation.yield(.ready)
+                    }
                 }
             }
             store.exhaustivity = .off
@@ -264,14 +255,10 @@ struct ChatTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 1
+                    credentialGeneration: UUID(1)
                 )
             }
-            let connectionCount = LockIsolated(0)
-            let (stream, continuation) = AsyncThrowingStream<
-                CloudTranscriptUpdate,
-                any Error
-            >.makeStream()
+            let selectionCount = LockIsolated(0)
             let store = TestStore(
                 initialState: Chat.State(
                     session: session,
@@ -281,9 +268,9 @@ struct ChatTests {
                 Chat()
             } withDependencies: {
                 $0.defaultDatabase = database
-                $0.cloudAPIClient.observeTranscript = { _, _, _ in
-                    connectionCount.withValue { $0 += 1 }
-                    return stream
+                $0.chatSyncClient.observeSelected = { _ in
+                    selectionCount.withValue { $0 += 1 }
+                    return AsyncStream { _ in }
                 }
                 $0.desktopClient.fetchModelSettings = {
                     DesktopClient.ModelSettings(
@@ -297,23 +284,18 @@ struct ChatTests {
             store.exhaustivity = .off(showSkippedAssertions: false)
 
             let task = await store.send(.task)
-            for _ in 0..<1_000 where connectionCount.value < 1 {
-                await Task.yield()
-            }
+            await waitUntil { selectionCount.value >= 1 }
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 2
+                    credentialGeneration: UUID(2)
                 )
             }
             await store.receive(\.cloudConfigurationChanged)
-            for _ in 0..<10_000 where connectionCount.value < 2 {
-                await Task.yield()
-            }
-            #expect(connectionCount.value == 2)
+            await waitUntil { selectionCount.value >= 2 }
+            #expect(selectionCount.value == 2)
 
             await task.cancel()
-            continuation.finish()
         }
     }
 
@@ -363,24 +345,24 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = {
-                    remoteSessionID,
-                    workspaceID,
-                    checkpoint in
-                    #expect(remoteSessionID == "remote-session")
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(checkpoint == nil)
-                    return AsyncThrowingStream { continuation in
-                        continuation.yield(
-                            CloudTranscriptUpdate(
-                                accountID: "account",
-                                sessionID: remoteSessionID,
-                                messages: [],
-                                kind: .complete,
-                                rawCursor: nil
-                            )
-                        )
-                        continuation.finish()
+                $0.chatSyncClient.observeSelected = { selectedSessionID in
+                    #expect(selectedSessionID == session.id)
+                    return AsyncStream { continuation in
+                        Task {
+                            try await database.write { db in
+                                _ = try CloudChatPersistence.persist(
+                                    CloudTranscriptUpdate(
+                                        accountID: "account",
+                                        sessionID: "remote-session",
+                                        messages: [],
+                                        kind: .complete,
+                                        rawCursor: nil
+                                    ),
+                                    in: db
+                                )
+                            }
+                            continuation.yield(.ready)
+                        }
                     }
                 }
             }
@@ -426,15 +408,14 @@ struct ChatTests {
                         transcriptCursor: "committed",
                         hasCompleteTranscript: true,
                         transcriptProjectionVersion: CloudTranscriptAdapter
-                            .projectionVersion
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
                     )
                 }
                 .execute(db)
         }
-        let (stream, continuation) = AsyncThrowingStream<
-            CloudTranscriptUpdate,
-            any Error
-        >.makeStream()
+        let (stream, continuation) = AsyncStream<ChatSyncEvent>
+            .makeStream()
 
         try await withDependencies {
             $0.defaultDatabase = database
@@ -455,34 +436,16 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.cloudAPIClient.observeTranscript = { _, _, _ in stream }
+                $0.chatSyncClient.observeSelected = { _ in stream }
             }
             store.exhaustivity = .off
 
             let task = await store.send(.task)
+            continuation.yield(.ready)
             await store.receive(\.initialMessagesResponse)
-            continuation.yield(
-                CloudTranscriptUpdate(
-                    accountID: "other-account",
-                    sessionID: "remote-session",
-                    messages: [],
-                    kind: .incremental,
-                    rawCursor: "uncommitted"
-                )
-            )
+            continuation.yield(.failure(CloudChatPersistenceError.transcriptOwnershipMismatch))
             await store.receive(\.loadMessagesFailed)
-            continuation.yield(
-                CloudTranscriptUpdate(
-                    accountID: "account",
-                    sessionID: "remote-session",
-                    messages: [],
-                    kind: .incremental,
-                    rawCursor: "later-in-memory"
-                )
-            )
-            for _ in 0..<100 {
-                await Task.yield()
-            }
+            try? await ContinuousClock().sleep(for: .milliseconds(50))
 
             let cache = try await database.read { db in
                 try CloudChatPersistence.cachedTranscript(
@@ -492,6 +455,67 @@ struct ChatTests {
             }
             #expect(cache.checkpoint?.rawCursor == "committed")
             await task.cancel()
+        }
+    }
+
+    @Test("Initial message database failures clear loading")
+    func initialMessageDatabaseFailureClearsLoading() async throws {
+        let database = try appDatabase()
+        let session = try makeSession()
+        let (stream, continuation) = AsyncStream<ChatSyncEvent>.makeStream()
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: Chat.State(session: session)
+            ) {
+                Chat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: session.model,
+                        defaultReasoningEffort: session.model.defaultReasoningEffort,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.chatSyncClient.observeSelected = { _ in stream }
+            }
+            store.exhaustivity = .off
+
+            let task = await store.send(.task)
+            try await database.write { database in
+                try #sql("DROP TABLE \"session_messages\"")
+                    .execute(database)
+            }
+            continuation.yield(.ready)
+            await store.receive(\.loadMessagesFailed) {
+                $0.isLoadingMessages = false
+            }
+
+            await task.cancel()
+            continuation.finish()
+        }
+    }
+
+    @Test("Cancellation load failures do not dismiss loading")
+    func cancellationLoadFailureDoesNotDismissLoading() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .loadMessagesFailed(
+                    sessionID: session.id,
+                    error: CancellationError()
+                )
+            )
+            #expect(store.state.isLoadingMessages)
         }
     }
 
@@ -552,22 +576,14 @@ struct ChatTests {
 
             emptySnapshot.isLoadingMessages = false
             #expect(emptySnapshot.allowsAgentSwitching)
-            emptySnapshot.optimisticMessages = [
-                .init(
-                    id: UUID(),
-                    workspaceID: emptySnapshot.session.workspaceID,
-                    sessionID: emptySnapshot.sessionID,
-                    content: "Sending",
-                    model: emptySnapshot.selectedModel,
-                    isFastModeEnabled: emptySnapshot.isFastModeEnabled,
-                    mode: .sent,
-                    reasoningEffort: emptySnapshot.selectedReasoningEffort,
-                    status: .sending,
-                    previousTurnID: nil
-                ),
-            ]
+            emptySnapshot.recentlyEnqueuedAttempt = makeDeliveryAttempt(
+                session: emptySnapshot.session,
+                content: "Sending",
+                state: .ready
+            )
             #expect(!emptySnapshot.allowsAgentSwitching)
-            emptySnapshot.optimisticMessages[0].status = .rejected
+            emptySnapshot.recentlyEnqueuedAttempt?.state =
+                MessageDeliveryAttempt.State.rejected.rawValue
             #expect(emptySnapshot.allowsAgentSwitching)
         }
     }
@@ -845,6 +861,26 @@ struct ChatTests {
         }
     }
 
+    @Test("Sending is ignored while voice input is transcribing")
+    func sendWhileTranscribing() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            var state = Chat.State(session: session)
+            state.voiceInput.phase = .transcribing
+            state.$messageDraft.withLock { $0 = "Keep this draft." }
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            await store.send(.sendButtonTapped(.sent))
+
+            #expect(store.state.messageDraft == "Keep this draft.")
+            #expect(!store.state.isEnqueueInFlight)
+        }
+    }
+
     @Test("Messages are scoped to the session and ordered by actual send time")
     func messagesAreScopedAndOrdered() async throws {
         var delayedMessage = try makeMessage(
@@ -883,51 +919,32 @@ struct ChatTests {
         }
     }
 
-    @Test("Task observes the selected session, reconnects after failure, and cancels")
+    @Test("Task observes selected readiness and cancels")
     func task() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let clock = TestClock()
-            let (firstStream, firstContinuation) = AsyncThrowingStream<
-                DesktopMessageObservation,
-                any Error
-            >.makeStream()
-            let (secondStream, secondContinuation) = AsyncThrowingStream<
-                DesktopMessageObservation,
-                any Error
-            >.makeStream()
-            let connectionCount = LockIsolated(0)
+            let (stream, continuation) = AsyncStream<ChatSyncEvent>
+                .makeStream()
             let session = try makeSession()
-            let secondConnectionCancelled = LockIsolated(false)
-            secondContinuation.onTermination = { termination in
+            let didCancelSelection = LockIsolated(false)
+            continuation.onTermination = { termination in
                 guard case .cancelled = termination else {
                     return
                 }
 
-                secondConnectionCancelled.setValue(true)
+                didCancelSelection.setValue(true)
             }
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
-                $0.continuousClock = clock
-                $0.desktopClient.observeMessages = { workspaceID, sessionID in
-                    #expect(workspaceID == session.workspaceID)
-                    #expect(sessionID == session.id)
-
-                    let count = connectionCount.withValue {
-                        $0 += 1
-                        return $0
-                    }
-                    return switch count {
-                    case 1:
-                        firstStream
-
-                    default:
-                        secondStream
-                    }
+                $0.desktopClient.fetchModelSettings = { throw CancellationError() }
+                $0.chatSyncClient.observeSelected = { selectedSessionID in
+                    #expect(selectedSessionID == session.id)
+                    return stream
                 }
             }
+            store.exhaustivity = .off(showSkippedAssertions: false)
 
             let task = await store.send(.task)
 
@@ -936,26 +953,19 @@ struct ChatTests {
             }
             #expect(try #require(store.state.turns).isEmpty)
             #expect(try #require(store.state.rows).isEmpty)
-            #expect(connectionCount.value == 1)
 
-            firstContinuation.yield(.snapshot([]))
+            continuation.yield(.ready)
             await store.receive(\.initialMessagesResponse) {
                 $0.isLoadingMessages = false
             }
 
-            firstContinuation.finish(throwing: TestError())
-            await store.receive(\.loadMessagesFailed)
-            #expect(connectionCount.value == 1)
-
-            await clock.advance(by: .seconds(1))
-            #expect(connectionCount.value == 2)
-
             await task.cancel()
-            #expect(secondConnectionCancelled.value)
+            await waitUntil { didCancelSelection.value }
+            #expect(didCancelSelection.value)
         }
     }
 
-    @Test("Task applies message snapshots, changes, and deletions")
+    @Test("Task renders persisted message snapshots, changes, and deletions")
     func taskIngestsMessageBatches() async throws {
         let database = try appDatabase()
         let testID = UUID().uuidString
@@ -986,51 +996,29 @@ struct ChatTests {
         var mutableUpdatedLateMessage = lateMessage
         mutableUpdatedLateMessage.content = "Updated late message"
         let updatedLateMessage = mutableUpdatedLateMessage
-        let staleQueuedMessage = Message(
-            id: "stale-queued-\(testID)",
-            sessionID: session.id,
-            role: .user,
-            content: "Already deleted on desktop",
-            createdAt: Date(timeIntervalSince1970: 1_783_558_803),
-            queueOrder: 1
-        )
-        let queuedMessage = Message(
-            id: "queued-\(testID)",
-            sessionID: session.id,
-            role: .user,
-            content: "Still queued",
-            createdAt: Date(timeIntervalSince1970: 1_783_558_804),
-            queueOrder: 2
-        )
+
         try await database.write { db in
-            try Message.upsert {
-                [earlyMessage, lateMessage, staleQueuedMessage, queuedMessage]
-            }
-            .execute(db)
+            try Message.upsert { [earlyMessage, lateMessage] }.execute(db)
         }
-        let baselineChangeCount = try await database.write { $0.totalChangesCount }
-        let (stream, continuation) = AsyncThrowingStream<
-            DesktopMessageObservation,
-            any Error
-        >.makeStream()
+        let (stream, continuation) = AsyncStream<ChatSyncEvent>
+            .makeStream()
         let store = Store(initialState: Chat.State(session: session)) {
             Chat()
         } withDependencies: {
             $0.defaultDatabase = database
-            $0.desktopClient.observeMessages = { workspaceID, sessionID in
-                #expect(workspaceID == session.workspaceID)
-                #expect(sessionID == session.id)
+            $0.desktopClient.fetchModelSettings = { throw CancellationError() }
+            $0.chatSyncClient.observeSelected = { selectedSessionID in
+                #expect(selectedSessionID == session.id)
                 return stream
             }
         }
 
         let task = store.send(.task)
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
-        while humanMessageContent(in: store.state, id: lateMessage.id)
-            != lateMessage.content,
-              clock.now < deadline {
-            await Task.yield()
+        await waitUntil {
+            await MainActor.run {
+                humanMessageContent(in: store.state, id: lateMessage.id)
+                    == lateMessage.content
+            }
         }
         try expectHumanPresentationCaches(
             store.state,
@@ -1042,13 +1030,21 @@ struct ChatTests {
             ]
         )
 
-        continuation.yield(
-            .snapshot([lateMessage, updatedEarlyMessage, queuedMessage])
-        )
-        while humanMessageContent(in: store.state, id: earlyMessage.id)
-            != updatedEarlyMessage.content,
-              clock.now < deadline {
-            await Task.yield()
+        try await database.write { db in
+            try Message.find(earlyMessage.id).delete().execute(db)
+            try Message.upsert { updatedEarlyMessage }.execute(db)
+        }
+        continuation.yield(.ready)
+        await waitUntil {
+            await MainActor.run {
+                !store.state.isLoadingMessages
+            }
+        }
+        await waitUntil {
+            await MainActor.run {
+                humanMessageContent(in: store.state, id: earlyMessage.id)
+                    == updatedEarlyMessage.content
+            }
         }
         #expect(!store.state.isLoadingMessages)
         try expectHumanPresentationCaches(
@@ -1060,16 +1056,14 @@ struct ChatTests {
                 .init(id: lateMessage.id, content: "Message late"),
             ]
         )
-        continuation.yield(
-            .changes(
-                upserting: [updatedLateMessage],
-                deleting: [queuedMessage.id]
-            )
-        )
-        while humanMessageContent(in: store.state, id: lateMessage.id)
-            != updatedLateMessage.content,
-              clock.now < deadline {
-            await Task.yield()
+        try await database.write { db in
+            try Message.upsert { updatedLateMessage }.execute(db)
+        }
+        await waitUntil {
+            await MainActor.run {
+                humanMessageContent(in: store.state, id: lateMessage.id)
+                    == updatedLateMessage.content
+            }
         }
         try expectHumanPresentationCaches(
             store.state,
@@ -1087,12 +1081,9 @@ struct ChatTests {
                 .fetchAll(db)
         }
         expectNoDifference(storedMessages, [updatedEarlyMessage, updatedLateMessage])
-        #expect(
-            try await database.write { $0.totalChangesCount }
-                == baselineChangeCount + 6
-        )
 
         task.cancel()
+        continuation.finish()
     }
 
     @Test("Messages updated parses turns")
@@ -1125,6 +1116,7 @@ struct ChatTests {
                 $0.turns = Turn.parse(messages: [message])
                 $0.initializeIdleBaseline()
                 $0.updateRows()
+                $0.isLoadingMessages = false
             }
             try expectHumanPresentationCaches(
                 store.state,
@@ -1181,8 +1173,9 @@ struct ChatTests {
         }
     }
 
-    @Test("An empty initial response replaces cached presentation and shows the empty state")
+    @Test("Persisted presentation remains visible until an empty initial response replaces it")
     func emptyInitialResponse() async throws {
+        let database = try appDatabase()
         let session = try makeSession()
         let message: Message = .init(
             id: "cached",
@@ -1192,16 +1185,14 @@ struct ChatTests {
             createdAt: Date(timeIntervalSince1970: 0),
             turnID: "turn-1"
         )
-        let (stream, continuation) = AsyncThrowingStream<
-            DesktopMessageObservation,
-            any Error
-        >.makeStream()
+        let (stream, continuation) = AsyncStream<ChatSyncEvent>
+            .makeStream()
+        try await database.write { db in
+            try Message.upsert { message }.execute(db)
+        }
 
         try await withDependencies {
-            try $0.bootstrapDatabase()
-            try $0.defaultDatabase.write { db in
-                try Message.upsert { message }.execute(db)
-            }
+            $0.defaultDatabase = database
         } operation: {
             let state = Chat.State(session: session)
             try await state.$messages.load()
@@ -1209,7 +1200,9 @@ struct ChatTests {
             let store = TestStore(initialState: state) {
                 Chat()
             } withDependencies: {
-                $0.desktopClient.observeMessages = { _, _ in stream }
+                $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = { throw CancellationError() }
+                $0.chatSyncClient.observeSelected = { _ in stream }
             }
 
             await store.send(.messagesUpdated(messages)) {
@@ -1217,14 +1210,18 @@ struct ChatTests {
                 $0.turns = Turn.parse(messages: messages)
                 $0.initializeIdleBaseline()
                 $0.updateRows()
+                $0.isLoadingMessages = false
             }
             expectNoDifference(store.state.messages, [message])
-            #expect(store.state.isLoadingMessages)
+            #expect(!store.state.isLoadingMessages)
             #expect(!store.state.shouldShowEmptyChat)
 
             let task = await store.send(.task)
             store.exhaustivity = .off
-            continuation.yield(.snapshot([]))
+            try await database.write { db in
+                try Message.find(message.id).delete().execute(db)
+            }
+            continuation.yield(.ready)
             await store.receive(\.initialMessagesResponse)
             if !store.state.messages.isEmpty {
                 await store.receive(\.messagesUpdated)
@@ -1262,6 +1259,41 @@ struct ChatTests {
                     .turnInProgress(
                         id: "\(session.id):pending",
                         startedAt: try #require(session.updatedDate)
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test("An accepted local send starts elapsed time before session status refreshes")
+    func localSendStartsProgressImmediately() throws {
+        try withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let attemptID = UUID(0)
+            let startedAt = Date(timeIntervalSince1970: 1_783_558_800)
+            let attempt = makeDeliveryAttempt(
+                session: session,
+                content: "Run it",
+                attemptID: attemptID,
+                state: .ready,
+                createdAt: startedAt
+            )
+            var state = Chat.State(session: session)
+            state.recentlyEnqueuedAttempt = attempt
+
+            state.beginSendCycle(attemptID: attemptID)
+            state.updateRows()
+
+            #expect(state.displayedSessionStatus == .idle)
+            expectNoDifference(
+                try #require(state.rows).map(DisplayedRowProjection.init),
+                [
+                    .human(id: attemptID.uuidString, content: "Run it"),
+                    .turnInProgress(
+                        id: attemptID.uuidString,
+                        startedAt: startedAt
                     ),
                 ]
             )
@@ -1324,10 +1356,7 @@ struct ChatTests {
             }
 
             await store.send(.messagesUpdated([message])) {
-                $0.isMessageSnapshotEmpty = false
-                $0.turns = Turn.parse(messages: [message])
-                $0.initializeIdleBaseline()
-                $0.updateRows()
+                $0.isLoadingMessages = false
             }
             await store.send(.sessionStatusChanged(.working)) {
                 $0.sessionStatusChanged(.working)
@@ -1370,20 +1399,13 @@ struct ChatTests {
             )
             var state = Chat.State(session: session)
             state.turns = Turn.parse(messages: [previousMessage])
-            state.optimisticMessages = [
-                .init(
-                    id: UUID(0),
-                    workspaceID: session.workspaceID,
-                    sessionID: session.id,
-                    content: "Unconfirmed",
-                    model: session.model,
-                    isFastModeEnabled: false,
-                    mode: .sent,
-                    reasoningEffort: nil,
-                    status: .unconfirmed,
-                    previousTurnID: "previous-turn"
-                ),
-            ]
+            state.recentlyEnqueuedAttempt = makeDeliveryAttempt(
+                session: session,
+                content: "Unconfirmed",
+                attemptID: UUID(0),
+                state: .unknown,
+                previousTurnID: "previous-turn"
+            )
             state.initializeIdleBaseline()
             state.beginSendCycle(attemptID: UUID(0))
             state.sessionStatusChanged(.working)
@@ -1604,7 +1626,7 @@ struct ChatTests {
                 $0.selectedModel = .gpt_5_6_sol
                 $0.selectedReasoningEffort = .low
             }
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+            await store.send(.modelSelected(.gpt_5_6_terra)) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
@@ -1742,11 +1764,11 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+            await store.send(.modelSelected(.gpt_5_6_terra)) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
-            await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
+            await store.send(.modelSelected(.gpt5_5)) {
                 $0.selectedModel = .gpt5_5
             }
             await store.send(
@@ -1785,7 +1807,7 @@ struct ChatTests {
                     )
                 )
             )
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_terra))) {
+            await store.send(.modelSelected(.gpt_5_6_terra)) {
                 $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
             }
@@ -1819,6 +1841,167 @@ struct ChatTests {
             await store.send(.sessionFastModeChanged(true)) {
                 $0.isFastModeEnabled = true
             }
+        }
+    }
+
+    @Test("Cloud configuration actions are read-only for available and missing routes")
+    func cloudConfigurationActionsAreReadOnly() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: .gpt5_5,
+                codexThinkingLevel: .high,
+                isFastModeEnabled: false
+            )
+            let routes: [WorkspaceMutationRoute?] = [
+                .cloud(
+                    accountID: "account",
+                    remoteWorkspaceID: "remote-workspace"
+                ),
+                nil,
+            ]
+
+            for route in routes {
+                let store = TestStore(
+                    initialState: Chat.State(
+                        session: session,
+                        isCloudHosted: true,
+                        mutationRoute: route
+                    )
+                ) {
+                    Chat()
+                }
+
+                #expect(
+                    store.state.configurationInteractionMode
+                        == .readOnlyInformational
+                )
+                await store.send(.modelSelected(.gpt_5_6_terra))
+                await store.send(.reasoningEffortSelected(.medium))
+                await store.send(.fastModeButtonTapped)
+                #expect(store.state.selectedModel == .gpt5_5)
+                #expect(store.state.selectedReasoningEffort == .high)
+                #expect(!store.state.isFastModeEnabled)
+                #expect(!store.state.hasUserSelectedModel)
+                #expect(!store.state.hasUserSelectedReasoningEffort)
+                #expect(!store.state.hasUserSelectedFastMode)
+            }
+        }
+    }
+
+    @Test("Desktop configuration actions require an available mutation route")
+    func unavailableDesktopConfigurationActionsAreRejected() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = Chat.State(
+                session: .preview(
+                    model: .gpt5_5,
+                    codexThinkingLevel: .high,
+                    isFastModeEnabled: false
+                )
+            )
+            state.mutationRoute = nil
+            let store = TestStore(initialState: state) {
+                Chat()
+            }
+
+            #expect(store.state.configurationInteractionMode == .hidden)
+            await store.send(.modelSelected(.gpt_5_6_terra))
+            await store.send(.reasoningEffortSelected(.medium))
+            await store.send(.fastModeButtonTapped)
+            #expect(store.state.selectedModel == .gpt5_5)
+            #expect(store.state.selectedReasoningEffort == .high)
+            #expect(!store.state.isFastModeEnabled)
+        }
+    }
+
+    @Test("Missing Cloud configuration stays Default and off")
+    func missingCloudConfigurationIsNotInferred() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: Session.Model(rawValue: ""),
+                codexThinkingLevel: nil,
+                isFastModeEnabled: nil
+            )
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: session,
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            }
+
+            #expect(store.state.selectedModel.rawValue.isEmpty)
+            #expect(store.state.selectedReasoningEffort == nil)
+            #expect(!store.state.isFastModeEnabled)
+
+            await store.send(
+                .modelSettingsFetched(
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_sol,
+                        defaultReasoningEffort: .medium,
+                        isFastModeEnabled: true
+                    )
+                )
+            )
+            #expect(store.state.selectedModel.rawValue.isEmpty)
+            #expect(store.state.selectedReasoningEffort == nil)
+            #expect(!store.state.isFastModeEnabled)
+        }
+    }
+
+    @Test("Cloud synchronization replaces defaults and preserves unknown values")
+    func cloudConfigurationFollowsSynchronization() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let futureModel = Session.Model(rawValue: "future-model")
+            let futureEffort = Session.ReasoningEffort(
+                rawValue: "future-effort"
+            )
+            let store = TestStore(
+                initialState: Chat.State(
+                    session: .preview(
+                        model: Session.Model(rawValue: ""),
+                        codexThinkingLevel: nil,
+                        isFastModeEnabled: nil
+                    ),
+                    isCloudHosted: true
+                )
+            ) {
+                Chat()
+            }
+
+            await store.send(.sessionModelChanged(.gpt5_5)) {
+                $0.hasObservedSessionModelChange = true
+                $0.selectedModel = .gpt5_5
+            }
+            await store.send(.sessionReasoningEffortChanged(.high)) {
+                $0.hasObservedSessionReasoningEffortChange = true
+                $0.selectedReasoningEffort = .high
+            }
+            await store.send(.sessionFastModeChanged(true)) {
+                $0.hasObservedSessionFastModeChange = true
+                $0.isFastModeEnabled = true
+            }
+
+            await store.send(.sessionModelChanged(futureModel)) {
+                $0.selectedModel = futureModel
+            }
+            #expect(store.state.availableReasoningEfforts.isEmpty)
+            await store.send(.sessionReasoningEffortChanged(futureEffort)) {
+                $0.selectedReasoningEffort = futureEffort
+            }
+            #expect(store.state.selectedModel.rawValue == "future-model")
+            #expect(
+                store.state.selectedReasoningEffort?.rawValue
+                    == "future-effort"
+            )
         }
     }
 
@@ -1902,12 +2085,12 @@ struct ChatTests {
                 Chat()
             }
 
-            await store.send(.binding(.set(\.selectedModel, .gpt_5_6_luna))) {
+            await store.send(.modelSelected(.gpt_5_6_luna)) {
                 $0.selectedModel = .gpt_5_6_luna
                 $0.selectedReasoningEffort = .medium
                 $0.hasUserSelectedModel = true
             }
-            await store.send(.binding(.set(\.selectedModel, .gpt5_5))) {
+            await store.send(.modelSelected(.gpt5_5)) {
                 $0.selectedModel = .gpt5_5
             }
         }
@@ -2194,10 +2377,55 @@ private func makeSession(
     )
 }
 
+private func makeDeliveryAttempt(
+    session: Session,
+    content: String,
+    attemptID: UUID = UUID(),
+    state: MessageDeliveryAttempt.State,
+    previousTurnID: String? = nil,
+    dispatchStartedAt: Date? = nil,
+    createdAt: Date = Date()
+) -> MessageDeliveryAttempt {
+    MessageDeliveryAttempt(
+        attemptID: attemptID,
+        route: .desktop,
+        canonicalWorkspaceID: session.workspaceID,
+        canonicalSessionID: session.id,
+        content: content,
+        model: session.model,
+        isFastModeEnabled: false,
+        mode: .sent,
+        reasoningEffort: session.reasoningEffort,
+        submittedDraft: content,
+        previousTurnID: previousTurnID,
+        state: state,
+        dispatchStartedAt: dispatchStartedAt,
+        createdAt: createdAt
+    )
+}
+
 private struct TestError: LocalizedError {
     var errorDescription: String? {
         "Something went wrong."
     }
+}
+
+private func waitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if await condition() {
+            return
+        }
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
+    }
+    Issue.record("Timed out waiting for an asynchronous test condition.")
 }
 
 private enum DisplayedRowProjection: Equatable {

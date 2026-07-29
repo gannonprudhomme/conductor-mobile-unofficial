@@ -138,6 +138,8 @@ struct MainTests {
         } operation: {
             let store = TestStore(initialState: Main.State()) {
                 Main()
+            } withDependencies: {
+                $0.chatSyncClient.runForeground = { }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -152,6 +154,66 @@ struct MainTests {
                 $0.isInBackground = false
             }
             await store.receive(\.workspaces.appBecameActive)
+        }
+    }
+
+    @Test("Chat sync foreground follows app lifecycle")
+    func chatSyncForegroundFollowsLifecycle() async throws {
+        let starts = LockIsolated(0)
+        let cancellations = LockIsolated(0)
+        let continuations = LockIsolated<[AsyncStream<Void>.Continuation]>([])
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.date.now = Date(timeIntervalSinceReferenceDate: 1_000)
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            } withDependencies: {
+                $0.chatSyncClient.runForeground = {
+                    starts.withValue { $0 += 1 }
+                    let stream = AsyncStream<Void> { continuation in
+                        continuations.withValue { $0.append(continuation) }
+                        continuation.onTermination = { termination in
+                            if case .cancelled = termination {
+                                cancellations.withValue { $0 += 1 }
+                            }
+                        }
+                    }
+                    for await _ in stream { }
+                }
+            }
+            defer {
+                continuations.value.forEach { $0.finish() }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.task)
+            await store.receive(\.workspaces.task)
+            await waitUntil { starts.value >= 1 }
+            #expect(starts.value == 1)
+
+            await store.send(.appEnteredBackground) {
+                $0.isInBackground = true
+            }
+            await store.receive(\.workspaces.appEnteredBackground)
+            await waitUntil { cancellations.value >= 1 }
+            #expect(cancellations.value == 1)
+
+            await store.send(.appBecameActive) {
+                $0.isInBackground = false
+            }
+            await store.receive(\.workspaces.appBecameActive)
+            await waitUntil { starts.value >= 2 }
+            #expect(starts.value == 2)
+
+            await store.send(.appEnteredBackground) {
+                $0.isInBackground = true
+            }
+            await store.receive(\.workspaces.appEnteredBackground)
+            await waitUntil { cancellations.value >= 2 }
+            #expect(cancellations.value == 2)
         }
     }
 
@@ -216,180 +278,6 @@ struct MainTests {
         }
     }
 
-    @Test("Popping and reopening a workspace restores its warm chat state")
-    func reopeningWorkspaceRestoresWarmChatState() async throws {
-        let workspace = Workspace.preview(
-            id: "workspace",
-            activeSessionID: "session",
-            derivedStatus: Workspace.Status.inProgress.rawValue
-        )
-        let item = WorkspaceWithRepository(
-            workspace: workspace,
-            repository: .preview()
-        )
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-            try await database.write { database in
-                try Workspace.upsert { workspace }.execute(database)
-                try Session.upsert {
-                    Session.preview(
-                        id: "session",
-                        workspaceID: workspace.id
-                    )
-                }.execute(database)
-            }
-
-            var initialState = Main.State()
-            var workspaceChat = WorkspaceChat.State(
-                workspaceWithRepository: item
-            )
-            workspaceChat.isLoadingSessions = false
-            workspaceChat.chat?.isLoadingMessages = false
-            initialState.path.append(.workspaceChat(workspaceChat))
-            let pathID = try #require(initialState.path.ids.first)
-            let store = TestStore(initialState: initialState) {
-                Main()
-            }
-
-            await store.send(.path(.popFrom(id: pathID))) {
-                $0.cachedWorkspaceChat = workspaceChat
-                $0.path.pop(from: pathID)
-            }
-            await store.send(.workspaces(.workspaceTapped(item))) {
-                $0.cachedWorkspaceChat = nil
-                $0.path.append(.workspaceChat(workspaceChat))
-            }
-        }
-    }
-
-    @Test("Cloud credential deletion invalidates warm chat presentation")
-    func logoutClearsWarmCloudChat() async throws {
-        let workspace = Workspace.preview(
-            id: "cloud-workspace",
-            activeSessionID: "session",
-            derivedStatus: Workspace.Status.inProgress.rawValue,
-            hostingServerURL: Workspace.conductorCloudHostingServerURL
-        )
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Dependency(\.defaultDatabase) var database
-            try await database.write { database in
-                try Workspace.upsert { workspace }.execute(database)
-                try Session.upsert {
-                    Session.preview(
-                        id: "session",
-                        workspaceID: workspace.id
-                    )
-                }
-                .execute(database)
-            }
-
-            var initialState = Main.State()
-            initialState.settings = ConductorSettings.State()
-            initialState.cachedWorkspaceChat = WorkspaceChat.State(
-                workspaceWithRepository: WorkspaceWithRepository(
-                    workspace: workspace,
-                    repository: nil
-                )
-            )
-            let store = TestStore(initialState: initialState) {
-                Main()
-            } withDependencies: {
-                $0.cloudWorkspaceCacheClient.clear = { _ in }
-            }
-
-            await store.send(
-                .settings(
-                    .presented(
-                        .cloudCredentialDeleteResult(.success(()))
-                    )
-                )
-            ) {
-                $0.cachedWorkspaceChat = nil
-            }
-            await store.receive(
-                \.settings.presented.cloudCacheCleanupResult
-            )
-        }
-    }
-
-    @Test("A Cloud chat popped after logout is not cached or reopened")
-    func logoutThenPopDoesNotRestoreCloudChat() async throws {
-        let workspace = Workspace.preview(
-            id: "cloud-workspace",
-            activeSessionID: "session",
-            hostingServerURL: Workspace.conductorCloudHostingServerURL
-        )
-        let item = WorkspaceWithRepository(
-            workspace: workspace,
-            repository: nil
-        )
-        let session = Session.preview(
-            id: "session",
-            workspaceID: workspace.id
-        )
-
-        try await withDependencies {
-            try $0.bootstrapDatabase()
-        } operation: {
-            @Shared(.cloudConfiguration) var cloudConfiguration
-            $cloudConfiguration.withLock {
-                $0 = CloudConfiguration(accountID: "account")
-            }
-
-            var workspaceChat = WorkspaceChat.State(
-                workspaceWithRepository: item
-            )
-            workspaceChat.chat = Chat.State(
-                session: session,
-                isCloudHosted: true
-            )
-            workspaceChat.chat?.isLoadingMessages = false
-            workspaceChat.isLoadingSessions = false
-            workspaceChat.transcriptCopyCount = 42
-
-            var initialState = Main.State()
-            initialState.settings = ConductorSettings.State()
-            initialState.path.append(.workspaceChat(workspaceChat))
-            let pathID = try #require(initialState.path.ids.first)
-            let store = TestStore(initialState: initialState) {
-                Main()
-            } withDependencies: {
-                $0.cloudWorkspaceCacheClient.clear = { _ in }
-            }
-            store.exhaustivity = .off(showSkippedAssertions: false)
-
-            await store.send(
-                .settings(
-                    .presented(
-                        .cloudCredentialDeleteResult(.success(()))
-                    )
-                )
-            )
-            #expect(store.state.cloudConfiguration == nil)
-            await store.receive(
-                \.settings.presented.cloudCacheCleanupResult
-            )
-
-            await store.send(.path(.popFrom(id: pathID)))
-            #expect(store.state.cachedWorkspaceChat == nil)
-            #expect(store.state.path.isEmpty)
-
-            await store.send(.workspaces(.workspaceTapped(item)))
-            guard case let .workspaceChat(reopened)? = store.state.path.last
-            else {
-                Issue.record("Expected the workspace chat to reopen.")
-                return
-            }
-            #expect(reopened.transcriptCopyCount == 0)
-        }
-    }
-
     @Test("Archived workspace delegate pops its chat")
     func archivedWorkspacePopsChat() async throws {
         let item = WorkspaceWithRepository(
@@ -432,11 +320,6 @@ struct MainTests {
             endpointEpoch: 0
         )
         let creation = WorkspaceCreationResult(
-            initialPrompt: .init(
-                attemptID: UUID(42),
-                content: "Run the tests.",
-                deliveryResult: .unknown(reason: "Delivery unconfirmed.")
-            ),
             selectedModel: .gpt_5_6_terra,
             selectedReasoningEffort: .ultra,
             requestLease: requestLease,
@@ -462,13 +345,6 @@ struct MainTests {
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
                             selectedReasoningEffort: .ultra,
-                            initialMessage: .init(
-                                id: UUID(42),
-                                content: "Run the tests.",
-                                deliveryResult: .unknown(
-                                    reason: "Delivery unconfirmed."
-                                )
-                            ),
                             shouldFocusMessageField: true
                         )
                     )
@@ -511,6 +387,12 @@ struct MainTests {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
             $0.defaultInMemoryStorage = InMemoryStorage()
+            $0.chatSyncClient.runForeground = { }
+            $0.chatSyncClient.observeSelected = { _ in
+                AsyncStream { continuation in
+                    continuation.yield(.ready)
+                }
+            }
             $0.desktopClient.isRequestLeaseValid = { _ in true }
             $0.desktopClient.observeMessages = { _, _ in
                 AsyncThrowingStream { $0.finish() }
@@ -612,6 +494,7 @@ struct MainTests {
         try await withDependencies {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
+            $0.chatSyncClient.runForeground = { }
             $0.desktopClient.observeMessages = { workspaceID, _ in
                 #expect(workspaceID == cachedWorkspace.id)
                 return messages
@@ -723,6 +606,24 @@ private func firstValue<Value: Sendable>(
         group.cancelAll()
         return value
     }
+}
+
+private func waitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if await condition() {
+            return
+        }
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
+    }
+    Issue.record("Timed out waiting for an asynchronous test condition.")
 }
 
 @MainActor

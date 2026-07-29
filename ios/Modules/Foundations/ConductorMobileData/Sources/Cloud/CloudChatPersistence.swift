@@ -46,6 +46,14 @@ public enum CloudChatPersistence {
         in database: Database
     ) throws -> [Session] {
         let generation = UUID().uuidString
+        let canonicalWorkspaceID = try CloudWorkspaceMetadata
+            .where {
+                $0.accountID.eq(snapshot.accountID)
+                    && $0.remoteWorkspaceID.eq(snapshot.workspace.id)
+            }
+            .fetchOne(database)?
+            .workspaceID
+            ?? snapshot.workspace.id
         try clearCachedRows(
             in: database,
             keepingAccountID: snapshot.accountID
@@ -58,34 +66,93 @@ public enum CloudChatPersistence {
                 remoteSessionID: cloudSession.id
             )
             let existing = try Session.find(canonicalID).fetchOne(database)
-            let storedDesktopSession = try Session
-                .find(cloudSession.id)
-                .fetchOne(database)
-            let desktopSession: Session? = if storedDesktopSession?.workspaceID
-                == snapshot.workspace.id {
-                storedDesktopSession
-            } else {
-                nil
-            }
             let existingMetadata = try CloudSessionMetadata
                 .find(canonicalID)
                 .fetchOne(database)
             let status = snapshot.statuses[cloudSession.id]
-            let session = canonicalSession(
+            let attempts = try pendingAttempts(
+                accountID: snapshot.accountID,
+                canonicalSessionID: canonicalID,
+                in: database
+            )
+            var finalizedAttemptIDs: [UUID] = []
+            var session = canonicalSession(
                 cloudSession,
                 canonicalID: canonicalID,
-                workspaceID: snapshot.workspace.id,
+                workspaceID: canonicalWorkspaceID,
                 status: status,
-                existing: existing,
-                desktopSession: desktopSession
+                existing: existing
             )
+            for attempt in attempts {
+                switch attempt.mutationOperation {
+                case .createSession:
+                    if try CloudPendingMutation.compareAndSetState(
+                        attemptID: attempt.attemptID,
+                        from: attempt.mutationState,
+                        to: .acknowledged,
+                        at: Date(),
+                        in: database
+                    ) {
+                        finalizedAttemptIDs.append(attempt.attemptID)
+                    }
+
+                case .renameSession:
+                    let request = try attempt.request(
+                        as: CloudRenameSessionRequest.self
+                    )
+                    session.title = request.name
+                    if cloudSession.name == request.name {
+                        if try CloudPendingMutation.compareAndSetState(
+                            attemptID: attempt.attemptID,
+                            from: attempt.mutationState,
+                            to: .acknowledged,
+                            at: Date(),
+                            in: database
+                        ) {
+                            finalizedAttemptIDs.append(attempt.attemptID)
+                        }
+                    }
+
+                case .archiveSession:
+                    session.isHidden = true
+                    if cloudSession.archivedAt != nil {
+                        if try CloudPendingMutation.compareAndSetState(
+                            attemptID: attempt.attemptID,
+                            from: attempt.mutationState,
+                            to: .acknowledged,
+                            at: Date(),
+                            in: database
+                        ) {
+                            finalizedAttemptIDs.append(attempt.attemptID)
+                        }
+                    }
+
+                case .cancelSession:
+                    if attempt.mutationState == .accepted,
+                       status?.status == .idle
+                        || status?.status == .error {
+                        if try CloudPendingMutation.compareAndSetState(
+                            attemptID: attempt.attemptID,
+                            from: attempt.mutationState,
+                            to: .acknowledged,
+                            at: Date(),
+                            in: database
+                        ) {
+                            finalizedAttemptIDs.append(attempt.attemptID)
+                        }
+                    }
+
+                default:
+                    break
+                }
+            }
             try Session.upsert { session }.execute(database)
             try CloudSessionMetadata
                 .upsert {
                     CloudSessionMetadata(
                         canonicalSessionID: canonicalID,
                         cloudSessionID: cloudSession.id,
-                        workspaceID: snapshot.workspace.id,
+                        workspaceID: canonicalWorkspaceID,
                         accountID: snapshot.accountID,
                         listOrder: listOrder,
                         refreshGeneration: generation,
@@ -94,38 +161,51 @@ public enum CloudChatPersistence {
                             ?? false,
                         transcriptProjectionVersion: existingMetadata?
                             .transcriptProjectionVersion
-                            ?? 0
+                            ?? 0,
+                        lastFullTranscriptRefreshAt: existingMetadata?
+                            .lastFullTranscriptRefreshAt
                     )
                 }
                 .execute(database)
+            for attemptID in finalizedAttemptIDs {
+                try CloudPendingMutation.find(attemptID)
+                    .delete()
+                    .execute(database)
+            }
             canonicalSessions.append(session)
         }
 
         let staleMetadata = try CloudSessionMetadata
             .where {
-                $0.workspaceID.eq(snapshot.workspace.id)
+                $0.workspaceID.eq(canonicalWorkspaceID)
                     && $0.accountID.eq(snapshot.accountID)
                     && $0.refreshGeneration.neq(generation)
             }
             .fetchAll(database)
-        try removeSessions(staleMetadata, from: database)
+        try reconcileStaleSessions(
+            staleMetadata,
+            accountID: snapshot.accountID,
+            in: database
+        )
         return canonicalSessions
     }
 
+    /// Applies Desktop-only visibility changes to Cloud canonical session rows.
+    ///
+    /// Raw Desktop identifiers are used only for matching and are never persisted as duplicates.
     public static func reconcileSessionVisibility(
         from desktopSessions: [Session],
-        workspaceID: Workspace.ID,
+        canonicalWorkspaceID: Workspace.ID,
+        remoteWorkspaceID: Workspace.ID,
         in database: Database
     ) throws -> [Session] {
-        let workspaceSessions = desktopSessions.filter {
-            $0.workspaceID == workspaceID
-        }
-        try Session.upsert { workspaceSessions }.execute(database)
         let desktopSessionsByID = Dictionary(
-            uniqueKeysWithValues: workspaceSessions.map { ($0.id, $0) }
+            uniqueKeysWithValues: desktopSessions
+                .filter { $0.workspaceID == remoteWorkspaceID }
+                .map { ($0.id, $0) }
         )
         let metadata = try CloudSessionMetadata
-            .where { $0.workspaceID.eq(workspaceID) }
+            .where { $0.workspaceID.eq(canonicalWorkspaceID) }
             .order(by: \.listOrder)
             .fetchAll(database)
 
@@ -198,6 +278,13 @@ public enum CloudChatPersistence {
                 in: database
             )
         }
+        try acknowledgeObservedDeliveries(
+            update.messages,
+            accountID: update.accountID,
+            remoteSessionID: update.sessionID,
+            canonicalSessionID: canonicalSessionID,
+            in: database
+        )
 
         var updatedMetadata = sessionMetadata
         updatedMetadata.transcriptCursor = update.rawCursor
@@ -205,6 +292,10 @@ public enum CloudChatPersistence {
             update.kind == .complete || sessionMetadata.hasCompleteTranscript
         updatedMetadata.transcriptProjectionVersion =
             CloudTranscriptAdapter.projectionVersion
+        if update.kind == .complete {
+            updatedMetadata.lastFullTranscriptRefreshAt =
+                update.completedAt ?? Date()
+        }
         try CloudSessionMetadata
             .upsert { updatedMetadata }
             .execute(database)
@@ -230,11 +321,14 @@ public enum CloudChatPersistence {
         let checkpoint: CloudTranscriptCheckpoint? =
             if metadata.hasCompleteTranscript,
                metadata.transcriptProjectionVersion
-                == CloudTranscriptAdapter.projectionVersion {
+                == CloudTranscriptAdapter.projectionVersion,
+               let lastFullTranscriptRefreshAt =
+                metadata.lastFullTranscriptRefreshAt {
                 CloudTranscriptCheckpoint(
                     accountID: metadata.accountID,
                     remoteSessionID: metadata.cloudSessionID,
-                    rawCursor: metadata.transcriptCursor
+                    rawCursor: metadata.transcriptCursor,
+                    lastFullTranscriptRefreshAt: lastFullTranscriptRefreshAt
                 )
             } else {
                 nil
@@ -243,6 +337,23 @@ public enum CloudChatPersistence {
             remoteSessionID: metadata.cloudSessionID,
             messages: messages,
             checkpoint: checkpoint
+        )
+    }
+
+    public static func reconcileDeliveryAttempts(
+        for canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws {
+        guard let metadata = try CloudSessionMetadata
+            .find(canonicalSessionID)
+            .fetchOne(database) else {
+            return
+        }
+        try acknowledgePersistedDeliveries(
+            accountID: metadata.accountID,
+            remoteSessionID: metadata.cloudSessionID,
+            canonicalSessionID: canonicalSessionID,
+            in: database
         )
     }
 
@@ -267,21 +378,13 @@ public enum CloudChatPersistence {
         } else {
             try CloudSessionMetadata.all.fetchAll(database)
         }
-        try removeSessions(metadata, from: database)
-    }
-
-    public static func removeCachedRows(
-        workspaceID: Workspace.ID,
-        accountID: String,
-        in database: Database
-    ) throws {
-        let metadata = try CloudSessionMetadata
-            .where {
-                $0.workspaceID.eq(workspaceID)
-                    && $0.accountID.eq(accountID)
-            }
-            .fetchAll(database)
-        try removeSessions(metadata, from: database)
+        try CloudOwnershipCleanup.perform(
+            scope: .sessions(Set(metadata.map(\.canonicalSessionID))),
+            reason: keepingAccountID == nil
+                ? .credentialRemoval
+                : .authoritativeSnapshot,
+            in: database
+        )
     }
 
     private static func canonicalSession(
@@ -289,55 +392,54 @@ public enum CloudChatPersistence {
         canonicalID: Session.ID,
         workspaceID: Workspace.ID,
         status: CloudSessionStatusResponse?,
-        existing: Session?,
-        desktopSession: Session?
+        existing: Session?
     ) -> Session {
         let model = cloudSession.model
             ?? cloudSession.resolvedModel
             ?? existing?.model.rawValue
             ?? ""
-        let inferredAgent = [cloudSession.model, cloudSession.resolvedModel]
-            .compactMap { $0 }
-            .compactMap { Session.Model(rawValue: $0).agentType }
-            .first
         let agent = cloudSession.agent
-            ?? inferredAgent?.rawValue
+            ?? Session.Model(rawValue: model).agentType?.rawValue
             ?? existing?.agentType.rawValue
             ?? "unknown"
         let updatedAt = status?.updatedAt.ISO8601Format()
             ?? existing?.updatedAt
             ?? Date.distantPast.ISO8601Format()
         let createdAt = existing?.createdAt ?? updatedAt
-        let effort = cloudSession.effort.map(Session.ReasoningEffort.init(rawValue:))
         let agentType = Session.AgentType(rawValue: agent)
-        let sessionStatus = status?.status.rawValue
-            ?? existing?.status.rawValue
-            ?? CloudSessionStatusResponse.Status.unknown.rawValue
-        let isHidden = desktopSession?.isHidden
-            ?? (cloudSession.archivedAt != nil ? true : existing?.isHidden)
-            ?? false
+        let effort = cloudSession.effort
+            .map(Session.ReasoningEffort.init(rawValue:))
+            ?? (
+                existing?.agentType == agentType
+                    ? existing?.reasoningEffort
+                    : nil
+            )
 
         return Session(
             id: canonicalID,
             workspaceID: workspaceID,
             title: cloudSession.name,
             agentType: agentType,
-            isHidden: isHidden,
+            isHidden: cloudSession.archivedAt != nil
+                || existing?.isHidden == true,
             createdAt: createdAt,
             updatedAt: updatedAt,
             lastUserMessageAt: existing?.lastUserMessageAt,
-            status: Session.Status(rawValue: sessionStatus),
+            status: Session.Status(
+                rawValue: status?.status.rawValue ?? "unknown"
+            ),
             model: Session.Model(rawValue: model),
             unreadCount: existing?.unreadCount ?? 0,
             freshlyCompacted: existing?.freshlyCompacted ?? 0,
             contextTokenCount: existing?.contextTokenCount ?? 0,
             codexThinkingLevel: agentType == .codex
                 ? effort
-                : existing?.codexThinkingLevel,
-            isFastModeEnabled: cloudSession.fastMode,
+                : nil,
+            isFastModeEnabled: cloudSession.fastMode
+                ?? existing?.isFastModeEnabled,
             claudeEffortLevel: agentType == .claude
                 ? effort
-                : existing?.claudeEffortLevel,
+                : nil,
             queuePausedAt: existing?.queuePausedAt
         )
     }
@@ -347,15 +449,36 @@ public enum CloudChatPersistence {
         from database: Database
     ) throws {
         for item in metadata {
-            let messageMetadata = try CloudMessageMetadata
-                .where {
-                    $0.canonicalSessionID.eq(item.canonicalSessionID)
-                        && $0.accountID.eq(item.accountID)
-                }
-                .fetchAll(database)
-            try removeMessages(messageMetadata, from: database)
             try Session.find(item.canonicalSessionID).delete().execute(database)
         }
+    }
+
+    private static func reconcileStaleSessions(
+        _ metadata: [CloudSessionMetadata],
+        accountID: String,
+        in database: Database
+    ) throws {
+        try CloudOwnershipCleanup.perform(
+            scope: .sessions(Set(metadata.map(\.canonicalSessionID))),
+            reason: .authoritativeSnapshot,
+            in: database
+        )
+    }
+
+    private static func pendingAttempts(
+        accountID: String,
+        canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws -> [CloudPendingMutation] {
+        try CloudPendingMutation
+            .where {
+                $0.accountID.eq(accountID)
+                    && $0.canonicalSessionID.eq(canonicalSessionID)
+                    && $0.state.neq(
+                        CloudPendingMutation.State.acknowledged.rawValue
+                    )
+            }
+            .fetchAll(database)
     }
 
     private static func removeMessages(
@@ -507,6 +630,134 @@ public enum CloudChatPersistence {
         ) {
             let endIndex = min(startIndex + size, elements.endIndex)
             try operation(Array(elements[startIndex..<endIndex]))
+        }
+    }
+
+    private static func acknowledgeObservedDeliveries(
+        _ events: [CloudTranscriptMessage],
+        accountID: String,
+        remoteSessionID: String,
+        canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws {
+        let observedEvents = events.compactMap { event -> (
+            remoteMessageID: String,
+            canonicalMessageID: Message.ID?,
+            canonicalTurnID: String?
+        )? in
+            guard let remoteMessageID = observedRemoteMessageID(for: event) else {
+                return nil
+            }
+            let userMessage = CloudTranscriptAdapter
+                .adapt(
+                    event,
+                    accountID: accountID,
+                    remoteSessionID: remoteSessionID,
+                    canonicalSessionID: canonicalSessionID
+                )
+                .first { $0.message.role == .user }?
+                .message
+            return (
+                remoteMessageID.lowercased(),
+                userMessage?.id,
+                userMessage?.turnID
+            )
+        }
+        guard !observedEvents.isEmpty else {
+            return
+        }
+        let attempts = try MessageDeliveryAttempt
+            .where {
+                $0.accountID.eq(accountID)
+                    && $0.canonicalSessionID.eq(canonicalSessionID)
+                    && $0.route.eq(MessageDeliveryAttempt.Route.cloud.rawValue)
+                    && $0.state.neq(
+                        MessageDeliveryAttempt.State.acknowledged.rawValue
+                    )
+            }
+            .fetchAll(database)
+        for attempt in attempts {
+            let attemptID = attempt.attemptID.uuidString.lowercased()
+            guard let observed = observedEvents.first(where: {
+                $0.remoteMessageID == attemptID
+            }) else {
+                continue
+            }
+            _ = try MessageDeliveryAttempt.acknowledge(
+                attemptID: attempt.attemptID,
+                canonicalMessageID: observed.canonicalMessageID,
+                canonicalTurnID: observed.canonicalTurnID,
+                at: Date(),
+                in: database
+            )
+        }
+    }
+
+    private static func observedRemoteMessageID(
+        for event: CloudTranscriptMessage
+    ) -> String? {
+        guard case let .object(content) = event.content,
+              case .string("userMessage") = content["type"] else {
+            return nil
+        }
+        if case let .string(messageID) = content["id"] {
+            return messageID
+        } else if case let .string(turnID) = content["turnId"] {
+            return turnID
+        } else {
+            return event.id
+        }
+    }
+
+    private static func acknowledgePersistedDeliveries(
+        accountID: String,
+        remoteSessionID: String,
+        canonicalSessionID: Session.ID,
+        in database: Database
+    ) throws {
+        let messages = try CloudMessageMetadata
+            .messages(sessionID: canonicalSessionID)
+            .fetchAll(database)
+            .filter { $0.role == .user }
+        let metadata = try CloudMessageMetadata
+            .where { $0.canonicalSessionID.eq(canonicalSessionID) }
+            .fetchAll(database)
+        let messagesByID = Dictionary(
+            uniqueKeysWithValues: messages.map { ($0.id, $0) }
+        )
+        let attempts = try MessageDeliveryAttempt
+            .where {
+                $0.accountID.eq(accountID)
+                    && $0.canonicalSessionID.eq(canonicalSessionID)
+                    && $0.route.eq(MessageDeliveryAttempt.Route.cloud.rawValue)
+                    && $0.state.neq(
+                        MessageDeliveryAttempt.State.acknowledged.rawValue
+                    )
+            }
+            .fetchAll(database)
+        for attempt in attempts {
+            let remoteMessageID = attempt.attemptID.uuidString.lowercased()
+            let canonicalRemoteTurnID = CloudCanonicalID.turn(
+                accountID: accountID,
+                remoteSessionID: remoteSessionID,
+                remoteTurnID: remoteMessageID
+            )
+            let message = messages.first {
+                $0.sdkMessageID?.lowercased() == remoteMessageID
+                    || $0.turnID == canonicalRemoteTurnID
+            } ?? metadata.first {
+                $0.cloudEventID.lowercased() == remoteMessageID
+            }.flatMap { messagesByID[$0.canonicalMessageID] }
+            guard let message else {
+                continue
+            }
+            _ = try MessageDeliveryAttempt.acknowledge(
+                attemptID: attempt.attemptID,
+                canonicalMessageID: message.id,
+                canonicalTurnID: message.turnID,
+                at: Date(),
+                in: database
+            )
         }
     }
 }

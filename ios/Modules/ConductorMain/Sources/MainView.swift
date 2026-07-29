@@ -45,6 +45,9 @@ public struct Main: Sendable {
         case appEnteredBackground
         case cloudCacheCleanupResult(Result<Void, any Error>)
         case cloudCredentialReconciliationResult(Result<String?, any Error>)
+        case messageDeliveryOutboxResult(Result<Void, any Error>)
+        case cloudMutationRunnerResult(Result<Void, any Error>)
+        case cloudWorkspaceCompletionConsumed(Result<Void, any Error>)
         case path(StackActionOf<Path>)
         case settings(PresentationAction<ConductorSettings.Action>)
         case task
@@ -52,8 +55,11 @@ public struct Main: Sendable {
     }
 
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+    @Dependency(\.chatSyncClient) var chatSyncClient
+    @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
+    @Dependency(\.messageDeliveryOutbox) var messageDeliveryOutbox
 
     public init() {
     }
@@ -66,32 +72,87 @@ public struct Main: Sendable {
             Reduce { state, action in
                 switch action {
                 case .task:
-                    guard state.cloudConfiguration != nil else {
-                        return .send(.workspaces(.task))
-                    }
-                    return .run { [cloudCredentialClient] send in
+                    let startRunner: Effect<Action> = .run {
+                        [cloudMutationRunner] send in
                         await send(
-                            .cloudCredentialReconciliationResult(
+                            .cloudMutationRunnerResult(
                                 await Result {
-                                    try await cloudCredentialClient.loadAPIKey()
+                                    try await cloudMutationRunner.start()
                                 }
                             )
                         )
                     }
+                    let startOutbox: Effect<Action> = .run {
+                        [messageDeliveryOutbox] send in
+                        await send(
+                            .messageDeliveryOutboxResult(
+                                await Result {
+                                    try await messageDeliveryOutbox.start()
+                                }
+                            )
+                        )
+                    }
+                    guard state.cloudConfiguration != nil else {
+                        return .merge(
+                            runChatSyncForeground(),
+                            startRunner,
+                            startOutbox,
+                            .send(.workspaces(.task))
+                        )
+                    }
+                    return .merge(
+                        runChatSyncForeground(),
+                        startRunner,
+                        startOutbox,
+                        .run { [cloudCredentialClient] send in
+                            await send(
+                            .cloudCredentialReconciliationResult(
+                                await Result {
+                                    try await cloudCredentialClient
+                                        .loadAPIKey()
+                                }
+                                )
+                            )
+                        }
+                    )
+
+                case let .cloudMutationRunnerResult(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .cloudMutationRunnerResult(.success):
+                    return .none
+
+                case let .messageDeliveryOutboxResult(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .messageDeliveryOutboxResult(.success):
+                    return .none
+
+                case let .cloudWorkspaceCompletionConsumed(.failure(error)):
+                    return .send(.workspaces(.loadWorkspacesFailed(error)))
+
+                case .cloudWorkspaceCompletionConsumed(.success):
+                    return .none
 
                 case .appBecameActive:
                     guard state.isInBackground else {
                         return .none
                     }
                     state.isInBackground = false
-                    return .send(.workspaces(.appBecameActive))
+                    return .merge(
+                        runChatSyncForeground(),
+                        .send(.workspaces(.appBecameActive))
+                    )
 
                 case .appEnteredBackground:
                     guard !state.isInBackground else {
                         return .none
                     }
                     state.isInBackground = true
-                    return .send(.workspaces(.appEnteredBackground))
+                    return .merge(
+                        .cancel(id: CancelID.chatSyncForeground),
+                        .send(.workspaces(.appEnteredBackground))
+                    )
 
                 case let .cloudCredentialReconciliationResult(result):
                     switch result {
@@ -149,29 +210,51 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceCreated(creation)):
-                    guard desktopClient.isRequestLeaseValid(
-                        lease: creation.requestLease
-                    ) else {
-                        return .none
+                    if let requestLease = creation.requestLease {
+                        guard desktopClient.isRequestLeaseValid(
+                            lease: requestLease
+                        ) else {
+                            return .none
+                        }
                     }
-                    state.path.append(
-                        .workspaceChat(
-                            WorkspaceChat.State(
-                                workspaceWithRepository: creation.workspace,
-                                selectedModel: creation.selectedModel,
-                                selectedReasoningEffort: creation.selectedReasoningEffort,
-                                initialMessage: creation.initialPrompt.map {
-                                    WorkspaceChat.InitialMessage(
-                                        id: $0.attemptID,
-                                        content: $0.content,
-                                        deliveryResult: $0.deliveryResult
-                                    )
-                                },
-                                shouldFocusMessageField: true
+                    let alreadyPresented = state.path.contains { destination in
+                        guard case let .workspaceChat(workspaceChat) = destination else {
+                            return false
+                        }
+                        return workspaceChat.workspace.id == creation.workspace.id
+                    }
+                    if !alreadyPresented {
+                        state.path.append(
+                            .workspaceChat(
+                                WorkspaceChat.State(
+                                    workspaceWithRepository: creation.workspace,
+                                    selectedSessionID: creation.selectedSessionID,
+                                    selectedModel: creation.selectedModel,
+                                    selectedReasoningEffort: creation.selectedReasoningEffort,
+                                    shouldFocusMessageField: true
+                                )
                             )
                         )
-                    )
-                    return .none
+                    }
+                    guard let completionID = creation.completionID else {
+                        return .none
+                    }
+                    return .run { send in
+                        await send(
+                            .cloudWorkspaceCompletionConsumed(
+                                await Result {
+                                    try await database.write { database in
+                                        try CloudMutationOutcome
+                                            .find(completionID)
+                                            .update {
+                                                $0.consumedAt = #bind(Date())
+                                            }
+                                            .execute(database)
+                                    }
+                                }
+                            )
+                        )
+                    }
 
                 case let .workspaces(.workspaceTapped(item)):
                     let workspaceChat: WorkspaceChat.State
@@ -224,6 +307,13 @@ public struct Main: Sendable {
         }
         .forEach(\.path, action: \.path)
     }
+
+    private func runChatSyncForeground() -> Effect<Action> {
+        .run { [chatSyncClient] _ in await chatSyncClient.runForeground() }
+        .cancellable(id: CancelID.chatSyncForeground, cancelInFlight: true)
+    }
+
+    private enum CancelID: Hashable { case chatSyncForeground }
 }
 
 extension Main.Path.State: Equatable { }

@@ -64,7 +64,7 @@ public struct ReasoningEffortMenu<SourceLabel: View>: View {
         .menuOrder(.fixed)
         .disabled(isDisabled)
         .accessibilityLabel("Reasoning effort")
-        .accessibilityValue(selectedEffort?.displayName ?? "Unavailable")
+        .accessibilityValue(selectedEffort?.displayName ?? "Default")
     }
 }
 
@@ -128,38 +128,58 @@ public struct ReasoningEffortControl: View {
     }
 
     private func effortLabel(for effort: Session.ReasoningEffort) -> some View {
+        ReasoningEffortLabel(
+            effort: effort,
+            showsDefaultTitle: false,
+            showsName: showsName
+        )
+    }
+}
+
+struct ReasoningEffortLabel: View {
+    let effort: Session.ReasoningEffort?
+    let showsDefaultTitle: Bool
+    var showsName = true
+
+    private var displayedEffort: Session.ReasoningEffort {
+        effort ?? .none
+    }
+
+    var body: some View {
         Group {
             if showsName {
-                effortLabelContent(for: effort)
+                label
             } else {
-                effortLabelContent(for: effort)
+                label
                     .labelStyle(.iconOnly)
             }
         }
         .font(.theme(.small))
         .foregroundStyle(
-            .theme(effort.usesUltraAppearance ? .textPrimary : .textSecondary)
+            .theme(
+                displayedEffort.usesUltraAppearance
+                    ? .textPrimary
+                    : .textSecondary
+            )
         )
         .padding(EdgeInsets(vertical: 6, horizontal: 8))
         .background(
-            effort.usesUltraAppearance
+            displayedEffort.usesUltraAppearance
                 ? AnyShapeStyle(LinearGradient.reasoningUltra)
                 : AnyShapeStyle(Color.clear),
             in: .capsule
         )
     }
 
-    private func effortLabelContent(
-        for effort: Session.ReasoningEffort
-    ) -> some View {
+    private var label: some View {
         Label {
-            if effort != .none {
-                Text(effort.displayName)
+            if showsDefaultTitle || displayedEffort != .none {
+                Text(displayedEffort.displayName)
             }
         } icon: {
             ReasoningEffortIcon(
-                activeBarCount: effort.activeBarCount,
-                usesUltraAppearance: effort.usesUltraAppearance
+                activeBarCount: displayedEffort.activeBarCount,
+                usesUltraAppearance: displayedEffort.usesUltraAppearance
             )
         }
     }

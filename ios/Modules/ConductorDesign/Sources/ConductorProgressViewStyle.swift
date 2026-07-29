@@ -9,17 +9,22 @@
 import SwiftUI
 
 public struct ConductorProgressViewStyle: ProgressViewStyle {
-    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
-
-    private let phaseOffset: Double
-
-    public init() {
-        self.phaseOffset = 0
+    public enum Variant: Sendable {
+        case `default`
+        case random
     }
 
-    public init(phaseSeed: some Hashable) {
-        // Stagger indicators that start together so they do not animate in lockstep.
-        self.phaseOffset = Double(phaseSeed.hashValue.magnitude % 10_000) / 10_000
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
+    private let variant: Variant
+    private let phaseOffset: Double
+
+    fileprivate init(
+        _ variant: Variant = .default,
+        phaseOffset: Double = 0
+    ) {
+        self.variant = variant
+        self.phaseOffset = phaseOffset
     }
 
     public func makeBody(configuration _: Configuration) -> some View {
@@ -34,17 +39,27 @@ public struct ConductorProgressViewStyle: ProgressViewStyle {
             TimelineView(
                 .animation(paused: accessibilityReduceMotion)
             ) { context in
-                let frame = ProgressAnimation.frame(at: context.date, phaseOffset: phaseOffset)
+                let frame = ProgressAnimation.frame(
+                    at: context.date,
+                    variant: variant,
+                    phaseOffset: phaseOffset
+                )
 
                 ZStack {
                     ForEach(ProgressAnimation.dots) { dot in
+                        let dotScale = ProgressAnimation.scale(
+                            of: dot,
+                            at: frame,
+                            variant: variant
+                        )
+
                         Circle()
                             .fill(.tint)
                             .frame(
                                 width: ProgressAnimation.dotSize * scale,
                                 height: ProgressAnimation.dotSize * scale
                             )
-                            .scaleEffect(accessibilityReduceMotion ? 1 : dot.scale(at: frame))
+                            .scaleEffect(accessibilityReduceMotion ? 1 : dotScale)
                             .position(
                                 x: origin.x + dot.position.x * scale,
                                 y: origin.y + dot.position.y * scale
@@ -68,14 +83,13 @@ private enum ProgressAnimation {
     /// The design-space canvas the layout is authored in; scaled to fit the view.
     static let canvasSize = inset * 2 + spacing * Double(gridSize - 1)
 
-    // The pulse keyframes below are authored on a fixed timeline of `frameCount` frames
-    // at `authoredFrameRate` fps. This is the source animation's timebase, not the display
+    // The pulse keyframes below are authored on a fixed timeline at `authoredFrameRate`
+    // fps. This is the source animation's timebase, not the display
     // refresh rate: `TimelineView(.animation)` renders at the display's native cadence
     // (including 120 Hz ProMotion) and the scale interpolation is continuous, so playback
     // stays smooth at any refresh rate.
     static let authoredFrameRate = 60.0
-    /// Total frames in one loop, so the animation resets every `frameCount / authoredFrameRate` seconds.
-    static let frameCount = 64.0
+    static let defaultFrameCount = 64.0
     /// Frames between one circle starting its pulse and the next.
     static let stagger = 3.0
     /// Frames for a circle to scale 0 → 1 → 0.
@@ -86,43 +100,94 @@ private enum ProgressAnimation {
         (0..<gridSize).map { row in
             let index = column * gridSize + row
             return Dot(
+                id: index,
                 position: CGPoint(
                     x: inset + Double(column) * spacing,
                     y: inset + Double(row) * spacing
-                ),
-                startFrame: Double(index) * stagger
+                )
             )
         }
     }
 
-    static func frame(at date: Date, phaseOffset: Double) -> Double {
-        (date.timeIntervalSinceReferenceDate * authoredFrameRate + phaseOffset * frameCount)
-            .truncatingRemainder(dividingBy: frameCount)
+    static func frame(
+        at date: Date,
+        variant: ConductorProgressViewStyle.Variant,
+        phaseOffset: Double
+    ) -> Double {
+        let loopFrameCount = switch variant {
+        case .default:
+            defaultFrameCount
+        case .random:
+            Double(randomFrameCount)
+        }
+        let elapsed = date.timeIntervalSinceReferenceDate * authoredFrameRate
+            + phaseOffset * loopFrameCount
+        return elapsed.truncatingRemainder(dividingBy: loopFrameCount)
+    }
+
+    static func scale(
+        of dot: Dot,
+        at frame: Double,
+        variant: ConductorProgressViewStyle.Variant
+    ) -> Double {
+        switch variant {
+        case .default:
+            defaultPulseScale(elapsed: frame - Double(dot.id) * stagger)
+        case .random:
+            randomScale(of: dot, at: frame)
+        }
+    }
+
+    private static func defaultPulseScale(elapsed: Double) -> Double {
+        guard elapsed >= 0, elapsed < pulseDuration else {
+            return 0
+        }
+
+        let half = pulseDuration / 2
+        return elapsed < half
+            ? UnitCurve.easeInOut.value(at: elapsed / half)
+            : 1 - UnitCurve.easeInOut.value(at: (elapsed - half) / half)
+    }
+
+    private static let randomFrameCount = 640
+    private static let randomScales = NSDataAsset(
+        name: "ConductorProgressRandom",
+        bundle: #bundle
+    ).flatMap {
+        Data(base64Encoded: $0.data, options: .ignoreUnknownCharacters)
+    }
+
+    private static func randomScale(of dot: Dot, at frame: Double) -> Double {
+        guard let randomScales,
+              randomScales.count == randomFrameCount * dots.count else {
+            return 0
+        }
+
+        let lowerFrame = Int(frame.rounded(.down))
+        let upperFrame = (lowerFrame + 1) % randomFrameCount
+        let progress = frame - Double(lowerFrame)
+        let lowerScale = Double(randomScales[lowerFrame * dots.count + dot.id]) / 255
+        let upperScale = Double(randomScales[upperFrame * dots.count + dot.id]) / 255
+        return lowerScale + (upperScale - lowerScale) * progress
     }
 
     struct Dot: Identifiable {
+        let id: Int
         let position: CGPoint
-        let startFrame: Double
-
-        var id: Double { startFrame }
-
-        // Scale up over the first half of the pulse and back down over the second.
-        func scale(at frame: Double) -> Double {
-            let elapsed = frame - startFrame
-            guard elapsed >= 0, elapsed < ProgressAnimation.pulseDuration else { return 0 }
-
-            let half = ProgressAnimation.pulseDuration / 2
-            return elapsed < half
-                ? UnitCurve.easeInOut.value(at: elapsed / half)
-                : 1 - UnitCurve.easeInOut.value(at: (elapsed - half) / half)
-        }
     }
 }
 
 public extension ProgressViewStyle where Self == ConductorProgressViewStyle {
     static var conductor: Self { Self() }
 
+    static func conductor(_ variant: ConductorProgressViewStyle.Variant) -> Self {
+        Self(variant)
+    }
+
     static func conductor(phaseSeed: some Hashable) -> Self {
-        Self(phaseSeed: phaseSeed)
+        Self(
+            // Stagger indicators that start together so they do not animate in lockstep.
+            phaseOffset: Double(phaseSeed.hashValue.magnitude % 10_000) / 10_000
+        )
     }
 }

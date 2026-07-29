@@ -87,7 +87,7 @@ struct WorkspacesTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 1
+                    credentialGeneration: UUID(1)
                 )
             }
             let connectionCount = LockIsolated(0)
@@ -113,7 +113,7 @@ struct WorkspacesTests {
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
-                    credentialRevision: 2
+                    credentialGeneration: UUID(2)
                 )
             }
             await store.receive(\.cloudConfigurationChanged)
@@ -132,6 +132,11 @@ struct WorkspacesTests {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Repository
+                    .insert { Repository.preview(id: "repo-1") }
+                    .execute(database)
+            }
         } operation: {
             let initialState = Workspaces.State()
             initialState.$grouping.withLock { $0 = .project }
@@ -681,6 +686,46 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("A removed duplicate repository cannot strand the persisted filter")
+    func removedRepositoryClearsPersistedFilter() throws {
+        try withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.selectedRepositoryID) var selectedRepositoryID
+            $selectedRepositoryID.withLock {
+                $0 = "removed-duplicate-repository"
+            }
+
+            let state = Workspaces.State()
+
+            #expect(state.selectedRepositoryID == nil)
+        }
+    }
+
+    @Test("Repository consolidation clears an active duplicate filter")
+    func repositoryConsolidationClearsActiveFilter() async throws {
+        let repository = Repository.preview(id: "duplicate-repository")
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Repository.insert { repository }.execute(database)
+            }
+        } operation: {
+            let state = Workspaces.State()
+            state.$selectedRepositoryID.withLock { $0 = repository.id }
+            let store = TestStore(initialState: state) {
+                Workspaces()
+            }
+
+            await store.send(.repositoriesChanged([])) {
+                $0.$selectedRepositoryID.withLock { $0 = nil }
+            }
+            await store.finish()
+        }
+    }
+
     @Test("Create button presents a sheet with the available repositories")
     func createButtonPresentsSheet() async throws {
         let repository = Repository.preview()
@@ -1153,6 +1198,111 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Cloud-only workspace actions explain the public API limitation")
+    func cloudOnlyWorkspaceActionsRequireDesktop() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+            let item = cloudWorkspace()
+            let requestCount = LockIsolated(0)
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item)) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(.workspaceStatusButtonTapped(item, .done)) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(.workspaceUnreadButtonTapped(item)) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+
+            #expect(requestCount.value == 0)
+        }
+    }
+
+    @Test("Connected Cloud workspace actions use the desktop workspace ID")
+    func connectedCloudWorkspaceActionsUseDesktop() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .connected }
+            let item = cloudWorkspace()
+            let now = Date(timeIntervalSince1970: 1_783_555_200)
+            let requests = LockIsolated<[String]>([])
+            try await database.write { db in
+                try Workspace.insert { item.workspace }.execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.date.now = now
+                $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
+                    requests.withValue { $0.append("pinned:\(workspaceID):\(isPinned)") }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    requests.withValue {
+                        $0.append("status:\(workspaceID):\(status.rawValue)")
+                    }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, isUnread in
+                    requests.withValue { $0.append("unread:\(workspaceID):\(isUnread)") }
+                    return .hook
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item))
+            await store.finish()
+            await store.send(.workspaceStatusButtonTapped(item, .done))
+            await store.finish()
+            await store.send(.workspaceUnreadButtonTapped(item))
+            await store.finish()
+
+            let updatedWorkspace = try await database.read { db in
+                try Workspace.find(item.id).fetchOne(db)
+            }
+            #expect(updatedWorkspace?.pinnedAt == now.ISO8601Format())
+            #expect(updatedWorkspace?.manualStatus == Workspace.Status.done.rawValue)
+            #expect(updatedWorkspace?.unread == 1)
+            #expect(
+                requests.value == [
+                    "pinned:remote-workspace:true",
+                    "status:remote-workspace:done",
+                    "unread:remote-workspace:true",
+                ]
+            )
+        }
+    }
+
     @Test("A failed pin update restores the previous value")
     func failedPinUpdateRollsBack() async throws {
         try await withDependencies {
@@ -1445,6 +1595,24 @@ private func workspace(
             repositoryID: repository?.id ?? repositoryID
         ),
         repository: repository
+    )
+}
+
+private func cloudWorkspace() -> WorkspaceWithRepository {
+    let workspace = Workspace.preview(
+        id: "canonical-workspace",
+        derivedStatus: Workspace.Status.inProgress.rawValue,
+        hostingServerURL: Workspace.conductorCloudHostingServerURL
+    )
+    return WorkspaceWithRepository(
+        workspace: workspace,
+        repository: nil,
+        cloudMetadata: CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
     )
 }
 

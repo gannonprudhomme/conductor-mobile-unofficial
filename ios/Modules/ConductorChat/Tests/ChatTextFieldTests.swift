@@ -30,7 +30,7 @@ struct ChatTextFieldTests {
                 isWorking: false,
                 voiceInputPhase: .idle,
                 voiceInputLevels: [],
-                selectedModel: .constant(.gpt_5_6_sol),
+                selectedModel: .gpt_5_6_sol,
                 selectedReasoningEffort: nil,
                 availableReasoningEfforts: [],
                 shouldFocusOnAppear: true,

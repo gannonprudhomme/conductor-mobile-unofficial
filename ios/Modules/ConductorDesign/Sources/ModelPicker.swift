@@ -10,38 +10,75 @@ import LucideIcons
 import SharedConductorData
 import SwiftUI
 
+public enum ModelConfigurationControl: Equatable, Sendable {
+    case model
+    case reasoningEffort
+    case fastMode
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .model:
+            "configuration.model"
+        case .reasoningEffort:
+            "configuration.reasoningEffort"
+        case .fastMode:
+            "configuration.fastMode"
+        }
+    }
+}
+
+public enum ModelConfigurationInteractionMode: Equatable, Sendable {
+    case editable
+    case readOnlyInformational
+    case hidden
+}
+
 public struct ModelAndFastModeControls: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let allowedModels: Set<Session.Model>?
     let availableReasoningEfforts: [Session.ReasoningEffort]
+    let interactionMode: ModelConfigurationInteractionMode
     let isFastModeEnabled: Bool
     let isFastModeButtonDisabled: Bool
+    let showsFastMode: Bool
     let selectedModel: Session.Model
     let selectedReasoningEffort: Session.ReasoningEffort?
     let onFastModeTapped: @MainActor () -> Void
+    let onInformationalControlTapped: @MainActor (ModelConfigurationControl) -> Void
     let onSelectReasoningEffort: @MainActor (Session.ReasoningEffort) -> Void
     let onSelectModel: @MainActor (Session.Model) -> Void
 
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        allowedModels: Set<Session.Model>? = nil,
         availableReasoningEfforts: [Session.ReasoningEffort],
+        interactionMode: ModelConfigurationInteractionMode = .editable,
         isFastModeEnabled: Bool,
         isFastModeButtonDisabled: Bool = false,
+        showsFastMode: Bool = true,
         selectedModel: Session.Model,
         selectedReasoningEffort: Session.ReasoningEffort?,
         onFastModeTapped: @escaping @MainActor () -> Void,
+        onInformationalControlTapped: @escaping @MainActor (
+            ModelConfigurationControl
+        ) -> Void = { _ in },
         onSelectReasoningEffort: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSelectModel: @escaping @MainActor (Session.Model) -> Void
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.allowedModels = allowedModels
         self.availableReasoningEfforts = availableReasoningEfforts
+        self.interactionMode = interactionMode
         self.isFastModeEnabled = isFastModeEnabled
         self.isFastModeButtonDisabled = isFastModeButtonDisabled
+        self.showsFastMode = showsFastMode
         self.selectedModel = selectedModel
         self.selectedReasoningEffort = selectedReasoningEffort
         self.onFastModeTapped = onFastModeTapped
+        self.onInformationalControlTapped = onInformationalControlTapped
         self.onSelectReasoningEffort = onSelectReasoningEffort
         self.onSelectModel = onSelectModel
     }
@@ -71,55 +108,190 @@ public struct ModelAndFastModeControls: View {
         showsReasoningEffortName: Bool
     ) -> some View {
         HStack(spacing: 4) {
-            ModelPicker(
-                agentType: agentType,
-                allowsAgentSwitching: allowsAgentSwitching,
-                selectedModel: selectedModel,
-                showsName: showsModelName,
-                onSelect: onSelectModel
-            )
-            .equatable()
+            modelControl(showsName: showsModelName)
 
-            Button(action: onFastModeTapped) {
-                Label {
-                    Text("Fast mode")
-                } icon: {
-                    LucideIcon(Lucide.zap, style: .small)
-                }
-                .labelStyle(.iconOnly)
-                .foregroundStyle(
-                    .theme(isFastModeEnabled ? .accent : .textSecondary)
-                )
-                .padding(8)
-                .background(
-                    Color.theme(.highlight)
-                        .opacity(isFastModeEnabled ? 1 : 0),
-                    in: .circle
-                )
-                .animation(.interactiveSpring, value: isFastModeEnabled)
+            if showsFastMode {
+                fastModeControl
             }
-            .buttonStyle(.spring)
-            .disabled(isFastModeButtonDisabled)
-            .accessibilityLabel("Fast mode")
-            .accessibilityValue(isFastModeEnabled ? "On" : "Off")
 
-            if !availableReasoningEfforts.isEmpty {
-                ReasoningEffortControl(
-                    availableEfforts: availableReasoningEfforts,
-                    selectedEffort: selectedReasoningEffort,
-                    isDisabled: isFastModeButtonDisabled,
-                    showsName: showsReasoningEffortName,
-                    onSelect: onSelectReasoningEffort
-                )
+            if isReasoningEffortControlVisible {
+                reasoningEffortControl(showsName: showsReasoningEffortName)
             }
         }
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private func modelControl(showsName: Bool) -> some View {
+        switch interactionMode {
+        case .editable:
+            ModelPicker(
+                agentType: agentType,
+                allowsAgentSwitching: allowsAgentSwitching,
+                allowedModels: allowedModels,
+                selectedModel: selectedModel,
+                showsName: showsName,
+                onSelect: onSelectModel
+            )
+            .equatable()
+            .accessibilityIdentifier(
+                ModelConfigurationControl.model.accessibilityIdentifier
+            )
+        case .readOnlyInformational:
+            Button {
+                onInformationalControlTapped(.model)
+            } label: {
+                ModelControlLabel(
+                    agentType: displayedModelAgentType,
+                    title: displayedModelName,
+                    showsName: showsName
+                )
+            }
+            .buttonStyle(.spring)
+            .accessibilityLabel("Model")
+            .accessibilityValue(displayedModelName)
+            .accessibilityHint(readOnlyAccessibilityHint)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.model.accessibilityIdentifier
+            )
+        case .hidden:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var fastModeControl: some View {
+        switch interactionMode {
+        case .editable:
+            Button(action: onFastModeTapped) {
+                fastModeLabel
+            }
+            .buttonStyle(.spring)
+            .disabled(isDisabledDuringAction(.fastMode))
+            .accessibilityLabel("Fast mode")
+            .accessibilityValue(displayedFastModeName)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.fastMode.accessibilityIdentifier
+            )
+        case .readOnlyInformational:
+            Button {
+                onInformationalControlTapped(.fastMode)
+            } label: {
+                fastModeLabel
+            }
+            .buttonStyle(.spring)
+            .accessibilityLabel("Fast mode")
+            .accessibilityValue(displayedFastModeName)
+            .accessibilityHint(readOnlyAccessibilityHint)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.fastMode.accessibilityIdentifier
+            )
+        case .hidden:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func reasoningEffortControl(showsName: Bool) -> some View {
+        switch interactionMode {
+        case .editable:
+            ReasoningEffortControl(
+                availableEfforts: availableReasoningEfforts,
+                selectedEffort: selectedReasoningEffort,
+                isDisabled: isDisabledDuringAction(.reasoningEffort),
+                showsName: showsName,
+                onSelect: onSelectReasoningEffort
+            )
+            .accessibilityIdentifier(
+                ModelConfigurationControl.reasoningEffort.accessibilityIdentifier
+            )
+        case .readOnlyInformational:
+            Button {
+                onInformationalControlTapped(.reasoningEffort)
+            } label: {
+                ReasoningEffortLabel(
+                    effort: selectedReasoningEffort,
+                    showsDefaultTitle: true,
+                    showsName: showsName
+                )
+            }
+            .buttonStyle(.spring)
+            .accessibilityLabel("Reasoning effort")
+            .accessibilityValue(displayedReasoningEffortName)
+            .accessibilityHint(readOnlyAccessibilityHint)
+            .accessibilityIdentifier(
+                ModelConfigurationControl.reasoningEffort.accessibilityIdentifier
+            )
+        case .hidden:
+            EmptyView()
+        }
+    }
+
+    private var fastModeLabel: some View {
+        Label {
+            Text("Fast mode")
+        } icon: {
+            LucideIcon(Lucide.zap, style: .small)
+        }
+        .labelStyle(.iconOnly)
+        .foregroundStyle(
+            .theme(isFastModeEnabled ? .accent : .textSecondary)
+        )
+        .padding(8)
+        .background(
+            Color.theme(.highlight)
+                .opacity(isFastModeEnabled ? 1 : 0),
+            in: .circle
+        )
+        .animation(.interactiveSpring, value: isFastModeEnabled)
+    }
+
+    var displayedModelAgentType: Session.AgentType {
+        selectedModel.agentType ?? agentType
+    }
+
+    var displayedModelName: String {
+        selectedModel.rawValue.isEmpty
+            ? "Default"
+            : selectedModel.displayName
+    }
+
+    var displayedReasoningEffortName: String {
+        selectedReasoningEffort?.displayName ?? "Default"
+    }
+
+    var displayedFastModeName: String {
+        isFastModeEnabled ? "On" : "Off"
+    }
+
+    var isReasoningEffortControlVisible: Bool {
+        interactionMode == .readOnlyInformational
+            || !availableReasoningEfforts.isEmpty
+    }
+
+    func isDisabledDuringAction(
+        _ control: ModelConfigurationControl
+    ) -> Bool {
+        guard interactionMode == .editable else {
+            return false
+        }
+        switch control {
+        case .reasoningEffort, .fastMode:
+            return isFastModeButtonDisabled
+        case .model:
+            return false
+        }
+    }
+
+    var readOnlyAccessibilityHint: String {
+        "Double-tap to learn why this setting can’t be changed."
     }
 }
 
 public struct ModelMenu<SourceLabel: View>: View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let allowedModels: Set<Session.Model>?
     let selectedModel: Session.Model
     let onSelect: @MainActor (Session.Model) -> Void
     let label: (Session.Model, Session.AgentType) -> SourceLabel
@@ -127,12 +299,14 @@ public struct ModelMenu<SourceLabel: View>: View {
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        allowedModels: Set<Session.Model>? = nil,
         selectedModel: Session.Model,
         onSelect: @escaping @MainActor (Session.Model) -> Void,
         @ViewBuilder label: @escaping (Session.Model, Session.AgentType) -> SourceLabel
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.allowedModels = allowedModels
         self.selectedModel = selectedModel
         self.onSelect = onSelect
         self.label = label
@@ -164,6 +338,9 @@ public struct ModelMenu<SourceLabel: View>: View {
 
     private func models(for sectionAgentType: Session.AgentType) -> [Session.Model] {
         var models = Session.Model.models(for: sectionAgentType)
+        if let allowedModels {
+            models = models.filter(allowedModels.contains)
+        }
         if sectionAgentType == agentType, !models.contains(selectedModel) {
             models.insert(selectedModel, at: 0)
         }
@@ -206,24 +383,14 @@ public struct ModelMenu<SourceLabel: View>: View {
         _ title: String,
         agentType: Session.AgentType
     ) -> some View {
-        Label {
-            Text(title)
-        } icon: {
-            AgentIcon(
-                agentType: agentType,
-                size: ThemeFontStyle.small.size,
-                relativeTo: ThemeFontStyle.small.textStyle
-            )
-        }
-        .labelStyle(.conductorExtraSmall)
-        .foregroundStyle(.theme(.textPrimary))
-        .font(.theme(.small))
+        ModelControlLabel(agentType: agentType, title: title)
     }
 }
 
 public struct ModelPicker: Equatable, View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
+    let allowedModels: Set<Session.Model>?
     let selectedModel: Session.Model
     let showsName: Bool
     let onSelect: @MainActor (Session.Model) -> Void
@@ -231,12 +398,14 @@ public struct ModelPicker: Equatable, View {
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
+        allowedModels: Set<Session.Model>? = nil,
         selectedModel: Session.Model,
         showsName: Bool = true,
         onSelect: @escaping @MainActor (Session.Model) -> Void
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
+        self.allowedModels = allowedModels
         self.selectedModel = selectedModel
         self.showsName = showsName
         self.onSelect = onSelect
@@ -247,6 +416,7 @@ public struct ModelPicker: Equatable, View {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.agentType == rhs.agentType
             && lhs.allowsAgentSwitching == rhs.allowsAgentSwitching
+            && lhs.allowedModels == rhs.allowedModels
             && lhs.selectedModel == rhs.selectedModel
             && lhs.showsName == rhs.showsName
     }
@@ -255,6 +425,7 @@ public struct ModelPicker: Equatable, View {
         ModelMenu(
             agentType: agentType,
             allowsAgentSwitching: allowsAgentSwitching,
+            allowedModels: allowedModels,
             selectedModel: selectedModel,
             onSelect: onSelect
         ) { model, agentType in
@@ -277,12 +448,26 @@ public struct ModelPicker: Equatable, View {
         _ title: String,
         agentType: Session.AgentType
     ) -> some View {
+        ModelControlLabel(
+            agentType: agentType,
+            title: title,
+            showsName: showsName
+        )
+    }
+}
+
+private struct ModelControlLabel: View {
+    let agentType: Session.AgentType
+    let title: String
+    var showsName = true
+
+    var body: some View {
         Group {
             if showsName {
-                modelLabelContent(title, agentType: agentType)
+                label
                     .labelStyle(.conductorExtraSmall)
             } else {
-                modelLabelContent(title, agentType: agentType)
+                label
                     .labelStyle(.iconOnly)
             }
         }
@@ -290,10 +475,7 @@ public struct ModelPicker: Equatable, View {
         .font(.theme(.small))
     }
 
-    private func modelLabelContent(
-        _ title: String,
-        agentType: Session.AgentType
-    ) -> some View {
+    private var label: some View {
         Label {
             Text(title)
         } icon: {

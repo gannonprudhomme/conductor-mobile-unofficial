@@ -14,7 +14,7 @@ import Sharing
 @DependencyClient
 public struct DesktopClient: Sendable {
     public typealias MessageDeliveryResult = SharedConductorData.MessageDeliveryResult
-    public typealias MessageMode = MessageSendMode
+    public typealias MessageMode = SharedConductorData.MessageSendMode
 
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
     /// Captures the current endpoint identity for a multi-step request/persistence workflow.

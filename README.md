@@ -1,6 +1,6 @@
 # *Unofficial* Conductor.build iOS app
 
-A native-iOS app prototype for [Conductor.build](https://conductor.build).
+A native-iOS app prototype for [Conductor.build](https://conductor.build), supporting both local and cloud workspaces.
 
 ## Screenshots
 
@@ -25,14 +25,16 @@ brew install mise xcodegen xcbeautify
 Steps:
 1. Install Xcode 26
 
-    a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version will do
+    a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version should do
 
     b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
 
 2. Clone the repo & run `mise run xcode` to generate the Xcode project + open it.
 3. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
 
-4. In the top-center bar select the left button and change it to `ConductorMobile`. Then choose your physical device
+    a. Alternatively, give an agent your team ID and have it swap it in in xcodegen's [project.yml](ios/project.yml)
+
+4. In the top-center bar select the scheme (left button) and change it to `ConductorMobile`. Then choose your physical device in the next dropdown
 
     a. If you haven't connected it to your Mac before, you'll need to plug it in with a cable. After this initial pairing you can deploy it over Wi-Fi.
 
@@ -40,7 +42,7 @@ Steps:
 
 ### Desktop Companion
 
-In order to read and write to local workspaces, as well as support features the Conductor Cloud API doesn't support yet (like GitHub PR status & in-progress status for Cloud workspaces), you can install our macOS companion app. You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
+In order to read and write to local workspaces, as well as support features the public Conductor Cloud API doesn't support yet (like GitHub PR status, queued messages, & in-progress status for Cloud workspaces), you can install our macOS companion app. You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
 
 ## Setup
 
@@ -63,65 +65,28 @@ After downloading & launching the macOS app, you must install the "UI hook" into
 
 ## How does it work?
 
-### Experimental Conductor Cloud API
-
-The iOS app can validate and store a Conductor Cloud API key from Settings, then
-show the authenticated account's cloud workspaces in the existing workspace
-list. The key is stored in the device Keychain; only non-secret configuration
-and account identifiers are stored in app support.
-
-Cloud projects, workspaces, and coarse status are fetched from the fixed
-production API and cached in the mobile SQLite database. Because the
-[Cloud API](https://www.conductor.build/docs/api#endpoints) provides offset
-pagination rather than an incremental change feed, the app constructs
-deduplicated polling snapshots. Cloud and desktop observations merge into one
-canonical workspace row: Cloud supplies its coarse workspace state, while a
-paired desktop supplies richer working and pull-request state. Cached rows
-remain visible after relaunch and during offline refresh failures. API-only
-rows are display-only; a row becomes navigable when the desktop companion
-observes the same workspace ID. Local pairing continues to operate without a
-cloud credential, and a saved Cloud credential is enough to browse the
-workspace list without pairing a Mac.
-
-Opening cloud workspaces, cloud chat, polling transcripts, sending or stopping
-agents, and creating cloud workspaces or sessions are deliberately deferred.
-
 ### Reading data
 
-For the most part all of the data we get is from Conductor's SQLite database. Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms - and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
+For local workspaces, we read Conductor's local SQLite database.
+Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms - and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
+
+For Cloud workspaces we generally use Conductor's public API. However the public API is missing a handful of features, like queued messages, GitHub PR status, etc, which we instead read from the local SQLite database when connected.
 
 ### Writing data through the UI hook
 
-While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI. It also
+While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI.
 
-just writing to the database does not mean you will see the changes propagated in Conductor - at least not when it's open. (if you write to the SQLite database then restart, you will see them)
+As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script* in Tauri's Web Inspector. The Desktop companion connects to this script and sends commands to it whenever requested from the mobile app.
 
-As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script in Tauri's Web Inspector which connects to the desktop companion using Server Sent Events (SSEs). Sends and stops call Conductor's own loaded message-processing controller and report explicit acceptance or rejection to the companion. SQLite remains authoritative for persisted messages and the final stopped session, which still arrive on the phone through database-backed WebSocket observation.
+*the `Copy loader` [script](desktop/workspace-hook/bootstrap-loader.js) isn't actually the UI hook itself. It instead retrieves & executes the [actual UI hook](desktop/workspace-hook/browser-hook.mjs) from the desktop companion web server. This is mostly so it automatically updates itself during development.
 
-Though note the `Copy loader` button isn't actually the UI hook itself. It instead retrieves & executes the UI hook from the desktop companion web server. This is mostly so it automatically updates itself during development.
+### iOS
 
-## Missing features
+The iOS app is a native iOS app, implemented through SwiftUI and [TCA](https://github.com/pointfreeco/swift-composable-architecture).
+We use UIKit sparingly whenever required, namely for the chat view itself, as the desired performance and scrolling behavior was only consistently achievable with UIKit.
 
-The core of it works for what I personally need (from my testing!), but I'm certainly missing a ton of features:
-
-- Conductor Cloud chat, navigation, and workspace/session creation
-- File diffs / file viewing
-  - I just use GitHub for this!
-- Tool use results
-- Create PR / Create draft PR button
-- Plan mode
-- Cursor models & OpenCode
-  - This might work if Conductor uses the same schema as Codex & Claude code, but I haven't tested them.
-- Displaying available skills & MCPs
-- Viewing PRs
-- Displaying Codex goals
-- Parsing subagent actions
-- Parsing thinking actions
-- Displaying context usage
-- Showing compaction
-- Terminal access
-- Run status
-- Attaching files from the app
+We use [sqlite-data](https://github.com/pointfreeco/sqlite-data) as our backing store and cache.
+Our SQLite tables are generally a 1:1 match to Conductor's schema, though we often store extra "metadata" in sibling tables we JOIN on.
 
 ## Development
 

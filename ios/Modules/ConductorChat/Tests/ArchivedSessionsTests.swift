@@ -151,7 +151,7 @@ struct ArchivedSessionsTests {
         }
     }
 
-    @Test("Cloud history preserves API order, isolation, and remote routing")
+    @Test("Cloud history preserves API order and disables unavailable restore")
     func cloudHistoryIsSourceAware() async throws {
         let workspaceID = "workspace"
         let cloudActive = Session.preview(
@@ -219,9 +219,13 @@ struct ArchivedSessionsTests {
             let store = TestStore(
                 initialState: ArchivedSessions.State(
                     workspaceID: workspaceID,
-                    isCloudHosted: true,
+                    source: .cloud,
                     sessions: [],
-                    activeSessions: []
+                    activeSessions: [],
+                    mutationRoute: .cloud(
+                        accountID: "account",
+                        remoteWorkspaceID: workspaceID
+                    )
                 )
             ) {
                 ArchivedSessions()
@@ -236,14 +240,8 @@ struct ArchivedSessionsTests {
                 store.state.sessions.map(\.id)
                     == [secondCloudArchived.id, firstCloudArchived.id]
             )
-            await store.send(.restoreSessionButtonTapped(secondCloudArchived)) {
-                $0.restoringSessionIDs = [secondCloudArchived.id]
-            }
-            await store.receive(\.restoreSessionSucceeded) {
-                $0.restoringSessionIDs = []
-            }
-            #expect(request.value?.0 == workspaceID)
-            #expect(request.value?.1 == "remote-second")
+            await store.send(.restoreSessionButtonTapped(secondCloudArchived))
+            #expect(request.value == nil)
         }
     }
 }

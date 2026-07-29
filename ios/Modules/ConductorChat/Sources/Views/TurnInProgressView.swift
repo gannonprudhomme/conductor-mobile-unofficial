@@ -27,8 +27,8 @@ struct TurnInProgressView: View {
             }
         } icon: {
             ProgressView()
-                .progressViewStyle(.conductor)
-                .tint(.theme(.textSecondary))
+                .progressViewStyle(.conductor(.random))
+                .tint(.theme(.foreground))
                 .frame(width: indicatorSize, height: indicatorSize)
                 .accessibilityHidden(true)
         }

@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/12/26.
 //
 
+#if canImport(os)
 import Foundation
 import Logging
 import struct Logging.Logger
@@ -100,3 +101,4 @@ extension OSLogType {
         }
     }
 }
+#endif
