@@ -278,7 +278,6 @@ public struct WorkspaceChat: Sendable {
 
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.date.now) var now
-    @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.workspaceMutationClient) var workspaceMutationClient
 
@@ -801,6 +800,9 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case let .loadSessionsResponse(.failure(error)):
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
+                    return .none
+                }
                 Logger.chat.error("Failed to load sessions: \(error)")
                 if let apiError = error as? CloudAPIClientError,
                    apiError.isAuthenticationFailure {
@@ -916,6 +918,9 @@ public struct WorkspaceChat: Sendable {
 
             case let .chat(.loadMessagesFailed(sessionID, error)):
                 guard state.chat?.sessionID == sessionID else {
+                    return .none
+                }
+                guard !CloudAPIClientError.isRequestCancellation(error) else {
                     return .none
                 }
                 if let apiError = error as? CloudAPIClientError,
@@ -1322,106 +1327,84 @@ public struct WorkspaceChat: Sendable {
         isCloudHosted: Bool,
         canonicalWorkspaceID: Workspace.ID
     ) -> Effect<Action> {
-        if isCloudHosted {
-            return observeCloudSessions(
-                remoteWorkspaceID: workspaceID,
-                canonicalWorkspaceID: canonicalWorkspaceID
-            )
-                .cancellable(
-                    id: CancelID.sessionObservation,
-                    cancelInFlight: true
-                )
-        }
-        return .run { send in
-            await StreamObservation.observe {
-                desktopClient.observeSessions(workspaceID: workspaceID)
-            } onValue: { sessions in
-                try await database.write { db in
-                    try Session
-                        .where { $0.workspaceID.eq(workspaceID) }
-                        .delete()
-                        .execute(db)
-
-                    try Session.upsert { sessions }
-                        .execute(db)
-                }
-                await send(.sessionSnapshotPersisted)
-                await send(.loadSessionsResponse(.success(sessions)))
-            } onFailure: { error in
-                await send(.loadSessionsResponse(.failure(error)))
-            }
-        }
-        .cancellable(id: CancelID.sessionObservation, cancelInFlight: true)
-    }
-
-    private func observeCloudSessions(
-        remoteWorkspaceID: String,
-        canonicalWorkspaceID: Workspace.ID
-    ) -> Effect<Action> {
         let visibilitySnapshot = CloudSessionVisibilitySnapshot()
         return .merge(
             .run { send in
-                do {
-                    for try await snapshot in cloudAPIClient.observeSessions(
-                        workspaceID: remoteWorkspaceID
-                    ) {
-                        let desktopSessions = await visibilitySnapshot.current()
-                        let sessions = try await database.write { database in
-                            var sessions = try CloudChatPersistence.persist(
-                                snapshot,
-                                in: database
-                            )
-                            if let desktopSessions {
-                                sessions = try CloudChatPersistence
+                for await event in WorkspaceSessionObservation.observe(
+                    workspaceID: workspaceID,
+                    isCloudHosted: isCloudHosted
+                ) {
+                    switch event {
+                    case let .snapshot(sessions):
+                        let sessions = if isCloudHosted,
+                                          let desktopSessions =
+                                              await visibilitySnapshot.current() {
+                            try await database.write { database in
+                                try CloudChatPersistence
                                     .reconcileSessionVisibility(
                                         from: desktopSessions,
                                         canonicalWorkspaceID:
                                             canonicalWorkspaceID,
-                                        remoteWorkspaceID: remoteWorkspaceID,
+                                        remoteWorkspaceID: workspaceID,
                                         in: database
                                     )
                             }
-                            return sessions
+                        } else {
+                            sessions
                         }
-                        await send(.loadSessionsResponse(.success(sessions)))
                         await send(.sessionSnapshotPersisted)
+                        await send(.loadSessionsResponse(.success(sessions)))
+
+                    case let .failure(error):
+                        await send(.loadSessionsResponse(.failure(error)))
                     }
-                } catch is CancellationError {
-                    return
-                } catch {
-                    await send(.loadSessionsResponse(.failure(error)))
                 }
             },
-            .run { send in
-                await StreamObservation.observe(
-                    retrying: {
-                        desktopClient.observeSessions(
-                            workspaceID: remoteWorkspaceID
-                        )
-                    },
-                    retryDelays: [.seconds(10)]
-                ) { desktopSessions in
-                    await visibilitySnapshot.update(desktopSessions)
-                    let sessions = try await database.write { database in
-                        try CloudChatPersistence.reconcileSessionVisibility(
-                            from: desktopSessions,
-                            canonicalWorkspaceID: canonicalWorkspaceID,
-                            remoteWorkspaceID: remoteWorkspaceID,
-                            in: database
-                        )
-                    }
-                    guard !sessions.isEmpty else {
-                        return
-                    }
-                    await send(.loadSessionsResponse(.success(sessions)))
-                    await send(.sessionSnapshotPersisted)
-                } onFailure: { error in
-                    Logger.chat.error(
-                        "Failed to reconcile Cloud session visibility: \(error)"
+            isCloudHosted
+                ? observeCloudSessionVisibility(
+                    remoteWorkspaceID: workspaceID,
+                    canonicalWorkspaceID: canonicalWorkspaceID,
+                    visibilitySnapshot: visibilitySnapshot
+                )
+                : .none
+        )
+        .cancellable(id: CancelID.sessionObservation, cancelInFlight: true)
+    }
+
+    private func observeCloudSessionVisibility(
+        remoteWorkspaceID: Workspace.ID,
+        canonicalWorkspaceID: Workspace.ID,
+        visibilitySnapshot: CloudSessionVisibilitySnapshot
+    ) -> Effect<Action> {
+        .run { send in
+            await StreamObservation.observe(
+                retrying: {
+                    desktopClient.observeSessions(
+                        workspaceID: remoteWorkspaceID
+                    )
+                },
+                retryDelays: [.seconds(10)]
+            ) { desktopSessions in
+                await visibilitySnapshot.update(desktopSessions)
+                let sessions = try await database.write { database in
+                    try CloudChatPersistence.reconcileSessionVisibility(
+                        from: desktopSessions,
+                        canonicalWorkspaceID: canonicalWorkspaceID,
+                        remoteWorkspaceID: remoteWorkspaceID,
+                        in: database
                     )
                 }
+                guard !sessions.isEmpty else {
+                    return
+                }
+                await send(.loadSessionsResponse(.success(sessions)))
+                await send(.sessionSnapshotPersisted)
+            } onFailure: { error in
+                Logger.chat.error(
+                    "Failed to reconcile Cloud session visibility: \(error)"
+                )
             }
-        )
+        }
     }
 
     private actor CloudSessionVisibilitySnapshot {
