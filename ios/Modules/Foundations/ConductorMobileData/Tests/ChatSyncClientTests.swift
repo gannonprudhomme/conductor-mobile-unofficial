@@ -13,6 +13,7 @@ import SQLiteData
 @testable import ConductorMobileData
 import Testing
 
+@Suite(.serialized)
 @MainActor
 struct ChatSyncClientTests {
     @Test("Workspace query excludes archived states, orders by activity, and caps at 30")
