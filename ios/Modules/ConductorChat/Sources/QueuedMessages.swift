@@ -804,6 +804,15 @@ private struct QueuedMessageRow: View {
     var body: some View {
         row
             .swipeActions(
+                edge: .leading,
+                allowsFullSwipe: isInteractionEnabled
+            ) {
+                if isInteractionEnabled {
+                    steerButton(color: .theme(.foreground))
+                        .tint(.theme(.planBorder))
+                }
+            }
+            .swipeActions(
                 edge: .trailing,
                 allowsFullSwipe: isInteractionEnabled
             ) {
@@ -869,7 +878,7 @@ private struct QueuedMessageRow: View {
             Menu {
                 editButton
 
-                steerButton
+                steerButton()
 
                 deleteButton(color: Color(uiColor: .systemRed))
             } label: {
@@ -908,12 +917,14 @@ private struct QueuedMessageRow: View {
         }
     }
 
-    private var steerButton: some View {
+    private func steerButton(
+        color: Color = .theme(.textSecondary)
+    ) -> some View {
         Button(action: steer) {
             Label {
                 Text("Steer")
             } icon: {
-                ColoredMenuImage(Lucide.arrowUp)
+                ColoredMenuImage(Lucide.arrowUp, color: color)
             }
         }
     }
