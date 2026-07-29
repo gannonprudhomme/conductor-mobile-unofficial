@@ -71,7 +71,7 @@ struct WorkspaceRow: View {
                     action(.toggleUnread)
                 } label: {
                     Label(
-                        isUnread ? "Mark as read" : "Mark as unread",
+                        isUnread ? "Read" : "Unread",
                         systemImage: isUnread ? "envelope.open" : "envelope"
                     )
                 }
@@ -83,6 +83,7 @@ struct WorkspaceRow: View {
                 } label: {
                     Label("Archive", systemImage: "archivebox")
                 }
+                .tint(.theme(.destructive))
             }
         } else {
             rowLabel

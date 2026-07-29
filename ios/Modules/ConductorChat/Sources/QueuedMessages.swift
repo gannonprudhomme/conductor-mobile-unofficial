@@ -726,7 +726,6 @@ struct QueuedMessagesView: View {
         .contentMargins(.vertical, 0, for: .scrollContent)
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         .animation(.default, value: store.displayedMessages)
-        .environment(\.editMode, .constant(.active))
     }
 
     @MainActor

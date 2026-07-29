@@ -32,9 +32,11 @@ struct DesktopClientWebSocketsTests {
             DesktopClient.messagesWebSocketURL(
                 serverAddress: "my-mac",
                 workspaceID: "workspace-1",
-                sessionID: "session-1"
+                sessionID: "session-1",
+                resumeAfterMessageID: "message / \u{e9}"
             )?.absoluteString,
             "ws://my-mac:3768/workspaces/workspace-1/sessions/session-1/messages"
+                + "?after=message%20/%20%C3%A9"
         )
         expectNoDifference(
             DesktopClient.workspacesWebSocketURL(serverAddress: "my-mac:4000")?.absoluteString,

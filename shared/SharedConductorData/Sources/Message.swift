@@ -73,6 +73,17 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
 }
 
 extension Message {
+    /// Whether Conductor currently treats this row as a mutable queued message.
+    ///
+    /// The desktop server uses this exact persisted-state rule to separate completed history from
+    /// the queue. The mobile cache uses the same rule when reconciling complete queue snapshots.
+    /// Rows that satisfy only one condition remain completed history.
+    public var isQueued: Bool {
+        sentAt == nil && queueOrder != nil
+    }
+}
+
+extension Message {
     public struct Role: Codable, Hashable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {
         public var rawValue: String
 
