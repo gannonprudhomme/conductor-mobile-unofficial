@@ -47,53 +47,73 @@ public struct ModelAndFastModeControls: View {
     }
 
     public var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 4) {
-                ModelPicker(
-                    agentType: agentType,
-                    allowsAgentSwitching: allowsAgentSwitching,
-                    selectedModel: selectedModel,
-                    onSelect: onSelectModel
+        ViewThatFits(in: .horizontal) {
+            controls(
+                showsModelName: true,
+                showsReasoningEffortName: true
+            )
+
+            controls(
+                showsModelName: true,
+                showsReasoningEffortName: false
+            )
+
+            controls(
+                showsModelName: false,
+                showsReasoningEffortName: false
+            )
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func controls(
+        showsModelName: Bool,
+        showsReasoningEffortName: Bool
+    ) -> some View {
+        HStack(spacing: 4) {
+            ModelPicker(
+                agentType: agentType,
+                allowsAgentSwitching: allowsAgentSwitching,
+                selectedModel: selectedModel,
+                showsName: showsModelName,
+                onSelect: onSelectModel
+            )
+            .equatable()
+
+            Button(action: onFastModeTapped) {
+                Label {
+                    Text("Fast mode")
+                } icon: {
+                    LucideIcon(Lucide.zap, style: .small)
+                }
+                .labelStyle(.iconOnly)
+                .foregroundStyle(
+                    .theme(isFastModeEnabled ? .accent : .textSecondary)
                 )
-                .equatable()
+                .padding(8)
+                .background(
+                    Color.theme(.highlight)
+                        .opacity(isFastModeEnabled ? 1 : 0),
+                    in: .circle
+                )
+                .animation(.interactiveSpring, value: isFastModeEnabled)
+            }
+            .buttonStyle(.spring)
+            .disabled(isFastModeButtonDisabled)
+            .accessibilityLabel("Fast mode")
+            .accessibilityValue(isFastModeEnabled ? "On" : "Off")
 
-                Button(action: onFastModeTapped) {
-                    Label {
-                        Text("Fast mode")
-                    } icon: {
-                        LucideIcon(Lucide.zap, style: .small)
-                    }
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(
-                        .theme(isFastModeEnabled ? .accent : .textSecondary)
-                    )
-                    .padding(8)
-                    .background(
-                        Color.theme(.highlight)
-                            .opacity(isFastModeEnabled ? 1 : 0),
-                        in: .circle
-                    )
-                    .animation(.interactiveSpring, value: isFastModeEnabled)
-                }
-                .buttonStyle(.spring)
-                .disabled(isFastModeButtonDisabled)
-                .accessibilityLabel("Fast mode")
-                .accessibilityValue(isFastModeEnabled ? "On" : "Off")
-
-                if !availableReasoningEfforts.isEmpty {
-                    ReasoningEffortControl(
-                        availableEfforts: availableReasoningEfforts,
-                        selectedEffort: selectedReasoningEffort,
-                        isDisabled: isFastModeButtonDisabled,
-                        onSelect: onSelectReasoningEffort
-                    )
-                }
+            if !availableReasoningEfforts.isEmpty {
+                ReasoningEffortControl(
+                    availableEfforts: availableReasoningEfforts,
+                    selectedEffort: selectedReasoningEffort,
+                    isDisabled: isFastModeButtonDisabled,
+                    showsName: showsReasoningEffortName,
+                    onSelect: onSelectReasoningEffort
+                )
             }
         }
-        .scrollIndicators(.hidden)
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-        .defaultScrollAnchor(.leading)
-        .fixedSize(horizontal: false, vertical: true)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -205,17 +225,20 @@ public struct ModelPicker: Equatable, View {
     let agentType: Session.AgentType
     let allowsAgentSwitching: Bool
     let selectedModel: Session.Model
+    let showsName: Bool
     let onSelect: @MainActor (Session.Model) -> Void
 
     public init(
         agentType: Session.AgentType,
         allowsAgentSwitching: Bool = false,
         selectedModel: Session.Model,
+        showsName: Bool = true,
         onSelect: @escaping @MainActor (Session.Model) -> Void
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
         self.selectedModel = selectedModel
+        self.showsName = showsName
         self.onSelect = onSelect
     }
 
@@ -225,6 +248,7 @@ public struct ModelPicker: Equatable, View {
         lhs.agentType == rhs.agentType
             && lhs.allowsAgentSwitching == rhs.allowsAgentSwitching
             && lhs.selectedModel == rhs.selectedModel
+            && lhs.showsName == rhs.showsName
     }
 
     public var body: some View {
@@ -253,6 +277,23 @@ public struct ModelPicker: Equatable, View {
         _ title: String,
         agentType: Session.AgentType
     ) -> some View {
+        Group {
+            if showsName {
+                modelLabelContent(title, agentType: agentType)
+                    .labelStyle(.conductorExtraSmall)
+            } else {
+                modelLabelContent(title, agentType: agentType)
+                    .labelStyle(.iconOnly)
+            }
+        }
+        .foregroundStyle(.theme(.textPrimary))
+        .font(.theme(.small))
+    }
+
+    private func modelLabelContent(
+        _ title: String,
+        agentType: Session.AgentType
+    ) -> some View {
         Label {
             Text(title)
         } icon: {
@@ -262,9 +303,6 @@ public struct ModelPicker: Equatable, View {
                 relativeTo: ThemeFontStyle.small.textStyle
             )
         }
-        .labelStyle(.conductorExtraSmall)
-        .foregroundStyle(.theme(.textPrimary))
-        .font(.theme(.small))
     }
 }
 

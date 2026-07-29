@@ -81,5 +81,14 @@ struct ModelPickerTests {
                 onSelect: { _ in }
             )
         )
+        #expect(
+            picker != ModelPicker(
+                agentType: .codex,
+                allowsAgentSwitching: true,
+                selectedModel: .gpt_5_6_sol,
+                showsName: false,
+                onSelect: { _ in }
+            )
+        )
     }
 }

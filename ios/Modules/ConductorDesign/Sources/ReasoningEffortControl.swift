@@ -74,17 +74,20 @@ public struct ReasoningEffortControl: View {
     let availableEfforts: [Session.ReasoningEffort]
     let selectedEffort: Session.ReasoningEffort?
     let isDisabled: Bool
+    let showsName: Bool
     let onSelect: @MainActor (Session.ReasoningEffort) -> Void
 
     public init(
         availableEfforts: [Session.ReasoningEffort],
         selectedEffort: Session.ReasoningEffort?,
         isDisabled: Bool = false,
+        showsName: Bool = true,
         onSelect: @escaping @MainActor (Session.ReasoningEffort) -> Void
     ) {
         self.availableEfforts = availableEfforts
         self.selectedEffort = selectedEffort
         self.isDisabled = isDisabled
+        self.showsName = showsName
         self.onSelect = onSelect
         _displayedEffort = State(initialValue: selectedEffort)
     }
@@ -125,15 +128,13 @@ public struct ReasoningEffortControl: View {
     }
 
     private func effortLabel(for effort: Session.ReasoningEffort) -> some View {
-        Label {
-            if effort != .none {
-                Text(effort.displayName)
+        Group {
+            if showsName {
+                effortLabelContent(for: effort)
+            } else {
+                effortLabelContent(for: effort)
+                    .labelStyle(.iconOnly)
             }
-        } icon: {
-            ReasoningEffortIcon(
-                activeBarCount: effort.activeBarCount,
-                usesUltraAppearance: effort.usesUltraAppearance
-            )
         }
         .font(.theme(.small))
         .foregroundStyle(
@@ -146,6 +147,21 @@ public struct ReasoningEffortControl: View {
                 : AnyShapeStyle(Color.clear),
             in: .capsule
         )
+    }
+
+    private func effortLabelContent(
+        for effort: Session.ReasoningEffort
+    ) -> some View {
+        Label {
+            if effort != .none {
+                Text(effort.displayName)
+            }
+        } icon: {
+            ReasoningEffortIcon(
+                activeBarCount: effort.activeBarCount,
+                usesUltraAppearance: effort.usesUltraAppearance
+            )
+        }
     }
 }
 
