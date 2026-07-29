@@ -274,8 +274,8 @@ struct ChatSyncClientTests {
                 )
             }
             #expect(localCache?.messages == [localMessage])
-            #expect(cloudCache?.messages.map(\.content) == ["Cloud"])
-            #expect(cloudCache?.checkpoint?.rawCursor == cloudMessage.id)
+            #expect(cloudCache.messages.map(\.content) == ["Cloud"])
+            #expect(cloudCache.checkpoint?.rawCursor == cloudMessage.id)
         }
     }
 
