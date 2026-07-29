@@ -77,15 +77,22 @@ struct ChatTextField: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            if isEditingQueuedMessage {
-                editingHeader
-            }
+            VStack(spacing: 12) {
+                if isEditingQueuedMessage {
+                    editingHeader
+                        .transition(.blurReplace)
+                }
 
-            textField
+                textField
+            }
+            .animation(.default, value: isFocused)
+            .animation(
+                QueuedMessagesPresentation.disclosureAnimation,
+                value: isEditingQueuedMessage
+            )
 
             bottomRowButtons
         }
-        .animation(.default, value: isFocused)
         .padding(EdgeInsets(vertical: 12, horizontal: 16))
         .glassEffect(
             .clear
@@ -179,11 +186,11 @@ struct ChatTextField: View {
                     )
                 }
             }
+            .animation(.default, value: hasSendableText)
+            .animation(.default, value: isWorking)
         }
         .frame(maxWidth: .infinity)
         .fixedSize(horizontal: false, vertical: true)
-        .animation(.default, value: hasSendableText)
-        .animation(.default, value: isWorking)
     }
 
     private var hasSendableText: Bool {
