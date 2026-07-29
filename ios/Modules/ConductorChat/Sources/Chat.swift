@@ -1130,10 +1130,6 @@ struct ChatView: View {
         .animation(.default, value: store.connectionStatus)
         .animation(.default, value: shouldShowScrollDownButton)
         .animation(.default, value: queuedMessagesStore.displayedMessages)
-        .animation(
-            QueuedMessagesPresentation.disclosureAnimation,
-            value: queuedMessagesStore.isEditing
-        )
     }
 
     private func controlRow(isExpanded: Bool) -> some View {
