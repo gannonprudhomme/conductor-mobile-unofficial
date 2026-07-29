@@ -1,5 +1,5 @@
 {
-  "originHash" : "a8c06aca6c3e100f09135d96893b45c6e37d978acaee960e8fe50748112c67ae",
+  "originHash" : "b5837d2e437d0a360782f766c547bb6062ee119d5f2a4628b48aa743a83c5ab1",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -62,6 +62,15 @@
       "state" : {
         "revision" : "b658dbac886f2ac3baeaed46810bc4ddbc9a5961",
         "version" : "1.23.0"
+      }
+    },
+    {
+      "identity" : "opencombine",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/OpenCombine/OpenCombine.git",
+      "state" : {
+        "revision" : "8576f0d579b27020beccbccc3ea6844f3ddfc2c2",
+        "version" : "0.14.0"
       }
     },
     {
@@ -339,8 +348,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/pointfreeco/swift-structured-queries",
       "state" : {
-        "revision" : "500c4cb5182842ded958ad32052ed2e35bec5fb7",
-        "version" : "0.33.1"
+        "revision" : "dafddd843f10630aa6b5be47c1b6a59cc4ab6586",
+        "version" : "0.34.0"
       }
     },
     {

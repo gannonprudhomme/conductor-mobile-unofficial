@@ -19,6 +19,7 @@ let package = Package(
         .package(name: "ConductorShared", path: "../shared"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", exact: "2.25.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", exact: "2.7.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.0"),
         .package(url: "https://github.com/pointfreeco/swift-dependencies", exact: "1.14.1"),
         .package(url: "https://github.com/pointfreeco/sqlite-data", exact: "1.6.6"),
     ],
@@ -27,6 +28,11 @@ let package = Package(
             name: "ConductorMobileServer",
             dependencies: [
                 .product(name: "SharedConductorData", package: "ConductorShared"),
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux, .windows])
+                ),
                 .product(name: "Dependencies", package: "swift-dependencies"),
                 .product(name: "DependenciesMacros", package: "swift-dependencies"),
                 .product(name: "Hummingbird", package: "hummingbird"),
