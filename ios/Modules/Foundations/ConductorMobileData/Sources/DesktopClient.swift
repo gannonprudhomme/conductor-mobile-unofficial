@@ -484,14 +484,6 @@ extension DesktopClient: DependencyKey {
     }
 
     private static func baseURL() throws -> URL {
-        // A task-local lease pins multi-request workflows to their starting endpoint. Checking it
-        // before each request prevents a later step from silently switching to a new desktop.
-        if let lease = DesktopRequestLeaseContext.current {
-            guard DesktopLeaseAuthority.shared.isValid(lease) else {
-                throw DesktopClientError.staleRequestLease
-            }
-            return lease.baseURL
-        }
         @Shared(.desktopServerAddress) var desktopServerAddress
         // A task-local lease pins multi-request workflows to their starting endpoint. Checking it
         // before each request prevents a later step from silently switching to a new desktop.

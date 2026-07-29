@@ -12,6 +12,28 @@ import SQLiteData
 import Testing
 
 struct DesktopTranscriptStoreTests {
+    @Test("An empty complete history clears completed rows")
+    func emptyHistory() async throws {
+        let database = try appDatabase()
+        let (workspace, session) = try await seed(database: database)
+        let completed = message(id: "completed", sessionID: session.id, seconds: 1)
+        try await DesktopTranscriptStore.applySyncEvent(
+            .snapshot([completed], cursor: completed.id, queuedMessages: []),
+            workspaceID: workspace.id,
+            sessionID: session.id,
+            database: database
+        )
+
+        try await DesktopTranscriptStore.applySyncEvent(
+            .snapshot([], cursor: nil, queuedMessages: []),
+            workspaceID: workspace.id,
+            sessionID: session.id,
+            database: database
+        )
+
+        #expect(try await storedMessages(sessionID: session.id, database: database).isEmpty)
+    }
+
     @Test("Legacy complete snapshots reconcile mixed history and queue rows")
     func legacySnapshot() async throws {
         let database = try appDatabase()
@@ -241,6 +263,12 @@ struct DesktopTranscriptStoreTests {
             )
         }
         #expect(try await storedMessages(sessionID: session.id, database: database).isEmpty)
+        #expect(
+            try await storedMessages(
+                sessionID: otherSession.id,
+                database: database
+            ) == [existingOtherMessage]
+        )
     }
 
     @Test("Queue snapshots delete omissions without deleting completed history")
