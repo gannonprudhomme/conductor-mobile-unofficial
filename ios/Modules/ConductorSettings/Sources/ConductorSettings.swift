@@ -235,6 +235,7 @@ public struct ConductorSettings: Sendable {
         case cloudCredentialDeleteResult(Result<Void, any Error>)
         case cloudSaveResult(
             accountID: String,
+            didReplaceCredential: Bool,
             result: Result<Void, any Error>
         )
         case deleteCloudCredentialButtonTapped
@@ -262,8 +263,11 @@ public struct ConductorSettings: Sendable {
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.cloudAPIClient) var cloudAPIClient
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+    @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.cloudWorkspaceCacheClient) var cloudWorkspaceCacheClient
+    @Dependency(\.messageDeliveryOutbox) var messageDeliveryOutbox
     @Dependency(\.dismiss) var dismiss
+    @Dependency(\.uuid) var uuid
 
     public init() { }
 
@@ -350,10 +354,28 @@ public struct ConductorSettings: Sendable {
                     return .none
                 }
                 state.cloudOperation = .deleting
-                return .run { [cloudCredentialClient] send in
+                return .run {
+                    [
+                        cloudCredentialClient,
+                        cloudMutationRunner,
+                        configuration = state.cloudConfiguration,
+                        messageDeliveryOutbox,
+                    ] send in
                     await send(
                         .cloudCredentialDeleteResult(
                             await Result {
+                                if let configuration {
+                                    await messageDeliveryOutbox.cancelAndAwait(
+                                        accountID: configuration.accountID,
+                                        credentialGeneration: configuration
+                                            .credentialGeneration
+                                    )
+                                    await cloudMutationRunner.cancelAndAwait(
+                                        accountID: configuration.accountID,
+                                        credentialGeneration: configuration
+                                            .credentialGeneration
+                                    )
+                                }
                                 try await cloudCredentialClient.deleteAPIKey()
                             }
                         )
@@ -377,7 +399,11 @@ public struct ConductorSettings: Sendable {
                     )
                 }
 
-            case let .cloudSaveResult(accountID, result):
+            case let .cloudSaveResult(
+                accountID,
+                didReplaceCredential,
+                result
+            ):
                 switch result {
                 case let .failure(error):
                     state.cloudOperation = nil
@@ -385,12 +411,19 @@ public struct ConductorSettings: Sendable {
                     return .none
 
                 case .success:
-                    let nextCredentialRevision =
-                        (state.cloudConfiguration?.credentialRevision ?? 0) + 1
+                    let credentialGeneration =
+                        if !didReplaceCredential,
+                           state.cloudConfiguration?.accountID == accountID,
+                           let existingGeneration = state.cloudConfiguration?
+                            .credentialGeneration {
+                            existingGeneration
+                        } else {
+                            uuid()
+                        }
                     state.$cloudConfiguration.withLock {
                         $0 = CloudConfiguration(
                             accountID: accountID,
-                            credentialRevision: nextCredentialRevision
+                            credentialGeneration: credentialGeneration
                         )
                     }
                     state.cloudAPIKey = ""
@@ -562,13 +595,39 @@ public struct ConductorSettings: Sendable {
         }
         state.cloudOperation = .saving
         return .run {
-            [accountID, cloudAPIKey, cloudCredentialClient] send in
+            [
+                accountID,
+                cloudAPIKey,
+                cloudCredentialClient,
+                cloudMutationRunner,
+                configuration = state.cloudConfiguration,
+                messageDeliveryOutbox,
+            ] send in
+            let didReplaceCredential = !cloudAPIKey.isEmpty
             let result = await Result {
-                if !cloudAPIKey.isEmpty {
+                if didReplaceCredential {
+                    if let configuration {
+                        await messageDeliveryOutbox.cancelAndAwait(
+                            accountID: configuration.accountID,
+                            credentialGeneration: configuration
+                                .credentialGeneration
+                        )
+                        await cloudMutationRunner.cancelAndAwait(
+                            accountID: configuration.accountID,
+                            credentialGeneration: configuration
+                                .credentialGeneration
+                        )
+                    }
                     try await cloudCredentialClient.saveAPIKey(apiKey: cloudAPIKey)
                 }
             }
-            await send(.cloudSaveResult(accountID: accountID, result: result))
+            await send(
+                .cloudSaveResult(
+                    accountID: accountID,
+                    didReplaceCredential: didReplaceCredential,
+                    result: result
+                )
+            )
         }
     }
 
@@ -1079,6 +1138,7 @@ public struct ConductorSettingsView: View {
         .autocorrectionDisabled()
         .textContentType(.URL)
         .keyboardType(.URL)
+        .accessibilityIdentifier("serverAddressField")
         .submitLabel(.done)
         .onSubmit {
             store.send(.testButtonTapped)

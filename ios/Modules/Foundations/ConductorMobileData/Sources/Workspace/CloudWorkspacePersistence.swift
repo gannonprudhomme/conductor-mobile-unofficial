@@ -50,6 +50,7 @@ public enum CloudWorkspacePersistence {
         let generation = UUID().uuidString
         let repositoryIDs = try repositoryIDsByProjectID(
             for: snapshot,
+            generation: generation,
             in: database
         )
         try persistWorkspaces(
@@ -63,6 +64,73 @@ public enum CloudWorkspacePersistence {
             generation: generation,
             from: database
         )
+        try removeStaleProjectMappings(
+            currentAccountID: snapshot.accountID,
+            generation: generation,
+            from: database
+        )
+    }
+
+    /// Persists the desktop relay snapshot while retaining any Cloud canonical identities.
+    ///
+    /// A Cloud-created workspace can reach the phone through both sources: the Cloud mutation
+    /// response names it immediately, and the desktop relay later observes the same remote UUID.
+    /// Mapping that UUID back onto the Cloud row keeps the shared list and mobile-only state from
+    /// briefly containing two representations of the same workspace.
+    public static func persistDesktopSnapshot(
+        _ snapshot: WorkspaceListSnapshot,
+        in database: Database
+    ) throws {
+        try Repository
+            .upsert { snapshot.repositories }
+            .execute(database)
+
+        let canonicalIDsByRemoteID = Dictionary(
+            try CloudWorkspaceMetadata.all
+                .fetchAll(database)
+                .map { ($0.remoteWorkspaceID, $0.workspaceID) },
+            uniquingKeysWith: { existing, _ in existing }
+        )
+        let workspaces = snapshot.workspaces.map { item in
+            let remoteWorkspaceID = item.workspace.id
+            let canonicalWorkspaceID =
+                canonicalIDsByRemoteID[remoteWorkspaceID]
+                ?? remoteWorkspaceID
+            return (
+                remoteWorkspaceID: remoteWorkspaceID,
+                workspace: item.workspace.replacingID(
+                    with: canonicalWorkspaceID
+                ),
+                isWorking: item.isWorking,
+                pullRequest: snapshot.pullRequests[remoteWorkspaceID]
+            )
+        }
+
+        try persistDesktopWorkspaces(
+            workspaces.map(\.workspace),
+            in: database
+        )
+
+        // The desktop snapshot is authoritative for this source-specific table.
+        try MobileWorkspaceState.delete().execute(database)
+        try MobileWorkspaceState
+            .upsert {
+                workspaces.map {
+                    MobileWorkspaceState(
+                        workspaceID: $0.workspace.id,
+                        isWorking: $0.isWorking,
+                        pullRequest: $0.pullRequest
+                    )
+                }
+            }
+            .execute(database)
+
+        for workspace in workspaces
+        where workspace.remoteWorkspaceID != workspace.workspace.id {
+            try Workspace.find(workspace.remoteWorkspaceID)
+                .delete()
+                .execute(database)
+        }
     }
 
     /// Maps API projects onto canonical repositories, preferring an existing repository with the
@@ -70,25 +138,41 @@ public enum CloudWorkspacePersistence {
     /// and Cloud observe the same repository.
     private static func repositoryIDsByProjectID(
         for snapshot: CloudWorkspaceSnapshot,
+        generation: String,
         in database: Database
     ) throws -> [CloudProject.ID: Repository.ID] {
-        let projectIDsWithWorkspaces = Set(
-            snapshot.workspaces.compactMap { item in
-                snapshot.statuses[item.id]?.status == .deleted
-                    ? nil
-                    : item.project.id
-            }
-        )
         var repositories = try Repository.all.fetchAll(database)
+        let desktopRepositoryIDs = try desktopRepositoryIDs(in: database)
+        let mappings = try CloudProjectRepositoryMapping
+            .where { $0.accountID.eq(snapshot.accountID) }
+            .fetchAll(database)
         var repositoryIDs: [CloudProject.ID: Repository.ID] = [:]
 
-        for project in snapshot.projects
-        where projectIDsWithWorkspaces.contains(project.id) {
+        for project in snapshot.projects {
             let repository: Repository
-            if let existingRepository = matchingRepository(
+            let matchingRepositories = matchingRepositories(
                 for: project,
                 in: repositories
+            )
+            if let existingRepository = preferredRepository(
+                for: project,
+                matchingRepositories: matchingRepositories,
+                mappings: mappings,
+                desktopRepositoryIDs: desktopRepositoryIDs
             ) {
+                try consolidateRepositories(
+                    matchingRepositories,
+                    into: existingRepository,
+                    in: database
+                )
+                let duplicateRepositoryIDs = Set(
+                    matchingRepositories
+                        .map(\.id)
+                        .filter { $0 != existingRepository.id }
+                )
+                repositories.removeAll {
+                    duplicateRepositoryIDs.contains($0.id)
+                }
                 try fillMissingRepositoryDetails(
                     from: project,
                     in: existingRepository,
@@ -103,23 +187,112 @@ public enum CloudWorkspacePersistence {
                 repositories.append(repository)
             }
             repositoryIDs[project.id] = repository.id
+            try CloudProjectRepositoryMapping
+                .upsert {
+                    CloudProjectRepositoryMapping(
+                        accountID: snapshot.accountID,
+                        cloudProjectID: project.id,
+                        canonicalRepositoryID: repository.id,
+                        projectName: project.name,
+                        gitRemote: project.gitRemote,
+                        refreshGeneration: generation
+                    )
+                }
+                .execute(database)
         }
 
         return repositoryIDs
     }
 
-    private static func matchingRepository(
+    private static func desktopRepositoryIDs(
+        in database: Database
+    ) throws -> Set<Repository.ID> {
+        let desktopWorkspaceIDs = Set(
+            try MobileWorkspaceState.all
+                .fetchAll(database)
+                .map(\.workspaceID)
+        )
+        return Set(
+            try Workspace.all
+                .fetchAll(database)
+                .filter { desktopWorkspaceIDs.contains($0.id) }
+                .compactMap(\.repositoryID)
+        )
+    }
+
+    private static func matchingRepositories(
         for project: CloudProject,
         in repositories: [Repository]
-    ) -> Repository? {
+    ) -> [Repository] {
         let normalizedRemote = normalizedGitRemote(project.gitRemote)
-        return repositories.first {
+        return repositories.filter {
             $0.id == project.id
                 || (
                     !normalizedRemote.isEmpty
                         && $0.remoteURL.map(normalizedGitRemote)
                             == normalizedRemote
                 )
+        }
+    }
+
+    private static func preferredRepository(
+        for project: CloudProject,
+        matchingRepositories: [Repository],
+        mappings: [CloudProjectRepositoryMapping],
+        desktopRepositoryIDs: Set<Repository.ID>
+    ) -> Repository? {
+        let desktopRepositories = matchingRepositories
+            .filter { desktopRepositoryIDs.contains($0.id) }
+            .sorted(by: isPreferredRepository)
+        if let desktopRepository = desktopRepositories.first {
+            return desktopRepository
+        }
+        if let mapping = mappings.first(where: {
+            $0.cloudProjectID == project.id
+        }),
+           let mappedRepository = matchingRepositories.first(where: {
+               $0.id == mapping.canonicalRepositoryID
+           }) {
+            return mappedRepository
+        }
+        return matchingRepositories.first(where: { $0.id == project.id })
+            ?? matchingRepositories.sorted(by: isPreferredRepository).first
+    }
+
+    private static func isPreferredRepository(
+        _ lhs: Repository,
+        _ rhs: Repository
+    ) -> Bool {
+        let lhsHasRootPath = lhs.rootPath?.isEmpty == false
+        let rhsHasRootPath = rhs.rootPath?.isEmpty == false
+        if lhsHasRootPath != rhsHasRootPath {
+            return lhsHasRootPath
+        }
+        return lhs.id < rhs.id
+    }
+
+    private static func consolidateRepositories(
+        _ repositories: [Repository],
+        into canonicalRepository: Repository,
+        in database: Database
+    ) throws {
+        for repository in repositories
+        where repository.id != canonicalRepository.id {
+            try Workspace
+                .where { $0.repositoryID.eq(repository.id) }
+                .update {
+                    $0.repositoryID = #bind(canonicalRepository.id)
+                }
+                .execute(database)
+            try CloudProjectRepositoryMapping
+                .where { $0.canonicalRepositoryID.eq(repository.id) }
+                .update {
+                    $0.canonicalRepositoryID = #bind(canonicalRepository.id)
+                }
+                .execute(database)
+            try Repository.find(repository.id)
+                .delete()
+                .execute(database)
         }
     }
 
@@ -196,8 +369,20 @@ public enum CloudWorkspacePersistence {
         in database: Database
     ) throws {
         let workspace = item.workspace
+        let existingMetadata = try CloudWorkspaceMetadata
+            .where {
+                $0.accountID.eq(accountID)
+                    && $0.remoteWorkspaceID.eq(workspace.id)
+            }
+            .fetchOne(database)
+        let canonicalWorkspaceID = existingMetadata?.workspaceID ?? workspace.id
+        try consolidateDesktopWorkspace(
+            remoteWorkspaceID: workspace.id,
+            into: canonicalWorkspaceID,
+            in: database
+        )
         let existingWorkspace = try Workspace
-            .find(workspace.id)
+            .find(canonicalWorkspaceID)
             .fetchOne(database)
 
         if let existingWorkspace {
@@ -211,6 +396,7 @@ public enum CloudWorkspacePersistence {
         } else {
             try insertAPIOnlyWorkspace(
                 workspace,
+                canonicalWorkspaceID: canonicalWorkspaceID,
                 status: status,
                 repositoryID: repositoryID,
                 in: database
@@ -219,14 +405,21 @@ public enum CloudWorkspacePersistence {
 
         try upsertCloudMetadata(
             for: item,
+            canonicalWorkspaceID: canonicalWorkspaceID,
             accountID: accountID,
             generation: generation,
+            in: database
+        )
+        try reconcileWorkspaceAttempts(
+            canonicalWorkspaceID: canonicalWorkspaceID,
+            isAuthoritativelyArchived: status?.status == .archived,
             in: database
         )
     }
 
     private static func insertAPIOnlyWorkspace(
         _ workspace: CloudWorkspace,
+        canonicalWorkspaceID: Workspace.ID,
         status: CloudWorkspaceStatusResponse?,
         repositoryID: Repository.ID,
         in database: Database
@@ -234,7 +427,7 @@ public enum CloudWorkspacePersistence {
         try Workspace
             .insert {
                 Workspace(
-                    id: workspace.id,
+                    id: canonicalWorkspaceID,
                     createdAt: workspace.createdAt,
                     creatorUserID: workspace.creatorID,
                     hostingServerURL: Workspace.conductorCloudHostingServerURL,
@@ -260,7 +453,7 @@ public enum CloudWorkspacePersistence {
             Workspace.State(rawValue: $0.status.rawValue)
         } ?? existingWorkspace.state
         try Workspace
-            .find(workspace.id)
+            .find(existingWorkspace.id)
             .update {
                 $0.createdAt = #bind(workspace.createdAt)
                 $0.creatorUserID = #bind(workspace.creatorID)
@@ -279,6 +472,7 @@ public enum CloudWorkspacePersistence {
 
     private static func upsertCloudMetadata(
         for item: CloudProjectWorkspace,
+        canonicalWorkspaceID: Workspace.ID,
         accountID: String,
         generation: String,
         in database: Database
@@ -286,12 +480,117 @@ public enum CloudWorkspacePersistence {
         let workspace = item.workspace
         try CloudWorkspaceMetadata
             .upsert {
-                CloudWorkspaceMetadata(
-                    workspaceID: workspace.id,
+                    CloudWorkspaceMetadata(
+                    workspaceID: canonicalWorkspaceID,
                     accountID: accountID,
+                    remoteWorkspaceID: workspace.id,
                     lastSeenGeneration: generation
                 )
             }
+            .execute(database)
+    }
+
+    private static func reconcileWorkspaceAttempts(
+        canonicalWorkspaceID: Workspace.ID,
+        isAuthoritativelyArchived: Bool,
+        in database: Database
+    ) throws {
+        let attempts = try CloudPendingMutation
+            .where {
+                $0.canonicalWorkspaceID.eq(canonicalWorkspaceID)
+            }
+            .fetchAll(database)
+        for attempt in attempts {
+            switch attempt.mutationOperation {
+            case .archiveWorkspace:
+                if isAuthoritativelyArchived {
+                    try CloudPendingMutation.find(attempt.attemptID)
+                        .delete()
+                        .execute(database)
+                    try CloudOwnershipCleanup.perform(
+                        scope: .workspaces([canonicalWorkspaceID]),
+                        reason: .authoritativeSnapshot,
+                        in: database
+                    )
+                    continue
+                }
+                try Workspace.find(canonicalWorkspaceID)
+                    .update {
+                        $0.state = #bind(
+                            Workspace.State(rawValue: "archived")
+                        )
+                    }
+                    .execute(database)
+
+            case .createWorkspace:
+                _ = try CloudPendingMutation.compareAndSetState(
+                    attemptID: attempt.attemptID,
+                    from: attempt.mutationState,
+                    to: .acknowledged,
+                    at: Date(),
+                    in: database
+                )
+                let hasUnconsumedOutcome = try CloudMutationOutcome
+                    .where {
+                        $0.attemptID.eq(attempt.attemptID)
+                            && $0.consumedAt.is(nil)
+                    }
+                    .fetchCount(database) > 0
+                let hasUnresolvedDelivery = try MessageDeliveryAttempt
+                    .where {
+                        $0.canonicalWorkspaceID.eq(canonicalWorkspaceID)
+                            && $0.state.neq(
+                                MessageDeliveryAttempt.State.acknowledged
+                                    .rawValue
+                            )
+                    }
+                    .fetchCount(database) > 0
+                if !hasUnconsumedOutcome, !hasUnresolvedDelivery {
+                    try CloudPendingMutation.find(attempt.attemptID)
+                        .delete()
+                        .execute(database)
+                }
+
+            default:
+                break
+            }
+        }
+    }
+
+    private static func consolidateDesktopWorkspace(
+        remoteWorkspaceID: Workspace.ID,
+        into canonicalWorkspaceID: Workspace.ID,
+        in database: Database
+    ) throws {
+        guard remoteWorkspaceID != canonicalWorkspaceID,
+              let desktopWorkspace = try Workspace
+                .find(remoteWorkspaceID)
+                .fetchOne(database) else {
+            return
+        }
+
+        try Workspace
+            .upsert {
+                desktopWorkspace.replacingID(with: canonicalWorkspaceID)
+            }
+            .execute(database)
+
+        if let mobileState = try MobileWorkspaceState
+            .find(remoteWorkspaceID)
+            .fetchOne(database) {
+            try MobileWorkspaceState
+                .upsert {
+                    MobileWorkspaceState(
+                        workspaceID: canonicalWorkspaceID,
+                        isWorking: mobileState.isWorking,
+                        pullRequest: mobileState.pullRequestSnapshot
+                    )
+                }
+                .execute(database)
+        }
+
+        try Workspace.find(remoteWorkspaceID)
+            .delete()
             .execute(database)
     }
 
@@ -314,7 +613,21 @@ public enum CloudWorkspacePersistence {
         )
     }
 
-    private static func normalizedGitRemote(_ remote: String) -> String {
+    private static func removeStaleProjectMappings(
+        currentAccountID: String,
+        generation: String,
+        from database: Database
+    ) throws {
+        try CloudProjectRepositoryMapping
+            .where {
+                $0.accountID.neq(currentAccountID)
+                    || $0.refreshGeneration.neq(generation)
+            }
+            .delete()
+            .execute(database)
+    }
+
+    public static func normalizedGitRemote(_ remote: String) -> String {
         let normalized = remote
             .lowercased()
             .replacingOccurrences(
@@ -326,5 +639,66 @@ public enum CloudWorkspacePersistence {
             return String(normalized.dropLast(4))
         }
         return normalized
+    }
+}
+
+extension Workspace {
+    func replacingID(with id: ID) -> Self {
+        Self(
+            id: id,
+            activeSessionID: activeSessionID,
+            archiveCommit: archiveCommit,
+            assigneeUserID: assigneeUserID,
+            bigTerminalMode: bigTerminalMode,
+            branch: branch,
+            createdAt: createdAt,
+            creatorClientID: creatorClientID,
+            creatorUserID: creatorUserID,
+            derivedStatus: derivedStatus,
+            directoryName: directoryName,
+            hostingServerURL: hostingServerURL,
+            initializationFilesCopied: initializationFilesCopied,
+            initializationLogPath: initializationLogPath,
+            initializationParentBranch: initializationParentBranch,
+            intendedTargetBranch: intendedTargetBranch,
+            linkedDirectoryPaths: linkedDirectoryPaths,
+            linkedWorkspaceIDs: linkedWorkspaceIDs,
+            manualStatus: manualStatus,
+            notes: notes,
+            organizationID: organizationID,
+            permissionLevel: permissionLevel,
+            pinnedAt: pinnedAt,
+            placeholderBranchName: placeholderBranchName,
+            prDescription: prDescription,
+            prTitle: prTitle,
+            remoteFileSyncEnabled: remoteFileSyncEnabled,
+            repositoryID: repositoryID,
+            sandboxProvider: sandboxProvider,
+            secondaryDirectoryName: secondaryDirectoryName,
+            setupLogPath: setupLogPath,
+            state: state,
+            unread: unread,
+            updatedAt: updatedAt,
+            userSetBranchName: userSetBranchName,
+            userSetWorkspaceName: userSetWorkspaceName,
+            watcherUserIDs: watcherUserIDs,
+            workspaceName: workspaceName,
+            workspacePath: workspacePath
+        )
+    }
+}
+
+extension MobileWorkspaceState {
+    var pullRequestSnapshot: PullRequestSnapshot? {
+        guard let pullRequestURL else {
+            return nil
+        }
+        return PullRequestSnapshot(
+            url: pullRequestURL,
+            isDraft: isPullRequestDraft,
+            isMerged: isPullRequestMerged,
+            mergeStateStatus: pullRequestMergeStateStatus,
+            checksStatus: pullRequestChecksStatus
+        )
     }
 }

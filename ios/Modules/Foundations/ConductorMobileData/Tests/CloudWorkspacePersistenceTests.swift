@@ -13,6 +13,42 @@ import SQLiteData
 import Testing
 
 struct CloudWorkspacePersistenceTests {
+    @Test("Cloud snapshots persist projects without workspaces")
+    func persistsEmptyProjects() throws {
+        let database = try appDatabase()
+        let project = CloudProject(
+            id: "empty-project",
+            name: "Empty",
+            gitRemote: "https://github.com/example/empty.git"
+        )
+
+        try database.write { database in
+            try CloudWorkspacePersistence.persist(
+                CloudWorkspaceSnapshot(
+                    accountID: "account-1",
+                    projects: [project],
+                    statuses: [:],
+                    workspaces: []
+                ),
+                in: database
+            )
+        }
+
+        try database.read { database in
+            let mapping = try CloudProjectRepositoryMapping.find(
+                CloudProjectRepositoryMapping.id(
+                    accountID: "account-1",
+                    cloudProjectID: project.id
+                )
+            )
+            .fetchOne(database)
+            let repository = try Repository.find(project.id).fetchOne(database)
+            #expect(mapping?.canonicalRepositoryID == repository?.id)
+            #expect(mapping?.projectName == "Empty")
+            #expect(repository?.remoteURL == project.gitRemote)
+        }
+    }
+
     @Test("Cloud snapshots create canonical rows with coarse state")
     func createsCanonicalRows() throws {
         let database = try appDatabase()
@@ -173,6 +209,249 @@ struct CloudWorkspacePersistenceTests {
                 == Workspace.conductorCloudHostingServerURL
         )
         #expect(desktopThenCloud.repositoryID == "project-1")
+    }
+
+    @Test("Desktop relay reuses the canonical Cloud workspace identity")
+    func desktopRelayReusesCloudIdentity() throws {
+        let database = try appDatabase()
+        let accountID = "account-1"
+        let remoteWorkspaceID = "E8E0E15A-9066-43FC-AB85-9A98C375F789"
+        let canonicalWorkspaceID = CloudCanonicalID.workspace(
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID
+        )
+        let repository = Repository.preview(id: "project-1")
+        let cloudWorkspace = Workspace.preview(
+            id: canonicalWorkspaceID,
+            repositoryID: repository.id
+        )
+        let desktopWorkspace = Workspace.preview(
+            id: remoteWorkspaceID.lowercased(),
+            branch: "conductor/desktop-observed",
+            repositoryID: repository.id
+        )
+        let pullRequest = PullRequestSnapshot(
+            url: "https://example.test/pull/1",
+            isDraft: true,
+            isMerged: false
+        )
+
+        try database.write { db in
+            try Repository.insert { repository }.execute(db)
+            try Workspace.insert { cloudWorkspace }.execute(db)
+            try CloudWorkspaceMetadata
+                .insert {
+                    CloudWorkspaceMetadata(
+                        workspaceID: canonicalWorkspaceID,
+                        accountID: accountID,
+                        remoteWorkspaceID: remoteWorkspaceID.lowercased(),
+                        lastSeenGeneration: "provisional"
+                    )
+                }
+                .execute(db)
+
+            try CloudWorkspacePersistence.persistDesktopSnapshot(
+                WorkspaceListSnapshot(
+                    repositories: [repository],
+                    workspaces: [
+                        WorkspaceSnapshot(
+                            workspace: desktopWorkspace,
+                            isWorking: true
+                        ),
+                    ],
+                    pullRequests: [
+                        desktopWorkspace.id: pullRequest,
+                    ]
+                ),
+                in: db
+            )
+        }
+
+        try database.read { db in
+            let workspaces = try Workspace.all.fetchAll(db)
+            let mobileStates = try MobileWorkspaceState.all.fetchAll(db)
+            let metadata = try CloudWorkspaceMetadata.all.fetchAll(db)
+
+            #expect(workspaces.map(\.id) == [canonicalWorkspaceID])
+            #expect(
+                workspaces.first?.branch == "conductor/desktop-observed"
+            )
+            #expect(mobileStates.map(\.workspaceID) == [canonicalWorkspaceID])
+            #expect(mobileStates.first?.pullRequestURL == pullRequest.url)
+            #expect(metadata.map(\.workspaceID) == [canonicalWorkspaceID])
+        }
+    }
+
+    @Test("Cloud refresh removes a late raw desktop workspace duplicate")
+    func cloudRefreshConsolidatesDesktopWorkspace() throws {
+        let database = try appDatabase()
+        let accountID = "account-1"
+        let remoteWorkspaceID = "remote-workspace"
+        let canonicalWorkspaceID = CloudCanonicalID.workspace(
+            accountID: accountID,
+            remoteWorkspaceID: remoteWorkspaceID
+        )
+        let repository = Repository.preview(id: "project-1")
+        let cloudWorkspace = Workspace.preview(
+            id: canonicalWorkspaceID,
+            repositoryID: repository.id
+        )
+        let desktopWorkspace = Workspace.preview(
+            id: remoteWorkspaceID,
+            branch: "conductor/desktop-observed",
+            repositoryID: repository.id
+        )
+
+        try database.write { db in
+            try Repository.insert { repository }.execute(db)
+            try Workspace
+                .insert { [cloudWorkspace, desktopWorkspace] }
+                .execute(db)
+            try CloudWorkspaceMetadata
+                .insert {
+                    CloudWorkspaceMetadata(
+                        workspaceID: canonicalWorkspaceID,
+                        accountID: accountID,
+                        remoteWorkspaceID: remoteWorkspaceID,
+                        lastSeenGeneration: "provisional"
+                    )
+                }
+                .execute(db)
+            try MobileWorkspaceState
+                .insert {
+                    MobileWorkspaceState(
+                        workspaceID: remoteWorkspaceID,
+                        isWorking: true
+                    )
+                }
+                .execute(db)
+
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(workspaceIDs: [remoteWorkspaceID]),
+                in: db
+            )
+        }
+
+        try database.read { db in
+            let workspaces = try Workspace.all.fetchAll(db)
+            let mobileStates = try MobileWorkspaceState.all.fetchAll(db)
+            let metadata = try CloudWorkspaceMetadata.all.fetchAll(db)
+
+            #expect(workspaces.map(\.id) == [canonicalWorkspaceID])
+            #expect(
+                workspaces.first?.branch == "conductor/desktop-observed"
+            )
+            #expect(mobileStates.map(\.workspaceID) == [canonicalWorkspaceID])
+            #expect(metadata.map(\.workspaceID) == [canonicalWorkspaceID])
+        }
+    }
+
+    @Test("Cloud refresh consolidates duplicate repositories into the desktop row")
+    func consolidatesDuplicateRepositories() throws {
+        let database = try appDatabase()
+        let localRepository = Repository.preview(
+            id: "local-repository",
+            name: "conductor-mobile-unofficial",
+            remoteURL:
+                "https://github.com/gannonprudhomme/conductor-mobile-unofficial",
+            rootPath: "/tmp/conductor-shared"
+        )
+        let personalCloudRepository = Repository.preview(
+            id: "personal-cloud-project",
+            name: "Conductor Mobile Unofficial",
+            remoteURL:
+                "git@github.com:gannonprudhomme/conductor-mobile-unofficial.git"
+        )
+        let organizationCloudRepository = Repository.preview(
+            id: "organization-cloud-project",
+            name: "Conductor Mobile Unofficial",
+            remoteURL:
+                "https://github.com/GannonPrudhomme/conductor-mobile-unofficial.git/"
+        )
+        let localWorkspace = Workspace.preview(
+            id: "local-workspace",
+            repositoryID: localRepository.id
+        )
+        let cloudWorkspace = Workspace.preview(
+            id: "legacy-cloud-workspace",
+            repositoryID: organizationCloudRepository.id
+        )
+
+        try database.write { db in
+            try Repository
+                .insert {
+                    [
+                        localRepository,
+                        personalCloudRepository,
+                        organizationCloudRepository,
+                    ]
+                }
+                .execute(db)
+            try Workspace
+                .insert { [localWorkspace, cloudWorkspace] }
+                .execute(db)
+            try MobileWorkspaceState
+                .insert {
+                    MobileWorkspaceState(
+                        workspaceID: localWorkspace.id,
+                        isWorking: false
+                    )
+                }
+                .execute(db)
+            try CloudProjectRepositoryMapping
+                .insert {
+                    [
+                        CloudProjectRepositoryMapping(
+                            accountID: "personal-account",
+                            cloudProjectID: "personal-project",
+                            canonicalRepositoryID: personalCloudRepository.id,
+                            projectName: personalCloudRepository.displayName,
+                            gitRemote: personalCloudRepository.remoteURL ?? "",
+                            refreshGeneration: "previous"
+                        ),
+                        CloudProjectRepositoryMapping(
+                            accountID: "organization-account",
+                            cloudProjectID: "project-1",
+                            canonicalRepositoryID:
+                                organizationCloudRepository.id,
+                            projectName:
+                                organizationCloudRepository.displayName,
+                            gitRemote:
+                                organizationCloudRepository.remoteURL ?? "",
+                            refreshGeneration: "previous"
+                        ),
+                    ]
+                }
+                .execute(db)
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(
+                    accountID: "organization-account",
+                    workspaceIDs: [],
+                    gitRemote:
+                        "https://github.com/gannonprudhomme/conductor-mobile-unofficial.git"
+                ),
+                in: db
+            )
+        }
+
+        try database.read { db in
+            let repositories = try Repository.all.fetchAll(db)
+            let workspaces = try Workspace.all.fetchAll(db)
+            let mapping = try CloudProjectRepositoryMapping.find(
+                CloudProjectRepositoryMapping.id(
+                    accountID: "organization-account",
+                    cloudProjectID: "project-1"
+                )
+            )
+            .fetchOne(db)
+
+            #expect(repositories.map(\.id) == [localRepository.id])
+            #expect(
+                Set(workspaces.compactMap(\.repositoryID))
+                    == [localRepository.id]
+            )
+            #expect(mapping?.canonicalRepositoryID == localRepository.id)
+        }
     }
 
     @Test("Account replacement removes only stale API-owned rows")
@@ -491,12 +770,13 @@ private func persistCloudChat(
 private func cloudSnapshot(
     accountID: String = "account-1",
     workspaceIDs: [CloudWorkspace.ID],
-    status: CloudWorkspaceStatusResponse.Status = .ready
+    status: CloudWorkspaceStatusResponse.Status = .ready,
+    gitRemote: String = "https://github.com/example/mobile.git"
 ) -> CloudWorkspaceSnapshot {
     let project = CloudProject(
         id: "project-1",
         name: "Mobile",
-        gitRemote: "https://github.com/example/mobile.git"
+        gitRemote: gitRemote
     )
     let workspaces = workspaceIDs.map { workspaceID in
         CloudWorkspace(

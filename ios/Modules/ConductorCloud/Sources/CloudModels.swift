@@ -402,15 +402,18 @@ public struct CloudTranscriptCheckpoint: Equatable, Sendable {
     public let accountID: String
     public let remoteSessionID: String
     public let rawCursor: String?
+    public let lastFullTranscriptRefreshAt: Date
 
     public init(
         accountID: String,
         remoteSessionID: String,
-        rawCursor: String?
+        rawCursor: String?,
+        lastFullTranscriptRefreshAt: Date
     ) {
         self.accountID = accountID
         self.remoteSessionID = remoteSessionID
         self.rawCursor = rawCursor
+        self.lastFullTranscriptRefreshAt = lastFullTranscriptRefreshAt
     }
 }
 
@@ -421,24 +424,265 @@ public struct CloudTranscriptUpdate: Equatable, Sendable {
     public let messages: [CloudTranscriptMessage]
     public let kind: Kind
     public let rawCursor: String?
+    public let completedAt: Date?
 
     public init(
         accountID: String,
         sessionID: String,
         messages: [CloudTranscriptMessage],
         kind: Kind,
-        rawCursor: String?
+        rawCursor: String?,
+        completedAt: Date? = nil
     ) {
         self.accountID = accountID
         self.sessionID = sessionID
         self.messages = messages
         self.kind = kind
         self.rawCursor = rawCursor
+        self.completedAt = completedAt
     }
 
     public enum Kind: Equatable, Sendable {
         case complete
         case incremental
+    }
+}
+
+public struct CloudSendMessageRequest: Codable, Equatable, Sendable {
+    public let messageID: String
+    public let message: String
+
+    public init(messageID: String, message: String) {
+        self.messageID = messageID
+        self.message = message
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case messageID = "messageId"
+        case message
+    }
+}
+
+public struct CloudSendMessageResponse: Decodable, Equatable, Sendable {
+    public let messageID: String
+    public let state: State
+
+    private enum CodingKeys: String, CodingKey {
+        case messageID = "messageId"
+        case state
+    }
+
+    public struct State: Codable, Equatable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let queued = Self(rawValue: "queued")
+        public static let sent = Self(rawValue: "sent")
+    }
+}
+
+public struct CloudCancelSessionResponse: Decodable, Equatable, Sendable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let status: CloudSessionStatusResponse.Status
+    public let canceledQueuedMessages: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspaceId"
+        case sessionID = "sessionId"
+        case status
+        case canceledQueuedMessages
+    }
+}
+
+public struct CloudCreateSessionRequest: Codable, Equatable, Sendable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let name: String?
+    public let agent: String
+    public let model: String?
+    public let effort: String?
+    public let fastMode: Bool?
+
+    public init(
+        workspaceID: String,
+        sessionID: String,
+        name: String? = nil,
+        agent: String,
+        model: String? = nil,
+        effort: String? = nil,
+        fastMode: Bool? = nil
+    ) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.name = name
+        self.agent = agent
+        self.model = model
+        self.effort = effort
+        self.fastMode = fastMode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspaceId"
+        case sessionID = "sessionId"
+        case name
+        case agent
+        case model
+        case effort
+        case fastMode
+    }
+}
+
+public struct CloudRenameSessionRequest: Codable, Equatable, Sendable {
+    public let name: String
+
+    public init(name: String) {
+        self.name = name
+    }
+}
+
+public struct CloudArchiveSessionResponse: Decodable, Equatable, Sendable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let status: Status
+    public let canceledQueuedMessages: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspaceId"
+        case sessionID = "sessionId"
+        case status
+        case canceledQueuedMessages
+    }
+
+    public struct Status: Codable, Equatable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let archived = Self(rawValue: "archived")
+    }
+}
+
+public struct CloudCreateWorkspaceRequest: Codable, Equatable, Sendable {
+    public let projectID: String?
+    public let repositoryURL: URL?
+    public let branch: String?
+    public let name: String?
+    public let sessionName: String?
+    public let agent: String?
+    public let model: String?
+    public let effort: String?
+
+    public init(
+        projectID: String,
+        branch: String? = nil,
+        name: String? = nil,
+        sessionName: String? = nil,
+        agent: String? = nil,
+        model: String? = nil,
+        effort: String? = nil
+    ) {
+        self.projectID = projectID
+        self.repositoryURL = nil
+        self.branch = branch
+        self.name = name
+        self.sessionName = sessionName
+        self.agent = agent
+        self.model = model
+        self.effort = effort
+    }
+
+    public init(
+        repositoryURL: URL,
+        branch: String? = nil,
+        name: String? = nil,
+        sessionName: String? = nil,
+        agent: String? = nil,
+        model: String? = nil,
+        effort: String? = nil
+    ) {
+        self.projectID = nil
+        self.repositoryURL = repositoryURL
+        self.branch = branch
+        self.name = name
+        self.sessionName = sessionName
+        self.agent = agent
+        self.model = model
+        self.effort = effort
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case projectID = "projectId"
+        case repositoryURL = "repositoryUrl"
+        case branch
+        case name
+        case sessionName
+        case agent
+        case model
+        case effort
+    }
+}
+
+public struct CloudCreateWorkspaceResponse: Decodable, Equatable, Sendable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let deepLink: URL
+
+    public init(
+        workspaceID: String,
+        sessionID: String,
+        deepLink: URL
+    ) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.deepLink = deepLink
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspaceId"
+        case sessionID = "sessionId"
+        case deepLink
+    }
+}
+
+public struct CloudWorkspaceCreationRecoveryRequest: Equatable, Sendable {
+    public let baselineWorkspaceIDs: [String]
+    public let projectID: String?
+    public let sessionName: String
+
+    public init(
+        baselineWorkspaceIDs: [String],
+        projectID: String?,
+        sessionName: String
+    ) {
+        self.baselineWorkspaceIDs = baselineWorkspaceIDs
+        self.projectID = projectID
+        self.sessionName = sessionName
+    }
+}
+
+public struct CloudArchiveWorkspaceResponse: Decodable, Equatable, Sendable {
+    public let workspaceID: String
+    public let status: Status
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID = "workspaceId"
+        case status
+    }
+
+    public struct Status: Codable, Equatable, RawRepresentable, Sendable {
+        public var rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public static let archived = Self(rawValue: "archived")
     }
 }
 
