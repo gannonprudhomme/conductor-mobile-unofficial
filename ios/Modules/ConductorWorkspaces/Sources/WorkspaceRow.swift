@@ -83,6 +83,7 @@ struct WorkspaceRow: View {
                 } label: {
                     Label("Archive", systemImage: "archivebox")
                 }
+                .tint(.theme(.destructive))
             }
         } else {
             rowLabel
