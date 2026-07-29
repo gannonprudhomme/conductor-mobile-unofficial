@@ -548,11 +548,17 @@ private func firstEvent(
 private func waitUntil(
     _ condition: @escaping @Sendable () async -> Bool
 ) async {
-    for _ in 0..<10_000 {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
         if await condition() {
             return
         }
-        await Task.yield()
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
     }
     Issue.record("Timed out waiting for an asynchronous test condition.")
 }
