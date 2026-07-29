@@ -458,6 +458,31 @@ struct CloudChatPersistenceTests {
         )
     }
 
+    @Test("A duplicate complete event ID keeps only its final projection")
+    func duplicateCompleteEventID() throws {
+        let database = try appDatabase()
+        try database.write { db in
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["session"]),
+                in: db
+            )
+            _ = try CloudChatPersistence.persist(
+                transcript(
+                    messages: [
+                        userEvent(id: "duplicate", index: 1, text: "Obsolete"),
+                        unsupportedEvent(id: "duplicate", index: 2),
+                    ]
+                ),
+                in: db
+            )
+        }
+
+        let messageCount = try database.read { db in
+            try CloudMessageMetadata.fetchCount(db)
+        }
+        #expect(messageCount == 0)
+    }
+
     @Test("An unsupported incremental replacement removes obsolete visible parts")
     func unsupportedIncrementalReplacement() throws {
         let database = try appDatabase()
@@ -683,6 +708,83 @@ struct CloudChatPersistenceTests {
         #expect(cache.messages.isEmpty)
         #expect(cache.checkpoint != nil)
         #expect(cache.checkpoint?.rawCursor == nil)
+    }
+
+    @Test("Complete transcript persistence replaces large projections")
+    func completeTranscriptReplacesLargeProjection() throws {
+        let database = try appDatabase()
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: "session"
+        )
+        let initialMessages = (0..<205).map {
+            userEvent(
+                id: "initial-\($0)",
+                index: Double($0),
+                text: "Initial \($0)"
+            )
+        }
+        let replacementMessages = (0..<205).map {
+            userEvent(
+                id: "replacement-\($0)",
+                index: Double($0),
+                text: "Replacement \($0)"
+            )
+        }
+
+        try database.write { db in
+            _ = try CloudChatPersistence.persist(
+                snapshot(accountID: "account", sessionIDs: ["session"]),
+                in: db
+            )
+            _ = try CloudChatPersistence.persist(
+                transcript(messages: initialMessages),
+                in: db
+            )
+            _ = try CloudChatPersistence.persist(
+                transcript(messages: replacementMessages),
+                in: db
+            )
+        }
+
+        let cache = try database.read { db in
+            try CloudChatPersistence.cachedTranscript(
+                for: canonicalSessionID,
+                in: db
+            )
+        }
+        #expect(cache.messages.count == 205)
+        #expect(
+            cache.messages.map(\.content)
+                == (0..<205).map { "Replacement \($0)" }
+        )
+        #expect(
+            try database.read { db in
+                try CloudMessageMetadata.fetchCount(db)
+            } == 205
+        )
+    }
+
+    @Test("Maximum rows per statement respect SQLite's argument limit")
+    func maximumRowsPerStatementRespectsArgumentLimit() {
+        #expect(
+            CloudChatPersistence.maximumRowsPerStatement(
+                maximumArgumentCount: 500_000,
+                argumentsPerRow: 15
+            ) == 33_333
+        )
+        #expect(
+            CloudChatPersistence.maximumRowsPerStatement(
+                maximumArgumentCount: 500_000,
+                argumentsPerRow: 6
+            ) == 83_333
+        )
+        #expect(
+            CloudChatPersistence.maximumRowsPerStatement(
+                maximumArgumentCount: 1_000,
+                argumentsPerRow: 15
+            ) == 66
+        )
     }
 }
 
