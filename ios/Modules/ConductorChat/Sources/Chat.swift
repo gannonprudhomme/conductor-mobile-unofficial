@@ -1317,6 +1317,18 @@ extension SharedKey where Self == FileStorageKey<[Session.ID: String]>.Default {
     }
 }
 
+struct ChatLoadingView: View {
+    var body: some View {
+        ProgressView()
+            .progressViewStyle(.network)
+            .tint(.theme(.textSecondary))
+            .frame(width: 32, height: 32)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .background(.theme(.background))
+            .accessibilityIdentifier("chat.loading")
+    }
+}
+
 struct ChatView: View {
     private static let overlaySpacing: CGFloat = 8
     private static let scrollDownButtonContentSpacing: CGFloat = 16
@@ -1328,15 +1340,18 @@ struct ChatView: View {
     @State private var scrollDownButtonHeight: CGFloat = 0
     @State private var shouldShowScrollDownButton = false
     let directoryName: String
+    let showsLoadingIndicator: Bool
     let firstQueuedRowFrameChanged: @MainActor (CGRect) -> Void
 
     init(
         store: StoreOf<Chat>,
         directoryName: String,
+        showsLoadingIndicator: Bool = true,
         firstQueuedRowFrameChanged: @escaping @MainActor (CGRect) -> Void = { _ in }
     ) {
         self.store = store
         self.directoryName = directoryName
+        self.showsLoadingIndicator = showsLoadingIndicator
         self.firstQueuedRowFrameChanged = firstQueuedRowFrameChanged
     }
 
@@ -1360,14 +1375,10 @@ struct ChatView: View {
                 )
             )
             .overlay {
-                if store.isLoadingMessages && !store.hasOptimisticMessages {
-                    ProgressView()
-                        .progressViewStyle(.network)
-                        .tint(.theme(.textSecondary))
-                        .frame(width: 32, height: 32)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                        .background(.theme(.background))
-                        .accessibilityIdentifier("chat.loading")
+                if showsLoadingIndicator
+                    && store.isLoadingMessages
+                    && !store.hasOptimisticMessages {
+                    ChatLoadingView()
                 } else if store.shouldShowEmptyChat {
                     EmptyChatView(directoryName: directoryName)
                         .accessibilityIdentifier("chat.empty")
