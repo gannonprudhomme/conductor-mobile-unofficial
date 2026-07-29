@@ -48,6 +48,24 @@ struct VoiceInputTests {
         levelContinuation.finish()
     }
 
+    @Test("Recording levels fill wide waveforms and retain recent samples")
+    func recordingLevelHistory() async {
+        var state = VoiceInput.State(id: "test")
+        state.phase = .recording
+        state.levels = Array(
+            repeating: 0.25,
+            count: VoiceInput.maximumLevelCount
+        )
+        let store = TestStore(initialState: state) {
+            VoiceInput()
+        }
+
+        await store.send(.recordingLevelUpdated(2)) {
+            $0.levels.removeFirst()
+            $0.levels.append(1)
+        }
+    }
+
     @Test("An empty transcript silently returns to idle")
     func emptyTranscript() async {
         let store = TestStore(initialState: VoiceInput.State(id: "test")) {

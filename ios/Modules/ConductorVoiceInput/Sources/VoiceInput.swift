@@ -11,6 +11,8 @@ import Foundation
 
 @Reducer
 public struct VoiceInput: Sendable {
+    static let maximumLevelCount = 256
+
     @ObservableState
     public struct State: Equatable {
         public let id: String
@@ -110,8 +112,10 @@ public struct VoiceInput: Sendable {
                     return .none
                 }
                 state.levels.append(min(max(level, 0), 1))
-                if state.levels.count > 48 {
-                    state.levels.removeFirst(state.levels.count - 48)
+                if state.levels.count > Self.maximumLevelCount {
+                    state.levels.removeFirst(
+                        state.levels.count - Self.maximumLevelCount
+                    )
                 }
                 return .none
 
