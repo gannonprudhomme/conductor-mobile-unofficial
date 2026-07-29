@@ -518,7 +518,17 @@ extension CloudAPIClient: DependencyKey {
         apiKey: String
     ) async throws -> [CloudTranscriptMessage] {
         guard let after else {
-            return try await allPages(pageSize: 100) { limit, offset in
+            // Offset pages are independent, so the first two can share one
+            // network round trip. Starting with the full 50-request window
+            // would make short chats faster by no more, while issuing dozens
+            // of requests beyond their end. Page size 100 and a later window
+            // of 50 were the fastest combination for the measured p90/p99
+            // transcripts without that penalty for the common short case.
+            return try await allPagesInConcurrentWindows(
+                pageSize: 100,
+                initialWindowPageCount: 2,
+                maximumWindowPageCount: 50
+            ) { limit, offset in
                 try await request(
                     CloudPage<CloudTranscriptMessage>.self,
                     baseURL: baseURL,
@@ -532,6 +542,9 @@ extension CloudAPIClient: DependencyKey {
             }
         }
 
+        // Incremental pages cannot use offsets: each response supplies the
+        // cursor required by the next request. Keep this path serial and reject
+        // repeated cursors so a malformed response cannot poll forever.
         var cursor = after
         var visitedCursors: Set<String> = [after]
         var messages: [CloudTranscriptMessage] = []
@@ -931,9 +944,10 @@ extension CloudAPIClient: DependencyKey {
 private extension CloudAPIClient {
     static func allPages<Element: Decodable & Equatable & Sendable>(
         pageSize: Int,
+        startingAt initialOffset: Int = 0,
         page: (_ limit: Int, _ offset: Int) async throws -> CloudPage<Element>
     ) async throws -> [Element] {
-        var offset = 0
+        var offset = initialOffset
         var results: [Element] = []
 
         while true {
@@ -950,11 +964,115 @@ private extension CloudAPIClient {
                 throw CloudAPIClientError.invalidResponse
             }
 
+            // Advance by what the API actually returned, not by the requested
+            // size, so a short nonterminal page cannot create a gap.
             let nextOffset = offset + response.data.count
             guard nextOffset > offset else {
                 throw CloudAPIClientError.invalidResponse
             }
             offset = nextOffset
+        }
+    }
+
+    /// Fetches fixed-offset pages in ordered concurrent windows.
+    ///
+    /// The API exposes `hasMore`, but not a total count or reverse pagination.
+    /// A small first window avoids flooding short transcripts; later windows
+    /// trade bounded speculative requests for substantially lower tail latency.
+    static func allPagesInConcurrentWindows<
+        Element: Decodable & Equatable & Sendable
+    >(
+        pageSize: Int,
+        initialWindowPageCount: Int,
+        maximumWindowPageCount: Int,
+        page: @escaping @Sendable (
+            _ limit: Int,
+            _ offset: Int
+        ) async throws -> CloudPage<Element>
+    ) async throws -> [Element] {
+        guard pageSize > 0,
+              initialWindowPageCount > 0,
+              maximumWindowPageCount > 0 else {
+            throw CloudAPIClientError.invalidResponse
+        }
+
+        var windowPageCount = initialWindowPageCount
+        var nextOffset = 0
+        var results: [Element] = []
+
+        // The first window is intentionally small. Reaching the bottom of that
+        // window proves the transcript is large enough to benefit from the
+        // caller's maximum concurrency on every subsequent pass.
+        while true {
+            try Task.checkCancellation()
+            let offsets = (0..<windowPageCount).map {
+                nextOffset + ($0 * pageSize)
+            }
+            let pages: [CloudPage<Element>]
+            do {
+                // Task groups return in completion order. Fetch every fixed
+                // offset concurrently, then restore API order below.
+                pages = try await withThrowingTaskGroup(
+                    of: CloudPage<Element>.self
+                ) { group in
+                    for offset in offsets {
+                        group.addTask {
+                            try await page(pageSize, offset)
+                        }
+                    }
+                    return try await group.reduce(into: []) {
+                        $0.append($1)
+                    }
+                }
+            } catch {
+                try Task.checkCancellation()
+                // A failed speculative window has not committed any of its
+                // pages to results. Retrying serially from nextOffset avoids
+                // discarding an otherwise usable transcript just because the
+                // server or connection could not sustain the parallel burst.
+                results.append(
+                    contentsOf: try await allPages(
+                        pageSize: pageSize,
+                        startingAt: nextOffset
+                    ) { limit, offset in
+                        try await page(limit, offset)
+                    }
+                )
+                return results
+            }
+            try Task.checkCancellation()
+
+            for response in pages.sorted(by: { $0.offset < $1.offset }) {
+                // The API provides hasMore but no total count. Walking the
+                // sorted responses contiguously lets the first hasMore=false
+                // page define the real end while ignoring speculative pages
+                // that were requested beyond it.
+                guard response.offset == nextOffset else {
+                    throw CloudAPIClientError.invalidResponse
+                }
+                results.append(contentsOf: response.data)
+                guard response.hasMore else {
+                    return results
+                }
+                guard response.data.count == pageSize else {
+                    // Fixed offsets assume every nonterminal page is full. If
+                    // the API returns a short page with hasMore=true, continue
+                    // from its actual length serially to avoid a gap or overlap.
+                    results.append(
+                        contentsOf: try await allPages(
+                            pageSize: pageSize,
+                            startingAt: response.offset + response.data.count
+                        ) { limit, offset in
+                            try await page(limit, offset)
+                        }
+                    )
+                    return results
+                }
+                nextOffset += response.data.count
+            }
+            // Both initial pages (or the previous large window) were full and
+            // nonterminal, so latency now matters more than speculative work.
+            windowPageCount = maximumWindowPageCount
         }
     }
 }

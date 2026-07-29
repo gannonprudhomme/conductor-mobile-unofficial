@@ -10,6 +10,9 @@ import Dependencies
 import Foundation
 import Testing
 
+// The pagination concurrency test deliberately suspends a 50-request window.
+// Keep its sibling clock-driven tests from competing with that stress fixture.
+@Suite(.serialized)
 @MainActor
 struct CloudAPIClientTests {
     @Test("Production requests use the fixed Conductor Cloud origin")
@@ -1032,7 +1035,8 @@ struct CloudAPIClientTests {
                     .first(where: { $0.name == "after" })?
                     .value
                     requestedCursors.withValue { $0.append(cursor) }
-                    let data = if cursor == nil {
+                    let offset = requestOffset(request)
+                    let data = if cursor == nil, offset == 0 {
                         [
                             transcriptMessageJSON(
                                 id: "raw-first",
@@ -1048,7 +1052,7 @@ struct CloudAPIClientTests {
                         ""
                     }
                     return try testResponse(
-                        page(data: data, offset: 0, hasMore: false),
+                        page(data: data, offset: offset, hasMore: false),
                         for: request
                     )
                 default:
@@ -1069,8 +1073,11 @@ struct CloudAPIClientTests {
 
         await waitForCloudCondition { updates.value.count == 1 }
         await clock.advance(by: .seconds(10))
-        await waitForCloudCondition { requestedCursors.value.count == 2 }
-        #expect(requestedCursors.value == [nil, "raw-last"])
+        await waitForCloudCondition { requestedCursors.value.count == 3 }
+        #expect(
+            requestedCursors.value.compactMap { $0 } == ["raw-last"]
+        )
+        #expect(requestedCursors.value.filter { $0 == nil }.count == 2)
         #expect(updates.value[0].messages.map(\.id) == ["raw-first", "raw-last"])
         #expect(updates.value[0].rawCursor == "raw-last")
 
@@ -1107,18 +1114,25 @@ struct CloudAPIClientTests {
                 case "/v0/sessions/session/messages":
                     let queryItems = requestQueryItems(request)
                     requests.withValue { $0.append(queryItems) }
-                    let offset = queryItems
+                    let offset = try #require(
+                        queryItems
                         .first(where: { $0.name == "offset" })?
                         .value
-                    let id = offset == "0" ? "first" : "second"
+                        .flatMap(Int.init)
+                    )
+                    let data = if offset == 0 {
+                        transcriptMessagesJSON(offset: 0, count: 100)
+                    } else {
+                        transcriptMessageJSON(
+                            id: "second",
+                            sessionIndex: 100
+                        )
+                    }
                     return try testResponse(
                         page(
-                            data: transcriptMessageJSON(
-                                id: id,
-                                sessionIndex: offset == "0" ? 2 : 1
-                            ),
-                            offset: offset == "0" ? 0 : 1,
-                            hasMore: offset == "0"
+                            data: data,
+                            offset: offset,
+                            hasMore: offset == 0
                         ),
                         for: request
                     )
@@ -1147,8 +1161,169 @@ struct CloudAPIClientTests {
                 ["limit", "offset"],
             ]
         )
-        #expect(updates.value[0].messages.map(\.id) == ["first", "second"])
+        #expect(updates.value[0].messages.count == 101)
+        #expect(updates.value[0].messages.first?.id == "message-0")
+        #expect(updates.value[0].messages.last?.id == "second")
         #expect(updates.value[0].rawCursor == "second")
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Complete transcript pages fetch concurrently after two full pages")
+    func completeTranscriptPaginationConcurrency() async throws {
+        let clock = TestClock()
+        let fixture = TranscriptPaginationConcurrencyTransportFixture()
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    return try await fixture.response(for: request)
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { await fixture.initialRequestCount() == 2 }
+        #expect(await fixture.activeRequestCount() == 2)
+        await fixture.releaseConcurrentRequests()
+
+        await waitForCloudCondition { await fixture.tailRequestCount() == 50 }
+        #expect(await fixture.activeRequestCount() == 50)
+        #expect(await fixture.maximumConcurrentRequestCount() == 50)
+        await fixture.releaseConcurrentRequests()
+        await waitForCloudCondition { updates.value.count == 1 }
+
+        let update = try #require(updates.value.first)
+        #expect(update.messages.count == 250)
+        #expect(
+            update.messages.map(\.id)
+                == (0..<250).map { "message-\($0)" }
+        )
+        #expect(update.rawCursor == "message-249")
+        #expect(
+            Set(await fixture.requestedOffsets())
+                == Set(stride(from: 0, through: 5_100, by: 100))
+        )
+
+        observation.cancel()
+        _ = try? await observation.value
+    }
+
+    @Test("Complete transcript pagination falls back after a concurrent failure")
+    func completeTranscriptPaginationConcurrencyFallback() async throws {
+        let clock = TestClock()
+        let requestedOffsets = LockIsolated<[Int]>([])
+        let failedOffsetRequestCount = LockIsolated(0)
+        let updates = LockIsolated<[CloudTranscriptUpdate]>([])
+        let client = CloudAPIClient.live(baseURL: testBaseURL) {
+            "stored-api-key"
+        }
+        let observation = withDependencies {
+            $0.continuousClock = clock
+            $0.cloudAPITransport.data = { request in
+                switch request.url?.path {
+                case "/me":
+                    return try testResponse(
+                        #"{"userId":"user","authMethod":"api-key"}"#,
+                        for: request
+                    )
+                case "/v0/sessions/session/status":
+                    return try testResponse(
+                        sessionStatusJSON(
+                            workspaceID: "workspace",
+                            sessionID: "session",
+                            status: "idle"
+                        ),
+                        for: request
+                    )
+                case "/v0/sessions/session/messages":
+                    let offset = requestOffset(request)
+                    requestedOffsets.withValue { $0.append(offset) }
+                    if offset == 200 {
+                        let requestCount = failedOffsetRequestCount.withValue {
+                            $0 += 1
+                            return $0
+                        }
+                        if requestCount == 1 {
+                            throw URLError(.timedOut)
+                        }
+                    }
+                    let count = switch offset {
+                    case 0, 100:
+                        100
+
+                    case 200:
+                        50
+
+                    default:
+                        0
+                    }
+                    return try testResponse(
+                        page(
+                            data: transcriptMessagesJSON(
+                                offset: offset,
+                                count: count
+                            ),
+                            offset: offset,
+                            hasMore: offset < 200
+                        ),
+                        for: request
+                    )
+                default:
+                    throw CloudAPIClientError.invalidResponse
+                }
+            }
+        } operation: {
+            Task {
+                for try await update in client.observeTranscript(
+                    sessionID: "session",
+                    workspaceID: "workspace",
+                    checkpoint: nil
+                ) {
+                    updates.withValue { $0.append(update) }
+                }
+            }
+        }
+
+        await waitForCloudCondition { updates.value.count == 1 }
+
+        let update = try #require(updates.value.first)
+        #expect(update.messages.count == 250)
+        #expect(update.rawCursor == "message-249")
+        #expect(
+            requestedOffsets.value.filter { $0 == 200 }.count == 2
+        )
 
         observation.cancel()
         _ = try? await observation.value
@@ -1648,7 +1823,7 @@ struct CloudAPIClientTests {
         let differentQueries = try await transcriptQueries(
             identityUserID: "other-account",
             checkpointAccountID: "account::",
-            expectedCount: 2
+            expectedCount: 3
         )
 
         #expect(Set(matchingQuery.map(\.name)) == ["limit", "after"])
@@ -1656,6 +1831,7 @@ struct CloudAPIClientTests {
             differentQueries.map { Set($0.map(\.name)) }
                 == [
                     ["limit", "after"],
+                    ["limit", "offset"],
                     ["limit", "offset"],
                 ]
         )
@@ -2076,6 +2252,95 @@ private actor StatusConcurrencyTransportFixture {
     func statusRequestCount() -> Int {
         observedStatusRequestCount
     }
+}
+
+// Hold each response until the test releases the whole window. An immediate
+// mock response could finish before sibling tasks start and would not prove
+// that the production client actually overlaps its requests.
+private actor TranscriptPaginationConcurrencyTransportFixture {
+    private var activeConcurrentRequestCount = 0
+    private var maximumActiveConcurrentRequestCount = 0
+    private var offsets: [Int] = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func response(
+        for request: URLRequest
+    ) async throws -> (Data, HTTPURLResponse) {
+        let offset = requestOffset(request)
+        offsets.append(offset)
+
+        activeConcurrentRequestCount += 1
+        maximumActiveConcurrentRequestCount = max(
+            maximumActiveConcurrentRequestCount,
+            activeConcurrentRequestCount
+        )
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+        activeConcurrentRequestCount -= 1
+
+        let count = switch offset {
+        case 0, 100:
+            100
+
+        case 200:
+            50
+
+        default:
+            0
+        }
+        return try testResponse(
+            page(
+                data: transcriptMessagesJSON(
+                    offset: offset,
+                    count: count
+                ),
+                offset: offset,
+                hasMore: offset < 200
+            ),
+            for: request
+        )
+    }
+
+    func initialRequestCount() -> Int {
+        offsets.filter { $0 < 200 }.count
+    }
+
+    func tailRequestCount() -> Int {
+        offsets.filter { $0 >= 200 }.count
+    }
+
+    func activeRequestCount() -> Int {
+        activeConcurrentRequestCount
+    }
+
+    func maximumConcurrentRequestCount() -> Int {
+        maximumActiveConcurrentRequestCount
+    }
+
+    func releaseConcurrentRequests() {
+        let continuations = waiters
+        waiters.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+
+    func requestedOffsets() -> [Int] {
+        offsets
+    }
+}
+
+private func transcriptMessagesJSON(
+    offset: Int,
+    count: Int
+) -> String {
+    (offset..<(offset + count))
+        .map {
+            transcriptMessageJSON(
+                id: "message-\($0)",
+                sessionIndex: Double($0)
+            )
+        }
+        .joined(separator: ",")
 }
 
 private func page(
