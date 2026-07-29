@@ -28,6 +28,9 @@ public struct WorkspaceChat: Sendable {
         @Shared(.cloudConfiguration)
         public var cloudConfiguration
 
+        @Shared(.desktopConnectionStatus)
+        public var connectionStatus
+
         // TODO: Ideally this would be non-nil but couldn't figure out a good way to achieve it
         var chat: Chat.State?
         var mutationRoute: WorkspaceMutationRoute?
@@ -196,6 +199,15 @@ public struct WorkspaceChat: Sendable {
         var canRenameSession: Bool {
             let title = sessionTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             return !title.isEmpty && title != renamingSession?.title
+        }
+
+        var canUseDesktopWorkspaceActions: Bool {
+            source != .cloud || connectionStatus == .connected
+        }
+
+        var desktopWorkspaceID: Workspace.ID {
+            workspaceWithRepository.cloudMetadata?.remoteWorkspaceID
+                ?? workspace.id
         }
 
         var sessionObservationWorkspaceID: Workspace.ID {
@@ -524,11 +536,19 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .renameBranchButtonTapped:
+                guard state.canUseDesktopWorkspaceActions else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                    return .none
+                }
                 state.branchNameDraft = state.workspace.branch ?? ""
                 state.destination = .renameBranch
                 return .none
 
             case .renameBranchSubmitted:
+                guard state.canUseDesktopWorkspaceActions else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                    return .none
+                }
                 guard state.canRenameBranch else {
                     return .none
                 }
@@ -539,7 +559,7 @@ public struct WorkspaceChat: Sendable {
                 state.branchNameDraft = branch
                 state.destination = nil
                 state.isRenamingBranch = true
-                return .run { [workspaceID = state.workspace.id, branch] send in
+                return .run { [workspaceID = state.desktopWorkspaceID, branch] send in
                     await send(
                         .renameBranchResponse(
                             Result {
@@ -1093,11 +1113,16 @@ public struct WorkspaceChat: Sendable {
                 guard !state.isWorkspaceMutationInFlight else {
                     return .none
                 }
+                guard state.canUseDesktopWorkspaceActions else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                    return .none
+                }
                 state.isWorkspaceMutationInFlight = true
                 let item = state.workspaceWithRepository
                 let isPinned = item.workspace.pinnedAt == nil
                 let previousPinnedAt = item.workspace.pinnedAt
                 let pinnedAt = isPinned ? now.ISO8601Format() : nil
+                let desktopWorkspaceID = state.desktopWorkspaceID
 
                 return updateWorkspace {
                     try await database.write { db in
@@ -1121,7 +1146,7 @@ public struct WorkspaceChat: Sendable {
                     }
                 } operation: {
                     try await desktopClient.setWorkspacePinned(
-                        workspaceID: item.id,
+                        workspaceID: desktopWorkspaceID,
                         isPinned: isPinned
                     )
                 }
@@ -1134,8 +1159,13 @@ public struct WorkspaceChat: Sendable {
                 guard item.workspace.status != status else {
                     return .none
                 }
+                guard state.canUseDesktopWorkspaceActions else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                    return .none
+                }
                 state.isWorkspaceMutationInFlight = true
                 let previousManualStatus = item.workspace.manualStatus
+                let desktopWorkspaceID = state.desktopWorkspaceID
 
                 return updateWorkspace {
                     try await database.write { db in
@@ -1159,7 +1189,7 @@ public struct WorkspaceChat: Sendable {
                     }
                 } operation: {
                     try await desktopClient.setWorkspaceStatus(
-                        workspaceID: item.id,
+                        workspaceID: desktopWorkspaceID,
                         status: status
                     )
                 }
@@ -1168,11 +1198,16 @@ public struct WorkspaceChat: Sendable {
                 guard !state.isWorkspaceMutationInFlight else {
                     return .none
                 }
+                guard state.canUseDesktopWorkspaceActions else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                    return .none
+                }
                 state.isWorkspaceMutationInFlight = true
                 let item = state.workspaceWithRepository
                 let isUnread = (item.workspace.unread ?? 0) == 0
                 let previousUnread = item.workspace.unread
                 let unread = isUnread ? 1 : 0
+                let desktopWorkspaceID = state.desktopWorkspaceID
 
                 return updateWorkspace {
                     try await database.write { db in
@@ -1196,7 +1231,7 @@ public struct WorkspaceChat: Sendable {
                     }
                 } operation: {
                     try await desktopClient.setWorkspaceUnread(
-                        workspaceID: item.id,
+                        workspaceID: desktopWorkspaceID,
                         isUnread: isUnread
                     )
                 }
@@ -1573,6 +1608,18 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
             TextState("Failed to update workspace")
         } message: {
             TextState(message)
+        }
+    }
+
+    static var cloudWorkspaceActionRequiresDesktop: Self {
+        AlertState {
+            TextState("Desktop connection required")
+        } actions: {
+            ButtonState(role: .cancel) {
+                TextState("OK")
+            }
+        } message: {
+            TextState("This action isn’t available yet through Conductor’s public Cloud API.")
         }
     }
 

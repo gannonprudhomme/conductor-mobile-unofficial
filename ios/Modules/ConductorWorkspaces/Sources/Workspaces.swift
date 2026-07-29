@@ -766,14 +766,16 @@ public struct Workspaces: Sendable {
                 return .none
 
             case let .workspacePinnedButtonTapped(item):
-                guard item.mutationRoute(
-                    cloudConfiguration: state.cloudConfiguration
-                )?.capabilities.canPin == true else {
+                guard item.source != .cloud
+                    || state.connectionStatus == .connected else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
                     return .none
                 }
                 let isPinned = item.workspace.pinnedAt == nil
                 let previousPinnedAt = item.workspace.pinnedAt
                 let pinnedAt = isPinned ? now.ISO8601Format() : nil
+                let desktopWorkspaceID = item.cloudMetadata?.remoteWorkspaceID
+                    ?? item.id
 
                 return updateWorkspace {
                     try await database.write { db in
@@ -797,21 +799,23 @@ public struct Workspaces: Sendable {
                     }
                 } operation: {
                     try await desktopClient.setWorkspacePinned(
-                        workspaceID: item.id,
+                        workspaceID: desktopWorkspaceID,
                         isPinned: isPinned
                     )
                 }
 
             case let .workspaceStatusButtonTapped(item, status):
-                guard item.mutationRoute(
-                    cloudConfiguration: state.cloudConfiguration
-                )?.capabilities.canSetStatus == true else {
-                    return .none
-                }
                 guard item.workspace.status != status else {
                     return .none
                 }
+                guard item.source != .cloud
+                    || state.connectionStatus == .connected else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                    return .none
+                }
                 let previousManualStatus = item.workspace.manualStatus
+                let desktopWorkspaceID = item.cloudMetadata?.remoteWorkspaceID
+                    ?? item.id
 
                 return updateWorkspace {
                     try await database.write { db in
@@ -835,20 +839,22 @@ public struct Workspaces: Sendable {
                     }
                 } operation: {
                     try await desktopClient.setWorkspaceStatus(
-                        workspaceID: item.id,
+                        workspaceID: desktopWorkspaceID,
                         status: status
                     )
                 }
 
             case let .workspaceUnreadButtonTapped(item):
-                guard item.mutationRoute(
-                    cloudConfiguration: state.cloudConfiguration
-                )?.capabilities.canMarkUnread == true else {
+                guard item.source != .cloud
+                    || state.connectionStatus == .connected else {
+                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
                     return .none
                 }
                 let isUnread = (item.workspace.unread ?? 0) == 0
                 let previousUnread = item.workspace.unread
                 let unread = isUnread ? 1 : 0
+                let desktopWorkspaceID = item.cloudMetadata?.remoteWorkspaceID
+                    ?? item.id
 
                 return updateWorkspace {
                     try await database.write { db in
@@ -872,7 +878,7 @@ public struct Workspaces: Sendable {
                     }
                 } operation: {
                     try await desktopClient.setWorkspaceUnread(
-                        workspaceID: item.id,
+                        workspaceID: desktopWorkspaceID,
                         isUnread: isUnread
                     )
                 }
@@ -1119,6 +1125,21 @@ extension AlertState where Action == Workspaces.Destination.Alert {
         }
     }
 
+    static var cloudWorkspaceActionRequiresDesktop: Self {
+        AlertState {
+            TextState("Desktop connection required")
+        } actions: {
+            ButtonState(role: .cancel) {
+                TextState("OK")
+            }
+        } message: {
+            TextState(
+                "This action isn’t available through Conductor’s public Cloud API. "
+                    + "Connect to Conductor on your Mac to make this change."
+            )
+        }
+    }
+
     static func failedToArchiveWorkspace(error: any Error) -> Self {
         AlertState {
             TextState("Failed to archive workspace")
@@ -1158,15 +1179,13 @@ public struct WorkspacesView: View {
                 ForEach(store.sections) { section in
                     if section.isPinned {
                         PinnedSectionView(
-                            section: section,
-                            cloudConfiguration: store.cloudConfiguration
+                            section: section
                         ) { item, action in
                             workspaceRowAction(action, item: item)
                         }
                     } else {
                         WorkspaceSectionView(
                             section: section,
-                            cloudConfiguration: store.cloudConfiguration,
                             showsRepositoryIcon: store.grouping == .status
                                 && store.selectedRepositoryID == nil,
                             isExpanded: Binding($collapsedSectionIDs)[isExpanded: section.id]
@@ -1532,7 +1551,6 @@ public struct WorkspacesView: View {
 
     private struct PinnedSectionView: View {
         let section: Workspaces.State.WorkspaceSection
-        let cloudConfiguration: CloudConfiguration?
         let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
         @ScaledMetric(relativeTo: .body) private var iconSize = 13.2
 
@@ -1543,7 +1561,6 @@ public struct WorkspacesView: View {
                     // Pinned mixes repositories, so always show the icon and keep rows flush left.
                     showsRepositoryIcon: true,
                     isIndented: false,
-                    cloudConfiguration: cloudConfiguration,
                     action: action
                 )
             } header: {
@@ -1559,7 +1576,6 @@ public struct WorkspacesView: View {
 
     private struct WorkspaceSectionView: View {
         let section: Workspaces.State.WorkspaceSection
-        let cloudConfiguration: CloudConfiguration?
         let showsRepositoryIcon: Bool
 
         @Binding var isExpanded: Bool
@@ -1571,7 +1587,6 @@ public struct WorkspacesView: View {
                 WorkspaceRows(
                     items: section.items,
                     showsRepositoryIcon: showsRepositoryIcon,
-                    cloudConfiguration: cloudConfiguration,
                     action: action
                 )
             } header: {
@@ -1633,7 +1648,6 @@ public struct WorkspacesView: View {
         let items: [WorkspaceWithRepository]
         let showsRepositoryIcon: Bool
         var isIndented = true
-        let cloudConfiguration: CloudConfiguration?
         let action: @MainActor (WorkspaceWithRepository, WorkspaceRowAction) -> Void
 
         var body: some View {
@@ -1641,11 +1655,6 @@ public struct WorkspacesView: View {
                 WorkspaceRow(
                     item: item,
                     showsRepositoryIcon: showsRepositoryIcon,
-                    capabilities: item
-                        .mutationRoute(
-                            cloudConfiguration: cloudConfiguration
-                        )
-                        .capabilities,
                     action: rowAction(for: item)
                 )
                 .padding(.leading, isIndented ? 12 : 0)

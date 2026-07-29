@@ -1832,6 +1832,151 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Cloud-only workspace menu actions explain the public API limitation")
+    func cloudOnlyWorkspaceMenuActionsRequireDesktop() async throws {
+        let workspace = try makeWorkspace(branch: "cloud-branch")
+        let metadata = CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: nil,
+            cloudMetadata: metadata
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.insert { workspace }.execute(db)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(db)
+            }
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+            let requestCount = LockIsolated(0)
+            let store = TestStore(
+                initialState: WorkspaceChat.State(workspaceWithRepository: item)
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.desktopClient.renameWorkspaceBranch = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                }
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(.renameBranchButtonTapped) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+
+            #expect(requestCount.value == 0)
+        }
+    }
+
+    @Test("Connected Cloud workspace menu actions use the desktop workspace ID")
+    func connectedCloudWorkspaceMenuActionsUseDesktop() async throws {
+        let workspace = try makeWorkspace(
+            branch: "cloud-branch",
+            status: .inProgress
+        )
+        let metadata = CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
+        let item = WorkspaceWithRepository(
+            workspace: workspace,
+            repository: nil,
+            cloudMetadata: metadata
+        )
+        let now = Date(timeIntervalSince1970: 1_783_555_200)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Workspace.insert { workspace }.execute(db)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(db)
+            }
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .connected }
+            let requests = LockIsolated<[String]>([])
+            let store = TestStore(
+                initialState: WorkspaceChat.State(workspaceWithRepository: item)
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.date.now = now
+                $0.desktopClient.renameWorkspaceBranch = { workspaceID, branch in
+                    requests.withValue { $0.append("branch:\(workspaceID):\(branch)") }
+                }
+                $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
+                    requests.withValue { $0.append("pinned:\(workspaceID):\(isPinned)") }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    requests.withValue {
+                        $0.append("status:\(workspaceID):\(status.rawValue)")
+                    }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, isUnread in
+                    requests.withValue { $0.append("unread:\(workspaceID):\(isUnread)") }
+                    return .hook
+                }
+            }
+            store.exhaustivity = .off
+
+            await store.send(.workspacePinnedButtonTapped)
+            await store.finish()
+            await store.send(.workspaceStatusButtonTapped(.inReview))
+            await store.finish()
+            await store.send(.workspaceUnreadButtonTapped)
+            await store.finish()
+            await store.send(.renameBranchButtonTapped) {
+                $0.branchNameDraft = "cloud-branch"
+                $0.destination = .renameBranch
+            }
+            await store.send(.binding(.set(\.branchNameDraft, "renamed-branch"))) {
+                $0.branchNameDraft = "renamed-branch"
+            }
+            await store.send(.renameBranchSubmitted) {
+                $0.destination = nil
+                $0.isRenamingBranch = true
+            }
+            await store.finish()
+
+            let updatedWorkspace = try await database.read { db in
+                try Workspace.find(workspace.id).fetchOne(db)
+            }
+            #expect(updatedWorkspace?.pinnedAt == now.ISO8601Format())
+            #expect(updatedWorkspace?.manualStatus == Workspace.Status.inReview.rawValue)
+            #expect(updatedWorkspace?.unread == 1)
+            #expect(
+                requests.value == [
+                    "pinned:remote-workspace:true",
+                    "status:remote-workspace:in-review",
+                    "unread:remote-workspace:true",
+                    "branch:remote-workspace:renamed-branch",
+                ]
+            )
+        }
+    }
+
     @Test("A failed workspace menu update restores the previous value")
     func failedWorkspaceMenuUpdateRollsBack() async throws {
         let workspace = try makeWorkspace()
