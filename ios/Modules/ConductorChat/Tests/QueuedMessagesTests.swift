@@ -427,6 +427,63 @@ struct QueuedMessagesTests {
         }
     }
 
+    @Test("Cloud queues keep the paired desktop session and message IDs")
+    func cloudQueueRouting() async throws {
+        let desktopWorkspaceID = "desktop-workspace"
+        let desktopSessionID = "desktop-session:/+"
+        var session = try makeSession(
+            id: CloudCanonicalID.session(
+                accountID: "account",
+                remoteSessionID: desktopSessionID
+            ),
+            status: "working"
+        )
+        session.workspaceID = "cloud-workspace"
+        let message = Message(
+            id: "desktop-message:/+",
+            sessionID: desktopSessionID,
+            role: .user,
+            content: "Queued",
+            createdAt: .distantPast,
+            queueOrder: 1
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Message.insert { message }.execute(database)
+            }
+        } operation: {
+            let state = QueuedMessages.State(
+                session: session,
+                desktopWorkspaceID: desktopWorkspaceID,
+                desktopSessionID: desktopSessionID
+            )
+            try await state.$messages.load()
+            expectNoDifference(state.messages, [message])
+
+            let store = TestStore(initialState: state) {
+                QueuedMessages()
+            } withDependencies: {
+                $0.desktopClient.deleteQueuedMessage = {
+                    workspaceID,
+                    sessionID,
+                    messageID in
+                    #expect(workspaceID == desktopWorkspaceID)
+                    #expect(sessionID == desktopSessionID)
+                    #expect(messageID == message.id)
+                }
+            }
+
+            await store.send(.deleteButtonTapped(message.id)) {
+                $0.messageActionInFlightID = message.id
+            }
+            await store.receive(\.deleteResponse) {
+                $0.messageActionInFlightID = nil
+            }
+        }
+    }
+
     @Test("Editing a queued message updates it and restores the queue")
     func editQueuedMessage() async throws {
         let session = try makeSession(status: "working")

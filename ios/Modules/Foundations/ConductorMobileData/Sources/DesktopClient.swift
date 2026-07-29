@@ -54,6 +54,9 @@ public struct DesktopClient: Sendable {
     public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<DesktopMessageObservation, any Error> = { _, _ in
         AsyncThrowingStream { $0.finish() }
     }
+    public var observeMessageEvents: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<MessageSyncEvent, any Error> = { _, _ in
+        AsyncThrowingStream { $0.finish() }
+    }
     public var observeSessions: @Sendable (_ workspaceID: String) -> AsyncThrowingStream<[Session], any Error> = { _ in
         AsyncThrowingStream { $0.finish() }
     }
@@ -366,6 +369,11 @@ extension DesktopClient: DependencyKey {
             }
         } observeMessages: { workspaceID, sessionID in
             observeMessages(workspaceID: workspaceID, sessionID: sessionID)
+        } observeMessageEvents: { workspaceID, sessionID in
+            observeMessageEvents(
+                workspaceID: workspaceID,
+                sessionID: sessionID
+            )
         } observeSessions: { workspaceID in
             observe([Session].self) { serverAddress in
                 sessionsWebSocketURL(

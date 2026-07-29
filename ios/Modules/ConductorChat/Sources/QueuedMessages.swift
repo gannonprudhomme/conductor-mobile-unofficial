@@ -63,6 +63,8 @@ public struct QueuedMessages: Sendable {
     public struct State: Equatable {
         @FetchAll var messages: [Message]
         @FetchOne var session: Session
+        var desktopSessionID: Session.ID
+        var desktopWorkspaceID: Workspace.ID
         var editStartInFlightMessageID: Message.ID?
         var editingMessageID: Message.ID?
         var editDraft = ""
@@ -115,9 +117,15 @@ public struct QueuedMessages: Sendable {
 
         init(
             session: Session,
+            desktopWorkspaceID: Workspace.ID? = nil,
+            desktopSessionID: Session.ID? = nil,
             mutationRoute: WorkspaceMutationRoute? = .desktop
         ) {
             self.mutationRoute = mutationRoute
+            let desktopSessionID = desktopSessionID ?? session.id
+            self.desktopSessionID = desktopSessionID
+            self.desktopWorkspaceID = desktopWorkspaceID
+                ?? session.workspaceID
             self._session = FetchOne(
                 wrappedValue: session,
                 Session.find(session.id),
@@ -127,7 +135,7 @@ public struct QueuedMessages: Sendable {
                 wrappedValue: [],
                 Message
                     .where {
-                        $0.sessionID.eq(session.id)
+                        $0.sessionID.eq(desktopSessionID)
                             && $0.sentAt.is(nil)
                             && $0.queueOrder.isNot(nil)
                             && $0.cancelledAt.is(nil)
@@ -225,8 +233,9 @@ public struct QueuedMessages: Sendable {
                 state.messageActionInFlightID = messageID
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .deleteResponse(
@@ -234,8 +243,8 @@ public struct QueuedMessages: Sendable {
                             messageID: messageID,
                             result: await Result {
                                 try await desktopClient.deleteQueuedMessage(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID,
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID,
                                     messageID: messageID
                                 )
                             }
@@ -261,8 +270,9 @@ public struct QueuedMessages: Sendable {
                 state.editStartInFlightMessageID = messageID
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .beginEditResponse(
@@ -270,8 +280,8 @@ public struct QueuedMessages: Sendable {
                             messageID: messageID,
                             result: await Result {
                                 try await desktopClient.beginQueuedMessageEdit(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID,
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID,
                                     messageID: messageID
                                 )
                             }
@@ -288,7 +298,7 @@ public struct QueuedMessages: Sendable {
                 state.editStartInFlightMessageID = nil
                 guard case let .success(edit) = result,
                       edit.message.id == messageID,
-                      edit.message.sessionID == sessionID else {
+                      edit.message.sessionID == state.desktopSessionID else {
                     return .none
                 }
 
@@ -311,16 +321,17 @@ public struct QueuedMessages: Sendable {
                 state.isEditInFlight = true
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .cancelEditResponse(
                             sessionID: sessionID,
                             result: await Result {
                                 try await desktopClient.resumeQueuedMessages(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID
                                 )
                             }
                         )
@@ -352,9 +363,10 @@ public struct QueuedMessages: Sendable {
                 state.isEditInFlight = true
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
                         shouldResumeQueue = state.shouldResumeAfterEditing,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .finishEditResponse(
@@ -362,8 +374,8 @@ public struct QueuedMessages: Sendable {
                             messageID: messageID,
                             result: await Result {
                                 try await desktopClient.finishQueuedMessageEdit(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID,
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID,
                                     messageID: messageID,
                                     content: content,
                                     shouldResumeQueue: shouldResumeQueue
@@ -398,16 +410,17 @@ public struct QueuedMessages: Sendable {
                 state.isReorderInFlight = true
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .reorderResponse(
                             sessionID: sessionID,
                             result: await Result {
                                 try await desktopClient.reorderQueuedMessages(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID,
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID,
                                     messageIDs: messageIDs
                                 )
                             }
@@ -436,16 +449,17 @@ public struct QueuedMessages: Sendable {
                 state.isResumeInFlight = true
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .resumeResponse(
                             sessionID: sessionID,
                             result: await Result {
                                 try await desktopClient.resumeQueuedMessages(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID
                                 )
                             }
                         )
@@ -469,8 +483,9 @@ public struct QueuedMessages: Sendable {
                 state.messageActionInFlightID = messageID
                 return .run {
                     [
+                        desktopSessionID = state.desktopSessionID,
                         sessionID = state.session.id,
-                        workspaceID = state.session.workspaceID,
+                        desktopWorkspaceID = state.desktopWorkspaceID,
                     ] send in
                     await send(
                         .steerResponse(
@@ -478,8 +493,8 @@ public struct QueuedMessages: Sendable {
                             messageID: messageID,
                             result: await Result {
                                 try await desktopClient.steerQueuedMessage(
-                                    workspaceID: workspaceID,
-                                    sessionID: sessionID,
+                                    workspaceID: desktopWorkspaceID,
+                                    sessionID: desktopSessionID,
                                     messageID: messageID
                                 )
                             }

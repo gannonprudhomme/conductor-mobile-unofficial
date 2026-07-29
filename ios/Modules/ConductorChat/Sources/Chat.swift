@@ -490,10 +490,23 @@ public struct Chat: Sendable {
             self.source = isCloudHosted ? .cloud : .desktop
             self.mutationRoute = mutationRoute
                 ?? (isCloudHosted ? nil : .desktop)
+            let desktopWorkspaceID: Workspace.ID? = switch mutationRoute {
+            case let .cloud(_, remoteWorkspaceID):
+                remoteWorkspaceID
+
+            case .desktop:
+                session.workspaceID
+
+            case nil:
+                nil
+            }
             self.queuedMessages = QueuedMessages.State(
                 session: session,
-                mutationRoute: mutationRoute
-                    ?? (isCloudHosted ? nil : .desktop)
+                desktopWorkspaceID: desktopWorkspaceID,
+                desktopSessionID: isCloudHosted
+                    ? CloudCanonicalID.remoteSessionID(from: session.id)
+                    : session.id,
+                mutationRoute: .desktop
             )
             self._session = FetchOne(
                 wrappedValue: session,
@@ -633,6 +646,7 @@ public struct Chat: Sendable {
     @Dependency(\.desktopClient) var desktopClient
     @Dependency(\.messageDeliveryOutbox) var messageDeliveryOutbox
     @Dependency(\.workspaceMutationClient) var workspaceMutationClient
+    private let messageQueuePersistence = MessageQueuePersistencePipeline()
 
     init() { }
 
@@ -658,6 +672,7 @@ public struct Chat: Sendable {
                                 .map(Action.cloudConfigurationChanged)
                         },
                         messageObservation,
+                        observeCloudQueue(state),
                         observeDeliveryAttempts(state)
                     )
                 }
@@ -677,7 +692,10 @@ public struct Chat: Sendable {
                     return .none
                 }
                 guard configuration != nil else {
-                    return .cancel(id: CancelID.messageObservation)
+                    return .merge(
+                        .cancel(id: CancelID.messageObservation),
+                        .cancel(id: CancelID.queueObservation)
+                    )
                 }
                 return observeMessages(state)
 
@@ -1068,6 +1086,37 @@ public struct Chat: Sendable {
         .cancellable(id: CancelID.messageObservation, cancelInFlight: true)
     }
 
+    private func observeCloudQueue(_ state: State) -> Effect<Action> {
+        .run {
+            [
+                desktopSessionID = state.queuedMessages.desktopSessionID,
+                desktopWorkspaceID = state.queuedMessages.desktopWorkspaceID,
+            ] _ in
+            // Cloud owns completed history, while the paired desktop remains the source of truth
+            // for its mutable queue. Observe raw desktop envelopes because the canonical Cloud
+            // session deliberately has no desktop transcript baseline in the mobile database.
+            await StreamObservation.observe(
+                retrying: {
+                    desktopClient.observeMessageEvents(
+                        workspaceID: desktopWorkspaceID,
+                        sessionID: desktopSessionID
+                    )
+                }
+            ) { event in
+                try await messageQueuePersistence.apply(
+                    event,
+                    sessionID: desktopSessionID,
+                    database: database
+                )
+            } onFailure: { error in
+                Logger.chat.error(
+                    "Failed to observe the Cloud chat queue: \(error)"
+                )
+            }
+        }
+        .cancellable(id: CancelID.queueObservation, cancelInFlight: true)
+    }
+
     private func observePersistedMessages(_ state: State) -> Effect<Action> {
         .publisher {
             state.$messages.publisher
@@ -1165,6 +1214,42 @@ public struct Chat: Sendable {
 
     private enum CancelID: Hashable {
         case messageObservation
+        case queueObservation
+    }
+}
+
+private actor MessageQueuePersistencePipeline {
+    func apply(
+        _ event: MessageSyncEvent,
+        sessionID: Session.ID,
+        database: any DatabaseWriter
+    ) async throws {
+        guard let queuedMessages = event.queuedMessages else {
+            return
+        }
+        guard queuedMessages.allSatisfy({
+            $0.sessionID == sessionID && $0.isQueued
+        }) else {
+            throw QueuePersistenceError.invalidMessage
+        }
+
+        try await database.write { database in
+            try Message
+                .where {
+                    $0.sessionID.eq(sessionID)
+                        && $0.sentAt.is(nil)
+                        && $0.queueOrder.isNot(nil)
+                }
+                .delete()
+                .execute(database)
+            if !queuedMessages.isEmpty {
+                try Message.upsert { queuedMessages }.execute(database)
+            }
+        }
+    }
+
+    private enum QueuePersistenceError: Error {
+        case invalidMessage
     }
 }
 
@@ -1380,7 +1465,7 @@ struct ChatView: View {
     private func queuedMessagesView(
         _ queuedMessagesStore: StoreOf<QueuedMessages>
     ) -> some View {
-        if store.mutationRoute.capabilities.canManageQueue,
+        if queuedMessagesStore.mutationRoute.capabilities.canManageQueue,
            !queuedMessagesStore.displayedMessages.isEmpty {
             QueuedMessagesView(
                 store: queuedMessagesStore,
