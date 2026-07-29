@@ -1198,6 +1198,111 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Cloud-only workspace actions explain the public API limitation")
+    func cloudOnlyWorkspaceActionsRequireDesktop() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .disconnected }
+            let item = cloudWorkspace()
+            let requestCount = LockIsolated(0)
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.desktopClient.setWorkspacePinned = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { _, _ in
+                    requestCount.withValue { $0 += 1 }
+                    return .hook
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item)) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(.workspaceStatusButtonTapped(item, .done)) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+            await store.send(.workspaceUnreadButtonTapped(item)) {
+                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            }
+
+            #expect(requestCount.value == 0)
+        }
+    }
+
+    @Test("Connected Cloud workspace actions use the desktop workspace ID")
+    func connectedCloudWorkspaceActionsUseDesktop() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            @Shared(.desktopConnectionStatus) var connectionStatus
+            $connectionStatus.withLock { $0 = .connected }
+            let item = cloudWorkspace()
+            let now = Date(timeIntervalSince1970: 1_783_555_200)
+            let requests = LockIsolated<[String]>([])
+            try await database.write { db in
+                try Workspace.insert { item.workspace }.execute(db)
+            }
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.date.now = now
+                $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
+                    requests.withValue { $0.append("pinned:\(workspaceID):\(isPinned)") }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceStatus = { workspaceID, status in
+                    requests.withValue {
+                        $0.append("status:\(workspaceID):\(status.rawValue)")
+                    }
+                    return .hook
+                }
+                $0.desktopClient.setWorkspaceUnread = { workspaceID, isUnread in
+                    requests.withValue { $0.append("unread:\(workspaceID):\(isUnread)") }
+                    return .hook
+                }
+            }
+
+            await store.send(.workspacePinnedButtonTapped(item))
+            await store.finish()
+            await store.send(.workspaceStatusButtonTapped(item, .done))
+            await store.finish()
+            await store.send(.workspaceUnreadButtonTapped(item))
+            await store.finish()
+
+            let updatedWorkspace = try await database.read { db in
+                try Workspace.find(item.id).fetchOne(db)
+            }
+            #expect(updatedWorkspace?.pinnedAt == now.ISO8601Format())
+            #expect(updatedWorkspace?.manualStatus == Workspace.Status.done.rawValue)
+            #expect(updatedWorkspace?.unread == 1)
+            #expect(
+                requests.value == [
+                    "pinned:remote-workspace:true",
+                    "status:remote-workspace:done",
+                    "unread:remote-workspace:true",
+                ]
+            )
+        }
+    }
+
     @Test("A failed pin update restores the previous value")
     func failedPinUpdateRollsBack() async throws {
         try await withDependencies {
@@ -1490,6 +1595,24 @@ private func workspace(
             repositoryID: repository?.id ?? repositoryID
         ),
         repository: repository
+    )
+}
+
+private func cloudWorkspace() -> WorkspaceWithRepository {
+    let workspace = Workspace.preview(
+        id: "canonical-workspace",
+        derivedStatus: Workspace.Status.inProgress.rawValue,
+        hostingServerURL: Workspace.conductorCloudHostingServerURL
+    )
+    return WorkspaceWithRepository(
+        workspace: workspace,
+        repository: nil,
+        cloudMetadata: CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
     )
 }
 
