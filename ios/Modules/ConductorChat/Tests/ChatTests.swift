@@ -793,8 +793,10 @@ struct ChatTests {
 
         let task = store.send(.task)
         await waitUntil {
-            humanMessageContent(in: store.state, id: lateMessage.id)
-                == lateMessage.content
+            await MainActor.run {
+                humanMessageContent(in: store.state, id: lateMessage.id)
+                    == lateMessage.content
+            }
         }
         try expectHumanPresentationCaches(
             store.state,
@@ -811,10 +813,16 @@ struct ChatTests {
             try Message.upsert { updatedEarlyMessage }.execute(db)
         }
         continuation.yield(.ready)
-        await waitUntil { !store.state.isLoadingMessages }
         await waitUntil {
-            humanMessageContent(in: store.state, id: earlyMessage.id)
-                == updatedEarlyMessage.content
+            await MainActor.run {
+                !store.state.isLoadingMessages
+            }
+        }
+        await waitUntil {
+            await MainActor.run {
+                humanMessageContent(in: store.state, id: earlyMessage.id)
+                    == updatedEarlyMessage.content
+            }
         }
         #expect(!store.state.isLoadingMessages)
         try expectHumanPresentationCaches(
@@ -830,8 +838,10 @@ struct ChatTests {
             try Message.upsert { updatedLateMessage }.execute(db)
         }
         await waitUntil {
-            humanMessageContent(in: store.state, id: lateMessage.id)
-                == updatedLateMessage.content
+            await MainActor.run {
+                humanMessageContent(in: store.state, id: lateMessage.id)
+                    == updatedLateMessage.content
+            }
         }
         try expectHumanPresentationCaches(
             store.state,

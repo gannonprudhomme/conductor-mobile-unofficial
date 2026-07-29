@@ -795,7 +795,11 @@ struct WorkspaceChatTests {
                     .execute(database)
             }
 
-            await waitUntil { store.state.workspace.isCloudHosted }
+            await waitUntil {
+                await MainActor.run {
+                    store.state.workspace.isCloudHosted
+                }
+            }
             #expect(store.state.workspace.isCloudHosted)
             let reload = await store.send(.hostingSourceChanged(true))
             #expect(store.state.destination == nil)

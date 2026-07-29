@@ -25,7 +25,7 @@ public enum ChatMessageCache {
 
     public static func localMessages(
         sessionID: Session.ID
-    ) -> some SelectStatement<Message, Message, Message> {
+    ) -> some SelectStatement<(), Message, ()> {
         Message
             .where {
                 $0.sessionID.eq(sessionID)
