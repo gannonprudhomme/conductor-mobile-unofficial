@@ -103,6 +103,7 @@ struct ChatSyncClientTests {
         >(nil)
 
         try await withDependencies {
+            $0.continuousClock = TestClock()
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { workspaceID in
                 guard workspaceID == localWorkspace.id else {
@@ -188,26 +189,36 @@ struct ChatSyncClientTests {
                     && cloudTranscriptConnections.value == 1
             }
 
-            let localCache = try await DesktopTranscriptStore
-                .cachedTranscriptSnapshot(
-                    workspaceID: localWorkspace.id,
-                    sessionID: localSession.id,
-                    database: database
-                )
             let cloudSessionID = CloudCanonicalID.session(
                 accountID: "account",
                 remoteSessionID: "remote-session"
             )
-            let cloudCache = try await database.read { database in
-                try CloudChatPersistence.cachedTranscript(
-                    for: cloudSessionID,
-                    in: database
-                )
+            var localCache: MessageSyncEvent?
+            var cloudCache: CloudCachedTranscript?
+            for _ in 0..<10_000 {
+                localCache = try await DesktopTranscriptStore
+                    .cachedTranscriptSnapshot(
+                        workspaceID: localWorkspace.id,
+                        sessionID: localSession.id,
+                        database: database
+                    )
+                cloudCache = try await database.read { database in
+                    try CloudChatPersistence.cachedTranscript(
+                        for: cloudSessionID,
+                        in: database
+                    )
+                }
+                if localCache?.messages == [localMessage],
+                   cloudCache?.messages.map(\.content) == ["Cloud"],
+                   cloudCache?.checkpoint?.rawCursor == cloudMessage.id {
+                    break
+                }
+                await Task.yield()
             }
 
             #expect(localCache?.messages == [localMessage])
-            #expect(cloudCache.messages.map(\.content) == ["Cloud"])
-            #expect(cloudCache.checkpoint?.rawCursor == cloudMessage.id)
+            #expect(cloudCache?.messages.map(\.content) == ["Cloud"])
+            #expect(cloudCache?.checkpoint?.rawCursor == cloudMessage.id)
         }
     }
 
@@ -227,6 +238,7 @@ struct ChatSyncClientTests {
         let observedSessionIDs = LockIsolated<[Session.ID]>([])
 
         await withDependencies {
+            $0.continuousClock = TestClock()
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { _ in
                 AsyncThrowingStream { continuation in
@@ -311,6 +323,7 @@ struct ChatSyncClientTests {
         let targetConnections = LockIsolated(0)
 
         await withDependencies {
+            $0.continuousClock = TestClock()
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { workspaceID in
                 #expect(workspaceID != targetWorkspace.id)
@@ -419,6 +432,7 @@ struct ChatSyncClientTests {
         let transcriptCancellations = LockIsolated(0)
 
         await withDependencies {
+            $0.continuousClock = TestClock()
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { _ in
                 AsyncThrowingStream { continuation in
