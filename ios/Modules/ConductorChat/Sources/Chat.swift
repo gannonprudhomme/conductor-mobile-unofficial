@@ -10,6 +10,7 @@ import ComposableArchitecture
 import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
+import ConductorVoiceInput
 import Foundation
 import Logging
 import SharedConductorData
@@ -67,6 +68,7 @@ public struct Chat: Sendable {
         var isMessageSnapshotEmpty = false
         var isStopInFlight = false
         var hasObservedSessionFastModeChange = false
+        var voiceInput: VoiceInput.State
         var hasObservedSessionModelChange = false
         var hasObservedSessionReasoningEffortChange = false
         var hasUserSelectedFastMode = false
@@ -437,6 +439,7 @@ public struct Chat: Sendable {
             self.selectedModel = selectedModel ?? session.model
             self.selectedReasoningEffort = selectedReasoningEffort ?? session.reasoningEffort
             self.shouldFocusMessageField = shouldFocusMessageField
+            self.voiceInput = VoiceInput.State(id: session.id)
             reconcileSelectedReasoningEffort()
         }
 
@@ -468,6 +471,7 @@ public struct Chat: Sendable {
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isStopInFlight == rhs.isStopInFlight
                 && lhs.hasObservedSessionFastModeChange == rhs.hasObservedSessionFastModeChange
+                && lhs.voiceInput == rhs.voiceInput
                 && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
                 && lhs.hasObservedSessionReasoningEffortChange
                     == rhs.hasObservedSessionReasoningEffortChange
@@ -520,6 +524,7 @@ public struct Chat: Sendable {
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
         case scrollDownButtonTapped
+        case voiceInput(VoiceInput.Action)
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -534,6 +539,10 @@ public struct Chat: Sendable {
 
         Scope(state: \.queuedMessages, action: \.queuedMessages) {
             QueuedMessages()
+        }
+
+        Scope(state: \.voiceInput, action: \.voiceInput) {
+            VoiceInput()
         }
 
         Reduce { state, action in
@@ -612,6 +621,22 @@ public struct Chat: Sendable {
                     state.initializeIdleBaseline()
                 }
                 state.updateRows()
+                return .none
+
+            case let .voiceInput(
+                .delegate(.transcriptionFinished(id, transcript))
+            ):
+                guard id == state.sessionID else {
+                    return .none
+                }
+                state.$messageDraft.withLock { draft in
+                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        draft = transcript
+                    } else {
+                        let separator = draft.last?.isWhitespace == true ? "" : " "
+                        draft += separator + transcript
+                    }
+                }
                 return .none
 
             case let .initialMessagesResponse(sessionID, messages):
@@ -741,7 +766,7 @@ public struct Chat: Sendable {
             case .sendButtonTapped:
                 return .none
 
-            case .binding, .queuedMessages:
+            case .binding, .queuedMessages, .voiceInput:
                 return .none
             }
         }
@@ -1101,6 +1126,9 @@ struct ChatView: View {
         .task(id: store.session.id) {
             await store.send(.task).finish()
         }
+        .onDisappear {
+            store.send(.voiceInput(.cancel))
+        }
         .preferredColorScheme(.dark)
     }
 
@@ -1376,6 +1404,8 @@ private struct ChatComposer: View {
             isSendInFlight: isSendInFlight,
             isStopInFlight: store.isStopInFlight,
             isWorking: store.session.status == .working,
+            voiceInputPhase: store.voiceInput.phase,
+            voiceInputLevels: store.voiceInput.levels,
             selectedModel: $store.selectedModel,
             selectedReasoningEffort: store.selectedReasoningEffort,
             availableReasoningEfforts: store.availableReasoningEfforts,
@@ -1385,6 +1415,9 @@ private struct ChatComposer: View {
             },
             onCancelEditingTapped: {
                 queuedMessagesStore.send(.cancelEditButtonTapped)
+            },
+            onMicrophoneTapped: {
+                store.send(.voiceInput(.microphoneButtonTapped))
             },
             onSelectReasoningEffort: {
                 store.send(.reasoningEffortSelected($0))

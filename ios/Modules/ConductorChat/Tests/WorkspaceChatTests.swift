@@ -65,6 +65,7 @@ struct WorkspaceChatTests {
                 ]
             }
             expectNotRestorable { $0.chat?.isStopInFlight = true }
+            expectNotRestorable { $0.chat?.voiceInput.phase = .recording }
             expectNotRestorable { $0.isCreatingSession = true }
             expectNotRestorable { $0.isArchivingWorkspace = true }
             expectNotRestorable { $0.isClosingSession = true }
@@ -2011,6 +2012,47 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("When voice transcription fails, an alert is presented and dismissed")
+    func voiceTranscriptionFails() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .voiceInput(
+                        .delegate(
+                            .failed(id: activeSession.id, error: TestError())
+                        )
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToTranscribeSpeech(message: TestError().localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
     @Test("A stop failure is ignored after the stopped session was observed")
     func observedStopSuppressesFailure() async throws {
         let workspace = Workspace.preview(activeSessionID: "active")
@@ -2178,6 +2220,39 @@ struct WorkspaceChatTests {
             #expect(secondConnectionCancelled.value)
         }
     }
+
+    @Test("Sending is ignored while voice input is transcribing")
+    func sendWhileTranscribing() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: .init(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            state.chat?.voiceInput.phase = .transcribing
+            let store = TestStore(initialState: state) {
+                WorkspaceChat()
+            }
+
+            let chat = try #require(store.state.chat)
+            chat.$messageDraft.withLock { $0 = "Keep this draft." }
+
+            await store.send(.chat(.sendButtonTapped(.sent)))
+
+            #expect(store.state.chat?.messageDraft == "Keep this draft.")
+            #expect(store.state.optimisticMessagesBySession.isEmpty)
+        }
+    }
+
     @Test("Send immediately inserts a bubble, clears the draft, scrolls, then hides progress")
     func optimisticSendAndAcceptance() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")

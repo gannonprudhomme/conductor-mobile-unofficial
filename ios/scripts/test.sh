@@ -16,6 +16,7 @@ TEST_SCHEMES=(
   ConductorMobileDataTests
   ConductorDesignTests
   ConductorSettingsTests
+  ConductorVoiceInputTests
   ConductorWorkspacesTests
   ConductorMainTests
 )

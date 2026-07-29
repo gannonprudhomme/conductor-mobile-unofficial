@@ -538,6 +538,14 @@ struct ChatTests {
             finishedLoading.isLoadingMessages = false
             #expect(original != finishedLoading)
 
+            var recording = original
+            recording.voiceInput.phase = .recording
+            #expect(original != recording)
+
+            var metering = original
+            metering.voiceInput.levels = [0.5]
+            #expect(original != metering)
+
             var emptySnapshot = original
             emptySnapshot.isMessageSnapshotEmpty = true
             #expect(original != emptySnapshot)
@@ -635,6 +643,205 @@ struct ChatTests {
 
             #expect(Chat.State(session: firstSession).messageDraft == "First draft")
             #expect(Chat.State(session: secondSession).messageDraft.isEmpty)
+        }
+    }
+
+    @Test("Voice input replaces an empty draft with its transcript")
+    func voiceInputReplacesEmptyDraft() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = {
+                    "Run the unit tests."
+                }
+            }
+
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            store.state.$messageDraft.withLock { $0 = "   " }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
+            }
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
+            }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
+            #expect(store.state.messageDraft == "Run the unit tests.")
+        }
+    }
+
+    @Test("Voice input appends to the latest draft")
+    func voiceInputAppendsToLatestDraft() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let (transcripts, transcriptContinuation) = AsyncStream<String>.makeStream()
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = {
+                    for await transcript in transcripts {
+                        return transcript
+                    }
+                    throw CancellationError()
+                }
+            }
+
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            store.state.$messageDraft.withLock { $0 = "Inspect this file." }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
+            }
+            store.state.$messageDraft.withLock { $0 = "Inspect these files." }
+
+            transcriptContinuation.yield("Then run the tests.")
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
+            }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
+            #expect(store.state.messageDraft == "Inspect these files. Then run the tests.")
+            transcriptContinuation.finish()
+            await store.finish()
+        }
+    }
+
+    @Test("Voice input with no transcript preserves the draft")
+    func voiceInputWithoutTranscript() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = { "" }
+            }
+
+            store.state.$messageDraft.withLock { $0 = "Keep this draft." }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
+            }
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
+            }
+        }
+    }
+
+    @Test("Cancelling voice input stops recording and preserves the draft")
+    func voiceInputCancellation() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let wasCancelled = LockIsolated(false)
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.cancelRecording = {
+                    wasCancelled.setValue(true)
+                }
+            }
+
+            store.state.$messageDraft.withLock { $0 = "Keep this draft." }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            await store.send(.voiceInput(.cancel)) {
+                $0.voiceInput.phase = .idle
+            }
+            await store.finish()
+
+            #expect(wasCancelled.value)
+            #expect(store.state.messageDraft == "Keep this draft.")
+        }
+    }
+
+    @Test("Leaving an idle chat still cancels the shared recorder")
+    func idleVoiceInputCancellation() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let wasCancelled = LockIsolated(false)
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.cancelRecording = {
+                    wasCancelled.setValue(true)
+                }
+            }
+
+            await store.send(.voiceInput(.cancel))
+            await store.finish()
+
+            #expect(wasCancelled.value)
+        }
+    }
+
+    @Test("Voice input levels update the waveform and reset after cancellation")
+    func voiceInputLevels() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let (levels, levelContinuation) = AsyncStream<Float>.makeStream()
+            let session = try makeSession()
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.speechTranscriptionClient.cancelRecording = { }
+                $0.speechTranscriptionClient.recordingLevels = { levels }
+                $0.speechTranscriptionClient.startRecording = { }
+            }
+
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+
+            levelContinuation.yield(0.25)
+            await store.receive(\.voiceInput.recordingLevelUpdated, 0.25) {
+                $0.voiceInput.levels = [0.25]
+            }
+            levelContinuation.yield(2)
+            await store.receive(\.voiceInput.recordingLevelUpdated, 2) {
+                $0.voiceInput.levels = [0.25, 1]
+            }
+
+            await store.send(.voiceInput(.cancel)) {
+                $0.voiceInput.phase = .idle
+                $0.voiceInput.levels = []
+            }
+            levelContinuation.finish()
+            await store.finish()
         }
     }
 

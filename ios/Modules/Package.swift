@@ -19,6 +19,7 @@ let package = Package(
         .library(name: "ConductorMain", targets: ["ConductorMain"]),
         .library(name: "ConductorMobileData", targets: ["ConductorMobileData"]),
         .library(name: "ConductorSettings", targets: ["ConductorSettings"]),
+        .library(name: "ConductorVoiceInput", targets: ["ConductorVoiceInput"]),
         .library(name: "ConductorWorkspaces", targets: ["ConductorWorkspaces"]),
     ],
     dependencies: [
@@ -75,6 +76,7 @@ let package = Package(
                 "ConductorCloud",
                 "ConductorMobileData",
                 "ConductorDesign",
+                "ConductorVoiceInput",
             ],
             path: "ConductorChat/Sources",
             swiftSettings: swiftSettings
@@ -108,6 +110,17 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .target(
+            name: "ConductorVoiceInput",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "LucideIcons", package: "lucide-icons-swift"),
+                "ConductorDesign",
+                "ConductorMobileData",
+            ],
+            path: "ConductorVoiceInput/Sources",
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "ConductorWorkspaces",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
@@ -119,6 +132,7 @@ let package = Package(
                 "ConductorCloud",
                 "ConductorMobileData",
                 "ConductorDesign",
+                "ConductorVoiceInput",
             ],
             path: "ConductorWorkspaces/Sources",
             swiftSettings: swiftSettings
