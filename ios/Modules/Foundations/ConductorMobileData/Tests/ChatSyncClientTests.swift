@@ -226,7 +226,7 @@ struct ChatSyncClientTests {
         }
         let observedSessionIDs = LockIsolated<[Session.ID]>([])
 
-        try await withDependencies {
+        await withDependencies {
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { _ in
                 AsyncThrowingStream { continuation in
@@ -257,7 +257,7 @@ struct ChatSyncClientTests {
         let (workspace, session) = try await seedLocalSession(in: database)
         let connections = LockIsolated(0)
 
-        try await withDependencies {
+        await withDependencies {
             $0.defaultDatabase = database
             $0.desktopClient.observeMessages = { workspaceID, sessionID in
                 #expect(workspaceID == workspace.id)
@@ -310,7 +310,7 @@ struct ChatSyncClientTests {
         }
         let targetConnections = LockIsolated(0)
 
-        try await withDependencies {
+        await withDependencies {
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { workspaceID in
                 #expect(workspaceID != targetWorkspace.id)
@@ -368,7 +368,7 @@ struct ChatSyncClientTests {
         >(nil)
         let missingEvents = LockIsolated<[ChatSyncEvent]>([])
 
-        try await withDependencies {
+        await withDependencies {
             $0.defaultDatabase = database
             $0.desktopClient.observeMessages = { _, sessionID in
                 AsyncThrowingStream { continuation in
@@ -404,8 +404,8 @@ struct ChatSyncClientTests {
             missingContinuation.value?.yield(
                 .requiresPersistence(.snapshot([], cursor: nil, queuedMessages: []))
             )
-            await waitUntil { missingEvents.value.contains(where: \.isReady) }
-            #expect(missingEvents.value.contains(where: \.isReady))
+            await waitUntil { missingEvents.value.contains { $0.isReady } }
+            #expect(missingEvents.value.contains { $0.isReady })
         }
     }
 
@@ -418,7 +418,7 @@ struct ChatSyncClientTests {
         let sessionCancellations = LockIsolated(0)
         let transcriptCancellations = LockIsolated(0)
 
-        try await withDependencies {
+        await withDependencies {
             $0.defaultDatabase = database
             $0.desktopClient.observeSessions = { _ in
                 AsyncThrowingStream { continuation in
