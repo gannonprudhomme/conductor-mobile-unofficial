@@ -14,6 +14,11 @@ import SQLiteData
 /// mutation here ensures the history rows, queue rows, and resume cursor change in one database
 /// transaction.
 enum DesktopTranscriptStore {
+    // A Message upsert binds every persisted column once per row. Deriving the
+    // batch size from the connection keeps large transcripts legal without an
+    // arbitrary row limit.
+    private static let messageArgumentsPerRow = 15
+
     /// Builds the complete cached snapshot shown before the WebSocket returns its first event.
     ///
     /// The client also resumes from this snapshot's cursor. Returning nil means the cache is
@@ -104,6 +109,13 @@ enum DesktopTranscriptStore {
         }
     }
 
+    static func maximumRowsPerStatement(
+        maximumArgumentCount: Int,
+        argumentsPerRow: Int
+    ) -> Int {
+        max(1, maximumArgumentCount / argumentsPerRow)
+    }
+
     /// Rejections that protect the local cache from an invalid envelope or obsolete connection.
     enum ApplyError: Error, Equatable, Sendable {
         /// One envelope tries to upsert the same raw message ID more than once.
@@ -171,21 +183,21 @@ private extension DesktopTranscriptStore {
             throw ApplyError.missingSession
         }
 
-        let oldMetadata = try DesktopTranscriptMetadata.find(sessionID).fetchOne(database)
-        let oldMessages = try loadMessagesInResumeOrder(
-            sessionID: sessionID,
-            database: database
-        )
-        // A suffix is meaningful only when a prior complete-baseline marker exists and its stored
-        // cursor still describes the rows the suffix would extend.
-        let hasCompleteBaseline = oldMetadata.map {
-            cursorMatchesCompletedHistoryTail(
-                $0.transcriptCursor,
-                in: oldMessages
+        if !event.isSnapshot {
+            let oldMetadata = try DesktopTranscriptMetadata.find(sessionID).fetchOne(database)
+            let historyTailID = try completedHistoryTailID(
+                sessionID: sessionID,
+                database: database
             )
-        } ?? false
-        guard event.isSnapshot || hasCompleteBaseline else {
-            throw ApplyError.incompleteBaseline
+            // A suffix is meaningful only when a prior complete-baseline marker exists and its
+            // stored cursor still describes the rows the suffix would extend.
+            guard let oldMetadata,
+                  cursorMatchesCompletedHistoryTail(
+                    oldMetadata.transcriptCursor,
+                    historyTailID: historyTailID
+                  ) else {
+                throw ApplyError.incompleteBaseline
+            }
         }
 
         let upsertedMessages = event.messages + (event.queuedMessages ?? [])
@@ -195,16 +207,16 @@ private extension DesktopTranscriptStore {
             database: database
         )
         if event.isSnapshot {
-            try deleteCompletedHistoryOmissions(
-                retaining: event.messages,
-                from: oldMessages,
+            // A complete event is authoritative. One set deletion avoids loading every old payload
+            // and issuing a delete for each omission before the replacement upsert.
+            try deleteCompletedHistory(
+                sessionID: sessionID,
                 database: database
             )
-        }
-        if !event.deletedMessageIDs.isEmpty {
+        } else if !event.deletedMessageIDs.isEmpty {
             try deleteCompletedHistoryRows(
                 event.deletedMessageIDs,
-                from: oldMessages,
+                sessionID: sessionID,
                 database: database
             )
         }
@@ -212,9 +224,7 @@ private extension DesktopTranscriptStore {
         // History is upserted first on purpose. When a queued row becomes completed, this clears
         // its queue markers before authoritative queue-omission reconciliation runs, preventing
         // the newly completed row from being deleted as a stale queue entry.
-        if !event.messages.isEmpty {
-            try Message.upsert { event.messages }.execute(database)
-        }
+        try upsertMessages(event.messages, database: database)
         if let queuedMessages = event.queuedMessages {
             try reconcileQueue(
                 queuedMessages,
@@ -224,7 +234,7 @@ private extension DesktopTranscriptStore {
         }
         guard cursorMatchesCompletedHistoryTail(
             event.cursor,
-            in: try loadMessagesInResumeOrder(
+            historyTailID: try completedHistoryTailID(
                 sessionID: sessionID,
                 database: database
             )
@@ -296,39 +306,60 @@ private extension DesktopTranscriptStore {
         sessionID: Session.ID,
         database: Database
     ) throws {
-        for message in messages {
-            guard let existing = try Message.find(message.id).fetchOne(database) else {
-                continue
-            }
-            guard existing.sessionID.map(RawUTF8Key.init) == RawUTF8Key(sessionID) else {
-                throw ApplyError.messageMoved
+        try forEachBatch(
+            messages.map(\.id),
+            size: database.maximumStatementArgumentCount
+        ) { messageIDs in
+            let storedOwnership = try Message
+                .where { $0.id.in(messageIDs) }
+                .select { ($0.id, $0.sessionID) }
+                .fetchAll(database)
+            for (_, storedSessionID) in storedOwnership {
+                guard storedSessionID.map(RawUTF8Key.init) == RawUTF8Key(sessionID) else {
+                    throw ApplyError.messageMoved
+                }
             }
         }
     }
 
-    /// Deletes completed rows omitted by an authoritative full history snapshot.
-    static func deleteCompletedHistoryOmissions(
-        retaining messages: [Message],
-        from storedMessages: [Message],
+    /// Deletes completed history without touching rows that still satisfy the queue predicate.
+    static func deleteCompletedHistory(
+        sessionID: Session.ID,
         database: Database
     ) throws {
-        let messageIDs = Set(messages.map { RawUTF8Key($0.id) })
-        for message in storedMessages
-        where !message.isQueued && !messageIDs.contains(RawUTF8Key(message.id)) {
-            try Message.find(message.id).delete().execute(database)
-        }
+        try Message
+            .where {
+                $0.sessionID.eq(sessionID)
+                    && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
+            }
+            .delete()
+            .execute(database)
     }
 
     /// Applies explicit live-history deletions without allowing that field to mutate queue rows.
     static func deleteCompletedHistoryRows(
         _ messageIDs: [Message.ID],
-        from storedMessages: [Message],
+        sessionID: Session.ID,
         database: Database
     ) throws {
-        let deletionIDs = Set(messageIDs.map(RawUTF8Key.init))
-        for message in storedMessages
-        where !message.isQueued && deletionIDs.contains(RawUTF8Key(message.id)) {
-            try Message.find(message.id).delete().execute(database)
+        var seenMessageIDs: Set<RawUTF8Key> = []
+        let uniqueMessageIDs = messageIDs.filter {
+            seenMessageIDs.insert(RawUTF8Key($0)).inserted
+        }
+        // The session predicate consumes one bound variable in addition to the
+        // IDs carried by the IN clause.
+        try forEachBatch(
+            uniqueMessageIDs,
+            size: max(1, database.maximumStatementArgumentCount - 1)
+        ) { batch in
+            try Message
+                .where {
+                    $0.sessionID.eq(sessionID)
+                        && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
+                        && $0.id.in(batch)
+                }
+                .delete()
+                .execute(database)
         }
     }
 
@@ -341,21 +372,70 @@ private extension DesktopTranscriptStore {
         sessionID: Session.ID,
         database: Database
     ) throws {
-        let queuedIDs = Set(queuedMessages.map { RawUTF8Key($0.id) })
-        let storedQueuedMessages = try Message
+        // History upserts run first, so a queued-to-completed row no longer matches this deletion.
+        // Replacing the remaining queue in one statement is cheaper than loading full payloads and
+        // deleting omissions one at a time.
+        try Message
             .where {
                 $0.sessionID.eq(sessionID)
                     && $0.sentAt.is(nil)
                     && $0.queueOrder.isNot(nil)
             }
-            .fetchAll(database)
-        for message in storedQueuedMessages
-        where !queuedIDs.contains(RawUTF8Key(message.id)) {
-            try Message.find(message.id).delete().execute(database)
+            .delete()
+            .execute(database)
+        try upsertMessages(queuedMessages, database: database)
+    }
+
+    /// Upserts as many rows as the active SQLite connection legally permits in each statement.
+    static func upsertMessages(
+        _ messages: [Message],
+        database: Database
+    ) throws {
+        try forEachBatch(
+            messages,
+            size: maximumRowsPerStatement(
+                maximumArgumentCount: database.maximumStatementArgumentCount,
+                argumentsPerRow: messageArgumentsPerRow
+            )
+        ) { batch in
+            try Message.upsert { batch }.execute(database)
         }
-        if !queuedMessages.isEmpty {
-            try Message.upsert { queuedMessages }.execute(database)
+    }
+
+    static func forEachBatch<Element>(
+        _ elements: [Element],
+        size: Int,
+        operation: ([Element]) throws -> Void
+    ) rethrows {
+        for startIndex in stride(
+            from: elements.startIndex,
+            to: elements.endIndex,
+            by: size
+        ) {
+            let endIndex = min(startIndex + size, elements.endIndex)
+            try operation(Array(elements[startIndex..<endIndex]))
         }
+    }
+
+    /// Fetches only the completed-history ID required to validate a cursor.
+    static func completedHistoryTailID(
+        sessionID: Session.ID,
+        database: Database
+    ) throws -> Message.ID? {
+        try Message
+            .where {
+                $0.sessionID.eq(sessionID)
+                    && ($0.sentAt.isNot(nil) || $0.queueOrder.is(nil))
+            }
+            .order {
+                (
+                    $0.createdAt.desc(),
+                    // SQLite BINARY collation compares the same raw UTF-8 bytes as RawUTF8Key.
+                    $0.id.desc()
+                )
+            }
+            .select { $0.id }
+            .fetchOne(database)
     }
 
     /// Loads one session in the exact order used to define the completed-history cursor.
@@ -399,7 +479,16 @@ private extension DesktopTranscriptStore {
         _ cursor: Message.ID?,
         in messages: [Message]
     ) -> Bool {
-        let historyTailID = messages.last(where: { !$0.isQueued })?.id
+        cursorMatchesCompletedHistoryTail(
+            cursor,
+            historyTailID: messages.last(where: { !$0.isQueued })?.id
+        )
+    }
+
+    static func cursorMatchesCompletedHistoryTail(
+        _ cursor: Message.ID?,
+        historyTailID: Message.ID?
+    ) -> Bool {
         switch (cursor, historyTailID) {
         case (nil, nil):
             return true

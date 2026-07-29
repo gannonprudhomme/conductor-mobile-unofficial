@@ -12,6 +12,97 @@ import SQLiteData
 import Testing
 
 struct DesktopTranscriptStoreTests {
+    @Test("Maximum rows per statement respect SQLite's argument limit")
+    func maximumRowsPerStatement() {
+        #expect(
+            DesktopTranscriptStore.maximumRowsPerStatement(
+                maximumArgumentCount: 500_000,
+                argumentsPerRow: 15
+            ) == 33_333
+        )
+        #expect(
+            DesktopTranscriptStore.maximumRowsPerStatement(
+                maximumArgumentCount: 1_000,
+                argumentsPerRow: 15
+            ) == 66
+        )
+    }
+
+    @Test(
+        "Complete snapshots persist representative large histories",
+        arguments: [484, 2_065]
+    )
+    func representativeLargeHistory(messageCount: Int) async throws {
+        let database = try appDatabase()
+        let (workspace, session) = try await seed(database: database)
+        let messages = (0..<messageCount).map {
+            message(
+                id: "message-\($0)",
+                sessionID: session.id,
+                seconds: TimeInterval($0)
+            )
+        }
+
+        try await DesktopTranscriptStore.applySyncEvent(
+            .snapshot(
+                messages,
+                cursor: messages.last?.id,
+                queuedMessages: []
+            ),
+            workspaceID: workspace.id,
+            sessionID: session.id,
+            database: database
+        )
+
+        let cached = try #require(
+            try await DesktopTranscriptStore.cachedTranscriptSnapshot(
+                workspaceID: workspace.id,
+                sessionID: session.id,
+                database: database
+            )
+        )
+        #expect(cached.messages.count == messageCount)
+        #expect(cached.cursor == messages.last?.id)
+    }
+
+    @Test("An empty complete history atomically clears completed rows")
+    func emptyHistory() async throws {
+        let database = try appDatabase()
+        let (workspace, session) = try await seed(database: database)
+        let completed = message(
+            id: "completed",
+            sessionID: session.id,
+            seconds: 1
+        )
+        try await DesktopTranscriptStore.applySyncEvent(
+            .snapshot(
+                [completed],
+                cursor: completed.id,
+                queuedMessages: []
+            ),
+            workspaceID: workspace.id,
+            sessionID: session.id,
+            database: database
+        )
+
+        try await DesktopTranscriptStore.applySyncEvent(
+            .snapshot([], cursor: nil, queuedMessages: []),
+            workspaceID: workspace.id,
+            sessionID: session.id,
+            database: database
+        )
+
+        let cached = try #require(
+            try await DesktopTranscriptStore.cachedTranscriptSnapshot(
+                workspaceID: workspace.id,
+                sessionID: session.id,
+                database: database
+            )
+        )
+        #expect(cached.messages.isEmpty)
+        #expect(cached.cursor == nil)
+    }
+
     @Test("Legacy complete snapshots reconcile mixed history and queue rows")
     func legacySnapshot() async throws {
         let database = try appDatabase()
@@ -241,6 +332,12 @@ struct DesktopTranscriptStoreTests {
             )
         }
         #expect(try await storedMessages(sessionID: session.id, database: database).isEmpty)
+        #expect(
+            try await storedMessages(
+                sessionID: otherSession.id,
+                database: database
+            ) == [existingOtherMessage]
+        )
     }
 
     @Test("Queue snapshots delete omissions without deleting completed history")
