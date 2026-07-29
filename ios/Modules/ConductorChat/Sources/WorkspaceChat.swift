@@ -1945,7 +1945,9 @@ public struct WorkspaceChatView: View {
         .scrollEdgeEffectStyle(.soft, for: .top)
         .overlay {
             if shouldShowLoadingIndicator {
-                ChatLoadingView()
+                LoadingView(
+                    shouldReserveChatChrome: store.chat == nil
+                )
             }
         }
         .background(.theme(.background))
@@ -2033,6 +2035,23 @@ public struct WorkspaceChatView: View {
     private func dismissDestination(isPresented: Bool) {
         if !isPresented {
             store.send(.destination(.dismiss))
+        }
+    }
+
+    private struct LoadingView: View {
+        // The picker and composer shift the available center by 33⅓ points once Chat mounts.
+        @ScaledMetric(relativeTo: .body)
+        private var unloadedChatVerticalOffset = -100.0 / 3.0
+
+        let shouldReserveChatChrome: Bool
+
+        var body: some View {
+            ChatLoadingView()
+                .offset(
+                    y: shouldReserveChatChrome
+                        ? unloadedChatVerticalOffset
+                        : 0
+                )
         }
     }
 
