@@ -1891,16 +1891,14 @@ public struct WorkspaceChatView: View {
             if let chatStore = store.scope(state: \.chat, action: \.chat) {
                 ChatView(
                     store: chatStore,
-                    directoryName: store.workspace.emptyChatDirectoryName
+                    directoryName: store.workspace.emptyChatDirectoryName,
+                    showsLoadingIndicator: false
                 )
                     // Treat each session as distinct content so view-local scroll state resets.
                     .id(chatStore.sessionID)
             } else {
-                ProgressView()
-                    .progressViewStyle(.network)
-                    .tint(.theme(.textSecondary))
-                    .frame(width: 32, height: 32)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                Color.theme(.background)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .themedNavigationTitle(
@@ -1946,13 +1944,8 @@ public struct WorkspaceChatView: View {
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .overlay {
-            if store.isLoadingSessions {
-                ProgressView()
-                    .progressViewStyle(.network)
-                    .tint(.theme(.textSecondary))
-                    .frame(width: 32, height: 32)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .background(.theme(.background))
+            if shouldShowLoadingIndicator {
+                ChatLoadingView()
             }
         }
         .background(.theme(.background))
@@ -2010,6 +2003,15 @@ public struct WorkspaceChatView: View {
         .task {
             await store.send(.task).finish()
         }
+    }
+
+    private var shouldShowLoadingIndicator: Bool {
+        guard let chat = store.chat else {
+            return true
+        }
+
+        return store.isLoadingSessions
+            || (chat.isLoadingMessages && !chat.hasOptimisticMessages)
     }
 
     private var isRenameBranchPresented: Binding<Bool> {
