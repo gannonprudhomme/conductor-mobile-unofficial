@@ -68,6 +68,9 @@ public enum Server {
         let router = Router(context: RequestContext.self)
         let webSocketRouter = Router(context: RequestContext.self)
         let databaseChanges = DatabaseChangeObserver(database: database)
+        let workspaceSnapshots = DatabaseSnapshotCache<String, WorkspaceListSnapshot>()
+        let sessionSnapshots = DatabaseSnapshotCache<String, [Session]>()
+        let messageSnapshots = DatabaseSnapshotCache<String, [Message]>()
 
         router.get("/ping") { _, _ in
             HTTPResponse.Status.noContent
@@ -159,6 +162,8 @@ public enum Server {
                     inbound: inbound,
                     outbound: outbound,
                     databaseChanges: databaseChanges,
+                    snapshotCache: workspaceSnapshots,
+                    snapshotKey: "workspaces",
                     loadSnapshot: loadSnapshot
                 )
             } else {
@@ -181,7 +186,9 @@ public enum Server {
             try await streamSnapshots(
                 inbound: inbound,
                 outbound: outbound,
-                databaseChanges: databaseChanges
+                databaseChanges: databaseChanges,
+                snapshotCache: sessionSnapshots,
+                snapshotKey: workspaceID
             ) {
                 try await database.read { database in
                     try Session.all(forWorkspaceID: workspaceID).fetchAll(database)
@@ -198,7 +205,9 @@ public enum Server {
             try await streamMessages(
                 inbound: inbound,
                 outbound: outbound,
-                databaseChanges: databaseChanges
+                databaseChanges: databaseChanges,
+                snapshotCache: messageSnapshots,
+                snapshotKey: "\(workspaceID)/\(sessionID)"
             ) {
                 try await database.read { database in
                     try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
@@ -425,52 +434,59 @@ public enum Server {
         }
     }
 
-    private static func streamSnapshots<Snapshot>(
+    private static func streamSnapshots<Key, Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
+        snapshotCache: DatabaseSnapshotCache<Key, Snapshot>,
+        snapshotKey: Key,
         loadSnapshot: @escaping @Sendable () async throws -> Snapshot
-    ) async throws where Snapshot: Encodable & Equatable & Sendable {
+    ) async throws where Key: Hashable & Sendable, Snapshot: Encodable & Equatable & Sendable {
         let changes = try await databaseChanges.changes()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            // Phone -> desktop: discard application data while waiting for close or failure.
-            group.addTask {
-                for try await _ in inbound {}
-            }
-
-            // Desktop -> phone: send current state immediately, then watch Conductor's database
-            // and push each changed route-specific snapshot.
-            group.addTask {
-                let encoder = JSONEncoder.conductor
-                var previousSnapshot = try await loadSnapshot()
-
-                // Every subscriber receives state immediately instead of waiting for a write.
-                try await outbound.writeTextMessage(
-                    String(decoding: try encoder.encode(previousSnapshot), as: UTF8.self)
-                )
-
-                // One observer polls SQLite for every socket. Slow snapshot consumers retain only
-                // the newest pending change instead of creating an unbounded update backlog.
-                for try await _ in changes {
-                    let snapshot = try await loadSnapshot()
-
-                    // data_version covers the whole database, so an unrelated table write can
-                    // wake this route. Only send when this route's actual snapshot changed.
-                    guard snapshot != previousSnapshot else {
-                        // No changes to the table(s) we're observing, ignore
-                        continue
-                    }
-
-                    try await outbound.writeTextMessage(
-                        String(decoding: try encoder.encode(snapshot), as: UTF8.self)
-                    )
-                    previousSnapshot = snapshot
+        try await snapshotCache.withSubscriber(for: snapshotKey) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                // Phone -> desktop: discard application data while waiting for close or failure.
+                group.addTask {
+                    for try await _ in inbound {}
                 }
-            }
 
-            // Return as soon as one direction closes or fails, then stop its surviving sibling.
-            defer { group.cancelAll() }
-            _ = try await group.next()
+                // Desktop -> phone: send current state immediately, then watch Conductor's database
+                // and push each changed route-specific snapshot.
+                group.addTask {
+                    let encoder = JSONEncoder.conductor
+                    var previousRevision: UInt64?
+
+                    // One observer polls SQLite for every socket. Slow snapshot consumers retain
+                    // only the newest pending change instead of creating an unbounded update
+                    // backlog. The cache gives slightly staggered sockets for the same resource
+                    // one shared SQLite read per change.
+                    for try await generation in changes {
+                        let value = try await snapshotCache.value(
+                            for: snapshotKey,
+                            generation: generation,
+                            load: loadSnapshot
+                        )
+
+                        // data_version covers the whole database, so an unrelated table write can
+                        // wake this route. Only send when this route's actual snapshot changed.
+                        guard value.revision != previousRevision else {
+                            continue
+                        }
+                        previousRevision = value.revision
+
+                        try await outbound.writeTextMessage(
+                            String(
+                                decoding: try encoder.encode(value.snapshot),
+                                as: UTF8.self
+                            )
+                        )
+                    }
+                }
+
+                // Return as soon as one direction closes or fails, then stop its surviving sibling.
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
         }
     }
 
@@ -524,60 +540,79 @@ public enum Server {
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
+        snapshotCache: DatabaseSnapshotCache<String, [Message]>,
+        snapshotKey: String,
         loadMessages: @escaping @Sendable () async throws -> [Message]
     ) async throws {
         let changes = try await databaseChanges.changes()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for try await _ in inbound {}
-            }
-
-            group.addTask {
-                let encoder = JSONEncoder.conductor
-                var previousMessages = try await loadMessages()
-                try await outbound.writeTextMessage(
-                    String(
-                        decoding: try encoder.encode(
-                            MessageSyncEvent.snapshot(previousMessages)
-                        ),
-                        as: UTF8.self
-                    )
-                )
-
-                for try await _ in changes {
-                    let messages = try await loadMessages()
-                    let previousMessagesByID = Dictionary(
-                        uniqueKeysWithValues: previousMessages.map { ($0.id, $0) }
-                    )
-                    let messageIDs = Set(messages.map(\.id))
-                    let changedMessages = messages.filter {
-                        previousMessagesByID[$0.id] != $0
-                    }
-                    let deletedMessageIDs = previousMessagesByID.keys
-                        .filter { !messageIDs.contains($0) }
-                        .sorted()
-                    previousMessages = messages
-
-                    guard !changedMessages.isEmpty || !deletedMessageIDs.isEmpty else {
-                        continue
-                    }
-
-                    try await outbound.writeTextMessage(
-                        String(
-                            decoding: try encoder.encode(
-                                MessageSyncEvent.changes(
-                                    upserting: changedMessages,
-                                    deleting: deletedMessageIDs
-                                )
-                            ),
-                            as: UTF8.self
-                        )
-                    )
+        try await snapshotCache.withSubscriber(for: snapshotKey) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for try await _ in inbound {}
                 }
-            }
 
-            defer { group.cancelAll() }
-            _ = try await group.next()
+                group.addTask {
+                    let encoder = JSONEncoder.conductor
+                    var previousRevision: UInt64?
+                    var previousMessages: [Message]?
+
+                    for try await generation in changes {
+                        let value = try await snapshotCache.value(
+                            for: snapshotKey,
+                            generation: generation,
+                            load: loadMessages
+                        )
+                        guard value.revision != previousRevision else {
+                            continue
+                        }
+                        previousRevision = value.revision
+                        let messages = value.snapshot
+                        guard let priorMessages = previousMessages else {
+                            try await outbound.writeTextMessage(
+                                String(
+                                    decoding: try encoder.encode(
+                                        MessageSyncEvent.snapshot(messages)
+                                    ),
+                                    as: UTF8.self
+                                )
+                            )
+                            previousMessages = messages
+                            continue
+                        }
+
+                        let previousMessagesByID = Dictionary(
+                            uniqueKeysWithValues: priorMessages.map { ($0.id, $0) }
+                        )
+                        let messageIDs = Set(messages.map(\.id))
+                        let changedMessages = messages.filter {
+                            previousMessagesByID[$0.id] != $0
+                        }
+                        let deletedMessageIDs = previousMessagesByID.keys
+                            .filter { !messageIDs.contains($0) }
+                            .sorted()
+                        previousMessages = messages
+
+                        guard !changedMessages.isEmpty || !deletedMessageIDs.isEmpty else {
+                            continue
+                        }
+
+                        try await outbound.writeTextMessage(
+                            String(
+                                decoding: try encoder.encode(
+                                    MessageSyncEvent.changes(
+                                        upserting: changedMessages,
+                                        deleting: deletedMessageIDs
+                                    )
+                                ),
+                                as: UTF8.self
+                            )
+                        )
+                    }
+                }
+
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
         }
     }
 

@@ -14,54 +14,76 @@ import SQLiteData
 /// reads and mutates the same continuation collection, version, and task lifecycle state. Actor
 /// isolation serializes those operations and guarantees that at most one polling task is active.
 actor DatabaseChangeObserver {
-    typealias Changes = AsyncThrowingStream<Void, any Error>
+    typealias Generation = UInt64
+    typealias Changes = AsyncThrowingStream<Generation, any Error>
 
+    private let broadcastInterval: Duration
+    private let clock = ContinuousClock()
     private let pollInterval: Duration
     private let readDatabaseVersion: @Sendable () throws -> DatabaseVersion
     private var continuations: [Int: Changes.Continuation] = [:]
     /// The last observed database version, established when the first subscriber arrives.
     private var databaseVersion: DatabaseVersion?
+    /// Identifies the database state that each invalidation belongs to so subscribers loading the
+    /// same resource can share one read without reusing a snapshot from an older invalidation.
+    private var generation: Generation = 0
+    /// Commits observed during the broadcast cooldown collapse into one trailing invalidation.
+    private var hasPendingChange = false
+    private var nextBroadcastInstant: ContinuousClock.Instant?
     private var nextSubscriberID = 0
     /// Exists only while there is at least one subscriber.
     private var pollingTask: Task<Void, Never>?
 
     init(
         database: DatabaseQueue,
-        pollInterval: Duration = .milliseconds(3)
+        pollInterval: Duration = .milliseconds(25),
+        broadcastInterval: Duration = .milliseconds(200)
     ) {
-        self.init(pollInterval: pollInterval, readDatabaseVersion: {
-            // These scalar reads do not need a transactionally consistent snapshot. Avoiding the
-            // transaction that `read` creates keeps high-frequency polling inexpensive.
-            try database.unsafeRead { database in
-                DatabaseVersion(
-                    // `data_version` changes when another connection commits.
-                    dataVersion: try #sql("PRAGMA data_version", as: Int.self)
-                        .fetchOne(database) ?? 0,
-                    // `data_version` deliberately ignores this connection's own commits. Pair it
-                    // with the cumulative count so server-side fallback writes also invalidate
-                    // subscribers. Without this value, those writes could leave sockets stale.
-                    totalChangesCount: database.totalChangesCount
-                )
+        self.init(
+            pollInterval: pollInterval,
+            broadcastInterval: broadcastInterval,
+            readDatabaseVersion: {
+                // These scalar reads do not need a transactionally consistent snapshot. Avoiding
+                // the transaction that `read` creates keeps high-frequency polling inexpensive.
+                try database.unsafeRead { database in
+                    DatabaseVersion(
+                        // `data_version` changes when another connection commits.
+                        dataVersion: try #sql("PRAGMA data_version", as: Int.self)
+                            .fetchOne(database) ?? 0,
+                        // `data_version` deliberately ignores this connection's own commits. Pair
+                        // it with the cumulative count so server-side fallback writes also
+                        // invalidate subscribers. Without this value, those writes could leave
+                        // sockets stale.
+                        totalChangesCount: database.totalChangesCount
+                    )
+                }
             }
-        })
+        )
     }
 
     init(
         pollInterval: Duration,
+        broadcastInterval: Duration = .milliseconds(200),
         readDataVersion: @escaping @Sendable () throws -> Int
     ) {
-        self.init(pollInterval: pollInterval, readDatabaseVersion: {
-            DatabaseVersion(
-                dataVersion: try readDataVersion(),
-                totalChangesCount: 0
-            )
-        })
+        self.init(
+            pollInterval: pollInterval,
+            broadcastInterval: broadcastInterval,
+            readDatabaseVersion: {
+                DatabaseVersion(
+                    dataVersion: try readDataVersion(),
+                    totalChangesCount: 0
+                )
+            }
+        )
     }
 
     private init(
         pollInterval: Duration,
+        broadcastInterval: Duration,
         readDatabaseVersion: @escaping @Sendable () throws -> DatabaseVersion
     ) {
+        self.broadcastInterval = broadcastInterval
         self.pollInterval = pollInterval
         self.readDatabaseVersion = readDatabaseVersion
     }
@@ -71,6 +93,8 @@ actor DatabaseChangeObserver {
         // new change and all subscribers compare against the same version.
         if pollingTask == nil {
             databaseVersion = try readDatabaseVersion()
+            hasPendingChange = false
+            nextBroadcastInstant = nil
         }
 
         let subscriberID = nextSubscriberID
@@ -82,6 +106,7 @@ actor DatabaseChangeObserver {
             bufferingPolicy: .bufferingNewest(1)
         )
         continuations[subscriberID] = continuation
+        continuation.yield(generation)
         continuation.onTermination = { [weak self] _ in
             Task {
                 await self?.removeContinuation(for: subscriberID)
@@ -106,14 +131,27 @@ actor DatabaseChangeObserver {
             while !Task.isCancelled {
                 try await Task.sleep(for: pollInterval)
                 let nextDatabaseVersion = try readDatabaseVersion()
-                guard nextDatabaseVersion != databaseVersion else {
+                if nextDatabaseVersion != databaseVersion {
+                    databaseVersion = nextDatabaseVersion
+                    hasPendingChange = true
+                }
+
+                guard hasPendingChange else {
                     continue
                 }
 
-                databaseVersion = nextDatabaseVersion
-                for continuation in continuations.values {
-                    continuation.yield(())
+                let now = clock.now
+                if let nextBroadcastInstant,
+                   now < nextBroadcastInstant {
+                    continue
                 }
+
+                generation &+= 1
+                for continuation in continuations.values {
+                    continuation.yield(generation)
+                }
+                hasPendingChange = false
+                nextBroadcastInstant = now.advanced(by: broadcastInterval)
             }
         } catch is CancellationError {
         } catch {
@@ -126,6 +164,8 @@ actor DatabaseChangeObserver {
         pollingTask = nil
         if continuations.isEmpty {
             databaseVersion = nil
+            hasPendingChange = false
+            nextBroadcastInstant = nil
         }
         startPollingIfNeeded()
     }

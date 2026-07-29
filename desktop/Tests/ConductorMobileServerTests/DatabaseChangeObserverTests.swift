@@ -39,11 +39,42 @@ struct DatabaseChangeObserverTests {
         let firstChanges = try await observer.changes()
         let secondChanges = try await observer.changes()
 
-        async let firstChange: Void = nextChange(from: firstChanges)
-        async let secondChange: Void = nextChange(from: secondChanges)
+        async let firstChange = nextChange(from: firstChanges)
+        async let secondChange = nextChange(from: secondChanges)
         dataVersion.withLock { $0 = 1 }
 
-        _ = try await (firstChange, secondChange)
+        let generations = try await (firstChange, secondChange)
+        expectNoDifference(generations.0, 1)
+        expectNoDifference(generations.1, 1)
+    }
+
+    @Test("Changes during the cooldown collapse into one trailing invalidation")
+    func rateLimitsChanges() async throws {
+        let dataVersion = Mutex(0)
+        let observer = DatabaseChangeObserver(
+            pollInterval: .milliseconds(1),
+            broadcastInterval: .milliseconds(100)
+        ) {
+            dataVersion.withLock { $0 }
+        }
+        let changes = try await observer.changes()
+        var iterator = changes.makeAsyncIterator()
+        let initialGeneration = try await iterator.next()
+        expectNoDifference(try #require(initialGeneration), 0)
+
+        dataVersion.withLock { $0 = 1 }
+        let firstGeneration = try await iterator.next()
+        expectNoDifference(try #require(firstGeneration), 1)
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        dataVersion.withLock { $0 = 2 }
+        try await Task.sleep(for: .milliseconds(10))
+        dataVersion.withLock { $0 = 3 }
+
+        let secondGeneration = try await iterator.next()
+        expectNoDifference(try #require(secondGeneration), 2)
+        #expect(start.duration(to: clock.now) >= .milliseconds(50))
     }
 }
 
@@ -51,11 +82,14 @@ private struct TimeoutError: Error { }
 
 private func nextChange(
     from changes: DatabaseChangeObserver.Changes
-) async throws {
-    try await withThrowingTaskGroup(of: Void.self) { group in
+) async throws -> DatabaseChangeObserver.Generation {
+    try await withThrowingTaskGroup(
+        of: DatabaseChangeObserver.Generation.self
+    ) { group in
         group.addTask {
             var iterator = changes.makeAsyncIterator()
             _ = try #require(await iterator.next())
+            return try #require(await iterator.next())
         }
         group.addTask {
             try await Task.sleep(for: .seconds(5))
@@ -63,6 +97,6 @@ private func nextChange(
         }
 
         defer { group.cancelAll() }
-        return try await group.next()!
+        return try #require(await group.next())
     }
 }
