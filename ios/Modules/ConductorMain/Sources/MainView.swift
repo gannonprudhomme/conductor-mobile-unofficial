@@ -55,6 +55,7 @@ public struct Main: Sendable {
     }
 
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
+    @Dependency(\.chatSyncClient) var chatSyncClient
     @Dependency(\.cloudMutationRunner) var cloudMutationRunner
     @Dependency(\.defaultDatabase) var database
     @Dependency(\.desktopClient) var desktopClient
@@ -93,21 +94,23 @@ public struct Main: Sendable {
                     }
                     guard state.cloudConfiguration != nil else {
                         return .merge(
+                            runChatSyncForeground(),
                             startRunner,
                             startOutbox,
                             .send(.workspaces(.task))
                         )
                     }
                     return .merge(
+                        runChatSyncForeground(),
                         startRunner,
                         startOutbox,
                         .run { [cloudCredentialClient] send in
                             await send(
-                                .cloudCredentialReconciliationResult(
-                                    await Result {
-                                        try await cloudCredentialClient
-                                            .loadAPIKey()
-                                    }
+                            .cloudCredentialReconciliationResult(
+                                await Result {
+                                    try await cloudCredentialClient
+                                        .loadAPIKey()
+                                }
                                 )
                             )
                         }
@@ -136,14 +139,20 @@ public struct Main: Sendable {
                         return .none
                     }
                     state.isInBackground = false
-                    return .send(.workspaces(.appBecameActive))
+                    return .merge(
+                        runChatSyncForeground(),
+                        .send(.workspaces(.appBecameActive))
+                    )
 
                 case .appEnteredBackground:
                     guard !state.isInBackground else {
                         return .none
                     }
                     state.isInBackground = true
-                    return .send(.workspaces(.appEnteredBackground))
+                    return .merge(
+                        .cancel(id: CancelID.chatSyncForeground),
+                        .send(.workspaces(.appEnteredBackground))
+                    )
 
                 case let .cloudCredentialReconciliationResult(result):
                     switch result {
@@ -298,6 +307,13 @@ public struct Main: Sendable {
         }
         .forEach(\.path, action: \.path)
     }
+
+    private func runChatSyncForeground() -> Effect<Action> {
+        .run { [chatSyncClient] _ in await chatSyncClient.runForeground() }
+        .cancellable(id: CancelID.chatSyncForeground, cancelInFlight: true)
+    }
+
+    private enum CancelID: Hashable { case chatSyncForeground }
 }
 
 extension Main.Path.State: Equatable { }

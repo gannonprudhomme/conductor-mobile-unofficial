@@ -15,6 +15,7 @@ import SQLiteData
 @testable import ConductorChat
 import Testing
 
+@Suite(.serialized)
 @MainActor
 struct WorkspaceChatTests {
     @Test("Only quiescent workspace chat presentation is warm-restorable")
@@ -289,6 +290,53 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Cloud authentication message failures show the authentication alert")
+    func cloudAuthenticationMessageFailureShowsAuthenticationAlert() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            activeSessionID: "session",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let session = Session.preview(
+            id: "session",
+            workspaceID: workspace.id
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            state.chat = Chat.State(session: session, isCloudHosted: true)
+            state.isLoadingSessions = false
+            let store = TestStore(initialState: state) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .loadMessagesFailed(
+                        sessionID: session.id,
+                        error: CloudAPIClientError.missingCredential
+                    )
+                )
+            ) {
+                $0.chat?.isLoadingMessages = false
+                $0.destination = .alert(
+                    .cloudAuthenticationFailed(
+                        message: CloudAPIClientError
+                            .missingCredential
+                            .localizedDescription
+                    )
+                )
+            }
+        }
+    }
+
     @Test("Active sessions match Conductor's creation order")
     func activeSessionsMatchConductorOrder() throws {
         let olderSession = try makeSession(
@@ -443,8 +491,8 @@ struct WorkspaceChatTests {
             )
         )
 
-        for _ in 0..<1_000 {
-            let counts = try await database.read { database in
+        await waitUntil {
+            let counts = try? await database.read { database in
                 (
                     try CloudSessionMetadata
                         .sessions(
@@ -462,10 +510,7 @@ struct WorkspaceChatTests {
                         .count
                 )
             }
-            if counts.0 == 1, counts.1 == 1 {
-                break
-            }
-            await Task.yield()
+            return counts?.0 == 1 && counts?.1 == 1
         }
 
         let visibleSessionIDs = try await database.read { database in
@@ -623,9 +668,7 @@ struct WorkspaceChatTests {
             store.exhaustivity = .off(showSkippedAssertions: false)
 
             let task = await store.send(.task)
-            for _ in 0..<1_000 where connectionCount.value < 1 {
-                await Task.yield()
-            }
+            await waitUntil { connectionCount.value >= 1 }
             $cloudConfiguration.withLock {
                 $0 = CloudConfiguration(
                     accountID: "account",
@@ -633,9 +676,7 @@ struct WorkspaceChatTests {
                 )
             }
             await store.receive(\.cloudConfigurationChanged)
-            for _ in 0..<1_000 where connectionCount.value < 2 {
-                await Task.yield()
-            }
+            await waitUntil { connectionCount.value >= 2 }
             #expect(connectionCount.value == 2)
 
             await task.cancel()
@@ -835,8 +876,10 @@ struct WorkspaceChatTests {
                     .execute(database)
             }
 
-            for _ in 0..<1_000 where !store.state.workspace.isCloudHosted {
-                await Task.yield()
+            await waitUntil {
+                await MainActor.run {
+                    store.state.workspace.isCloudHosted
+                }
             }
             #expect(store.state.workspace.isCloudHosted)
             let reload = await store.send(.hostingSourceChanged(.cloud))
@@ -1038,6 +1081,143 @@ struct WorkspaceChatTests {
             #expect(storedSessionIDs == [replacement.id])
 
             await task.cancel()
+        }
+    }
+
+    @Test("Opening a prefetched workspace reuses the session connection")
+    func openingPrefetchedWorkspaceReusesSessionConnection() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let database = try appDatabase()
+        try await database.write { database in
+            try Workspace.insert { workspace }.execute(database)
+            try Session.insert { session }.execute(database)
+        }
+        let connectionCount = LockIsolated(0)
+
+        await withDependencies {
+            $0.continuousClock = TestClock()
+            $0.defaultDatabase = database
+            $0.desktopClient.observeSessions = { workspaceID in
+                #expect(workspaceID == workspace.id)
+                return AsyncThrowingStream { continuation in
+                    connectionCount.withValue { $0 += 1 }
+                    continuation.yield([session])
+                }
+            }
+            $0.desktopClient.observeMessages = { _, _ in
+                AsyncThrowingStream { _ in }
+            }
+        } operation: {
+            let client = ChatSyncClient.live()
+            let foreground = Task { await client.runForeground() }
+            defer { foreground.cancel() }
+            await waitUntil { connectionCount.value == 1 }
+
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            let task = await store.send(.task)
+            await store.receive(\.sessionSnapshotPersisted) {
+                $0.hasPersistedInitialSessionSnapshot = true
+            }
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
+            }
+            #expect(connectionCount.value == 1)
+
+            await task.cancel()
+        }
+    }
+
+    @Test("Cancelled session streams cannot overwrite newer snapshots")
+    func cancelledSessionStreamCannotOverwriteNewerSnapshot() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let stale = try makeSession(id: "stale", workspaceID: workspace.id)
+        let fresh = try makeSession(id: "fresh", workspaceID: workspace.id)
+        let database = try appDatabase()
+        let (firstStream, firstContinuation) = AsyncThrowingStream<
+            [Session],
+            any Error
+        >.makeStream()
+        let (secondStream, secondContinuation) = AsyncThrowingStream<
+            [Session],
+            any Error
+        >.makeStream()
+        let connectionCount = LockIsolated(0)
+        let firstCancelled = LockIsolated(false)
+        firstContinuation.onTermination = { termination in
+            if case .cancelled = termination {
+                firstCancelled.setValue(true)
+            }
+        }
+        try await database.write { database in
+            try Workspace.insert { workspace }.execute(database)
+        }
+
+        try await withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.defaultDatabase = database
+                $0.desktopClient.observeSessions = { workspaceID in
+                    #expect(workspaceID == workspace.id)
+                    let count = connectionCount.withValue {
+                        $0 += 1
+                        return $0
+                    }
+                    return count == 1 ? firstStream : secondStream
+                }
+            }
+
+            var task = await store.send(.task)
+            firstContinuation.yield([stale])
+            await store.receive(\.sessionSnapshotPersisted) {
+                $0.hasPersistedInitialSessionSnapshot = true
+            }
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.chat = Chat.State(session: stale)
+                $0.isLoadingSessions = false
+            }
+            await task.cancel()
+            await waitUntil { firstCancelled.value }
+
+            task = await store.send(.task)
+            secondContinuation.yield([fresh])
+            await store.receive(\.sessionSnapshotPersisted)
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.chat = Chat.State(session: fresh)
+            }
+            firstContinuation.yield([stale])
+            try? await ContinuousClock().sleep(for: .milliseconds(50))
+
+            let sessions = try await database.read { database in
+                try Session
+                    .where { $0.workspaceID.eq(workspace.id) }
+                    .fetchAll(database)
+            }
+            #expect(sessions.map(\.id) == [fresh.id])
+            #expect(connectionCount.value == 2)
+
+            await task.cancel()
+            secondContinuation.finish()
         }
     }
 
@@ -2135,6 +2315,7 @@ struct WorkspaceChatTests {
                     )
                 )
             ) {
+                $0.chat?.isLoadingMessages = false
                 $0.destination = .alert(
                     .failedToLoadMessages(message: TestError().localizedDescription)
                 )
@@ -2450,7 +2631,9 @@ struct WorkspaceChatTests {
                         error: error
                     )
                 )
-            )
+            ) {
+                $0.chat?.isLoadingMessages = false
+            }
             await store.send(
                 .chat(
                     .enqueueMessageResponse(
@@ -2619,6 +2802,7 @@ struct WorkspaceChatTests {
             ) {
                 WorkspaceChat()
             } withDependencies: {
+                $0.continuousClock = TestClock()
                 $0.cloudAPIClient.observeSessions = { workspaceID in
                     #expect(workspaceID == remoteWorkspaceID)
                     return stream
@@ -2632,11 +2816,11 @@ struct WorkspaceChatTests {
             let task = await store.send(.task)
             await store.receive(\.mutationOutcomesUpdated)
             continuation.yield(snapshot)
-            await store.receive(\.loadSessionsResponse.success) {
-                $0.isLoadingSessions = false
-            }
             await store.receive(\.sessionSnapshotPersisted) {
                 $0.hasPersistedInitialSessionSnapshot = true
+            }
+            await store.receive(\.loadSessionsResponse.success) {
+                $0.isLoadingSessions = false
             }
             continuation.finish()
             await task.cancel()
@@ -3152,6 +3336,171 @@ struct WorkspaceChatTests {
         }
     }
 
+    @Test("Canonical observation replaces an accepted bubble before acknowledgement")
+    func canonicalObservationBeforeAcknowledgement() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let session = try makeSession(id: "active", workspaceID: workspace.id)
+        let message = Message(
+            id: "canonical",
+            sessionID: session.id,
+            role: .user,
+            content: "Test",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            turnID: "canonical-turn"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { session }.execute(database)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        state: .accepted,
+                        canonicalMessageID: message.id
+                    )
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let chat = try #require(store.state.chat)
+            chat.$messageDraft.withLock { $0 = "Test" }
+            await store.send(.chat(.sendButtonTapped(.sent)))
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
+
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .accepted
+            )
+            #expect(store.state.chat?.messageIDToBubbleID[message.id] == UUID(0))
+            #expect(
+                store.state.chat?.rows?.map(\.id)
+                    == [
+                        "human:\(UUID(0).uuidString)",
+                        "turn-in-progress:\(try #require(message.turnID))",
+                    ]
+            )
+            guard let row = store.state.chat?.rows?.first,
+                  case .humanMessage = row.content else {
+                Issue.record("Expected the canonical row to replace the optimistic row")
+                return
+            }
+        }
+    }
+
+    @Test("Cloud canonical observation replaces an accepted bubble")
+    func cloudCanonicalObservationBeforeAcknowledgement() async throws {
+        let workspace = Workspace.preview(
+            id: "workspace",
+            activeSessionID: "canonical-session",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let session = Session.preview(
+            id: "canonical-session",
+            workspaceID: workspace.id
+        )
+        let metadata = CloudWorkspaceMetadata(
+            workspaceID: workspace.id,
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace",
+            lastSeenGeneration: "generation"
+        )
+        let message = Message(
+            id: "canonical",
+            sessionID: session.id,
+            role: .user,
+            content: "Test",
+            createdAt: Date(timeIntervalSince1970: 1_783_558_800),
+            sdkMessageID: UUID(0).uuidString.lowercased(),
+            turnID: "canonical-turn"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Workspace.upsert { workspace }.execute(database)
+                try Session.upsert { session }.execute(database)
+                try CloudWorkspaceMetadata.insert { metadata }.execute(database)
+                try CloudSessionMetadata.insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: session.id,
+                        cloudSessionID: "remote-session",
+                        workspaceID: workspace.id,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation"
+                    )
+                }
+                .execute(database)
+            }
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(accountID: "account")
+            }
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: .init(
+                        workspace: workspace,
+                        repository: nil,
+                        cloudMetadata: metadata
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            } withDependencies: {
+                $0.messageDeliveryOutbox.enqueue = { request in
+                    makeDeliveryAttempt(
+                        session: session,
+                        content: request.content,
+                        attemptID: UUID(0),
+                        route: .cloud,
+                        state: .accepted
+                    )
+                }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            let chat = try #require(store.state.chat)
+            chat.$messageDraft.withLock { $0 = "Test" }
+            await store.send(.chat(.sendButtonTapped(.sent)))
+            await store.receive(\.chat.enqueueMessageResponse)
+            await store.finish()
+
+            await store.send(.chat(.messagesUpdated([message])))
+
+            #expect(
+                store.state.chat?.displayedDeliveryAttempts.first?.deliveryState
+                    == .accepted
+            )
+            #expect(store.state.chat?.messageIDToBubbleID[message.id] == UUID(0))
+            let rows = try #require(store.state.chat?.rows)
+            #expect(Set(rows.map(\.id)).count == rows.count)
+            guard let row = rows.first,
+                  case .humanMessage = row.content else {
+                Issue.record("Expected the Cloud canonical row to replace the optimistic row")
+                return
+            }
+        }
+    }
+
     @Test("Identical desktop text cannot claim a pending mobile bubble")
     func identicalDesktopMessageDoesNotReconcilePendingMobileMessage() async throws {
         let workspace = try makeWorkspace(activeSessionID: "active")
@@ -3588,4 +3937,22 @@ private struct TestError: LocalizedError {
     var errorDescription: String? {
         "Something went wrong."
     }
+}
+
+private func waitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if await condition() {
+            return
+        }
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
+    }
+    Issue.record("Timed out waiting for an asynchronous test condition.")
 }
