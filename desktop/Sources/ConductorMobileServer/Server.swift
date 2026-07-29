@@ -894,8 +894,20 @@ public enum Server {
                 && haveSameMessages(lhs.queue, rhs.queue)
         }
 
-        /// Orders completed history by the resume protocol's timestamp/raw-ID rule.
+        /// Orders completed history by actual send time and deterministic fallback values.
         private static func historyPrecedes(_ lhs: Message, _ rhs: Message) -> Bool {
+            if lhs.sentAt != rhs.sentAt {
+                switch (lhs.sentAt, rhs.sentAt) {
+                case let (lhs?, rhs?):
+                    return lhs < rhs
+                case (.some, nil):
+                    return true
+                case (nil, .some):
+                    return false
+                case (nil, nil):
+                    break
+                }
+            }
             if lhs.createdAt != rhs.createdAt {
                 return lhs.createdAt < rhs.createdAt
             }

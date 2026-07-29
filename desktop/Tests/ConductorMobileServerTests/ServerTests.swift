@@ -382,7 +382,7 @@ struct ServerTests {
                       ),
                       (
                         'queued', 'session', 'user', 'Queued',
-                        '2026-07-29T00:00:03Z', NULL, 0
+                        '2026-07-29T00:00:00Z', NULL, 0
                       );
                     """,
                 arguments: [composedID, decomposedID]

@@ -370,8 +370,20 @@ private extension DesktopTranscriptStore {
             .sorted(by: isEarlierInCompletedHistory)
     }
 
-    /// Breaks equal timestamps with raw bytes so cache order matches server resume order.
+    /// Matches the server's actual-send-time order used to define resume suffixes.
     static func isEarlierInCompletedHistory(_ lhs: Message, _ rhs: Message) -> Bool {
+        if lhs.sentAt != rhs.sentAt {
+            switch (lhs.sentAt, rhs.sentAt) {
+            case let (lhs?, rhs?):
+                return lhs < rhs
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            case (nil, nil):
+                break
+            }
+        }
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt < rhs.createdAt
         }

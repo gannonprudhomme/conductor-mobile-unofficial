@@ -638,18 +638,20 @@ struct ChatTests {
         }
     }
 
-    @Test("Messages are limited to the selected session and ordered chronologically")
+    @Test("Messages are scoped to the session and ordered by actual send time")
     func messagesAreScopedAndOrdered() async throws {
-        let earlyMessage = try makeMessage(
+        var delayedMessage = try makeMessage(
             id: "early",
             sessionID: "session-1",
             createdAt: "2026-07-09 01:00:00"
         )
-        let lateMessage = try makeMessage(
+        delayedMessage.sentAt = Date(timeIntervalSince1970: 1_783_566_000)
+        var priorAssistantMessage = try makeMessage(
             id: "late",
             sessionID: "session-1",
             createdAt: "2026-07-09 02:00:00"
         )
+        priorAssistantMessage.sentAt = Date(timeIntervalSince1970: 1_783_562_400)
         let otherMessage = try makeMessage(
             id: "other",
             sessionID: "session-2",
@@ -659,9 +661,9 @@ struct ChatTests {
         try await withDependencies {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { db in
-                try Message.upsert { lateMessage }.execute(db)
+                try Message.upsert { priorAssistantMessage }.execute(db)
                 try Message.upsert { otherMessage }.execute(db)
-                try Message.upsert { earlyMessage }.execute(db)
+                try Message.upsert { delayedMessage }.execute(db)
             }
         } operation: {
             let state = Chat.State(session: try makeSession())
@@ -669,7 +671,7 @@ struct ChatTests {
 
             expectNoDifference(
                 state.messages,
-                [earlyMessage, lateMessage]
+                [priorAssistantMessage, delayedMessage]
             )
         }
     }

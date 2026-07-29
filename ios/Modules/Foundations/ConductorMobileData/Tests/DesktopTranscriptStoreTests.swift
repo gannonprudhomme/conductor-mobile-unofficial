@@ -294,6 +294,11 @@ struct DesktopTranscriptStoreTests {
     func queuedToCompletedTransition() async throws {
         let database = try appDatabase()
         let (workspace, session) = try await seed(database: database)
+        let existing = message(
+            id: "existing",
+            sessionID: session.id,
+            seconds: 2
+        )
         let queued = message(
             id: "transitioning",
             sessionID: session.id,
@@ -301,14 +306,18 @@ struct DesktopTranscriptStoreTests {
             queueOrder: 0
         )
         try await DesktopTranscriptStore.applySyncEvent(
-            .snapshot([], queuedMessages: [queued]),
+            .snapshot(
+                [existing],
+                cursor: existing.id,
+                queuedMessages: [queued]
+            ),
             workspaceID: workspace.id,
             sessionID: session.id,
             database: database
         )
 
         var completed = queued
-        completed.sentAt = Date(timeIntervalSince1970: 2)
+        completed.sentAt = Date(timeIntervalSince1970: 3)
         completed.queueOrder = nil
         try await DesktopTranscriptStore.applySyncEvent(
             .changes(
@@ -328,7 +337,7 @@ struct DesktopTranscriptStoreTests {
                 database: database
             )
         )
-        #expect(cached.messages == [completed])
+        #expect(cached.messages == [existing, completed])
         #expect(cached.queuedMessages == [])
         #expect(cached.cursor == completed.id)
     }

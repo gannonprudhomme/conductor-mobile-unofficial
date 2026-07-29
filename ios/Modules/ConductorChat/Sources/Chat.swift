@@ -423,6 +423,7 @@ public struct Chat: Sendable {
                         }
                         .order {
                             (
+                                $0.sentAt.asc(nulls: .last),
                                 $0.createdAt,
                                 // SQLite's default BINARY collation preserves the protocol's raw
                                 // UTF-8 tie-break when timestamps match.
