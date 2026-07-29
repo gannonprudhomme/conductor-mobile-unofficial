@@ -75,6 +75,7 @@ struct StreamObservationTests {
         await clock.advance(by: .milliseconds(1))
         await waitUntil { connectionCount.value == 2 }
         #expect(receivedValues.value == [42])
+        await waitUntil { failureCount.value == 2 }
         #expect(failureCount.value == 2)
 
         await clock.advance(by: .milliseconds(999))
@@ -121,13 +122,19 @@ private enum ObservationError: Error {
 
 @MainActor
 private func waitUntil(
-    _ condition: @escaping () -> Bool
+    _ condition: @escaping @MainActor @Sendable () -> Bool
 ) async {
-    for _ in 0..<1_000 {
-        guard !condition() else {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if condition() {
             return
         }
-        await Task.yield()
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if condition() {
+        return
     }
     Issue.record("Timed out waiting for an asynchronous test condition.")
 }

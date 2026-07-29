@@ -138,6 +138,8 @@ struct MainTests {
         } operation: {
             let store = TestStore(initialState: Main.State()) {
                 Main()
+            } withDependencies: {
+                $0.chatSyncClient.runForeground = { }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -152,6 +154,66 @@ struct MainTests {
                 $0.isInBackground = false
             }
             await store.receive(\.workspaces.appBecameActive)
+        }
+    }
+
+    @Test("Chat sync foreground follows app lifecycle")
+    func chatSyncForegroundFollowsLifecycle() async throws {
+        let starts = LockIsolated(0)
+        let cancellations = LockIsolated(0)
+        let continuations = LockIsolated<[AsyncStream<Void>.Continuation]>([])
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.date.now = Date(timeIntervalSinceReferenceDate: 1_000)
+            try $0.bootstrapDatabase()
+        } operation: {
+            let store = TestStore(initialState: Main.State()) {
+                Main()
+            } withDependencies: {
+                $0.chatSyncClient.runForeground = {
+                    starts.withValue { $0 += 1 }
+                    let stream = AsyncStream<Void> { continuation in
+                        continuations.withValue { $0.append(continuation) }
+                        continuation.onTermination = { termination in
+                            if case .cancelled = termination {
+                                cancellations.withValue { $0 += 1 }
+                            }
+                        }
+                    }
+                    for await _ in stream { }
+                }
+            }
+            defer {
+                continuations.value.forEach { $0.finish() }
+            }
+            store.exhaustivity = .off(showSkippedAssertions: false)
+
+            await store.send(.task)
+            await store.receive(\.workspaces.task)
+            await waitUntil { starts.value >= 1 }
+            #expect(starts.value == 1)
+
+            await store.send(.appEnteredBackground) {
+                $0.isInBackground = true
+            }
+            await store.receive(\.workspaces.appEnteredBackground)
+            await waitUntil { cancellations.value >= 1 }
+            #expect(cancellations.value == 1)
+
+            await store.send(.appBecameActive) {
+                $0.isInBackground = false
+            }
+            await store.receive(\.workspaces.appBecameActive)
+            await waitUntil { starts.value >= 2 }
+            #expect(starts.value == 2)
+
+            await store.send(.appEnteredBackground) {
+                $0.isInBackground = true
+            }
+            await store.receive(\.workspaces.appEnteredBackground)
+            await waitUntil { cancellations.value >= 2 }
+            #expect(cancellations.value == 2)
         }
     }
 
@@ -325,6 +387,12 @@ struct MainTests {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
             $0.defaultInMemoryStorage = InMemoryStorage()
+            $0.chatSyncClient.runForeground = { }
+            $0.chatSyncClient.observeSelected = { _ in
+                AsyncStream { continuation in
+                    continuation.yield(.ready)
+                }
+            }
             $0.desktopClient.isRequestLeaseValid = { _ in true }
             $0.desktopClient.observeMessages = { _, _ in
                 AsyncThrowingStream { $0.finish() }
@@ -426,6 +494,7 @@ struct MainTests {
         try await withDependencies {
             $0.defaultDatabase = database
             $0.defaultFileStorage = .inMemory
+            $0.chatSyncClient.runForeground = { }
             $0.desktopClient.observeMessages = { workspaceID, _ in
                 #expect(workspaceID == cachedWorkspace.id)
                 return messages
@@ -537,6 +606,24 @@ private func firstValue<Value: Sendable>(
         group.cancelAll()
         return value
     }
+}
+
+private func waitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if await condition() {
+            return
+        }
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
+    }
+    Issue.record("Timed out waiting for an asynchronous test condition.")
 }
 
 @MainActor
