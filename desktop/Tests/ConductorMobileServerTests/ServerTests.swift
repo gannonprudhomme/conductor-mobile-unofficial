@@ -230,6 +230,7 @@ struct ServerTests {
                     #expect(changed.first?.title == "Updated")
                 }
 
+                let resumeCursor = LockIsolated<Message.ID?>(nil)
                 try await client.ws(
                     "/workspaces/workspace-iso/sessions/session-1/messages"
                 ) { inbound, _, _ in
@@ -241,6 +242,8 @@ struct ServerTests {
                     #expect(initial.isSnapshot)
                     #expect(initial.messages.map(\.id) == ["message-1"])
                     #expect(initial.deletedMessageIDs.isEmpty)
+                    #expect(initial.cursor == "message-1")
+                    #expect(initial.queuedMessages == [])
 
                     try await writer.write { database in
                         try database.execute(
@@ -261,6 +264,8 @@ struct ServerTests {
                     #expect(!changed.isSnapshot)
                     #expect(changed.messages.map(\.id) == ["message-2"])
                     #expect(changed.deletedMessageIDs.isEmpty)
+                    #expect(changed.cursor == "message-2")
+                    #expect(changed.queuedMessages == nil)
 
                     try await writer.write { database in
                         try database.execute(
@@ -279,6 +284,8 @@ struct ServerTests {
                     #expect(updated.messages.map(\.id) == ["message-1"])
                     #expect(updated.messages.first?.content == "Updated.")
                     #expect(updated.deletedMessageIDs.isEmpty)
+                    #expect(updated.cursor == "message-2")
+                    #expect(updated.queuedMessages == nil)
 
                     try await writer.write { database in
                         try database.execute(
@@ -292,6 +299,40 @@ struct ServerTests {
                     #expect(!deleted.isSnapshot)
                     #expect(deleted.messages.isEmpty)
                     #expect(deleted.deletedMessageIDs == ["message-2"])
+                    #expect(deleted.cursor == "message-1")
+                    #expect(deleted.queuedMessages == nil)
+                    resumeCursor.withValue {
+                        $0 = deleted.cursor
+                    }
+                }
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            INSERT INTO session_messages (
+                              id, session_id, role, content, created_at, sent_at
+                            ) VALUES (
+                              'message-3', 'session-1', 'assistant', 'Resumed.',
+                              '2026-07-09T00:00:08Z', '2026-07-09T00:00:09Z'
+                            )
+                            """
+                    )
+                }
+                let cursor = try #require(resumeCursor.value)
+                try await client.ws(
+                    "/workspaces/workspace-iso/sessions/session-1/messages"
+                        + "?after=\(cursor)"
+                ) { inbound, _, _ in
+                    var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                    let suffix = try decode(
+                        MessageSyncEvent.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(!suffix.isSnapshot)
+                    #expect(suffix.messages.map(\.id) == ["message-3"])
+                    #expect(suffix.deletedMessageIDs.isEmpty)
+                    #expect(suffix.cursor == "message-3")
+                    #expect(suffix.queuedMessages == [])
                 }
 
                 #if canImport(AppKit)
@@ -302,6 +343,292 @@ struct ServerTests {
                     #expect(response.status == .ok)
                 }
                 #endif
+            }
+        }
+    }
+
+    @Test("Message streams resume by history ID and fully reconcile live queues")
+    func messageResumeAndQueueReconciliation() async throws {
+        let writer = try testConductorDatabase()
+        let composedID = "message-\u{e9}"
+        let decomposedID = "message-e\u{301}"
+        try await writer.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO workspaces (id, created_at, updated_at)
+                    VALUES ('workspace', '2026-07-29T00:00:00Z', '2026-07-29T00:00:00Z');
+
+                    INSERT INTO sessions (
+                      id, workspace_id, agent_type, created_at, updated_at, status, model
+                    ) VALUES (
+                      'session', 'workspace', 'codex',
+                      '2026-07-29T00:00:00Z', '2026-07-29T00:00:00Z', 'idle', 'gpt-5'
+                    );
+
+                    INSERT INTO session_messages (
+                      id, session_id, role, content, created_at, sent_at, queue_order
+                    ) VALUES
+                      (
+                        ?, 'session', 'assistant', 'Composed',
+                        '2026-07-29T00:00:02Z', '2026-07-29T00:00:03Z', NULL
+                      ),
+                      (
+                        ?, 'session', 'assistant', 'Decomposed',
+                        '2026-07-29T00:00:02Z', '2026-07-29T00:00:03Z', NULL
+                      ),
+                      (
+                        'first', 'session', 'user', 'First',
+                        '2026-07-29T00:00:01Z', '2026-07-29T00:00:01Z', NULL
+                      ),
+                      (
+                        'queued', 'session', 'user', 'Queued',
+                        '2026-07-29T00:00:03Z', NULL, 0
+                      );
+                    """,
+                arguments: [composedID, decomposedID]
+            )
+        }
+        let application = Server.makeApplication(
+            database: writer,
+            port: 0,
+            allowedOrigin: "ws://localhost"
+        )
+
+        try await application.test(.live) { client in
+            let path = "/workspaces/workspace/sessions/session/messages"
+            try await client.ws(path) { inbound, _, _ in
+                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                let initial = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(initial.isSnapshot)
+                #expect(initial.messages.map(\.id) == ["first", decomposedID, composedID])
+                #expect(initial.cursor == composedID)
+                #expect(initial.queuedMessages?.map(\.id) == ["queued"])
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            UPDATE session_messages
+                            SET content = 'Edited queue', queue_order = 2
+                            WHERE id = 'queued'
+                            """
+                    )
+                }
+                let editedQueue = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(!editedQueue.isSnapshot)
+                #expect(editedQueue.messages.isEmpty)
+                #expect(editedQueue.deletedMessageIDs.isEmpty)
+                #expect(editedQueue.queuedMessages?.map(\.content) == ["Edited queue"])
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            INSERT INTO session_messages (
+                              id, session_id, role, content, created_at, queue_order
+                            ) VALUES (
+                              'queued-2', 'session', 'user', 'Second queued',
+                              '2026-07-29T00:00:03Z', 0
+                            )
+                            """
+                    )
+                }
+                let addedQueue = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(addedQueue.queuedMessages?.map(\.id) == ["queued-2", "queued"])
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            UPDATE session_messages
+                            SET queue_order = CASE id
+                              WHEN 'queued' THEN 0
+                              WHEN 'queued-2' THEN 1
+                            END
+                            WHERE id IN ('queued', 'queued-2')
+                            """
+                    )
+                }
+                let reorderedQueue = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(reorderedQueue.queuedMessages?.map(\.id) == ["queued", "queued-2"])
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: "DELETE FROM session_messages WHERE id = 'queued-2'"
+                    )
+                }
+                let deletedQueue = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(deletedQueue.deletedMessageIDs.isEmpty)
+                #expect(deletedQueue.queuedMessages?.map(\.id) == ["queued"])
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            UPDATE session_messages
+                            SET sent_at = '2026-07-29T00:00:04Z', queue_order = NULL
+                            WHERE id = 'queued'
+                            """
+                    )
+                }
+                let completedQueue = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(completedQueue.messages.map(\.id) == ["queued"])
+                #expect(completedQueue.queuedMessages == [])
+                #expect(completedQueue.cursor == "queued")
+
+                let composedQueueID = "queue-\u{e9}"
+                let decomposedQueueID = "queue-e\u{301}"
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            INSERT INTO session_messages (
+                              id, session_id, role, content, created_at, queue_order
+                            ) VALUES (
+                              ?, 'session', 'user', 'Raw queue identity',
+                              '2026-07-29T00:00:05Z', 0
+                            )
+                            """,
+                        arguments: [composedQueueID]
+                    )
+                }
+                _ = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                try await writer.write { database in
+                    try database.execute(
+                        sql: """
+                            UPDATE session_messages
+                            SET id = ?
+                            WHERE id = ?
+                            """,
+                        arguments: [decomposedQueueID, composedQueueID]
+                    )
+                }
+                let rawQueueIDChange = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(rawQueueIDChange.queuedMessages?.map(\.id) == [decomposedQueueID])
+                try await writer.write { database in
+                    try database.execute(
+                        sql: "DELETE FROM session_messages WHERE id = ?",
+                        arguments: [decomposedQueueID]
+                    )
+                }
+                _ = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: "UPDATE session_messages SET content = 'Updated' WHERE id = 'first'"
+                    )
+                }
+                let updatedHistory = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(updatedHistory.messages.map(\.id) == ["first"])
+                #expect(updatedHistory.deletedMessageIDs.isEmpty)
+                #expect(updatedHistory.queuedMessages == nil)
+
+                try await writer.write { database in
+                    try database.execute(
+                        sql: "DELETE FROM session_messages WHERE id = 'first'"
+                    )
+                }
+                let deletedHistory = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(deletedHistory.messages.isEmpty)
+                #expect(deletedHistory.deletedMessageIDs == ["first"])
+                #expect(deletedHistory.queuedMessages == nil)
+            }
+
+            try await writer.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO session_messages (
+                          id, session_id, role, content, created_at, queue_order
+                        ) VALUES (
+                          'queued-current', 'session', 'user', 'Still queued',
+                          '2026-07-29T00:00:05Z', 0
+                        )
+                        """
+                )
+            }
+
+            try await client.ws(path + "?after=message-e%CC%81") { inbound, _, _ in
+                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                let suffix = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(!suffix.isSnapshot)
+                #expect(suffix.messages.map(\.id) == [composedID, "queued"])
+                #expect(suffix.queuedMessages?.map(\.id) == ["queued-current"])
+            }
+
+            for invalidCursor in [
+                "missing",
+                "queued-current",
+            ] {
+                try await client.ws(path + "?after=\(invalidCursor)") { inbound, _, _ in
+                    var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                    let snapshot = try decode(
+                        MessageSyncEvent.self,
+                        from: try #require(await iterator.next())
+                    )
+                    #expect(snapshot.isSnapshot)
+                    #expect(snapshot.queuedMessages?.map(\.id) == ["queued-current"])
+                }
+            }
+
+            try await client.ws(path + "?after=queued") { inbound, _, _ in
+                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                let noNewHistory = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(!noNewHistory.isSnapshot)
+                #expect(noNewHistory.messages.isEmpty)
+                #expect(noNewHistory.cursor == "queued")
+                #expect(noNewHistory.queuedMessages?.map(\.id) == ["queued-current"])
+            }
+
+            try await client.ws(path + "?after=queued&after=first") { inbound, _, _ in
+                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                let duplicateCursor = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(duplicateCursor.isSnapshot)
+            }
+
+            try await client.ws(path + "?after=%") { inbound, _, _ in
+                var iterator = inbound.messages(maxSize: .max).makeAsyncIterator()
+                let malformedCursor = try decode(
+                    MessageSyncEvent.self,
+                    from: try #require(await iterator.next())
+                )
+                #expect(malformedCursor.isSnapshot)
             }
         }
     }

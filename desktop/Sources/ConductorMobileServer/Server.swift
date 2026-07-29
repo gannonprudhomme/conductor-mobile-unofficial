@@ -13,6 +13,10 @@ import SharedConductorData
 import SQLiteData
 
 public enum Server {
+    /// Runs the LAN mobile API and loopback browser-hook listener for the desktop companion.
+    ///
+    /// The executable calls this once. Both listeners retry independently so losing the browser
+    /// hook does not take down mobile reads, and a transient bind failure does not exit the app.
     public static func run(
         databaseURL: URL,
         workspaceUIHookSource: String
@@ -50,6 +54,11 @@ public enum Server {
         }
     }
 
+    /// Builds the LAN API used by every mobile HTTP and WebSocket client endpoint.
+    ///
+    /// `run` starts the returned application; server tests call this directly with an isolated
+    /// database and port. The message WebSocket route delegates its stateful protocol to
+    /// `streamMessages`.
     static func makeApplication( // only non-private for tests
         database: DatabaseQueue,
         // Five seconds tolerates a slow Conductor UI command without holding the request indefinitely.
@@ -195,10 +204,16 @@ public enum Server {
         ) { inbound, outbound, context in
             let workspaceID = try context.requestContext.parameters.require("workspaceID")
             let sessionID = try context.requestContext.parameters.require("sessionID")
+            let requestedResumeCursor = resumeCursor(
+                fromPercentEncodedQuery: context.request.uri.query.map { query in
+                    String(query)
+                }
+            )
             try await streamMessages(
                 inbound: inbound,
                 outbound: outbound,
-                databaseChanges: databaseChanges
+                databaseChanges: databaseChanges,
+                requestedResumeCursor: requestedResumeCursor
             ) {
                 try await database.read { database in
                     try Message.all(forWorkspaceID: workspaceID, sessionID: sessionID)
@@ -358,6 +373,10 @@ public enum Server {
         )
     }
 
+    /// Builds the loopback-only bridge that lets the desktop browser UI execute supported writes.
+    ///
+    /// `run` hosts this separately from the LAN API because its JavaScript and command-result
+    /// endpoints must never be exposed to other devices.
     static func makeWorkspaceUIHookApplication( // only non-private for tests
         hookSource: String,
         port: Int = 3_769
@@ -404,6 +423,10 @@ public enum Server {
         )
     }
 
+    /// Restarts one long-lived listener after transient startup or runtime failures.
+    ///
+    /// `run` wraps both applications with this helper so either listener can recover without
+    /// cancelling its sibling.
     private static func retryingServer(
         name: String,
         onFailure: @Sendable () async -> Void = {},
@@ -425,6 +448,10 @@ public enum Server {
         }
     }
 
+    /// Sends an initial route snapshot and each distinct snapshot after a SQLite invalidation.
+    ///
+    /// Workspace and session WebSocket routes call this because their entire selected state is
+    /// small enough to replace on every change.
     private static func streamSnapshots<Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
@@ -474,6 +501,10 @@ public enum Server {
         }
     }
 
+    /// Sends an initial route snapshot and polls sources SQLite cannot invalidate.
+    ///
+    /// The workspace list uses this when pull-request cache files can change independently of the
+    /// database observer used by `streamSnapshots`.
     private static func streamPolledSnapshots<Snapshot>(
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
@@ -513,9 +544,9 @@ public enum Server {
     }
 
     /// Runs for each accepted `/workspaces/{workspaceID}/sessions/{sessionID}/messages`
-    /// WebSocket connection. It immediately sends the session's complete message history, then
-    /// reloads that history after each database invalidation and sends messages that were added,
-    /// updated, or deleted.
+    /// WebSocket connection. It immediately sends a complete history or the suffix after a valid
+    /// cursor, together with the complete queue. It then reloads selected rows after each database
+    /// invalidation and sends completed-history changes or a changed complete queue.
     ///
     /// This is separate from `streamSnapshots` because message histories continually grow. Sending
     /// only incremental batches after the initial snapshot avoids repeatedly transferring and
@@ -524,6 +555,7 @@ public enum Server {
         inbound: WebSocketInboundStream,
         outbound: WebSocketOutboundWriter,
         databaseChanges: DatabaseChangeObserver,
+        requestedResumeCursor: Message.ID?,
         loadMessages: @escaping @Sendable () async throws -> [Message]
     ) async throws {
         let changes = try await databaseChanges.changes()
@@ -534,31 +566,69 @@ public enum Server {
 
             group.addTask {
                 let encoder = JSONEncoder.conductor
-                var previousMessages = try await loadMessages()
+                var previousState = TranscriptSnapshot(messages: try await loadMessages())
+                let initialEvent: MessageSyncEvent
+                // Only a cursor found in completed history can anchor an incremental suffix.
+                // Missing, malformed, queued, and unknown IDs intentionally take the snapshot
+                // branch so a client with no trustworthy baseline can recover in one event.
+                if let requestedResumeCursor,
+                   let cursorIndex = previousState.history.firstIndex(where: {
+                       RawUTF8Key($0.id) == RawUTF8Key(requestedResumeCursor)
+                   }) {
+                    initialEvent = .changes(
+                        upserting: Array(
+                            previousState.history[
+                                previousState.history.index(after: cursorIndex)...
+                            ]
+                        ),
+                        cursor: previousState.cursor,
+                        queuedMessages: previousState.queue
+                    )
+                } else {
+                    initialEvent = .snapshot(
+                        previousState.history,
+                        cursor: previousState.cursor,
+                        queuedMessages: previousState.queue
+                    )
+                }
                 try await outbound.writeTextMessage(
                     String(
-                        decoding: try encoder.encode(
-                            MessageSyncEvent.snapshot(previousMessages)
-                        ),
+                        decoding: try encoder.encode(initialEvent),
                         as: UTF8.self
                     )
                 )
 
                 for try await _ in changes {
-                    let messages = try await loadMessages()
+                    let state = TranscriptSnapshot(messages: try await loadMessages())
+                    // History is append-only while disconnected for v1, but mutations observed
+                    // on this live connection still need upsert/delete events. Queue state is
+                    // mutable, so any queue difference sends the entire current queue.
                     let previousMessagesByID = Dictionary(
-                        uniqueKeysWithValues: previousMessages.map { ($0.id, $0) }
+                        uniqueKeysWithValues: previousState.history.map {
+                            (RawUTF8Key($0.id), $0)
+                        }
                     )
-                    let messageIDs = Set(messages.map(\.id))
-                    let changedMessages = messages.filter {
-                        previousMessagesByID[$0.id] != $0
+                    let messageIDs = Set(state.history.map {
+                        RawUTF8Key($0.id)
+                    })
+                    let changedMessages = state.history.filter {
+                        guard let previous = previousMessagesByID[RawUTF8Key($0.id)] else {
+                            return true
+                        }
+                        return $0 != previous
                     }
                     let deletedMessageIDs = previousMessagesByID.keys
                         .filter { !messageIDs.contains($0) }
                         .sorted()
-                    previousMessages = messages
+                        .compactMap { previousMessagesByID[$0]?.id }
+                    let queuedMessages = state.hasSameQueue(as: previousState)
+                        ? nil
+                        : state.queue
+                    previousState = state
 
-                    guard !changedMessages.isEmpty || !deletedMessageIDs.isEmpty else {
+                    guard !changedMessages.isEmpty
+                            || !deletedMessageIDs.isEmpty
+                            || queuedMessages != nil else {
                         continue
                     }
 
@@ -567,7 +637,9 @@ public enum Server {
                             decoding: try encoder.encode(
                                 MessageSyncEvent.changes(
                                     upserting: changedMessages,
-                                    deleting: deletedMessageIDs
+                                    deleting: deletedMessageIDs,
+                                    cursor: state.cursor,
+                                    queuedMessages: queuedMessages
                                 )
                             ),
                             as: UTF8.self
@@ -581,6 +653,47 @@ public enum Server {
         }
     }
 
+    /// Extracts the optional `after` ID used by the message WebSocket route.
+    ///
+    /// Returning nil is deliberate: an absent, empty, duplicate, or malformed value
+    /// makes `streamMessages` send a recoverable full snapshot. Parsing manually avoids assigning
+    /// untrusted malformed percent escapes to `URLComponents.percentEncodedQuery`, which can trap.
+    private static func resumeCursor(
+        fromPercentEncodedQuery percentEncodedQuery: String?
+    ) -> Message.ID? {
+        guard let percentEncodedQuery else {
+            return nil
+        }
+
+        var values: [String] = []
+        for item in percentEncodedQuery.split(
+            separator: "&",
+            omittingEmptySubsequences: false
+        ) {
+            let pair = item.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard let name = String(pair[0]).removingPercentEncoding,
+                  name == "after" else {
+                continue
+            }
+            guard pair.count == 2,
+                  let value = String(pair[1]).removingPercentEncoding else {
+                return nil
+            }
+            values.append(value)
+        }
+
+        guard values.count == 1,
+              let cursor = values.first,
+              !cursor.isEmpty else {
+            return nil
+        }
+        return cursor
+    }
+
     /// Requires an exact Origin match. Production passes `nil`, so optional equality
     /// intentionally accepts only requests whose Origin header is absent.
     private static func originIsAllowed(
@@ -590,6 +703,10 @@ public enum Server {
         request.headers[.origin] == allowedOrigin
     }
 
+    /// Resolves the effective model defaults served by the mobile `/settings` route.
+    ///
+    /// `makeApplication` calls this per request so edits to user or managed TOML take effect
+    /// without restarting the companion.
     private static func modelSettings(
         userSettingsURL: URL,
         managedSettingsURL: URL
@@ -624,6 +741,10 @@ public enum Server {
         )
     }
 
+    /// Parses only the TOML keys the mobile settings response needs.
+    ///
+    /// The two-file resolver above calls this for user and managed settings, then applies managed
+    /// precedence. Avoiding a general TOML dependency keeps this narrow desktop helper lightweight.
     private static func modelSettings(from settingsURL: URL) throws -> ParsedModelSettings {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else {
             return ParsedModelSettings()
@@ -698,10 +819,64 @@ public enum Server {
         let defaultReasoningEffort: String
     }
 
+    /// A deterministic partition of the rows selected for one message-stream refresh.
+    ///
+    /// `streamMessages` creates one after every database invalidation, then diffs it against the
+    /// preceding value. The queue predicate is shared with mobile persistence through `isQueued`.
+    private struct TranscriptSnapshot {
+        let history: [Message]
+        let queue: [Message]
+
+        /// The opaque ID mobile sends back as `after`; nil means completed history is empty.
+        var cursor: Message.ID? {
+            history.last?.id
+        }
+
+        /// Separates mutable queue rows and establishes stable protocol order for both partitions.
+        init(messages: [Message]) {
+            history = messages
+                .filter { !$0.isQueued }
+                .sorted(by: Self.historyPrecedes)
+            queue = messages
+                .filter(\.isQueued)
+                .sorted(by: Self.queuePrecedes)
+        }
+
+        /// Compares queues without Swift's Unicode-normalized identifier equality.
+        ///
+        /// A raw-ID replacement must send a queue snapshot even when the two IDs are canonically
+        /// equivalent as Swift strings.
+        func hasSameQueue(as other: Self) -> Bool {
+            queue.count == other.queue.count
+                && zip(queue, other.queue).allSatisfy { lhs, rhs in
+                    RawUTF8Key(lhs.id) == RawUTF8Key(rhs.id) && lhs == rhs
+                }
+        }
+
+        /// Orders completed history by the resume protocol's timestamp/raw-ID rule.
+        private static func historyPrecedes(_ lhs: Message, _ rhs: Message) -> Bool {
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            return RawUTF8Key(lhs.id) < RawUTF8Key(rhs.id)
+        }
+
+        /// Orders mutable rows by queue position with deterministic fallbacks for malformed ties.
+        private static func queuePrecedes(_ lhs: Message, _ rhs: Message) -> Bool {
+            if let lhsOrder = lhs.queueOrder,
+               let rhsOrder = rhs.queueOrder,
+               lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            return historyPrecedes(lhs, rhs)
+        }
+    }
+
     struct RequestContext: Hummingbird.RequestContext, WebSocketRequestContext {
         var coreContext: CoreRequestContextStorage
         let webSocket: WebSocketHandlerReference<Self>
 
+        /// Gives each Hummingbird request the storage and WebSocket upgrade reference it requires.
         init(source: Source) {
             coreContext = .init(source: source)
             webSocket = .init()

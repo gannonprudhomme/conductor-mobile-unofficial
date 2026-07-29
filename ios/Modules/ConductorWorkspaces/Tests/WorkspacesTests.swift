@@ -773,8 +773,13 @@ struct WorkspacesTests {
                 workspace: workspace,
                 repository: repository
             )
+            let requestLease = DesktopRequestLease(
+                baseURL: try #require(URL(string: "http://test:3768")),
+                endpointEpoch: 0
+            )
             let creation = WorkspaceCreationResult(
                 selectedModel: .gpt_5_6_terra,
+                requestLease: requestLease,
                 workspace: item
             )
             var state = Workspaces.State()

@@ -681,11 +681,11 @@ struct ChatTests {
         } operation: {
             let clock = TestClock()
             let (firstStream, firstContinuation) = AsyncThrowingStream<
-                MessageSyncEvent,
+                DesktopMessageObservation,
                 any Error
             >.makeStream()
             let (secondStream, secondContinuation) = AsyncThrowingStream<
-                MessageSyncEvent,
+                DesktopMessageObservation,
                 any Error
             >.makeStream()
             let connectionCount = LockIsolated(0)
@@ -801,7 +801,7 @@ struct ChatTests {
         }
         let baselineChangeCount = try await database.write { $0.totalChangesCount }
         let (stream, continuation) = AsyncThrowingStream<
-            MessageSyncEvent,
+            DesktopMessageObservation,
             any Error
         >.makeStream()
         let store = Store(initialState: Chat.State(session: session)) {
@@ -984,7 +984,7 @@ struct ChatTests {
             turnID: "turn-1"
         )
         let (stream, continuation) = AsyncThrowingStream<
-            MessageSyncEvent,
+            DesktopMessageObservation,
             any Error
         >.makeStream()
 
@@ -1306,6 +1306,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
+            store.exhaustivity = .off
 
             await store.send(
                 .initialMessagesResponse(

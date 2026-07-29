@@ -13,6 +13,7 @@ import SharedConductorData
 import Sharing
 
 extension DesktopClient {
+    /// Builds the workspace-list socket URL used by `observeWorkspaces`.
     static func workspacesWebSocketURL(serverAddress: String) -> URL? {
         serverURL(scheme: "ws", address: serverAddress)?
             .appending(path: "workspaces")
@@ -20,21 +21,35 @@ extension DesktopClient {
 
     static let maximumWebSocketMessageSize = 64 * 1_024 * 1_024
 
-    /// `/workspaces/{workspaceID}/sessions/{sessionID}/messages`
+    /// Builds the message WebSocket URL, optionally resuming after one opaque history ID.
+    ///
+    /// `messageObservationStream` passes the cursor from the same cached snapshot it displays.
+    /// `URLQueryItem` percent-encodes the raw identifier without treating it as a path component.
     static func messagesWebSocketURL(
         serverAddress: String,
         workspaceID: String,
-        sessionID: String
+        sessionID: String,
+        resumeAfterMessageID: Message.ID? = nil
     ) -> URL? {
-        serverURL(scheme: "ws", address: serverAddress)?
+        guard let url = serverURL(scheme: "ws", address: serverAddress)?
             .appending(path: "workspaces")
             .appending(path: workspaceID)
             .appending(path: "sessions")
             .appending(path: sessionID)
-            .appending(path: "messages")
+            .appending(path: "messages") else {
+            return nil
+        }
+        guard let resumeAfterMessageID,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        components.queryItems = [
+            URLQueryItem(name: "after", value: resumeAfterMessageID)
+        ]
+        return components.url
     }
 
-    /// `/workspaces/{workspaceID}/sessions`
+    /// Builds the session-list socket URL used by `observeSessions`.
     static func sessionsWebSocketURL(serverAddress: String, workspaceID: String) -> URL? {
         serverURL(scheme: "ws", address: serverAddress)?
             .appending(path: "workspaces")
@@ -63,14 +78,15 @@ extension DesktopClient {
         let sharedServerAddress = $desktopServerAddress
 
         let values = Observations { sharedServerAddress.wrappedValue }
+            .map { DesktopLeaseAuthority.shared.transition(to: $0) }
             .removeDuplicates()
-            .compactMap { $0 }
-            // When the address actually changes, `flatMapLatest` cancels the old WebSocket stream
-            // and subscribes to a new one.
-            .flatMapLatest { (serverAddress: String) -> AsyncThrowingStream<Value, any Error> in
-                guard let url = makeURL(serverAddress) else {
+            .flatMapLatest { lifecycle -> AsyncThrowingStream<Value, any Error> in
+                guard case let .configured(endpoint, _) = lifecycle,
+                      let url = makeURL(endpoint.canonicalAddress) else {
                     return AsyncThrowingStream { continuation in
-                        continuation.finish(throwing: DesktopClientError.invalidServerAddress)
+                        continuation.finish(
+                            throwing: DesktopClientError.invalidServerAddress
+                        )
                     }
                 }
 
@@ -113,7 +129,159 @@ extension DesktopClient {
         }
     }
 
-    // Only non-private for tests
+    /// Observes one desktop transcript across persisted server-address changes.
+    ///
+    /// Unlike workspace/session observations, message frames after the initial response are
+    /// incremental and therefore use an unbounded buffer. Address changes replace the socket while
+    /// the existing durable transcript remains available as the single paired desktop's cache.
+    static func observeMessages(
+        workspaceID: Workspace.ID,
+        sessionID: Session.ID
+    ) -> AsyncThrowingStream<DesktopMessageObservation, any Error> {
+        @Shared(.desktopServerAddress) var desktopServerAddress
+        let sharedServerAddress = $desktopServerAddress
+        let values = Observations { sharedServerAddress.wrappedValue }
+            .map { DesktopLeaseAuthority.shared.transition(to: $0) }
+            .removeDuplicates()
+            .flatMapLatest { lifecycle in
+                messageObservationStream(
+                    lifecycle: lifecycle,
+                    workspaceID: workspaceID,
+                    sessionID: sessionID
+                )
+            }
+
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let producer = Task {
+                do {
+                    for try await value in values {
+                        if case .terminated = continuation.yield(value) {
+                            return
+                        }
+                    }
+                } catch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                producer.cancel()
+            }
+        }
+    }
+
+    /// Runs the cache/resume lifecycle for one endpoint identity emitted by `observeMessages`.
+    ///
+    /// It acquires a connection lease before reading the cache, emits a durable snapshot
+    /// immediately, then resumes from that exact snapshot's cursor. Each received event is
+    /// committed before it reaches Chat, so database observation remains the UI source of truth.
+    private static func messageObservationStream(
+        lifecycle: DesktopEndpointLifecycle,
+        workspaceID: Workspace.ID,
+        sessionID: Session.ID
+    ) -> AsyncThrowingStream<DesktopMessageObservation, any Error> {
+        @Dependency(\.defaultDatabase) var database
+        @Dependency(\.urlSession) var urlSession
+        let databaseWriter = database
+        let urlSessionConfiguration = urlSession.configuration
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let producer = Task {
+                guard case let .configured(endpoint, endpointEpoch) = lifecycle else {
+                    continuation.finish()
+                    return
+                }
+
+                let resumeKey = ResumeKey(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID
+                )
+                do {
+                    // Beginning the replacement connection first invalidates any older generation.
+                    // That older socket therefore cannot advance the cache between this read and
+                    // the `after` value derived from the same snapshot.
+                    guard let lease = DesktopLeaseAuthority.shared.beginConnection(
+                        resumeKey: resumeKey,
+                        endpointEpoch: endpointEpoch
+                    ) else {
+                        continuation.finish()
+                        return
+                    }
+
+                    let cachedTranscriptSnapshot = try await DesktopTranscriptStore
+                        .cachedTranscriptSnapshot(
+                            workspaceID: workspaceID,
+                            sessionID: sessionID,
+                            database: databaseWriter
+                        )
+                    if let cachedTranscriptSnapshot {
+                        continuation.yield(.persisted(cachedTranscriptSnapshot))
+                    }
+
+                    var resumeCursor = cachedTranscriptSnapshot?.cursor
+                    reconnectWithoutCursor: while !Task.isCancelled {
+                        guard let url = messagesWebSocketURL(
+                            serverAddress: endpoint.canonicalAddress,
+                            workspaceID: workspaceID,
+                            sessionID: sessionID,
+                            resumeAfterMessageID: resumeCursor
+                        ) else {
+                            throw DesktopClientError.invalidServerAddress
+                        }
+                        let stream = webSocketStream(
+                            MessageSyncEvent.self,
+                            bufferingPolicy: .unbounded,
+                            using: WebSocketTaskClient(
+                                url: url,
+                                configuration: localNetworkConfiguration(
+                                    from: urlSessionConfiguration
+                                )
+                            )
+                        )
+                        for try await event in stream {
+                            do {
+                                let appliedEvent = try await DesktopTranscriptStore
+                                    .applySyncEvent(
+                                        event,
+                                        lease: lease,
+                                        database: databaseWriter
+                                )
+                                resumeCursor = appliedEvent.cursor
+                                continuation.yield(.persisted(appliedEvent))
+                            } catch DesktopTranscriptStore.ApplyError.incompleteBaseline {
+                                // A stale/missing baseline cannot safely accept a suffix. Reopen
+                                // without `after`; the server then sends a complete replacement.
+                                resumeCursor = nil
+                                continue reconnectWithoutCursor
+                            } catch DesktopTranscriptStore.ApplyError.missingSession {
+                                continuation.finish()
+                                return
+                            } catch DesktopTranscriptStore.ApplyError.staleLease {
+                                continuation.finish()
+                                return
+                            }
+                        }
+                        continuation.finish()
+                        return
+                    }
+                } catch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                producer.cancel()
+            }
+        }
+    }
+
+    /// Converts one callback-style WebSocket task into the async stream used by every observer.
+    ///
+    /// This stays internal so transport tests can inject `WebSocketTaskClient`; production callers
+    /// use `observe` or `messageObservationStream` instead.
     static func webSocketStream<Value: Decodable & Sendable>(
         _ type: Value.Type,
         bufferingPolicy: AsyncThrowingStream<
@@ -182,6 +350,7 @@ extension DesktopClient {
         fileprivate var receive: @Sendable () async throws -> URLSessionWebSocketTask.Message
         fileprivate var resume: @Sendable () -> Void
 
+        /// Wraps an existing Foundation task when its owning session is managed elsewhere.
         init(_ task: URLSessionWebSocketTask) {
             task.maximumMessageSize = DesktopClient.maximumWebSocketMessageSize
             self.cancel = {
@@ -195,6 +364,7 @@ extension DesktopClient {
             }
         }
 
+        /// Creates the production task and retains its session for the socket's full lifetime.
         init(url: URL, configuration: URLSessionConfiguration) {
             let session = URLSession(configuration: configuration)
             let task = session.webSocketTask(with: url)
@@ -211,7 +381,8 @@ extension DesktopClient {
             }
         }
 
-        init( // only exists for tests
+        /// Supplies deterministic transport operations to `webSocketStream` tests.
+        init(
             cancel: @escaping @Sendable () -> Void,
             receive: @escaping @Sendable () async throws -> URLSessionWebSocketTask.Message,
             resume: @escaping @Sendable () -> Void
@@ -224,6 +395,7 @@ extension DesktopClient {
 }
 
 fileprivate extension DesktopClient {
+    /// Normalizes Foundation's binary/text WebSocket frames before JSON decoding.
     static func data(from message: URLSessionWebSocketTask.Message) throws -> Data {
         switch message {
         case let .data(data):

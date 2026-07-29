@@ -53,6 +53,7 @@ public struct Main: Sendable {
 
     @Dependency(\.cloudCredentialClient) var cloudCredentialClient
     @Dependency(\.defaultDatabase) var database
+    @Dependency(\.desktopClient) var desktopClient
 
     public init() {
     }
@@ -148,6 +149,11 @@ public struct Main: Sendable {
                     return .none
 
                 case let .workspaces(.workspaceCreated(creation)):
+                    guard desktopClient.isRequestLeaseValid(
+                        lease: creation.requestLease
+                    ) else {
+                        return .none
+                    }
                     state.path.append(
                         .workspaceChat(
                             WorkspaceChat.State(

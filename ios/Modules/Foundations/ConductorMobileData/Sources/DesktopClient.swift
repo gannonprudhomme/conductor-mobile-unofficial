@@ -17,6 +17,8 @@ public struct DesktopClient: Sendable {
     public typealias MessageMode = MessageSendMode
 
     public var archiveWorkspace: @Sendable (_ workspaceID: String) async throws -> Void
+    /// Captures the current endpoint identity for a multi-step request/persistence workflow.
+    public var acquireRequestLease: @Sendable () throws -> DesktopRequestLease
     public var beginQueuedMessageEdit: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageID: Message.ID) async throws -> QueuedMessageEdit
     public var checkConnection: @Sendable (_ serverAddress: String) async throws -> Void
     public var closeSession: @Sendable (_ workspaceID: String, _ sessionID: String) async throws -> Void
@@ -32,7 +34,24 @@ public struct DesktopClient: Sendable {
     public var fetchModelSettings: @Sendable () async throws -> ModelSettings = {
         throw CancellationError()
     }
-    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<MessageSyncEvent, any Error> = { _, _ in
+    /// Rejects delayed feature actions after the configured desktop endpoint changes.
+    ///
+    /// The dependency macro requires a non-throwing default. `false` fails closed so a test that
+    /// forgets to provide epoch behavior cannot accidentally accept stale endpoint data.
+    public var isRequestLeaseValid: @Sendable (_ lease: DesktopRequestLease) -> Bool = { _ in
+        false
+    }
+    /// Persists a created session only while its originating desktop endpoint remains current.
+    public var persistCreatedSession: @Sendable (
+        _ session: Session,
+        _ requestLease: DesktopRequestLease
+    ) async throws -> Void
+    /// Persists a created workspace/session pair only while its originating endpoint remains current.
+    public var persistCreatedWorkspace: @Sendable (
+        _ createdWorkspace: CreatedWorkspace,
+        _ requestLease: DesktopRequestLease
+    ) async throws -> Void
+    public var observeMessages: @Sendable (_ workspaceID: String, _ sessionID: String) -> AsyncThrowingStream<DesktopMessageObservation, any Error> = { _, _ in
         AsyncThrowingStream { $0.finish() }
     }
     public var observeSessions: @Sendable (_ workspaceID: String) -> AsyncThrowingStream<[Session], any Error> = { _ in
@@ -162,6 +181,7 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
     case invalidResponse
     case invalidServerAddress
     case requestFailed(statusCode: Int, message: String)
+    case staleRequestLease
 
     public var errorDescription: String? {
         switch self {
@@ -177,6 +197,9 @@ public enum DesktopClientError: Error, Equatable, LocalizedError, Sendable {
             } else {
                 "The desktop service returned HTTP \(statusCode): \(message)"
             }
+
+        case .staleRequestLease:
+            "The desktop configuration changed before the request completed."
         }
     }
 
@@ -220,6 +243,19 @@ extension DesktopClient: DependencyKey {
             _ = try await patch(
                 WorkspacePatchBody(shouldArchive: true),
                 at: workspaceURL(workspaceID: workspaceID)
+            )
+        } acquireRequestLease: {
+            // Capture the canonical endpoint and epoch together. Feature workflows carry this
+            // lease through every request and synchronous persistence boundary.
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            let lifecycle = DesktopLeaseAuthority.shared.transition(to: desktopServerAddress)
+            guard case let .configured(endpoint, endpointEpoch) = lifecycle,
+                  let baseURL = endpoint.url(scheme: "http") else {
+                throw DesktopClientError.invalidServerAddress
+            }
+            return DesktopRequestLease(
+                baseURL: baseURL,
+                endpointEpoch: endpointEpoch
             )
         } beginQueuedMessageEdit: { workspaceID, sessionID, messageID in
             guard let edit = try await post(
@@ -289,18 +325,37 @@ extension DesktopClient: DependencyKey {
                 } ?? defaultModel.defaultReasoningEffort,
                 isFastModeEnabled: settings.defaultFastMode ?? false
             )
-        } observeMessages: { workspaceID, sessionID in
-            // Messages are the only unbounded observation: frames after the initial snapshot
-            // contain incremental changes, so dropping one could permanently miss an update.
-            // Workspace and session frames are complete snapshots and can safely keep only the
-            // newest pending value.
-            observe(MessageSyncEvent.self, bufferingPolicy: .unbounded) { serverAddress in
-                messagesWebSocketURL(
-                    serverAddress: serverAddress,
-                    workspaceID: workspaceID,
-                    sessionID: sessionID
-                )
+        } isRequestLeaseValid: { lease in
+            DesktopLeaseAuthority.shared.isValid(lease)
+        } persistCreatedSession: { session, requestLease in
+            @Dependency(\.defaultDatabase) var database
+            try await database.write { database in
+                let persistenceResult: Void? = try requestLease.performIfCurrent {
+                    try Session.upsert { session }.execute(database)
+                }
+                guard persistenceResult != nil else {
+                    throw DesktopClientError.staleRequestLease
+                }
             }
+        } persistCreatedWorkspace: { createdWorkspace, requestLease in
+            @Dependency(\.defaultDatabase) var database
+            try await database.write { database in
+                let persistenceResult: Void? = try requestLease.performIfCurrent {
+                    try Workspace.upsert {
+                        createdWorkspace.workspace
+                    }
+                    .execute(database)
+                    try Session.upsert {
+                        createdWorkspace.session
+                    }
+                    .execute(database)
+                }
+                guard persistenceResult != nil else {
+                    throw DesktopClientError.staleRequestLease
+                }
+            }
+        } observeMessages: { workspaceID, sessionID in
+            observeMessages(workspaceID: workspaceID, sessionID: sessionID)
         } observeSessions: { workspaceID in
             observe([Session].self) { serverAddress in
                 sessionsWebSocketURL(
@@ -419,6 +474,14 @@ extension DesktopClient: DependencyKey {
     }
 
     private static func baseURL() throws -> URL {
+        // A task-local lease pins multi-request workflows to their starting endpoint. Checking it
+        // before each request prevents a later step from silently switching to a new desktop.
+        if let lease = DesktopRequestLeaseContext.current {
+            guard DesktopLeaseAuthority.shared.isValid(lease) else {
+                throw DesktopClientError.staleRequestLease
+            }
+            return lease.baseURL
+        }
         @Shared(.desktopServerAddress) var desktopServerAddress
         guard let desktopServerAddress,
               let baseURL = serverURL(scheme: "http", address: desktopServerAddress)
@@ -428,19 +491,9 @@ extension DesktopClient: DependencyKey {
         return baseURL
     }
 
-    /// `scheme`` is either `http` or `ws`
+    /// Builds a base URL from the settings address after canonical endpoint validation.
     static func serverURL(scheme: String, address: String) -> URL? {
-        guard var components = URLComponents(string: "\(scheme)://\(address)"),
-              let host = components.host,
-              !host.isEmpty
-        else {
-            return nil
-        }
-
-        if components.port == nil {
-            components.port = defaultServerPort
-        }
-        return components.url
+        DesktopEndpoint(rawAddress: address)?.url(scheme: scheme)
     }
 
     static func ping(serverAddress: String) async throws {
