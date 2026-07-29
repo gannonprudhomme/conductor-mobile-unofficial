@@ -138,6 +138,8 @@ struct MainTests {
         } operation: {
             let store = TestStore(initialState: Main.State()) {
                 Main()
+            } withDependencies: {
+                $0.chatSyncClient.runForeground = { }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -163,6 +165,7 @@ struct MainTests {
 
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.date.now = Date(timeIntervalSinceReferenceDate: 1_000)
             try $0.bootstrapDatabase()
         } operation: {
             let store = TestStore(initialState: Main.State()) {
@@ -188,36 +191,28 @@ struct MainTests {
 
             await store.send(.task)
             await store.receive(\.workspaces.task)
-            for _ in 0..<1_000 where starts.value < 1 {
-                await Task.yield()
-            }
+            await waitUntil { starts.value >= 1 }
             #expect(starts.value == 1)
 
             await store.send(.appEnteredBackground) {
                 $0.isInBackground = true
             }
             await store.receive(\.workspaces.appEnteredBackground)
-            for _ in 0..<1_000 where cancellations.value < 1 {
-                await Task.yield()
-            }
+            await waitUntil { cancellations.value >= 1 }
             #expect(cancellations.value == 1)
 
             await store.send(.appBecameActive) {
                 $0.isInBackground = false
             }
             await store.receive(\.workspaces.appBecameActive)
-            for _ in 0..<1_000 where starts.value < 2 {
-                await Task.yield()
-            }
+            await waitUntil { starts.value >= 2 }
             #expect(starts.value == 2)
 
             await store.send(.appEnteredBackground) {
                 $0.isInBackground = true
             }
             await store.receive(\.workspaces.appEnteredBackground)
-            for _ in 0..<1_000 where cancellations.value < 2 {
-                await Task.yield()
-            }
+            await waitUntil { cancellations.value >= 2 }
             #expect(cancellations.value == 2)
         }
     }
@@ -797,6 +792,24 @@ private func firstValue<Value: Sendable>(
         group.cancelAll()
         return value
     }
+}
+
+private func waitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+
+    while clock.now < deadline {
+        if await condition() {
+            return
+        }
+        try? await clock.sleep(for: .milliseconds(10))
+    }
+    if await condition() {
+        return
+    }
+    Issue.record("Timed out waiting for an asynchronous test condition.")
 }
 
 @MainActor
