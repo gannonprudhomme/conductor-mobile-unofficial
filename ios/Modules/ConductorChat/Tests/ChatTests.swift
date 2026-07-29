@@ -105,8 +105,8 @@ struct ChatTests {
                         isFastModeEnabled: false
                     )
                 }
-                $0.desktopClient.observeMessages = { _, _ in
-                    AsyncThrowingStream { _ in }
+                $0.chatSyncClient.observeSelected = { _ in
+                    AsyncStream { _ in }
                 }
             }
             let queuedRowFrame = LockIsolated<CGRect?>(nil)
@@ -662,6 +662,7 @@ struct ChatTests {
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             } withDependencies: {
+                $0.desktopClient.fetchModelSettings = { throw CancellationError() }
                 $0.chatSyncClient.observeSelected = { selectedSessionID in
                     #expect(selectedSessionID == session.id)
                     return stream
@@ -730,6 +731,7 @@ struct ChatTests {
             Chat()
         } withDependencies: {
             $0.defaultDatabase = database
+            $0.desktopClient.fetchModelSettings = { throw CancellationError() }
             $0.chatSyncClient.observeSelected = { selectedSessionID in
                 #expect(selectedSessionID == session.id)
                 return stream
@@ -759,6 +761,10 @@ struct ChatTests {
             try Message.upsert { updatedEarlyMessage }.execute(db)
         }
         continuation.yield(.ready)
+        let loadingDeadline = clock.now.advanced(by: .seconds(5))
+        while store.state.isLoadingMessages, clock.now < loadingDeadline {
+            await Task.yield()
+        }
         while humanMessageContent(in: store.state, id: earlyMessage.id)
             != updatedEarlyMessage.content,
               clock.now < deadline {
@@ -917,6 +923,7 @@ struct ChatTests {
                 Chat()
             } withDependencies: {
                 $0.defaultDatabase = database
+                $0.desktopClient.fetchModelSettings = { throw CancellationError() }
                 $0.chatSyncClient.observeSelected = { _ in stream }
             }
 
