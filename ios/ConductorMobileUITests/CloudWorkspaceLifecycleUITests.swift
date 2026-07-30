@@ -54,22 +54,27 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         XCTAssertTrue(createButton.isEnabled)
         createButton.tap()
 
-        let localButton = app.buttons["Local"]
-        let cloudButton = app.buttons["Cloud"]
+        let workspaceLocationMenu = app.buttons["Workspace location"]
         XCTAssertTrue(
-            localButton.waitForExistence(timeout: 15),
-            "Local creation was not available for the shared repository."
+            workspaceLocationMenu.waitForExistence(timeout: 15),
+            "Cloud org creation was not available for the shared repository."
         )
-        XCTAssertTrue(
-            cloudButton.waitForExistence(timeout: 15),
-            "Cloud creation was not available for the shared repository."
-        )
+        XCTAssertEqual(workspaceLocationMenu.value as? String, "Cloud org")
         XCTAssertEqual(
             app.buttons["Repository"].value as? String,
             repositoryName
         )
 
-        cloudButton.tap()
+        workspaceLocationMenu.tap()
+
+        let localButton = app.buttons["Local"]
+        XCTAssertTrue(localButton.waitForExistence(timeout: 5))
+        localButton.tap()
+        XCTAssertEqual(workspaceLocationMenu.value as? String, "Local")
+
+        workspaceLocationMenu.tap()
+        app.buttons["Cloud org"].tap()
+        XCTAssertEqual(workspaceLocationMenu.value as? String, "Cloud org")
         XCTAssertEqual(
             app.buttons["Repository"].value as? String,
             repositoryName

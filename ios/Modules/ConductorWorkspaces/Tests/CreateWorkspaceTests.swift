@@ -50,6 +50,40 @@ struct CreateWorkspaceTests {
         }
     }
 
+    @Test("Cloud org is the default when Cloud creation is available")
+    func cloudOrganizationDefault() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let local = Repository.preview(id: "local")
+            let firstCloud = Repository.preview(id: "first-cloud")
+            let selectedCloud = Repository.preview(id: "selected-cloud")
+            let state = CreateWorkspace.State(
+                repositories: [local],
+                cloudCandidates: [
+                    CloudWorkspaceCreationCandidate(
+                        repository: firstCloud,
+                        projectID: "first-project",
+                        repositoryURL: nil
+                    ),
+                    CloudWorkspaceCreationCandidate(
+                        repository: selectedCloud,
+                        projectID: "selected-project",
+                        repositoryURL: nil
+                    ),
+                ],
+                selectedRepositoryIDFilter: selectedCloud.id
+            )
+
+            expectNoDifference(state.mode, .cloud)
+            expectNoDifference(state.selectedRepositoryID, selectedCloud.id)
+
+            let localState = CreateWorkspace.State(repositories: [local])
+            expectNoDifference(localState.mode, .local)
+            expectNoDifference(localState.selectedRepositoryID, local.id)
+        }
+    }
+
     @Test("Create sends the selected repository, model, and Fast Mode")
     func createWorkspace() async throws {
         let repository = Repository.preview()
