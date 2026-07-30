@@ -1870,6 +1870,29 @@ public struct WorkspaceChatView: View {
     }
 
     public var body: some View {
+        presentedWorkspaceContent
+            .sensoryFeedback(.error, trigger: store.destination) { _, destination in
+                destination?.alert != nil
+            }
+            .sensoryFeedback(.selection, trigger: store.transcriptCopyCount)
+            .onChange(of: store.transcriptCopyCount) {
+                UIPasteboard.general.string = store.conciseTranscript
+            }
+            .sheet(
+                item: $store.scope(
+                    state: \.destination?.archivedSessions,
+                    action: \.destination.archivedSessions
+                )
+            ) { archivedSessionsStore in
+                ArchivedSessionsView(store: archivedSessionsStore)
+                    .presentationDetents([.medium, .large])
+            }
+            .task {
+                await store.send(.task).finish()
+            }
+    }
+
+    private var workspaceContent: some View {
         ChatTaskOwner(store: store) {
             if let chatStore = store.scope(state: \.chat, action: \.chat) {
                 ChatView(
@@ -1936,77 +1959,67 @@ public struct WorkspaceChatView: View {
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(.theme(.background))
-        .alert(
-            "Rename branch",
-            isPresented: isRenameBranchPresented
-        ) {
-            TextField("Branch name", text: $store.branchNameDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .tint(.theme(.accent))
+    }
 
-            Button("Rename", role: .confirm) {
-                store.send(.renameBranchSubmitted)
+    private var presentedWorkspaceContent: some View {
+        workspaceContent
+            .alert(
+                "Rename branch",
+                isPresented: isRenameBranchPresented
+            ) {
+                TextField("Branch name", text: $store.branchNameDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .tint(.theme(.accent))
+
+                Button("Rename", role: .confirm) {
+                    store.send(.renameBranchSubmitted)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!store.canRenameBranch)
+
+                Button("Cancel", role: .cancel) { }
             }
-            .keyboardShortcut(.defaultAction)
-            .disabled(!store.canRenameBranch)
+            .alert(
+                "Rename chat",
+                isPresented: isRenameSessionPresented
+            ) {
+                TextField("Chat name", text: $store.sessionTitleDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .tint(.theme(.accent))
 
-            Button("Cancel", role: .cancel) { }
-        }
-        .alert(
-            "Rename chat",
-            isPresented: isRenameSessionPresented
-        ) {
-            TextField("Chat name", text: $store.sessionTitleDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .tint(.theme(.accent))
+                Button("Rename", role: .confirm) {
+                    store.send(.renameSessionSubmitted)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!store.canRenameSession)
 
-            Button("Rename", role: .confirm) {
-                store.send(.renameSessionSubmitted)
+                Button("Cancel", role: .cancel) { }
             }
-            .keyboardShortcut(.defaultAction)
-            .disabled(!store.canRenameSession)
+            .alert(
+                "Rename workspace",
+                isPresented: isRenameWorkspacePresented
+            ) {
+                TextField("Workspace name", text: $store.workspaceNameDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .tint(.theme(.accent))
 
-            Button("Cancel", role: .cancel) { }
-        }
-        .alert(
-            "Rename workspace",
-            isPresented: isRenameWorkspacePresented
-        ) {
-            TextField("Workspace name", text: $store.workspaceNameDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .tint(.theme(.accent))
+                Button("Rename", role: .confirm) {
+                    store.send(.renameWorkspaceSubmitted)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!store.canRenameWorkspace)
 
-            Button("Rename", role: .confirm) {
-                store.send(.renameWorkspaceSubmitted)
+                Button("Cancel", role: .cancel) { }
             }
-            .keyboardShortcut(.defaultAction)
-            .disabled(!store.canRenameWorkspace)
-
-            Button("Cancel", role: .cancel) { }
-        }
-        .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
-        .sensoryFeedback(.error, trigger: store.destination) { _, destination in
-            destination?.alert != nil
-        }
-        .sensoryFeedback(.selection, trigger: store.transcriptCopyCount)
-        .onChange(of: store.transcriptCopyCount) {
-            UIPasteboard.general.string = store.conciseTranscript
-        }
-        .sheet(
-            item: $store.scope(
-                state: \.destination?.archivedSessions,
-                action: \.destination.archivedSessions
+            .alert(
+                $store.scope(
+                    state: \.destination?.alert,
+                    action: \.destination.alert
+                )
             )
-        ) { archivedSessionsStore in
-            ArchivedSessionsView(store: archivedSessionsStore)
-                .presentationDetents([.medium, .large])
-        }
-        .task {
-            await store.send(.task).finish()
-        }
     }
 
     private var shouldShowLoadingIndicator: Bool {
