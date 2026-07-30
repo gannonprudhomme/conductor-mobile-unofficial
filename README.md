@@ -92,8 +92,6 @@ Our SQLite tables are generally a 1:1 match to Conductor's schema, though we oft
 
 ## Development
 
-Your agent can probably figure it out, but I'll leave this in here in case you want to read. For the most part the `mise` scripts is what my agent uses. I also recommend installing [Xcodebuildmcp](https://github.com/getsentry/XcodeBuildMCP) as it gives easy access for your agent to "see", among other things, though it's not strictly necessary.
-
 Generate both native projects and open them in Xcode with:
 
 ```sh

@@ -238,7 +238,7 @@ public struct Main: Sendable {
                                     selectedModel: creation.selectedModel,
                                     selectedReasoningEffort: creation.selectedReasoningEffort,
                                     shouldPresentPersistedChatImmediately: true,
-                                    shouldFocusMessageField: true
+                                    shouldFocusMessageField: false
                                 )
                             )
                         )

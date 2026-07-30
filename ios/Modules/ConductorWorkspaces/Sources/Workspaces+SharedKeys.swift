@@ -7,6 +7,7 @@
 
 import ConductorMobileData
 import Foundation
+import SharedConductorData
 import Sharing
 import SwiftUI
 
@@ -64,7 +65,44 @@ extension SharedKey where Self == FileStorageKey<String>.Default {
     }
 }
 
+extension SharedKey where Self == FileStorageKey<CreateWorkspace.Mode?>.Default {
+    /// The workspace location the user last created from, so the picker reopens where they left off.
+    static var createWorkspaceMode: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "create-workspace-mode.json")
+            ),
+            default: nil,
+        ]
+    }
+}
+
+extension SharedKey where Self == FileStorageKey<Session.Model?>.Default {
+    /// The model the user last selected while creating a workspace.
+    static var createWorkspaceModel: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "create-workspace-model.json")
+            ),
+            default: nil,
+        ]
+    }
+}
+
 extension SharedKey where Self == FileStorageKey<String?>.Default {
+    /// The repository the user last created a workspace for, across both locations.
+    static var createWorkspaceRepositoryID: Self {
+        Self[
+            .fileStorage(
+                .applicationSupportDirectory
+                    .appending(component: "create-workspace-repository-id.json")
+            ),
+            default: nil,
+        ]
+    }
+
     static var selectedRepositoryID: Self {
         Self[
             .fileStorage(
