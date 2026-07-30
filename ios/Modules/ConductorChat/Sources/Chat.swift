@@ -190,11 +190,36 @@ public struct Chat: Sendable {
         }
 
         mutating func beginSendCycle(attemptID: UUID) {
+            guard workCycle.attemptID != attemptID else {
+                return
+            }
             workCycle = .working(
                 attemptID: attemptID,
                 baselineTurnID: turns?.last?.id,
                 correlatedTurnID: nil
             )
+        }
+
+        mutating func beginPendingSendCycleIfNeeded() -> Bool {
+            guard !workCycle.isWorking,
+                  let attempt = displayedDeliveryAttempts.last(where: {
+                      guard $0.messageMode == .sent,
+                            !hasCanonicalMessage(for: $0) else {
+                          return false
+                      }
+                      return switch $0.deliveryState {
+                      case .ready, .dispatching, .accepted:
+                          true
+                      case .acknowledged, .rejected, .unknown:
+                          false
+                      default:
+                          false
+                      }
+                  }) else {
+                return false
+            }
+            beginSendCycle(attemptID: attempt.attemptID)
+            return true
         }
 
         mutating func endSendCycle(attemptID: UUID) {
@@ -1100,6 +1125,9 @@ public struct Chat: Sendable {
             state.endSendCycle(attemptID: attempt.attemptID)
         }
         reconcileCanonicalMessages(Array(state.messages), state: &state)
+        if state.beginPendingSendCycleIfNeeded() {
+            state.updateRows()
+        }
 
         for attempt in attempts
         where attempt.messageMode == .queued

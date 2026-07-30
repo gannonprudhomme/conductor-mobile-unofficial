@@ -1206,38 +1206,52 @@ struct ChatTests {
         }
     }
 
-    @Test("An accepted local send starts elapsed time before session status refreshes")
-    func localSendStartsProgressImmediately() throws {
-        try withDependencies {
+    @Test("A pending persisted send starts elapsed time before session status refreshes")
+    func pendingPersistedSendStartsProgressImmediately() async throws {
+        try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
             let session = try makeSession()
-            let attemptID = UUID(0)
             let startedAt = Date(timeIntervalSince1970: 1_783_558_800)
-            let attempt = makeDeliveryAttempt(
-                session: session,
-                content: "Run it",
-                attemptID: attemptID,
-                state: .ready,
-                createdAt: startedAt
-            )
-            var state = Chat.State(session: session)
-            state.recentlyEnqueuedAttempt = attempt
+            for (index, deliveryState) in [
+                MessageDeliveryAttempt.State.ready,
+                .dispatching,
+                .accepted,
+            ].enumerated() {
+                let attemptID = UUID(index)
+                let attempt = makeDeliveryAttempt(
+                    session: session,
+                    content: "Run it",
+                    attemptID: attemptID,
+                    state: deliveryState,
+                    createdAt: startedAt
+                )
+                let store = TestStore(
+                    initialState: Chat.State(session: session)
+                ) {
+                    Chat()
+                }
 
-            state.beginSendCycle(attemptID: attemptID)
-            state.updateRows()
+                await store.send(.deliveryAttemptsUpdated([attempt])) {
+                    $0.deliveryAttempts = [attempt]
+                    $0.turns = []
+                    $0.beginSendCycle(attemptID: attemptID)
+                    $0.updateRows()
+                }
 
-            #expect(state.displayedSessionStatus == .idle)
-            expectNoDifference(
-                try #require(state.rows).map(DisplayedRowProjection.init),
-                [
-                    .human(id: attemptID.uuidString, content: "Run it"),
-                    .turnInProgress(
-                        id: attemptID.uuidString,
-                        startedAt: startedAt
-                    ),
-                ]
-            )
+                #expect(store.state.displayedSessionStatus == .idle)
+                expectNoDifference(
+                    try #require(store.state.rows)
+                        .map(DisplayedRowProjection.init),
+                    [
+                        .human(id: attemptID.uuidString, content: "Run it"),
+                        .turnInProgress(
+                            id: attemptID.uuidString,
+                            startedAt: startedAt
+                        ),
+                    ]
+                )
+            }
         }
     }
 
