@@ -764,13 +764,12 @@ public struct WorkspaceChat: Sendable {
                 state.sessionIDsBeforeCreation = nil
                 if !state.isQueuedMessageEditLocked,
                    state.chat?.sessionID != session.id {
-                    state.chat = Chat.State(
+                    state.chat = Self.newlyCreatedChat(
                         session: session,
                         isCloudHosted: state.source == .cloud,
                         mutationRoute: result.attemptID == nil
                             ? state.mutationRoute
-                            : nil,
-                        shouldFocusMessageField: true
+                            : nil
                     )
                 }
                 return .none
@@ -792,11 +791,12 @@ public struct WorkspaceChat: Sendable {
                     state.hasUserSelectedSession = true
                     state.sessionIDsBeforeCreation = nil
                     if !state.isQueuedMessageEditLocked {
-                        state.chat = Chat.State(
+                        state.chat = Self.newlyCreatedChat(
                             session: createdSession,
                             isCloudHosted: state.source == .cloud,
-                            mutationRoute: state.mutationRoute,
-                            shouldFocusMessageField: true
+                            mutationRoute: createdSession.status.rawValue == "creating"
+                                ? nil
+                                : state.mutationRoute
                         )
                     }
                 }
@@ -1355,6 +1355,22 @@ public struct WorkspaceChat: Sendable {
         return selectedChat
     }
 
+    private static func newlyCreatedChat(
+        session: Session,
+        isCloudHosted: Bool,
+        mutationRoute: WorkspaceMutationRoute?
+    ) -> Chat.State {
+        var chat = Chat.State(
+            session: session,
+            isCloudHosted: isCloudHosted,
+            mutationRoute: mutationRoute,
+            shouldFocusMessageField: true
+        )
+        chat.isLoadingMessages = false
+        chat.isMessageSnapshotEmpty = true
+        return chat
+    }
+
     private func observeSessions(
         workspaceID: String,
         isCloudHosted: Bool,
@@ -1811,6 +1827,11 @@ public struct WorkspaceChatView: View {
         .toolbar {
             toolbarMenu
         }
+        .overlay {
+            if shouldShowLoadingIndicator {
+                ChatLoadingView()
+            }
+        }
         .safeAreaBar(edge: .top) {
             SessionPicker(
                 sessions: store.activeSessions,
@@ -1836,11 +1857,6 @@ public struct WorkspaceChatView: View {
             .accessibilityValue(store.workspace.id)
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
-        .overlay {
-            if shouldShowLoadingIndicator {
-                ChatLoadingView()
-            }
-        }
         .background(.theme(.background))
         .alert(
             "Rename branch",
@@ -2211,6 +2227,12 @@ public struct WorkspaceChatView: View {
                         ProgressView()
                             .progressViewStyle(.conductor(phaseSeed: session.id))
                             .tint(.theme(.textSecondary))
+                            .frame(width: iconSize, height: iconSize)
+                    } else if session.status.rawValue == "creating" {
+                        ProgressView()
+                            .progressViewStyle(.network)
+                            .tint(.theme(.textSecondary))
+                            .controlSize(.mini)
                             .frame(width: iconSize, height: iconSize)
                     } else if session.unreadCount > 0 {
                         UnreadIcon(size: unreadIndicatorSize)
