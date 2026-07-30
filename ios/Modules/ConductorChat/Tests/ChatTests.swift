@@ -1206,6 +1206,49 @@ struct ChatTests {
         }
     }
 
+    @Test("A persisted initial prompt renders before observations start")
+    func persistedInitialPromptSeedsPresentation() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = try makeSession()
+            let startedAt = Date(timeIntervalSince1970: 1_783_558_800)
+            let attemptID = UUID(0)
+            let attempt = makeDeliveryAttempt(
+                session: session,
+                content: "Run it",
+                attemptID: attemptID,
+                state: .ready,
+                createdAt: startedAt
+            )
+            try await withDependencies {
+                try $0.defaultDatabase.write { database in
+                    try Session.upsert { session }.execute(database)
+                    try MessageDeliveryAttempt
+                        .insert { attempt }
+                        .execute(database)
+                }
+            } operation: {
+                let state = Chat.State(session: session)
+
+                #expect(!state.isLoadingMessages)
+                #expect(state.deliveryAttempts == [attempt])
+                #expect(state.fetchedDeliveryAttempts == [attempt])
+                expectNoDifference(
+                    try #require(state.rows)
+                        .map(DisplayedRowProjection.init),
+                    [
+                        .human(id: attemptID.uuidString, content: "Run it"),
+                        .turnInProgress(
+                            id: attemptID.uuidString,
+                            startedAt: startedAt
+                        ),
+                    ]
+                )
+            }
+        }
+    }
+
     @Test("A pending persisted send stays visible until a confirmed work cycle ends")
     func pendingPersistedSendStaysVisibleThroughEarlyIdleStatus() async throws {
         try await withDependencies {

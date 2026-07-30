@@ -616,7 +616,6 @@ public struct Chat: Sendable {
                 )
             }
             self._fetchedDeliveryAttempts = FetchAll(
-                wrappedValue: [],
                 MessageDeliveryAttempt
                     .where {
                         $0.canonicalSessionID.eq(session.id)
@@ -637,6 +636,15 @@ public struct Chat: Sendable {
             self.selectedReasoningEffort = selectedReasoningEffort ?? session.reasoningEffort
             self.shouldFocusMessageField = shouldFocusMessageField
             reconcileSelectedReasoningEffort()
+            deliveryAttempts = fetchedDeliveryAttempts
+            if !deliveryAttempts.isEmpty {
+                isLoadingMessages = false
+                isMessageSnapshotEmpty = messages.isEmpty
+                turns = Turn.parse(messages: messages)
+                _ = beginPendingSendCycleIfNeeded()
+                updateReportedContextWindowTokenLimits()
+                updateRows()
+            }
         }
 
         mutating func resolveSelectedModel() {
