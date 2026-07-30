@@ -17,6 +17,85 @@ import Testing
 @testable import ConductorMobileServer
 
 struct SessionRouteTests {
+    @Test("Model history returns only the latest modeled message")
+    func modelHistory() async throws {
+        let (database, workspace, session) = try await sessionRouteDatabase()
+        let neverUsedSession = Session(
+            id: "session-2",
+            workspaceID: workspace.id,
+            title: "New chat",
+            agentType: .codex,
+            isHidden: false,
+            createdAt: "2026-07-19T00:00:00Z",
+            updatedAt: "2026-07-19T00:00:00Z",
+            lastUserMessageAt: nil,
+            status: .idle,
+            model: Session.Model(rawValue: ""),
+            unreadCount: 0,
+            freshlyCompacted: 0,
+            contextTokenCount: 0
+        )
+        let messages = [
+            Message(
+                id: "modeled-1",
+                sessionID: session.id,
+                createdAt: Date(timeIntervalSince1970: 1),
+                model: Session.Model.gpt5_5.rawValue
+            ),
+            Message(
+                id: "modeled-2",
+                sessionID: session.id,
+                createdAt: Date(timeIntervalSince1970: 2),
+                model: Session.Model.gpt_5_6_sol.rawValue
+            ),
+            Message(
+                id: "unmodeled-later",
+                sessionID: session.id,
+                createdAt: Date(timeIntervalSince1970: 3)
+            ),
+        ]
+        try await database.write { database in
+            try Session.insert { neverUsedSession }.execute(database)
+            try Message.insert { messages }.execute(database)
+        }
+
+        let application = Server.makeApplication(database: database)
+        try await application.test(.router) { client in
+            try await client.execute(
+                uri: "/workspaces/\(workspace.id)/sessions/\(session.id)/model-history",
+                method: .get
+            ) { response in
+                #expect(response.status == .ok)
+                let history = try JSONDecoder.conductor.decode(
+                    Session.ModelHistory.self,
+                    from: Data(response.body.readableBytesView)
+                )
+                #expect(history.hasMessages)
+                #expect(history.lastUsedModel == .gpt_5_6_sol)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/\(workspace.id)/sessions/\(neverUsedSession.id)/model-history",
+                method: .get
+            ) { response in
+                #expect(response.status == .ok)
+                let history = try JSONDecoder.conductor.decode(
+                    Session.ModelHistory.self,
+                    from: Data(response.body.readableBytesView)
+                )
+                #expect(!history.hasMessages)
+                #expect(history.lastUsedModel == nil)
+            }
+
+            try await client.execute(
+                uri: "/workspaces/other/sessions/\(session.id)/model-history",
+                method: .get
+            ) { response in
+                #expect(response.status == .notFound)
+            }
+        }
+    }
+
     @Test("Session changes return success after persistence")
     func mutations() async throws {
         let (database, workspace, session) = try await sessionRouteDatabase()

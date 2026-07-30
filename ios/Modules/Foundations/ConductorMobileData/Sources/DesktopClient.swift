@@ -34,6 +34,10 @@ public struct DesktopClient: Sendable {
     public var fetchModelSettings: @Sendable () async throws -> ModelSettings = {
         throw CancellationError()
     }
+    public var fetchSessionModelHistory: @Sendable (
+        _ workspaceID: Workspace.ID,
+        _ sessionID: Session.ID
+    ) async throws -> Session.ModelHistory
     /// Rejects delayed feature actions after the configured desktop endpoint changes.
     ///
     /// The dependency macro requires a non-throwing default. `false` fails closed so a test that
@@ -327,6 +331,16 @@ extension DesktopClient: DependencyKey {
                     Session.ReasoningEffort(rawValue: $0)
                 } ?? defaultModel.defaultReasoningEffort,
                 isFastModeEnabled: settings.defaultFastMode ?? false
+            )
+        } fetchSessionModelHistory: { workspaceID, sessionID in
+            try await get(
+                Session.ModelHistory.self,
+                from: sessionURL(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID
+                )
+                .appending(path: "model-history"),
+                timeoutInterval: 3
             )
         } isRequestLeaseValid: { lease in
             @Shared(.desktopServerAddress) var desktopServerAddress
@@ -687,9 +701,14 @@ extension DesktopClient: DependencyKey {
 
     private static func get<Response: Decodable>(
         _ responseType: Response.Type,
-        from url: URL
+        from url: URL,
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> Response {
-        let (data, response) = try await data(for: URLRequest(url: url))
+        var request = URLRequest(url: url)
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
+        }
+        let (data, response) = try await data(for: request)
         try validateSuccessfulHTTPResponse(response, data: data)
         return try JSONDecoder.conductor.decode(responseType, from: data)
     }

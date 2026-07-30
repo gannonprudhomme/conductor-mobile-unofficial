@@ -1428,9 +1428,10 @@ struct WorkspaceChatTests {
             await store.send(
                 .loadSessionsResponse(.success([resolvedSession]))
             ) {
-                $0.chat?.hasObservedSessionModelChange = true
                 $0.chat?.hasObservedSessionReasoningEffortChange = true
+                $0.chat?.canonicalModel = .gpt_5_6_sol
                 $0.chat?.selectedModel = .gpt_5_6_sol
+                $0.chat?.selectedModelSource = .canonical
                 $0.chat?.selectedReasoningEffort = .high
                 $0.isLoadingSessions = false
             }

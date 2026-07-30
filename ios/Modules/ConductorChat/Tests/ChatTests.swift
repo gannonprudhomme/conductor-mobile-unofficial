@@ -852,6 +852,60 @@ struct ChatTests {
         }
     }
 
+    @Test("Task resolves model history before opening the transcript stream")
+    func taskResolvesModelBeforeTranscript() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: Session.Model(rawValue: ""),
+                codexThinkingLevel: nil
+            )
+            let events = LockIsolated<[String]>([])
+            let (messageStream, messageContinuation) = AsyncStream<ChatSyncEvent>
+                .makeStream()
+            let store = Store(initialState: Chat.State(session: session)) {
+                Chat()
+            } withDependencies: {
+                $0.continuousClock = ContinuousClock()
+                $0.desktopClient.fetchModelSettings = {
+                    DesktopClient.ModelSettings(
+                        defaultModel: .gpt_5_6_terra,
+                        defaultReasoningEffort: .high,
+                        isFastModeEnabled: false
+                    )
+                }
+                $0.desktopClient.fetchSessionModelHistory = { workspaceID, sessionID in
+                    #expect(workspaceID == session.workspaceID)
+                    #expect(sessionID == session.id)
+                    events.withValue { $0.append("history") }
+                    return Session.ModelHistory(
+                        hasMessages: true,
+                        lastUsedModel: .gpt_5_6_sol
+                    )
+                }
+                $0.chatSyncClient.observeSelected = { sessionID in
+                    #expect(sessionID == session.id)
+                    events.withValue { $0.append("transcript") }
+                    return messageStream
+                }
+            }
+
+            let task = store.send(.task)
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while events.value.count < 2, clock.now < deadline {
+                await Task.yield()
+            }
+
+            expectNoDifference(events.value, ["history", "transcript"])
+            #expect(store.state.selectedModel == .gpt_5_6_sol)
+            #expect(store.state.selectedModelSource == .historical)
+            task.cancel()
+            messageContinuation.finish()
+        }
+    }
+
     @Test("Task renders persisted message snapshots, changes, and deletions")
     func taskIngestsMessageBatches() async throws {
         let database = try appDatabase()
@@ -1485,220 +1539,314 @@ struct ChatTests {
         }
     }
 
-    @Test("Fetched model settings apply only before compatible user selections")
-    func modelSettings() async throws {
+    @Test("A non-empty session model wins immediately over the desktop default")
+    func canonicalSessionModel() async throws {
         try await withDependencies {
-            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(model: .gpt5_5)
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            #expect(store.state.selectedModel == .gpt5_5)
+            #expect(store.state.selectedModelSource == .canonical)
+            await store.send(
+                .modelSettingsResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        DesktopClient.ModelSettings(
+                            defaultModel: .gpt_5_6_terra,
+                            defaultReasoningEffort: .ultra,
+                            isFastModeEnabled: true
+                        )
+                    )
+                )
+            ) {
+                $0.desktopDefaultModel = .gpt_5_6_terra
+            }
+            #expect(store.state.selectedModel == .gpt5_5)
+            #expect(store.state.selectedModelDisplayName == "GPT-5.5")
+        }
+    }
+
+    @Test("An empty session model resolves from lightweight message history")
+    func historicalSessionModel() async throws {
+        try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
             let session = Session.preview(
-                model: .gpt5_5,
-                codexThinkingLevel: nil,
-                isFastModeEnabled: nil
+                model: Session.Model(rawValue: ""),
+                codexThinkingLevel: nil
             )
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
             await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt_5_6_sol,
-                        defaultReasoningEffort: .low,
-                        isFastModeEnabled: true
+                .sessionModelHistoryResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        Session.ModelHistory(
+                            hasMessages: true,
+                            lastUsedModel: .gpt_5_6_sol
+                        )
                     )
                 )
             ) {
-                $0.isFastModeEnabled = true
+                $0.sessionModelHistory = Session.ModelHistory(
+                    hasMessages: true,
+                    lastUsedModel: .gpt_5_6_sol
+                )
                 $0.selectedModel = .gpt_5_6_sol
+                $0.selectedModelSource = .historical
                 $0.selectedReasoningEffort = .low
             }
-            await store.send(.modelSelected(.gpt_5_6_terra)) {
-                $0.selectedModel = .gpt_5_6_terra
-                $0.hasUserSelectedModel = true
-            }
-            await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt5_4,
-                        defaultReasoningEffort: .low,
-                        isFastModeEnabled: false
-                    )
-                )
-            ) {
-                $0.isFastModeEnabled = false
-            }
-            await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .fable5,
-                        defaultReasoningEffort: .low,
-                        isFastModeEnabled: true
-                    )
-                )
-            ) {
-                $0.isFastModeEnabled = true
-            }
+            #expect(
+                store.state.selectedModelDisplayName
+                    == "GPT-5.6 Sol · Last used"
+            )
         }
     }
 
-    @Test("Mobile model settings override Conductor defaults")
-    func mobileModelSettingsOverride() async throws {
+    @Test("A never-used session labels the current desktop default as inherited")
+    func neverUsedSessionModel() async throws {
         try await withDependencies {
-            $0.defaultFileStorage = .inMemory
             try $0.bootstrapDatabase()
         } operation: {
             let session = Session.preview(
-                model: .gpt5_5,
+                model: Session.Model(rawValue: ""),
                 codexThinkingLevel: nil,
                 isFastModeEnabled: nil
-            )
-            let state = Chat.State(session: session)
-            state.$mobileModelSettingsOverride.withLock {
-                $0 = DesktopClient.ModelSettings(
-                    defaultModel: .gpt_5_6_terra,
-                    defaultReasoningEffort: .ultra,
-                    isFastModeEnabled: true
-                )
-            }
-            let store = TestStore(initialState: state) {
-                Chat()
-            }
-
-            await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt_5_6_sol,
-                        defaultReasoningEffort: .low,
-                        isFastModeEnabled: false
-                    )
-                )
-            ) {
-                $0.isFastModeEnabled = true
-                $0.selectedModel = .gpt_5_6_terra
-                $0.selectedReasoningEffort = .ultra
-            }
-        }
-    }
-
-    @Test("Persisted empty-session choices are not replaced by fetched defaults")
-    func persistedEmptySessionSettings() async throws {
-        try await withDependencies {
-            $0.defaultFileStorage = .inMemory
-            try $0.bootstrapDatabase()
-        } operation: {
-            let session = Session.preview(
-                lastUserMessageAt: nil,
-                model: .gpt_5_6_sol,
-                codexThinkingLevel: .high,
-                isFastModeEnabled: true
             )
             let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
             await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: session.model,
-                        defaultReasoningEffort: .low,
-                        isFastModeEnabled: false
+                .modelSettingsResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        DesktopClient.ModelSettings(
+                            defaultModel: .gpt_5_6_terra,
+                            defaultReasoningEffort: .ultra,
+                            isFastModeEnabled: true
+                        )
                     )
                 )
+            ) {
+                $0.desktopDefaultModel = .gpt_5_6_terra
+                $0.isFastModeEnabled = true
+                $0.selectedReasoningEffort = .ultra
+            }
+            #expect(store.state.selectedModelSource == .unresolved)
+            await store.send(
+                .sessionModelHistoryResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        Session.ModelHistory(
+                            hasMessages: false,
+                            lastUsedModel: nil
+                        )
+                    )
+                )
+            ) {
+                $0.sessionModelHistory = Session.ModelHistory(
+                    hasMessages: false,
+                    lastUsedModel: nil
+                )
+                $0.selectedModel = .gpt_5_6_terra
+                $0.selectedModelSource = .inheritedDefault
+            }
+            #expect(
+                store.state.selectedModelDisplayName
+                    == "Default · GPT-5.6 Terra"
             )
-            expectNoDifference(store.state.selectedReasoningEffort, .high)
-            #expect(store.state.isFastModeEnabled)
         }
     }
 
-    @Test("The model selected during creation is not replaced by the desktop default")
-    func creationModel() async throws {
+    @Test("A changed desktop default does not replace a historical model")
+    func historicalModelWinsOverChangedDefault() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let session = Session.preview(model: .gpt_5_6_terra)
-            let store = TestStore(
-                initialState: Chat.State(
-                    session: session,
-                    selectedModel: .gpt_5_6_terra
-                )
-            ) {
+            let session = Session.preview(
+                model: Session.Model(rawValue: "")
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
-            #expect(store.state.hasUserSelectedModel)
             await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt_5_6_sol,
-                        defaultReasoningEffort: .high,
-                        isFastModeEnabled: false
+                .modelSettingsResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        DesktopClient.ModelSettings(
+                            defaultModel: .gpt_5_6_terra,
+                            defaultReasoningEffort: .high,
+                            isFastModeEnabled: false
+                        )
                     )
                 )
-            )
-            #expect(store.state.selectedModel == .gpt_5_6_terra)
+            ) {
+                $0.desktopDefaultModel = .gpt_5_6_terra
+            }
+            await store.send(
+                .sessionModelHistoryResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        Session.ModelHistory(
+                            hasMessages: true,
+                            lastUsedModel: .gpt5_5
+                        )
+                    )
+                )
+            ) {
+                $0.sessionModelHistory = Session.ModelHistory(
+                    hasMessages: true,
+                    lastUsedModel: .gpt5_5
+                )
+                $0.selectedModel = .gpt5_5
+                $0.selectedModelSource = .historical
+            }
         }
     }
 
-    @Test("An explicit selection wins after returning to the initial model")
+    @Test("An explicit model selection is not overwritten by later resolution")
     func explicitModelSelection() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let store = TestStore(
-                initialState: Chat.State(session: .preview(model: .gpt5_5))
-            ) {
+            let session = Session.preview(
+                model: Session.Model(rawValue: "")
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
                 Chat()
             }
 
             await store.send(.modelSelected(.gpt_5_6_terra)) {
-                $0.selectedModel = .gpt_5_6_terra
                 $0.hasUserSelectedModel = true
-            }
-            await store.send(.modelSelected(.gpt5_5)) {
-                $0.selectedModel = .gpt5_5
+                $0.selectedModel = .gpt_5_6_terra
+                $0.selectedModelSource = .explicit
             }
             await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt_5_6_sol,
-                        defaultReasoningEffort: .high,
-                        isFastModeEnabled: false
+                .sessionModelHistoryResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        Session.ModelHistory(
+                            hasMessages: true,
+                            lastUsedModel: .gpt5_5
+                        )
                     )
                 )
-            )
+            ) {
+                $0.sessionModelHistory = Session.ModelHistory(
+                    hasMessages: true,
+                    lastUsedModel: .gpt5_5
+                )
+            }
+            await store.send(.sessionModelChanged(.gpt_5_6_sol))
+            #expect(store.state.selectedModel == .gpt_5_6_terra)
         }
     }
 
-    @Test("Observed session models apply until the user selects a model")
-    func sessionModel() async throws {
+    @Test("Delayed responses from a previous session cannot affect the current chat")
+    func staleModelResolutionResponses() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let store = TestStore(
-                initialState: Chat.State(session: .preview(model: .gpt5_5))
+            let session = Session.preview(
+                id: "current",
+                model: Session.Model(rawValue: "")
+            )
+            let store = TestStore(initialState: Chat.State(session: session)) {
+                Chat()
+            }
+
+            await store.send(
+                .sessionModelHistoryResponse(
+                    sessionID: "previous",
+                    result: .success(
+                        Session.ModelHistory(
+                            hasMessages: true,
+                            lastUsedModel: .gpt5_5
+                        )
+                    )
+                )
+            )
+            await store.send(
+                .modelSettingsResponse(
+                    sessionID: "previous",
+                    result: .success(
+                        DesktopClient.ModelSettings(
+                            defaultModel: .gpt_5_6_terra,
+                            defaultReasoningEffort: .ultra,
+                            isFastModeEnabled: true
+                        )
+                    )
+                )
+            )
+            #expect(store.state.selectedModelSource == .unresolved)
+        }
+    }
+
+    @Test("Unavailable history or defaults do not invent a selected model")
+    func unavailableModelResolution() async throws {
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+        } operation: {
+            let session = Session.preview(
+                model: Session.Model(rawValue: "")
+            )
+            let historyFailure = TestStore(
+                initialState: Chat.State(session: session)
             ) {
                 Chat()
             }
 
-            await store.send(.sessionModelChanged(.gpt_5_6_sol)) {
-                $0.hasObservedSessionModelChange = true
-                $0.selectedModel = .gpt_5_6_sol
+            await historyFailure.send(
+                .sessionModelHistoryResponse(
+                    sessionID: session.id,
+                    result: .failure(TestError())
+                )
+            ) {
+                $0.isSessionModelHistoryUnavailable = true
+                $0.selectedModelSource = .unavailable
             }
-            await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt5_4,
-                        defaultReasoningEffort: .high,
-                        isFastModeEnabled: false
+            #expect(historyFailure.state.selectedModel.rawValue.isEmpty)
+            #expect(historyFailure.state.selectedModelDisplayName == "Unavailable")
+
+            let settingsFailure = TestStore(
+                initialState: Chat.State(session: session)
+            ) {
+                Chat()
+            }
+            await settingsFailure.send(
+                .sessionModelHistoryResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        Session.ModelHistory(
+                            hasMessages: false,
+                            lastUsedModel: nil
+                        )
                     )
                 )
-            )
-            await store.send(.modelSelected(.gpt_5_6_terra)) {
-                $0.selectedModel = .gpt_5_6_terra
-                $0.hasUserSelectedModel = true
+            ) {
+                $0.sessionModelHistory = Session.ModelHistory(
+                    hasMessages: false,
+                    lastUsedModel: nil
+                )
             }
-            await store.send(.sessionModelChanged(.gpt5_4))
+            await settingsFailure.send(
+                .modelSettingsResponse(
+                    sessionID: session.id,
+                    result: .failure(TestError())
+                )
+            ) {
+                $0.isDesktopDefaultModelUnavailable = true
+                $0.selectedModelSource = .unavailable
+            }
+            #expect(settingsFailure.state.selectedModel.rawValue.isEmpty)
         }
     }
 
@@ -1717,14 +1865,19 @@ struct ChatTests {
                 $0.isFastModeEnabled = false
             }
             await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: session.model,
-                        defaultReasoningEffort: .medium,
-                        isFastModeEnabled: true
+                .modelSettingsResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        DesktopClient.ModelSettings(
+                            defaultModel: session.model,
+                            defaultReasoningEffort: .medium,
+                            isFastModeEnabled: true
+                        )
                     )
                 )
-            )
+            ) {
+                $0.desktopDefaultModel = session.model
+            }
             await store.send(.sessionFastModeChanged(true)) {
                 $0.isFastModeEnabled = true
             }
@@ -1828,11 +1981,14 @@ struct ChatTests {
             #expect(!store.state.isFastModeEnabled)
 
             await store.send(
-                .modelSettingsFetched(
-                    DesktopClient.ModelSettings(
-                        defaultModel: .gpt_5_6_sol,
-                        defaultReasoningEffort: .medium,
-                        isFastModeEnabled: true
+                .modelSettingsResponse(
+                    sessionID: session.id,
+                    result: .success(
+                        DesktopClient.ModelSettings(
+                            defaultModel: .gpt_5_6_sol,
+                            defaultReasoningEffort: .medium,
+                            isFastModeEnabled: true
+                        )
                     )
                 )
             )
@@ -1865,8 +2021,9 @@ struct ChatTests {
             }
 
             await store.send(.sessionModelChanged(.gpt5_5)) {
-                $0.hasObservedSessionModelChange = true
+                $0.canonicalModel = .gpt5_5
                 $0.selectedModel = .gpt5_5
+                $0.selectedModelSource = .canonical
             }
             await store.send(.sessionReasoningEffortChanged(.high)) {
                 $0.hasObservedSessionReasoningEffortChange = true
@@ -1878,6 +2035,7 @@ struct ChatTests {
             }
 
             await store.send(.sessionModelChanged(futureModel)) {
+                $0.canonicalModel = futureModel
                 $0.selectedModel = futureModel
             }
             #expect(store.state.availableReasoningEfforts.isEmpty)
@@ -1976,6 +2134,7 @@ struct ChatTests {
                 $0.selectedModel = .gpt_5_6_luna
                 $0.selectedReasoningEffort = .medium
                 $0.hasUserSelectedModel = true
+                $0.selectedModelSource = .explicit
             }
             await store.send(.modelSelected(.gpt5_5)) {
                 $0.selectedModel = .gpt5_5

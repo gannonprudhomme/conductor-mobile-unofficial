@@ -15,6 +15,7 @@ struct ChatTextField: View {
 
     @Binding var text: String
     let selectedModel: Session.Model
+    let selectedModelTitle: String?
     let selectedReasoningEffort: Session.ReasoningEffort?
     let availableReasoningEfforts: [Session.ReasoningEffort]
     let agentType: Session.AgentType
@@ -52,6 +53,7 @@ struct ChatTextField: View {
         isStopInFlight: Bool,
         isWorking: Bool,
         selectedModel: Session.Model,
+        selectedModelTitle: String? = nil,
         selectedReasoningEffort: Session.ReasoningEffort?,
         availableReasoningEfforts: [Session.ReasoningEffort],
         shouldFocusOnAppear: Bool = false,
@@ -78,6 +80,7 @@ struct ChatTextField: View {
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
         self.selectedModel = selectedModel
+        self.selectedModelTitle = selectedModelTitle
         self.selectedReasoningEffort = selectedReasoningEffort
         self.availableReasoningEfforts = availableReasoningEfforts
         self.shouldFocusOnAppear = shouldFocusOnAppear
@@ -173,6 +176,7 @@ struct ChatTextField: View {
                         isFastModeEnabled: isFastModeEnabled,
                         isFastModeButtonDisabled: isAnyActionInFlight,
                         selectedModel: selectedModel,
+                        selectedModelTitle: selectedModelTitle,
                         selectedReasoningEffort: selectedReasoningEffort,
                         onFastModeTapped: onFastModeTapped,
                         onInformationalControlTapped:
@@ -181,7 +185,7 @@ struct ChatTextField: View {
                         onSelectModel: onSelectModel
                     )
                 } else {
-                    Text(selectedModel.rawValue)
+                    Text(selectedModelTitle ?? selectedModel.rawValue)
                         .font(.theme(.small))
                         .foregroundStyle(.theme(.textSecondary))
                 }
