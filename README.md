@@ -23,11 +23,6 @@ brew install mise xcodegen xcbeautify
 
 Steps:
 1. Install Xcode 26
-
-    a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version should do
-
-    b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
-
 2. Clone the repo & run `mise run xcode` to generate the Xcode project + open it.
   
    a. Alternatively, to deploy to a simulator, run `mise run deploy` and stop here.
@@ -76,7 +71,7 @@ For Cloud workspaces we generally use Conductor's public API. However the public
 
 ### Writing data through the UI hook
 
-While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI, nor cause messages to be sent to the agent.
+While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagate the changes to the UI, nor cause messages to be sent to the agent.
 
 As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script* in Tauri's Web Inspector. The Desktop companion connects to this script and sends commands to it whenever requested from the mobile app.
 
