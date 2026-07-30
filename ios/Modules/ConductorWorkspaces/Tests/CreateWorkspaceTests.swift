@@ -298,6 +298,32 @@ struct CreateWorkspaceTests {
         }
     }
 
+    @Test("Creation starts with model settings cached at app launch")
+    func cachedDesktopModelSettings() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = {
+                DesktopClient.ModelSettings(
+                    defaultModel: .gpt_5_6_sol,
+                    defaultReasoningEffort: .ultra,
+                    isFastModeEnabled: true
+                )
+            }
+        } operation: {
+            let state = CreateWorkspace.State(repositories: [.preview()])
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            }
+
+            #expect(state.agentType == .codex)
+            #expect(state.selectedModel == .gpt_5_6_sol)
+            #expect(state.selectedReasoningEffort == .ultra)
+            #expect(state.isFastModeEnabled)
+
+            await store.send(.task)
+        }
+    }
+
     @Test("Desktop model settings seed creation until the user makes a selection")
     func modelSettings() async {
         await withDependencies {
