@@ -68,6 +68,7 @@ public struct WorkspaceChat: Sendable {
             selectedSessionID: Session.ID? = nil,
             selectedModel: Session.Model? = nil,
             selectedReasoningEffort: Session.ReasoningEffort? = nil,
+            shouldPresentPersistedChatImmediately: Bool = false,
             shouldFocusMessageField: Bool = false
         ) {
             let workspace = workspaceWithRepository.workspace
@@ -119,7 +120,7 @@ public struct WorkspaceChat: Sendable {
             }
 
             self._activeSessions = activeSessions
-            if source == .cloud,
+            if (source == .cloud || shouldPresentPersistedChatImmediately),
                (!self.activeSessions.isEmpty || !self.archivedSessions.isEmpty) {
                 self.isLoadingSessions = false
             }

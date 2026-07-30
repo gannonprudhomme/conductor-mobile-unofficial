@@ -310,11 +310,24 @@ struct MainTests {
         }
     }
 
-    @Test("Workspace creation pushes its chat")
-    func workspaceCreationPushesChat() async throws {
+    @Test("Workspace creation pushes its persisted chat without a loader")
+    func workspaceCreationPushesPersistedChat() async throws {
         let workspace = Workspace.preview(activeSessionID: "active")
         let session = Session.preview(id: "active", workspaceID: workspace.id)
         let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
+        let attemptID = UUID(0)
+        let attempt = MessageDeliveryAttempt(
+            attemptID: attemptID,
+            route: .desktop,
+            canonicalWorkspaceID: workspace.id,
+            canonicalSessionID: session.id,
+            content: "Run it",
+            model: .gpt_5_6_terra,
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: .ultra,
+            submittedDraft: "Run it"
+        )
         let requestLease = DesktopRequestLease(
             baseURL: try #require(URL(string: "http://test:3768")),
             endpointEpoch: 0
@@ -330,6 +343,9 @@ struct MainTests {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
                 try Session.upsert { session }.execute(database)
+                try MessageDeliveryAttempt
+                    .insert { attempt }
+                    .execute(database)
             }
         } operation: {
             let store = TestStore(initialState: Main.State()) {
@@ -345,11 +361,30 @@ struct MainTests {
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
                             selectedReasoningEffort: .ultra,
+                            shouldPresentPersistedChatImmediately: true,
                             shouldFocusMessageField: true
                         )
                     )
                 )
             }
+
+            let destination = try #require(store.state.path.last)
+            guard case let .workspaceChat(workspaceChat) = destination,
+                  let chat = workspaceChat.chat else {
+                Issue.record("Expected the created workspace chat")
+                return
+            }
+            #expect(!workspaceChat.isLoadingSessions)
+            #expect(!chat.isLoadingMessages)
+            #expect(chat.deliveryAttempts.map(\.attemptID) == [attemptID])
+            #expect(chat.deliveryAttempts.map(\.content) == ["Run it"])
+            #expect(
+                chat.rows?.map(\.id)
+                    == [
+                        "human:\(attemptID.uuidString)",
+                        "turn-in-progress:\(attemptID.uuidString)",
+                    ]
+            )
         }
     }
 
