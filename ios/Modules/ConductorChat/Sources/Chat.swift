@@ -71,9 +71,10 @@ public struct Chat: Sendable {
         var isLoadingMessages = true
         var isMessageSnapshotEmpty = false
         var isStopInFlight = false
+        var isDesktopDefaultModelUnavailable = false
+        var isSessionModelHistoryUnavailable = false
         var hasObservedSessionFastModeChange = false
         var voiceInput: VoiceInput.State
-        var hasObservedSessionModelChange = false
         var hasObservedSessionReasoningEffortChange = false
         var hasUserSelectedFastMode = false
         var hasUserSelectedModel = false
@@ -86,8 +87,12 @@ public struct Chat: Sendable {
         var reportedContextWindowTokenLimits: [Session.Model: Int] = [:]
         var messageIDToBubbleID: [Message.ID: UUID] = [:]
         var recentlyEnqueuedAttempt: MessageDeliveryAttempt?
+        var canonicalModel: Session.Model
+        var desktopDefaultModel: Session.Model?
         var selectedModel: Session.Model
+        var selectedModelSource: SelectedModelSource
         var selectedReasoningEffort: Session.ReasoningEffort?
+        var sessionModelHistory: Session.ModelHistory?
         var workCycle = WorkCycle.idle(
             attemptID: nil,
             baselineTurnID: nil,
@@ -288,9 +293,9 @@ public struct Chat: Sendable {
             if displayedSessionStatus != session.status {
                 sessionStatusChanged(session.status)
             }
-            if !hasUserSelectedModel, selectedModel != session.model {
-                hasObservedSessionModelChange = true
-                selectedModel = session.model
+            if canonicalModel != session.model {
+                canonicalModel = session.model
+                resolveSelectedModel()
             }
             let sessionFastMode = session.isFastModeEnabled ?? false
             if isFastModeEnabled != sessionFastMode {
@@ -463,6 +468,21 @@ public struct Chat: Sendable {
             }
         }
 
+        var selectedModelDisplayName: String {
+            switch selectedModelSource {
+            case .canonical, .explicit:
+                selectedModel.displayName
+            case .historical:
+                "\(selectedModel.displayName) · Last used"
+            case .inheritedDefault:
+                "Default · \(selectedModel.displayName)"
+            case .unavailable:
+                "Unavailable"
+            case .unresolved:
+                "Default"
+            }
+        }
+
         init(
             session: Session,
             messages: [Message] = [],
@@ -534,17 +554,61 @@ public struct Chat: Sendable {
                     }
                     .order(by: \.createdAt)
             )
+            self.canonicalModel = session.model
             self.hasUserSelectedModel = selectedModel != nil
             self.hasUserSelectedReasoningEffort = selectedReasoningEffort != nil
             self.selectedModel = selectedModel ?? session.model
+            self.selectedModelSource = if selectedModel != nil {
+                .explicit
+            } else if session.model.rawValue.isEmpty {
+                .unresolved
+            } else {
+                .canonical
+            }
             self.selectedReasoningEffort = selectedReasoningEffort ?? session.reasoningEffort
             self.shouldFocusMessageField = shouldFocusMessageField
             self.voiceInput = VoiceInput.State(id: session.id)
             reconcileSelectedReasoningEffort()
         }
 
+        mutating func resolveSelectedModel() {
+            guard !hasUserSelectedModel else {
+                return
+            }
+
+            if !canonicalModel.rawValue.isEmpty {
+                selectedModel = canonicalModel
+                selectedModelSource = .canonical
+            } else if let historicalModel = sessionModelHistory?.lastUsedModel,
+                      !historicalModel.rawValue.isEmpty {
+                selectedModel = historicalModel
+                selectedModelSource = .historical
+            } else if let sessionModelHistory {
+                if !sessionModelHistory.hasMessages,
+                   let desktopDefaultModel {
+                    selectedModel = desktopDefaultModel
+                    selectedModelSource = .inheritedDefault
+                } else if sessionModelHistory.hasMessages
+                            || isDesktopDefaultModelUnavailable {
+                    selectedModel = Session.Model(rawValue: "")
+                    selectedModelSource = .unavailable
+                } else {
+                    selectedModel = Session.Model(rawValue: "")
+                    selectedModelSource = .unresolved
+                }
+            } else if isSessionModelHistoryUnavailable {
+                selectedModel = Session.Model(rawValue: "")
+                selectedModelSource = .unavailable
+            } else {
+                selectedModel = Session.Model(rawValue: "")
+                selectedModelSource = .unresolved
+            }
+            reconcileSelectedReasoningEffort()
+        }
+
         mutating func reconcileSelectedReasoningEffort() {
-            guard configurationInteractionMode == .editable else {
+            guard configurationInteractionMode == .editable,
+                  !selectedModel.rawValue.isEmpty else {
                 return
             }
             let efforts = availableReasoningEfforts
@@ -576,9 +640,12 @@ public struct Chat: Sendable {
                 && lhs.isLoadingMessages == rhs.isLoadingMessages
                 && lhs.isMessageSnapshotEmpty == rhs.isMessageSnapshotEmpty
                 && lhs.isStopInFlight == rhs.isStopInFlight
+                && lhs.isDesktopDefaultModelUnavailable
+                    == rhs.isDesktopDefaultModelUnavailable
+                && lhs.isSessionModelHistoryUnavailable
+                    == rhs.isSessionModelHistoryUnavailable
                 && lhs.hasObservedSessionFastModeChange == rhs.hasObservedSessionFastModeChange
                 && lhs.voiceInput == rhs.voiceInput
-                && lhs.hasObservedSessionModelChange == rhs.hasObservedSessionModelChange
                 && lhs.hasObservedSessionReasoningEffortChange
                     == rhs.hasObservedSessionReasoningEffortChange
                 && lhs.hasUserSelectedFastMode == rhs.hasUserSelectedFastMode
@@ -592,20 +659,40 @@ public struct Chat: Sendable {
                     == rhs.reportedContextWindowTokenLimits
                 && lhs.messageIDToBubbleID == rhs.messageIDToBubbleID
                 && lhs.recentlyEnqueuedAttempt == rhs.recentlyEnqueuedAttempt
+                && lhs.canonicalModel == rhs.canonicalModel
+                && lhs.desktopDefaultModel == rhs.desktopDefaultModel
                 && lhs.selectedModel == rhs.selectedModel
+                && lhs.selectedModelSource == rhs.selectedModelSource
                 && lhs.selectedReasoningEffort == rhs.selectedReasoningEffort
+                && lhs.sessionModelHistory == rhs.sessionModelHistory
                 && lhs.workCycle == rhs.workCycle
         }
 
         /// Read by ``WorkspaceChat`` to track the selected session.
         var sessionID: Session.ID { session.id }
+
+        enum SelectedModelSource: Equatable, Sendable {
+            case canonical
+            case explicit
+            case historical
+            case inheritedDefault
+            case unavailable
+            case unresolved
+        }
     }
 
     public enum Action {
         case cloudConfigurationChanged(CloudConfiguration?)
         case configurationControlTapped(ModelConfigurationControl)
         case task
-        case modelSettingsFetched(DesktopClient.ModelSettings)
+        case modelSettingsResponse(
+            sessionID: Session.ID,
+            result: Result<DesktopClient.ModelSettings, any Error>
+        )
+        case sessionModelHistoryResponse(
+            sessionID: Session.ID,
+            result: Result<Session.ModelHistory, any Error>
+        )
         case fastModeButtonTapped
         case initialMessagesResponse(
             sessionID: Session.ID,
@@ -685,14 +772,18 @@ public struct Chat: Sendable {
                         observeDeliveryAttempts(state)
                     )
                 }
+                let remoteMessageObservation = if state.canonicalModel.rawValue.isEmpty {
+                    Effect.concatenate(
+                        fetchSessionModelHistory(state),
+                        observeMessages(state)
+                    )
+                } else {
+                    observeMessages(state)
+                }
                 return .merge(
-                    .run { send in
-                        guard let settings = try? await desktopClient.fetchModelSettings() else {
-                            return
-                        }
-                        await send(.modelSettingsFetched(settings))
-                    },
-                    messageObservation,
+                    fetchModelSettings(state),
+                    remoteMessageObservation,
+                    observePersistedMessages(state),
                     observeDeliveryAttempts(state)
                 )
 
@@ -708,18 +799,24 @@ public struct Chat: Sendable {
                 }
                 return observeMessages(state)
 
-            case let .modelSettingsFetched(settings):
-                guard state.configurationInteractionMode == .editable else {
+            case let .modelSettingsResponse(sessionID, result):
+                guard sessionID == state.sessionID,
+                      state.configurationInteractionMode == .editable else {
                     return .none
                 }
-                let settings = state.mobileModelSettingsOverride ?? settings
-                if !state.hasObservedSessionModelChange,
-                   !state.hasUserSelectedModel,
-                   Session.Model.models(for: state.session.agentType)
-                    .contains(settings.defaultModel) {
-                    state.selectedModel = settings.defaultModel
-                    state.reconcileSelectedReasoningEffort()
+                guard case let .success(fetchedSettings) = result else {
+                    state.isDesktopDefaultModelUnavailable = true
+                    state.resolveSelectedModel()
+                    return .none
                 }
+                state.isDesktopDefaultModelUnavailable = false
+                let settings = state.mobileModelSettingsOverride ?? fetchedSettings
+                state.desktopDefaultModel = Session.Model
+                    .models(for: state.session.agentType)
+                    .contains(settings.defaultModel)
+                    ? settings.defaultModel
+                    : nil
+                state.resolveSelectedModel()
                 if state.session.lastUserMessageAt == nil,
                    state.session.isFastModeEnabled == nil,
                    !state.hasObservedSessionFastModeChange,
@@ -735,12 +832,29 @@ public struct Chat: Sendable {
                 }
                 return .none
 
+            case let .sessionModelHistoryResponse(sessionID, result):
+                guard sessionID == state.sessionID,
+                      state.canonicalModel.rawValue.isEmpty else {
+                    return .none
+                }
+                switch result {
+                case let .success(history):
+                    state.sessionModelHistory = history
+                    state.isSessionModelHistoryUnavailable = false
+                case .failure:
+                    state.sessionModelHistory = nil
+                    state.isSessionModelHistoryUnavailable = true
+                }
+                state.resolveSelectedModel()
+                return .none
+
             case let .modelSelected(model):
                 guard state.mutationRoute.capabilities.canConfigureMessages else {
                     return .none
                 }
                 state.hasUserSelectedModel = true
                 state.selectedModel = model
+                state.selectedModelSource = .explicit
                 state.reconcileSelectedReasoningEffort()
                 return .none
 
@@ -811,9 +925,8 @@ public struct Chat: Sendable {
                 guard !state.hasUserSelectedModel else {
                     return .none
                 }
-                state.hasObservedSessionModelChange = true
-                state.selectedModel = model
-                state.reconcileSelectedReasoningEffort()
+                state.canonicalModel = model
+                state.resolveSelectedModel()
                 return .none
 
             case let .sessionFastModeChanged(isFastModeEnabled):
@@ -1052,6 +1165,43 @@ public struct Chat: Sendable {
         return .none
     }
 
+    /// Fetches the current desktop defaults without treating them as session history.
+    private func fetchModelSettings(_ state: State) -> Effect<Action> {
+        .run { [sessionID = state.sessionID] send in
+            await send(
+                .modelSettingsResponse(
+                    sessionID: sessionID,
+                    result: await Result {
+                        try await desktopClient.fetchModelSettings()
+                    }
+                )
+            )
+        }
+        .cancellable(id: CancelID.modelSettings, cancelInFlight: true)
+    }
+
+    /// Resolves historical model metadata before opening a potentially large transcript stream.
+    private func fetchSessionModelHistory(_ state: State) -> Effect<Action> {
+        .run {
+            [
+                sessionID = state.sessionID,
+                workspaceID = state.session.workspaceID,
+            ] send in
+            await send(
+                .sessionModelHistoryResponse(
+                    sessionID: sessionID,
+                    result: await Result {
+                        try await desktopClient.fetchSessionModelHistory(
+                            workspaceID: workspaceID,
+                            sessionID: sessionID
+                        )
+                    }
+                )
+            )
+        }
+        .cancellable(id: CancelID.modelHistory, cancelInFlight: true)
+    }
+
     /// Records selected-chat intent and waits for the shared sync worker to make the cache usable.
     private func observeMessages(_ state: State) -> Effect<Action> {
         return .run {
@@ -1241,6 +1391,8 @@ public struct Chat: Sendable {
 
     private enum CancelID: Hashable {
         case messageObservation
+        case modelHistory
+        case modelSettings
         case queueObservation
     }
 }
@@ -1682,6 +1834,7 @@ private struct ChatComposer: View {
             voiceInputPhase: store.voiceInput.phase,
             voiceInputLevels: store.voiceInput.levels,
             selectedModel: store.selectedModel,
+            selectedModelTitle: store.selectedModelDisplayName,
             selectedReasoningEffort: store.selectedReasoningEffort,
             availableReasoningEfforts: store.availableReasoningEfforts,
             shouldFocusOnAppear: store.shouldFocusMessageField,

@@ -92,6 +92,44 @@ struct ModelPickerTests {
                 onSelect: { _ in }
             )
         )
+        #expect(
+            picker != ModelPicker(
+                agentType: .codex,
+                allowsAgentSwitching: true,
+                selectedModel: .gpt_5_6_sol,
+                selectedModelTitle: "GPT-5.6 Sol · Last used",
+                onSelect: { _ in }
+            )
+        )
+    }
+
+    @Test("Model controls distinguish historical and inherited labels")
+    func resolvedModelLabels() {
+        let historical = ModelAndFastModeControls(
+            agentType: .codex,
+            availableReasoningEfforts: [.low, .high],
+            isFastModeEnabled: false,
+            selectedModel: .gpt_5_6_sol,
+            selectedModelTitle: "GPT-5.6 Sol · Last used",
+            selectedReasoningEffort: .low,
+            onFastModeTapped: { },
+            onSelectReasoningEffort: { _ in },
+            onSelectModel: { _ in }
+        )
+        let inheritedDefault = ModelAndFastModeControls(
+            agentType: .codex,
+            availableReasoningEfforts: [.low, .high],
+            isFastModeEnabled: false,
+            selectedModel: .gpt_5_6_sol,
+            selectedModelTitle: "Default · GPT-5.6 Sol",
+            selectedReasoningEffort: .low,
+            onFastModeTapped: { },
+            onSelectReasoningEffort: { _ in },
+            onSelectModel: { _ in }
+        )
+
+        #expect(historical.displayedModelName == "GPT-5.6 Sol · Last used")
+        #expect(inheritedDefault.displayedModelName == "Default · GPT-5.6 Sol")
     }
 
     @Test("Read-only controls expose stable values and stay enabled")

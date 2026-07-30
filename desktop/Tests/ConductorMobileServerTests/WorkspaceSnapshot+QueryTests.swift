@@ -5,6 +5,7 @@
 //  Created by Gannon Prudomme on 7/27/26.
 //
 
+import Foundation
 import SharedConductorData
 import SQLiteData
 import Testing
@@ -33,5 +34,33 @@ struct WorkspaceSnapshotQueryTests {
         }
 
         #expect(snapshots.map(\.workspace.id) == ["cloud-workspace"])
+    }
+
+    @Test("Workspace snapshots are not limited to 200 rows")
+    func moreThanTwoHundredWorkspaces() throws {
+        let database = try testConductorDatabase()
+        let date = Date(timeIntervalSince1970: 1_783_555_200)
+        let workspaces = (0...200).map { index in
+            Workspace(
+                id: "workspace-\(index)",
+                createdAt: date.addingTimeInterval(TimeInterval(index)),
+                state: index == 200 ? .archived : .ready,
+                updatedAt: date.addingTimeInterval(TimeInterval(index))
+            )
+        }
+
+        try database.write { database in
+            try Workspace
+                .insert { workspaces }
+                .execute(database)
+        }
+
+        let snapshots = try database.read { database in
+            try WorkspaceSnapshot.mostRecentlyUpdated.fetchAll(database)
+        }
+
+        #expect(snapshots.count == workspaces.count)
+        #expect(snapshots.first?.workspace.id == "workspace-200")
+        #expect(snapshots.last?.workspace.id == "workspace-0")
     }
 }

@@ -12,6 +12,44 @@ import SharedConductorData
 import SQLiteData
 
 enum SessionRoute {
+    static func modelHistory(
+        context: Server.RequestContext,
+        database: any DatabaseReader
+    ) async throws -> Session.ModelHistory {
+        let workspaceID = try context.parameters.require("workspaceID")
+        let sessionID = try context.parameters.require("sessionID")
+        return try await database.read { database in
+            let hasSession = try Session
+                .where {
+                    $0.id.eq(sessionID)
+                        && $0.workspaceID.eq(workspaceID)
+                }
+                .fetchOne(database) != nil
+            guard hasSession else {
+                throw PlainTextResponseError(.notFound, message: "Session not found.")
+            }
+
+            let messages = Message.where { $0.sessionID.eq(sessionID) }
+            let lastUsedModel: String? = try messages
+                .where { $0.model.isNot(nil) }
+                .order {
+                    (
+                        $0.createdAt.desc(),
+                        $0.id.desc()
+                    )
+                }
+                .select(\.model)
+                .fetchOne(database)
+                ?? nil
+            return Session.ModelHistory(
+                hasMessages: try messages.fetchCount(database) > 0,
+                lastUsedModel: lastUsedModel.map {
+                    Session.Model(rawValue: $0)
+                }
+            )
+        }
+    }
+
     static func patch(
         request: Request,
         context: Server.RequestContext,

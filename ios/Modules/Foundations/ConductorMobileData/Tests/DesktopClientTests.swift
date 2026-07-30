@@ -200,6 +200,55 @@ struct DesktopClientTests {
         expectNoDifference(requestedPath.value, "/settings")
     }
 
+    @Test("Session model history uses its lightweight desktop endpoint")
+    func sessionModelHistory() async throws {
+        let requestedPath = LockIsolated<String?>(nil)
+        DesktopClientURLProtocol.handler.setValue { request in
+            requestedPath.setValue(request.url?.path)
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(
+                    #"{"hasMessages":true,"lastUsedModel":"gpt-5.6-sol"}"#.utf8
+                )
+            )
+        }
+        defer { DesktopClientURLProtocol.handler.setValue(nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DesktopClientURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let history = try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.urlSession = urlSession
+        } operation: {
+            @Shared(.desktopServerAddress) var desktopServerAddress
+            $desktopServerAddress.withLock { $0 = "my-mac" }
+            return try await DesktopClient.liveValue.fetchSessionModelHistory(
+                workspaceID: "workspace-1",
+                sessionID: "session-1"
+            )
+        }
+
+        expectNoDifference(
+            history,
+            Session.ModelHistory(
+                hasMessages: true,
+                lastUsedModel: .gpt_5_6_sol
+            )
+        )
+        expectNoDifference(
+            requestedPath.value,
+            "/workspaces/workspace-1/sessions/session-1/model-history"
+        )
+    }
+
     @Test("Commands reject a missing desktop server address")
     func commandsWithoutServerAddress() async throws {
         try await withDependencies {

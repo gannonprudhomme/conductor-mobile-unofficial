@@ -4,9 +4,8 @@ A native-iOS app prototype for [Conductor.build](https://conductor.build), suppo
 
 ## Screenshots
 
-|||||
-|--|--|--|--|
-|<img src="docs/resources/showcase-home.png" width=200>|<img src="docs/resources/showcase-chat.png" width=200>|<img src="docs/resources/showcase-chat-menu.png" width=200>|<img src="docs/resources/showcase-new-workspace.png" width=200>|
+|<img src="docs/resources/showcase-home.png" width=200>|<img src="docs/resources/showcase-chat.png" width=200>|<img src="docs/resources/showcase-chat-menu.png" width=200>|
+|--|--|--|
 
 ## Installation
 

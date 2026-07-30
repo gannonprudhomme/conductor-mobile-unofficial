@@ -79,6 +79,9 @@ let package = Package(
                 "ConductorVoiceInput",
             ],
             path: "ConductorChat/Sources",
+            resources: [
+                .process("Assets.xcassets"),
+            ],
             swiftSettings: swiftSettings
         ),
         .target(

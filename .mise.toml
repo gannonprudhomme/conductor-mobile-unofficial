@@ -3,7 +3,12 @@ mr = "mise run"
 
 [tasks.deploy]
 description = "Build, install, and launch the native iOS app"
-run = "mise -C ios run deploy -- \"$@\""
+usage = '''
+arg "[destination]" help="xcodebuild destination, such as id=<UDID>"
+flag "--attach" help="Attach the terminal to the app process after launching"
+flag "--release" help="Build with the Release configuration"
+'''
+run = 'mise -C ios run deploy ${usage_destination:+"${usage_destination}"} ${usage_attach:+--attach} ${usage_release:+--release}'
 
 [tasks.release]
 description = "Archive and upload the native iOS app to TestFlight"

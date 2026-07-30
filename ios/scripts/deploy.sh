@@ -3,10 +3,11 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: deploy.sh [<xcodebuild-destination>] [--attach]
+Usage: deploy.sh [<xcodebuild-destination>] [--attach] [--release]
 
 Examples:
   deploy.sh --attach
+  deploy.sh --release id=00008110-001234567890801E
   deploy.sh id=22F507F3-FF8F-4909-BB21-ABDB8BB84AAA --attach
   deploy.sh 'platform=iOS Simulator,id=22F507F3-FF8F-4909-BB21-ABDB8BB84AAA'
 USAGE
@@ -14,12 +15,17 @@ USAGE
 
 DESTINATION=""
 ATTACH=false
+CONFIGURATION=Debug
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while (($#)); do
   case "$1" in
     --attach)
       ATTACH=true
+      shift
+      ;;
+    --release)
+      CONFIGURATION=Release
       shift
       ;;
     -h|--help)
@@ -60,16 +66,16 @@ DEVICE_ID="$(destination_id)"
 
 if xcrun simctl list devices available | grep -Fq "($DEVICE_ID)"; then
   IS_SIMULATOR=true
-  SDK_DIR="Debug-iphonesimulator"
+  SDK_DIR="$CONFIGURATION-iphonesimulator"
 else
   IS_SIMULATOR=false
-  SDK_DIR="Debug-iphoneos"
+  SDK_DIR="$CONFIGURATION-iphoneos"
 fi
 
 XCODEBUILD_ARGS=(
   -workspace "$IOS_DIR/ConductorMobile.xcworkspace"
   -scheme ConductorMobile
-  -configuration Debug
+  -configuration "$CONFIGURATION"
   -skipMacroValidation
   -skipPackagePluginValidation
   -skipPackageUpdates

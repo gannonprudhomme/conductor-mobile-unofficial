@@ -12,7 +12,6 @@ extension WorkspaceSnapshot {
     static var mostRecentlyUpdated: some SelectStatement<Self, Workspace, ()> {
         Workspace
             .order { $0.updatedAt.desc() }
-            .limit(200)
             .select { workspace in
                 // These correlated EXISTS expressions remain part of this single workspace query. The
                 // sessions workspace index makes each lookup direct, and EXISTS stops at its first match.

@@ -1310,10 +1310,13 @@ struct WorkspaceChatTests {
                 $0.isCreatingSession = false
                 $0.sessionIDsBeforeCreation = nil
                 $0.sessionIDAwaitingObservation = createdSession.id
-                $0.chat = Chat.State(
+                var chat = Chat.State(
                     session: createdSession,
                     shouldFocusMessageField: true
                 )
+                chat.isLoadingMessages = false
+                chat.isMessageSnapshotEmpty = true
+                $0.chat = chat
             }
 
             await store.send(.loadSessionsResponse(.success([activeSession]))) {
@@ -1426,9 +1429,10 @@ struct WorkspaceChatTests {
             await store.send(
                 .loadSessionsResponse(.success([resolvedSession]))
             ) {
-                $0.chat?.hasObservedSessionModelChange = true
                 $0.chat?.hasObservedSessionReasoningEffortChange = true
+                $0.chat?.canonicalModel = .gpt_5_6_sol
                 $0.chat?.selectedModel = .gpt_5_6_sol
+                $0.chat?.selectedModelSource = .canonical
                 $0.chat?.selectedReasoningEffort = .high
                 $0.isLoadingSessions = false
             }
@@ -1483,10 +1487,13 @@ struct WorkspaceChatTests {
                 $0.hasUserSelectedSession = true
                 $0.isLoadingSessions = false
                 $0.sessionIDsBeforeCreation = nil
-                $0.chat = Chat.State(
+                var chat = Chat.State(
                     session: createdSession,
                     shouldFocusMessageField: true
                 )
+                chat.isLoadingMessages = false
+                chat.isMessageSnapshotEmpty = true
+                $0.chat = chat
             }
             await store.send(.activeSessionIDChanged(activeSession.id))
             #expect(store.state.chat?.sessionID == createdSession.id)
@@ -1497,6 +1504,70 @@ struct WorkspaceChatTests {
                 $0.isCreatingSession = false
             }
             responseContinuation.finish()
+        }
+    }
+
+    @Test("Cloud session creation immediately presents a provisional empty chat")
+    func cloudSessionCreationStartsEmpty() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(
+            id: "active",
+            workspaceID: workspace.id
+        )
+        var createdSession = try makeSession(
+            id: "created",
+            workspaceID: workspace.id
+        )
+        createdSession.status = Session.Status(rawValue: "creating")
+        let attemptID = UUID()
+        let mutationRoute = WorkspaceMutationRoute.cloud(
+            accountID: "account",
+            remoteWorkspaceID: "remote-workspace"
+        )
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { database in
+                try Session.upsert { activeSession }.execute(database)
+            }
+        } operation: {
+            var state = WorkspaceChat.State(
+                workspaceWithRepository: WorkspaceWithRepository(
+                    workspace: workspace,
+                    repository: nil
+                )
+            )
+            state.source = .cloud
+            state.mutationRoute = mutationRoute
+            state.isCreatingSession = true
+            state.sessionIDsBeforeCreation = [activeSession.id]
+            let store = TestStore(initialState: state) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .createSessionResponse(
+                    .success(
+                        WorkspaceSessionCreationResult(
+                            session: createdSession,
+                            attemptID: attemptID
+                        )
+                    )
+                )
+            ) {
+                $0.hasUserSelectedSession = true
+                $0.isCreatingSession = false
+                $0.sessionIDsBeforeCreation = nil
+                var chat = Chat.State(
+                    session: createdSession,
+                    isCloudHosted: true,
+                    mutationRoute: nil,
+                    shouldFocusMessageField: true
+                )
+                chat.isLoadingMessages = false
+                chat.isMessageSnapshotEmpty = true
+                $0.chat = chat
+            }
         }
     }
 
