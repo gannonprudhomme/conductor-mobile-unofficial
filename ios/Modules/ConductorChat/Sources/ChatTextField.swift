@@ -102,29 +102,29 @@ struct ChatTextField: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            if !voiceInputPhase.shouldShowTakeover {
-                VStack(spacing: 12) {
-                    VStack(spacing: 12) {
-                        if isEditingQueuedMessage {
-                            editingHeader
-                                .transition(.blurReplace)
-                        }
-
-                        textField
-                    }
-                    .animation(.default, value: isFocused)
-                    .animation(
-                        QueuedMessagesPresentation.disclosureAnimation,
-                        value: isEditingQueuedMessage
-                    )
-
-                    bottomRowButtons
+        VStack(spacing: voiceInputPhase.shouldShowTakeover ? 0 : 12) {
+            VStack(spacing: 12) {
+                if isEditingQueuedMessage {
+                    editingHeader
+                        .transition(.blurReplace)
                 }
-                .transition(.blurReplace)
-            } else {
-                voiceInputTakeover
-                    .transition(.blurReplace)
+
+                textField
+            }
+            .opacity(voiceInputPhase.shouldShowTakeover ? 0 : 1)
+            .overlay {
+                if voiceInputPhase.shouldShowTakeover {
+                    voiceInputTakeover
+                }
+            }
+            .animation(.default, value: isFocused)
+            .animation(
+                QueuedMessagesPresentation.disclosureAnimation,
+                value: isEditingQueuedMessage
+            )
+
+            if !voiceInputPhase.shouldShowTakeover {
+                bottomRowButtons
             }
         }
         .frame(minHeight: voiceInputPhase.shouldShowTakeover ? 32 : 64)
