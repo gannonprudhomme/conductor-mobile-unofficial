@@ -178,7 +178,7 @@ private struct RecordingWaveform: View {
                 )
                 context.fill(
                     Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                    with: .color(Color.theme(.accent))
+                    with: .color(Color.theme(.textSecondary))
                 )
             }
         }
