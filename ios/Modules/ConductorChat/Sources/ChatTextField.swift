@@ -105,27 +105,36 @@ struct ChatTextField: View {
         VStack(spacing: 12) {
             if !voiceInputPhase.shouldShowTakeover {
                 VStack(spacing: 12) {
-                    if isEditingQueuedMessage {
-                        editingHeader
-                            .transition(.blurReplace)
+                    VStack(spacing: 12) {
+                        if isEditingQueuedMessage {
+                            editingHeader
+                                .transition(.blurReplace)
+                        }
+
+                        textField
                     }
+                    .animation(.default, value: isFocused)
+                    .animation(
+                        QueuedMessagesPresentation.disclosureAnimation,
+                        value: isEditingQueuedMessage
+                    )
 
-                    textField
+                    bottomRowButtons
                 }
-                .animation(.default, value: isFocused)
-                .animation(
-                    QueuedMessagesPresentation.disclosureAnimation,
-                    value: isEditingQueuedMessage
-                )
-
-                bottomRowButtons
+                .transition(.blurReplace)
             } else {
                 voiceInputTakeover
+                    .transition(.blurReplace)
             }
         }
-        .frame(minHeight: 64)
-        .animation(.default, value: voiceInputPhase)
-        .padding(EdgeInsets(vertical: 12, horizontal: 16))
+        .frame(minHeight: voiceInputPhase.shouldShowTakeover ? 32 : 64)
+        .padding(
+            EdgeInsets(
+                vertical: voiceInputPhase.shouldShowTakeover ? 6 : 12,
+                horizontal: 16
+            )
+        )
+        .animation(.default, value: voiceInputPhase.shouldShowTakeover)
         .glassEffect(
             .clear
                 .tint(.theme(.background).opacity(0.925)),
@@ -164,6 +173,7 @@ struct ChatTextField: View {
         VoiceInputTakeover(
             phase: voiceInputPhase,
             levels: voiceInputLevels,
+            contentHeight: 20,
             accessibilityIdentifier: "chat.voiceInput",
             onStopTapped: onMicrophoneTapped
         )

@@ -47,7 +47,7 @@ public struct VoiceInputButton: View {
                 case .recording:
                     let rectSize = iconSize / 1.5
                     Rectangle()
-                        .fill(Color.theme(.destructive))
+                        .fill(Color.theme(.textPrimary))
                         .frame(width: rectSize, height: rectSize)
                         .frame(width: iconSize, height: iconSize)
                         .contentTransition(.opacity)
@@ -92,28 +92,17 @@ public struct VoiceInputButton: View {
     }
 
     private var backgroundColor: Color {
-        switch phase {
-        case .recording:
-            .theme(.destructiveBackground)
-
-        case .idle, .startingRecording, .transcribing:
-            Color.theme(.foreground).opacity(0.05)
-        }
+        Color.theme(.foreground).opacity(0.05)
     }
 
     private var foregroundColor: Color {
-        switch phase {
-        case .recording:
-            .theme(.destructive)
-
-        case .idle, .startingRecording, .transcribing:
-            .theme(.textPrimary)
-        }
+        .theme(.textPrimary)
     }
 }
 
 public struct VoiceInputTakeover: View {
     private let accessibilityIdentifier: String
+    private let contentHeight: CGFloat
     private let levels: [Float]
     private let onStopTapped: @MainActor () -> Void
     private let phase: VoiceInputPhase
@@ -121,11 +110,13 @@ public struct VoiceInputTakeover: View {
     public init(
         phase: VoiceInputPhase,
         levels: [Float],
+        contentHeight: CGFloat = 40,
         accessibilityIdentifier: String,
         onStopTapped: @escaping @MainActor () -> Void
     ) {
         self.phase = phase
         self.levels = levels
+        self.contentHeight = contentHeight
         self.accessibilityIdentifier = accessibilityIdentifier
         self.onStopTapped = onStopTapped
     }
@@ -134,7 +125,10 @@ public struct VoiceInputTakeover: View {
         switch phase {
         case .recording:
             HStack(spacing: 12) {
-                RecordingWaveform(levels: levels)
+                RecordingWaveform(
+                    levels: levels,
+                    height: contentHeight
+                )
                     .frame(maxWidth: .infinity)
 
                 VoiceInputButton(
@@ -147,7 +141,10 @@ public struct VoiceInputTakeover: View {
             }
 
         case .transcribing:
-            VoiceInputStatus(title: "Transcribing…")
+            VoiceInputStatus(
+                title: "Transcribing…",
+                height: contentHeight
+            )
 
         case .idle, .startingRecording:
             EmptyView()
@@ -157,6 +154,7 @@ public struct VoiceInputTakeover: View {
 
 private struct RecordingWaveform: View {
     let levels: [Float]
+    let height: CGFloat
 
     var body: some View {
         Canvas { context, size in
@@ -184,7 +182,7 @@ private struct RecordingWaveform: View {
                 )
             }
         }
-        .frame(height: 40)
+        .frame(height: height)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Microphone audio level")
     }
@@ -192,6 +190,7 @@ private struct RecordingWaveform: View {
 
 private struct VoiceInputStatus: View {
     let title: String
+    let height: CGFloat
 
     var body: some View {
         Label {
@@ -204,7 +203,7 @@ private struct VoiceInputStatus: View {
         .labelStyle(.conductorSmall)
         .font(.theme(.small))
         .foregroundStyle(.theme(.textSecondary))
-        .frame(maxWidth: .infinity, minHeight: 40, alignment: .center)
+        .frame(maxWidth: .infinity, minHeight: height, alignment: .center)
     }
 }
 
@@ -233,7 +232,10 @@ private struct VoiceInputStatus: View {
             onStopTapped: {}
         )
 
-        VoiceInputStatus(title: "Transcribing…")
+        VoiceInputStatus(
+            title: "Transcribing…",
+            height: 40
+        )
     }
     .padding()
     .background(.theme(.background))
