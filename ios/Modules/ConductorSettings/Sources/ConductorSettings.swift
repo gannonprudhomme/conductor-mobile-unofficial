@@ -52,12 +52,17 @@ public struct ConductorSettings: Sendable {
         var testedServerAddress: String?
 
         public init() {
+            @Dependency(\.desktopClient) var desktopClient
             @Shared(.desktopDisplayConfiguration) var storedDisplayConfiguration
             @Shared(.desktopServerAddress) var storedServerAddress
             @Shared(.mobileModelSettingsOverride) var mobileModelSettingsOverride
+            let desktopModelSettings = desktopClient.cachedModelSettings()
             let initialModelSettings =
-                mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
-            self.conductorModelSettings = .conductorDefaults
+                mobileModelSettingsOverride
+                ?? desktopModelSettings
+                ?? DesktopClient.ModelSettings.conductorDefaults
+            self.conductorModelSettings =
+                desktopModelSettings ?? DesktopClient.ModelSettings.conductorDefaults
             self.deviceIcon = storedDisplayConfiguration?.icon ?? .laptop
             self.displayName = storedDisplayConfiguration?.name ?? ""
             self.draftModelSettings = initialModelSettings
@@ -278,6 +283,9 @@ public struct ConductorSettings: Sendable {
             switch action {
             case .task:
                 guard !state.isServerAddressMissing else {
+                    return .none
+                }
+                guard desktopClient.cachedModelSettings() == nil else {
                     return .none
                 }
                 state.isLoadingModelSettings = true

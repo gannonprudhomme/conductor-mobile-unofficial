@@ -822,6 +822,44 @@ struct ServerTests {
         }
     }
 
+    @Test("Current Claude Code settings provide the default effort")
+    func claudeCodeDefaultEffort() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let userSettingsURL = rootURL.appending(path: "settings.toml")
+        try """
+            [models]
+            default = "opus-5-1m"
+
+            [models.claude_code]
+            default_effort_level = "max"
+            """
+            .write(to: userSettingsURL, atomically: true, encoding: .utf8)
+
+        let application = Server.makeApplication(
+            database: try testConductorDatabase(),
+            userSettingsURL: userSettingsURL,
+            managedSettingsURL: rootURL.appending(path: "missing-managed-settings.toml"),
+            port: 0
+        )
+
+        try await application.test(.live) { client in
+            try await client.execute(uri: "/settings", method: .get) { response in
+                #expect(response.status == .ok)
+                let settings = try #require(
+                    JSONSerialization.jsonObject(
+                        with: Data(response.body.readableBytesView)
+                    ) as? [String: Any]
+                )
+                #expect(settings["defaultModel"] as? String == "opus-5-1m")
+                #expect(settings["defaultReasoningEffort"] as? String == "max")
+            }
+        }
+    }
+
     @Test("Browser-originated WebSocket and command requests are rejected")
     func browserOrigins() async throws {
         let database = try testConductorDatabase()
