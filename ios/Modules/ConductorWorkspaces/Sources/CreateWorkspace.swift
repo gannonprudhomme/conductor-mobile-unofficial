@@ -78,11 +78,17 @@ public struct CreateWorkspace: Sendable {
             )
             self.repositories = repositories
             self.cloudCandidates = cloudCandidates
-            self.mode = repositories.isEmpty ? .cloud : .local
-            self.selectedRepositoryID = repositories
-                .first { $0.id == selectedRepositoryIDFilter }?.id
-                ?? repositories.first?.id
-                ?? cloudCandidates[0].id
+            if cloudCandidates.isEmpty {
+                self.mode = .local
+                self.selectedRepositoryID = repositories
+                    .first { $0.id == selectedRepositoryIDFilter }?.id
+                    ?? repositories[0].id
+            } else {
+                self.mode = .cloud
+                self.selectedRepositoryID = cloudCandidates
+                    .first { $0.id == selectedRepositoryIDFilter }?.id
+                    ?? cloudCandidates[0].id
+            }
             let modelSettings =
                 mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
             if let agentType = modelSettings.defaultModel.agentType {
@@ -481,35 +487,24 @@ public struct CreateWorkspaceView: View {
 
     private var content: some View {
         VStack(spacing: 0) {
-            if !store.repositories.isEmpty,
-               !store.cloudCandidates.isEmpty {
-                Picker(
-                    "Workspace location",
-                    selection: Binding(
-                        get: { store.mode },
-                        set: { store.send(.modeSelected($0)) }
-                    )
-                ) {
-                    Text("Local").tag(CreateWorkspace.Mode.local)
-                    Text("Cloud").tag(CreateWorkspace.Mode.cloud)
-                }
-                .pickerStyle(.segmented)
-                .padding(.bottom, 12)
-            }
-
             promptEditor
         }
             .padding(.horizontal, 16)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    topRow
-                }
-            }
             .frame(maxHeight: .infinity)
-            .navigationBarTitleDisplayMode(.inline)
             .background(.theme(.background))
             .scrollEdgeEffectStyle(.soft, for: .bottom)
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .safeAreaBar(edge: .top) {
+                topRow
+                    .padding(
+                        EdgeInsets(
+                            top: 22,
+                            leading: 16,
+                            bottom: 20,
+                            trailing: 16
+                        )
+                    )
+            }
             .safeAreaBar(edge: .bottom) {
                 bottomRow
                     .padding(.horizontal, 24)
@@ -518,15 +513,46 @@ public struct CreateWorkspaceView: View {
             }
     }
 
-    private var topRow: some View {
-        Text(Array(repeating: "A", count: 100).joined())
-            .opacity(0)
-            .accessibilityHidden(true)
-            .overlay {
-                repositoryMenu
-                    .labelStyle(.titleAndIcon)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+    private var workspaceLocationMenu: some View {
+        Menu {
+            Picker(
+                "Workspace location",
+                selection: Binding(
+                    get: { store.mode },
+                    set: { store.send(.modeSelected($0)) }
+                )
+            ) {
+                Text("Local").tag(CreateWorkspace.Mode.local)
+                Text("Cloud org").tag(CreateWorkspace.Mode.cloud)
             }
+        } label: {
+            Label {
+                Text(store.mode == .cloud ? "Cloud org" : "Local")
+                    .lineLimit(1)
+                    .contentTransition(.opacity)
+            } icon: {
+                LucideIcon(Lucide.chevronDown, style: .small)
+                    .foregroundStyle(.theme(.textSecondary))
+            }
+            .labelStyle(.conductorSettingsMenu)
+        }
+        .accessibilityLabel("Workspace location")
+        .accessibilityValue(store.mode == .cloud ? "Cloud org" : "Local")
+        .tint(.theme(.textPrimary))
+        .disabled(store.isCreateAPIInFlight)
+    }
+
+    private var topRow: some View {
+        HStack(spacing: 12) {
+            repositoryMenu
+                .labelStyle(.titleAndIcon)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !store.repositories.isEmpty,
+               !store.cloudCandidates.isEmpty {
+                workspaceLocationMenu
+            }
+        }
     }
 
     private var repositoryMenu: some View {
