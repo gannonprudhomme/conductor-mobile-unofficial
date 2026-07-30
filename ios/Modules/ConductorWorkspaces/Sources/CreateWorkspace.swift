@@ -34,6 +34,15 @@ public struct CreateWorkspace: Sendable {
         @Shared(.createWorkspacePrompt)
         public var prompt
 
+        @Shared(.createWorkspaceMode)
+        var lastSelectedMode
+
+        @Shared(.createWorkspaceRepositoryID)
+        var lastSelectedRepositoryID
+
+        @Shared(.createWorkspaceModel)
+        var lastSelectedModel
+
         @Shared(.mobileModelSettingsOverride)
         var mobileModelSettingsOverride
 
@@ -80,17 +89,24 @@ public struct CreateWorkspace: Sendable {
             )
             self.repositories = repositories
             self.cloudCandidates = cloudCandidates
-            if cloudCandidates.isEmpty {
-                self.mode = .local
-                self.selectedRepositoryID = repositories
-                    .first { $0.id == selectedRepositoryIDFilter }?.id
-                    ?? repositories[0].id
+            @Shared(.createWorkspaceMode) var storedMode
+            @Shared(.createWorkspaceRepositoryID) var storedRepositoryID
+            let mode: Mode = if cloudCandidates.isEmpty {
+                .local
+            } else if repositories.isEmpty {
+                .cloud
             } else {
-                self.mode = .cloud
-                self.selectedRepositoryID = cloudCandidates
-                    .first { $0.id == selectedRepositoryIDFilter }?.id
-                    ?? cloudCandidates[0].id
+                storedMode ?? .cloud
             }
+            self.mode = mode
+            let availableRepositoryIDs: [Repository.ID] = switch mode {
+            case .local: repositories.map(\.id)
+            case .cloud: cloudCandidates.map(\.id)
+            }
+            self.selectedRepositoryID = availableRepositoryIDs
+                .first { $0 == selectedRepositoryIDFilter }
+                ?? availableRepositoryIDs.first { $0 == storedRepositoryID }
+                ?? availableRepositoryIDs[0]
             let modelSettings =
                 mobileModelSettingsOverride
                 ?? desktopClient.cachedModelSettings()
@@ -102,9 +118,32 @@ public struct CreateWorkspace: Sendable {
                 self.isFastModeEnabled = modelSettings.isFastModeEnabled
                 self.reconcileSelectedReasoningEffort()
             }
+            self.applyRememberedModel()
             if mode == .cloud {
                 self.applyCloudConfigurationDefault()
             }
+        }
+
+        mutating func applyRememberedModel() {
+            guard let model = lastSelectedModel else {
+                return
+            }
+            let agentType: Session.AgentType? = switch mode {
+            case .local:
+                model.agentType
+
+            case .cloud:
+                CloudCreationConfigurationCatalog.configurations
+                    .first(where: { $0.model == model })?
+                    .agent
+            }
+            guard let agentType else {
+                return
+            }
+            self.agentType = agentType
+            selectedModel = model
+            hasUserSelectedModel = true
+            reconcileSelectedReasoningEffort()
         }
 
         mutating func applyCloudConfigurationDefault() {
@@ -124,7 +163,23 @@ public struct CreateWorkspace: Sendable {
             isFastModeEnabled = false
         }
 
+        /// Restores the remembered repository when the new location offers it, falling back to its
+        /// first entry.
+        mutating func selectRememberedRepository() {
+            let availableRepositoryIDs = displayedRepositories.map(\.id)
+            guard let repositoryID = availableRepositoryIDs
+                .first(where: { $0 == lastSelectedRepositoryID })
+                ?? availableRepositoryIDs.first else {
+                return
+            }
+            selectedRepositoryID = repositoryID
+        }
+
         var displayedRepositories: [Repository] {
+            displayedRepositories(for: mode)
+        }
+
+        func displayedRepositories(for mode: Mode) -> [Repository] {
             switch mode {
             case .local:
                 repositories
@@ -134,7 +189,7 @@ public struct CreateWorkspace: Sendable {
         }
     }
 
-    public enum Mode: Equatable, Sendable {
+    public enum Mode: String, Codable, Equatable, Sendable {
         case local
         case cloud
     }
@@ -301,6 +356,7 @@ public struct CreateWorkspace: Sendable {
                 if let agentType = state.selectedModel.agentType {
                     state.agentType = agentType
                 }
+                state.$lastSelectedModel.withLock { $0 = state.selectedModel }
                 state.reconcileSelectedReasoningEffort()
                 return .none
 
@@ -381,26 +437,25 @@ public struct CreateWorkspace: Sendable {
                 return .none
 
             case let .modeSelected(mode):
-                guard state.mode != mode else {
+                guard state.mode != mode, !state.displayedRepositories(for: mode).isEmpty else {
                     return .none
                 }
                 state.mode = mode
+                state.$lastSelectedMode.withLock { $0 = mode }
+                state.selectRememberedRepository()
+                state.applyRememberedModel()
                 switch mode {
                 case .local:
-                    guard let repository = state.repositories.first else {
-                        return .none
-                    }
-                    state.selectedRepositoryID = repository.id
                     return .send(.task)
 
                 case .cloud:
-                    guard let candidate = state.cloudCandidates.first else {
-                        return .none
-                    }
-                    state.selectedRepositoryID = candidate.id
                     state.applyCloudConfigurationDefault()
                     return .none
                 }
+
+            case .binding(\.selectedRepositoryID):
+                state.$lastSelectedRepositoryID.withLock { $0 = state.selectedRepositoryID }
+                return .none
 
             case .alert, .binding, .delegate:
                 return .none
