@@ -49,6 +49,62 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         selectRepositoryFilter(in: app)
         let baselineWorkspaceIDs = waitForWorkspaceIdentifiers(in: app)
 
+        do {
+            let createButton = app.buttons["Create"]
+            XCTAssertTrue(createButton.waitForExistence(timeout: 10))
+            XCTAssertTrue(createButton.isEnabled)
+            createButton.tap()
+
+            let localButton = app.buttons["Local"]
+            XCTAssertTrue(
+                localButton.waitForExistence(timeout: 15),
+                "Local creation was not available for the shared repository."
+            )
+            localButton.tap()
+            XCTAssertEqual(
+                app.buttons["Repository"].value as? String,
+                repositoryName
+            )
+
+            let submitButton = app.buttons["create-workspace.submit"]
+            XCTAssertTrue(submitButton.waitForExistence(timeout: 10))
+            XCTAssertTrue(submitButton.isEnabled)
+            submitButton.tap()
+
+            let sessionPicker = app.descendants(matching: .any)[
+                "workspace-chat.session-picker"
+            ]
+            XCTAssertTrue(
+                sessionPicker.waitForExistence(timeout: 120),
+                "Local workspace creation did not navigate to chat."
+            )
+            let createdWorkspaceID = "workspace-row." + (try XCTUnwrap(
+                sessionPicker.value as? String
+            ))
+
+            let initialSession = waitForSessionCount(1, in: app).first!
+            let createdSession = try createSessionWithoutLoadingOverlay(
+                initialSessionID: initialSession.identifier,
+                in: app
+            )
+            assertSelection(
+                initialSession.identifier,
+                afterTapping: initialSession,
+                in: app
+            )
+            assertSelection(
+                createdSession.identifier,
+                afterTapping: createdSession,
+                in: app
+            )
+
+            archiveWorkspace(createdWorkspaceID, in: app)
+            XCTAssertEqual(
+                Set(workspaceIdentifiers(in: app)),
+                baselineWorkspaceIDs
+            )
+        }
+
         let createButton = app.buttons["Create"]
         XCTAssertTrue(createButton.waitForExistence(timeout: 10))
         XCTAssertTrue(createButton.isEnabled)
@@ -98,17 +154,10 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
 
         let initialSession = waitForSessionCount(1, in: app).first!
         let initialSessionID = initialSession.identifier
-        let newSessionButton = app.buttons["workspace-chat.new-session"]
-        XCTAssertTrue(newSessionButton.waitForExistence(timeout: 60))
-        XCTAssertTrue(newSessionButton.isEnabled)
-        newSessionButton.tap()
-
-        let sessions = waitForSessionCount(2, in: app)
-        XCTAssertEqual(sessions.count, 2)
-        let createdSession = try XCTUnwrap(
-            sessions.first { $0.identifier != initialSessionID }
+        let createdSession = try createSessionWithoutLoadingOverlay(
+            initialSessionID: initialSessionID,
+            in: app
         )
-        assertChatFinishesLoading(in: app)
         sendMessageAndWaitForAcknowledgement(in: app)
 
         assertSelection(
@@ -127,33 +176,7 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
             in: app
         )
 
-        navigateBackToWorkspaces(in: app)
-        XCTAssertEqual(
-            app.buttons["Filter workspaces"].value as? String,
-            "Filtered by \(repositoryName)"
-        )
-
-        let createdWorkspace = workspaceElement(createdWorkspaceID, in: app)
-        XCTAssertTrue(createdWorkspace.waitForExistence(timeout: 10))
-        createdWorkspace.tap()
-
-        let workspaceActions = app.buttons["Workspace actions"]
-        XCTAssertTrue(workspaceActions.waitForExistence(timeout: 30))
-        workspaceActions.tap()
-
-        let archiveButton = app.buttons["Archive"]
-        XCTAssertTrue(archiveButton.waitForExistence(timeout: 10))
-        archiveButton.tap()
-
-        XCTAssertTrue(
-            app.buttons["Filter workspaces"].waitForExistence(timeout: 60),
-            "Archiving did not return to the workspace list."
-        )
-        XCTAssertTrue(
-            workspaceElement(createdWorkspaceID, in: app)
-                .waitForNonExistence(timeout: 60),
-            "The archived Cloud workspace remained in the filtered list."
-        )
+        archiveWorkspace(createdWorkspaceID, in: app)
         XCTAssertEqual(
             Set(workspaceIdentifiers(in: app)),
             baselineWorkspaceIDs
@@ -329,6 +352,46 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         return query.allElementsBoundByIndex
     }
 
+    private func createSessionWithoutLoadingOverlay(
+        initialSessionID: String,
+        in app: XCUIApplication
+    ) throws -> XCUIElement {
+        let sessionPicker = app.descendants(matching: .any)[
+            "workspace-chat.session-picker"
+        ]
+        let initialSession = sessionButton(initialSessionID, in: app)
+        let loading = app.descendants(matching: .any)["chat.loading"]
+        let newSessionButton = app.buttons["workspace-chat.new-session"]
+        assertChatFinishesLoading(in: app)
+        XCTAssertTrue(newSessionButton.waitForExistence(timeout: 60))
+        XCTAssertTrue(newSessionButton.isEnabled)
+        newSessionButton.tap()
+
+        for _ in 0..<20 {
+            XCTAssertTrue(
+                sessionPicker.exists,
+                "The session picker disappeared while creating a session."
+            )
+            XCTAssertTrue(
+                initialSession.exists,
+                "The existing session disappeared while creating a session."
+            )
+            XCTAssertFalse(
+                loading.exists,
+                "A full chat loading overlay appeared for a known-empty new session."
+            )
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        let sessions = waitForSessionCount(2, in: app)
+        XCTAssertEqual(sessions.count, 2)
+        let createdSession = try XCTUnwrap(
+            sessions.first { $0.identifier != initialSessionID }
+        )
+        assertChatFinishesLoading(in: app)
+        return createdSession
+    }
+
     private func assertSelection(
         _ identifier: String,
         afterTapping element: XCUIElement,
@@ -395,6 +458,39 @@ final class CloudWorkspaceLifecycleUITests: XCTestCase {
         backButton.tap()
         XCTAssertTrue(
             app.buttons["Filter workspaces"].waitForExistence(timeout: 30)
+        )
+    }
+
+    private func archiveWorkspace(
+        _ workspaceIdentifier: String,
+        in app: XCUIApplication
+    ) {
+        navigateBackToWorkspaces(in: app)
+        XCTAssertEqual(
+            app.buttons["Filter workspaces"].value as? String,
+            "Filtered by \(repositoryName)"
+        )
+
+        let workspace = workspaceElement(workspaceIdentifier, in: app)
+        XCTAssertTrue(workspace.waitForExistence(timeout: 10))
+        workspace.tap()
+
+        let workspaceActions = app.buttons["Workspace actions"]
+        XCTAssertTrue(workspaceActions.waitForExistence(timeout: 30))
+        workspaceActions.tap()
+
+        let archiveButton = app.buttons["Archive"]
+        XCTAssertTrue(archiveButton.waitForExistence(timeout: 10))
+        archiveButton.tap()
+
+        XCTAssertTrue(
+            app.buttons["Filter workspaces"].waitForExistence(timeout: 60),
+            "Archiving did not return to the workspace list."
+        )
+        XCTAssertTrue(
+            workspaceElement(workspaceIdentifier, in: app)
+                .waitForNonExistence(timeout: 60),
+            "The archived workspace remained in the filtered list."
         )
     }
 
