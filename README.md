@@ -70,23 +70,23 @@ After downloading & launching the macOS app, you must install the "UI hook" into
 For local workspaces, we read Conductor's local SQLite database.
 Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms - and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
 
-For Cloud workspaces we generally use Conductor's public API. However the public API is missing a handful of features, like queued messages, GitHub PR status, etc, which we instead read from the local SQLite database when connected.
+For Cloud workspaces we generally use Conductor's public API. However the public API is missing a handful of features, like queued messages, GitHub PR status, etc, so we instead retrieve that information from the local SQLite database when available.
 
 ### Writing data through the UI hook
 
-While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI.
+While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI, nor cause messages to be sent to the agent.
 
 As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script* in Tauri's Web Inspector. The Desktop companion connects to this script and sends commands to it whenever requested from the mobile app.
 
-*the `Copy loader` [script](desktop/workspace-hook/bootstrap-loader.js) isn't actually the UI hook itself. It instead retrieves & executes the [actual UI hook](desktop/workspace-hook/browser-hook.mjs) from the desktop companion web server. This is mostly so it automatically updates itself during development.
+*the `Copy loader` [script](desktop/workspace-hook/bootstrap-loader.js) isn't the UI hook itself. It instead retrieves & executes the [actual UI hook](desktop/workspace-hook/browser-hook.mjs) from the desktop companion web server. This is mostly so it automatically updates itself during development.
 
 ### iOS
 
-The iOS app is a native iOS app, implemented through SwiftUI and [TCA](https://github.com/pointfreeco/swift-composable-architecture).
-We use UIKit sparingly whenever required, namely for the chat view itself, as the desired performance and scrolling behavior was only consistently achievable with UIKit.
+The iOS app is a native iOS app, implemented using SwiftUI and [TCA](https://github.com/pointfreeco/swift-composable-architecture).
+We use UIKit sparingly whenever required, namely for the chat view itself, as the desired performance and scrolling behavior was only consistently achievable with UIKit. (specifically a `UICollectionView`)
 
 We use [sqlite-data](https://github.com/pointfreeco/sqlite-data) as our backing store and cache.
-Our SQLite tables are generally a 1:1 match to Conductor's schema, though we often store extra "metadata" in sibling tables we JOIN on. 
+Our SQLite tables are generally a 1:1 match to Conductor's schema, though we often store extra "metadata" in sibling tables we JOIN on.
 
 ## Development
 
