@@ -675,15 +675,15 @@ extension CloudAPIClient: DependencyKey {
     ) async throws -> [CloudTranscriptMessage] {
         guard let after else {
             // Offset pages are independent, so the first two can share one
-            // network round trip. Starting with the full 50-request window
+            // network round trip. Starting with the full 30-request window
             // would make short chats faster by no more, while issuing dozens
             // of requests beyond their end. Page size 100 and a later window
-            // of 50 were the fastest combination for the measured p90/p99
-            // transcripts without that penalty for the common short case.
+            // of 30 balance tail latency with rate-limit pressure without that
+            // penalty for the common short case.
             return try await allPagesInConcurrentWindows(
                 pageSize: 100,
                 initialWindowPageCount: 2,
-                maximumWindowPageCount: 50
+                maximumWindowPageCount: 30
             ) { limit, offset in
                 try await request(
                     CloudPage<CloudTranscriptMessage>.self,

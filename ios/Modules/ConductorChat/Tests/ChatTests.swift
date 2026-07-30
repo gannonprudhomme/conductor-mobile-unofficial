@@ -213,6 +213,9 @@ struct ChatTests {
                         continuation.yield(.ready)
                     }
                 }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
             }
             store.exhaustivity = .off
 
@@ -223,6 +226,108 @@ struct ChatTests {
             }
             await task.cancel()
         }
+    }
+
+    @Test("Cloud chats observe their queue through the paired desktop session")
+    func cloudQueueObservation() async throws {
+        let database = try appDatabase()
+        let canonicalWorkspaceID = "cloud-workspace"
+        let remoteWorkspaceID = "remote-workspace"
+        let remoteSessionID = "remote-session:/+"
+        let canonicalSessionID = CloudCanonicalID.session(
+            accountID: "account",
+            remoteSessionID: remoteSessionID
+        )
+        let session = Session.preview(
+            id: canonicalSessionID,
+            workspaceID: canonicalWorkspaceID
+        )
+        let queuedMessage = Message(
+            id: "queued",
+            sessionID: remoteSessionID,
+            role: .user,
+            content: "Queued",
+            createdAt: .distantPast,
+            queueOrder: 1
+        )
+        try await database.write { database in
+            try Session.insert { session }.execute(database)
+            try CloudSessionMetadata
+                .insert {
+                    CloudSessionMetadata(
+                        canonicalSessionID: canonicalSessionID,
+                        cloudSessionID: remoteSessionID,
+                        workspaceID: session.workspaceID,
+                        accountID: "account",
+                        listOrder: 0,
+                        refreshGeneration: "generation",
+                        hasCompleteTranscript: true,
+                        transcriptProjectionVersion: CloudTranscriptAdapter
+                            .projectionVersion,
+                        lastFullTranscriptRefreshAt: .distantFuture
+                    )
+                }
+                .execute(database)
+        }
+        let (stream, continuation) = AsyncThrowingStream<
+            MessageSyncEvent,
+            any Error
+        >.makeStream()
+
+        let store = TestStore(
+            initialState: Chat.State(
+                session: session,
+                isCloudHosted: true,
+                mutationRoute: .cloud(
+                    accountID: "account",
+                    remoteWorkspaceID: remoteWorkspaceID
+                )
+            )
+        ) {
+            Chat()
+        } withDependencies: {
+            $0.defaultDatabase = database
+            $0.chatSyncClient.observeSelected = { selectedSessionID in
+                #expect(selectedSessionID == canonicalSessionID)
+                return AsyncStream { continuation in
+                    continuation.yield(.ready)
+                }
+            }
+            $0.desktopClient.observeMessageEvents = { workspaceID, sessionID in
+                #expect(workspaceID == remoteWorkspaceID)
+                #expect(sessionID == remoteSessionID)
+                return stream
+            }
+        }
+        store.exhaustivity = .off
+        #expect(store.state.queuedMessages.desktopSessionID == remoteSessionID)
+        #expect(
+            store.state.queuedMessages.desktopWorkspaceID
+                == remoteWorkspaceID
+        )
+
+        let task = await store.send(.task)
+        await store.receive(\.initialMessagesResponse) {
+            $0.isMessageSnapshotEmpty = true
+            $0.isLoadingMessages = false
+        }
+        continuation.yield(
+            .snapshot(
+                [],
+                queuedMessages: [queuedMessage]
+            )
+        )
+
+        var storedMessage: Message?
+        for _ in 0..<1_000 where storedMessage == nil {
+            storedMessage = try await database.read { database in
+                try Message.find(queuedMessage.id).fetchOne(database)
+            }
+            await Task.yield()
+        }
+        #expect(storedMessage == queuedMessage)
+
+        await task.cancel()
     }
 
     @Test("A same-account credential revision restarts transcript observation")
@@ -279,6 +384,9 @@ struct ChatTests {
                             session.model.defaultReasoningEffort,
                         isFastModeEnabled: false
                     )
+                }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
                 }
             }
             store.exhaustivity = .off(showSkippedAssertions: false)
@@ -365,6 +473,9 @@ struct ChatTests {
                         }
                     }
                 }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
             }
             store.exhaustivity = .off
 
@@ -437,6 +548,9 @@ struct ChatTests {
                     )
                 }
                 $0.chatSyncClient.observeSelected = { _ in stream }
+                $0.desktopClient.observeMessageEvents = { _, _ in
+                    AsyncThrowingStream { _ in }
+                }
             }
             store.exhaustivity = .off
 

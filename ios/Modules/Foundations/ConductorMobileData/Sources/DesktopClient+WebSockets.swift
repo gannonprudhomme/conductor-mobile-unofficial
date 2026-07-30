@@ -172,6 +172,27 @@ extension DesktopClient {
         }
     }
 
+    /// Observes raw desktop message envelopes without requiring a local desktop session baseline.
+    ///
+    /// Cloud chats use this stream only for the mutable queue. Their completed transcript and
+    /// canonical session belong to the Cloud cache, so the desktop transcript store cannot own
+    /// or resume that raw session.
+    static func observeMessageEvents(
+        workspaceID: Workspace.ID,
+        sessionID: Session.ID
+    ) -> AsyncThrowingStream<MessageSyncEvent, any Error> {
+        observe(
+            MessageSyncEvent.self,
+            bufferingPolicy: .unbounded
+        ) { serverAddress in
+            messagesWebSocketURL(
+                serverAddress: serverAddress,
+                workspaceID: workspaceID,
+                sessionID: sessionID
+            )
+        }
+    }
+
     /// Runs the cache/resume lifecycle for one endpoint identity emitted by `observeMessages`.
     ///
     /// It acquires a connection lease before reading the cache, emits a durable snapshot

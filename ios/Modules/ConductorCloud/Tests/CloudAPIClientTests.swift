@@ -10,7 +10,7 @@ import Dependencies
 import Foundation
 import Testing
 
-// The pagination concurrency test deliberately suspends a 50-request window.
+// The pagination concurrency test deliberately suspends a 30-request window.
 // Keep its sibling clock-driven tests from competing with that stress fixture.
 @Suite(.serialized)
 @MainActor
@@ -1048,9 +1048,9 @@ struct CloudAPIClientTests {
         #expect(await fixture.activeRequestCount() == 2)
         await fixture.releaseConcurrentRequests()
 
-        await waitForCloudCondition { await fixture.tailRequestCount() == 50 }
-        #expect(await fixture.activeRequestCount() == 50)
-        #expect(await fixture.maximumConcurrentRequestCount() == 50)
+        await waitForCloudCondition { await fixture.tailRequestCount() == 30 }
+        #expect(await fixture.activeRequestCount() == 30)
+        #expect(await fixture.maximumConcurrentRequestCount() == 30)
         await fixture.releaseConcurrentRequests()
         await waitForCloudCondition { updates.value.count == 1 }
 
@@ -1063,7 +1063,7 @@ struct CloudAPIClientTests {
         #expect(update.rawCursor == "message-249")
         #expect(
             Set(await fixture.requestedOffsets())
-                == Set(stride(from: 0, through: 5_100, by: 100))
+                == Set(stride(from: 0, through: 3_100, by: 100))
         )
 
         observation.cancel()

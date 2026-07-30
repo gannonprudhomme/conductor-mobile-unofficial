@@ -23,6 +23,26 @@ public enum CloudCanonicalID {
         "cloud-session:\(component(accountID)):\(component(remoteSessionID))"
     }
 
+    public static func remoteSessionID(
+        from canonicalSessionID: Session.ID
+    ) -> Session.ID? {
+        let components = canonicalSessionID.split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 3,
+              components[0] == "cloud-session",
+              let accountID = decodeComponent(String(components[1])),
+              let remoteSessionID = decodeComponent(String(components[2])),
+              session(
+                accountID: accountID,
+                remoteSessionID: remoteSessionID
+              ) == canonicalSessionID else {
+            return nil
+        }
+        return remoteSessionID
+    }
+
     public static func message(
         accountID: String,
         remoteSessionID: String,
@@ -77,5 +97,16 @@ public enum CloudCanonicalID {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func decodeComponent(_ value: String) -> String? {
+        var base64 = value
+            .replacingOccurrences(of: "_", with: "/")
+            .replacingOccurrences(of: "-", with: "+")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
     }
 }

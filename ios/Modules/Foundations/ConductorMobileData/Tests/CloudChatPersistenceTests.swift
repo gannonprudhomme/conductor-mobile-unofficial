@@ -130,6 +130,74 @@ struct CloudChatPersistenceTests {
         )
     }
 
+    @Test("Desktop reconciliation changes only Cloud visibility and queue state")
+    func desktopReconciliationChangesOnlyVisibilityAndQueueState() throws {
+        let database = try appDatabase()
+        let cloudSession = try database.write { database in
+            try #require(
+                CloudChatPersistence.persist(
+                    snapshot(
+                        accountID: "account",
+                        sessionIDs: ["session"]
+                    ),
+                    in: database
+                )
+                .first
+            )
+        }
+        var desktopSession = Session.preview(
+            id: "session",
+            workspaceID: "workspace",
+            title: "Desktop title",
+            agentType: .claude,
+            isHidden: true,
+            createdAt: "2001-01-01T00:00:00.000Z",
+            updatedAt: "2002-01-01T00:00:00.000Z",
+            lastUserMessageAt: "2003-01-01T00:00:00.000Z",
+            status: .working,
+            model: .opus,
+            unreadCount: 99,
+            freshlyCompacted: 1,
+            contextTokenCount: 123,
+            codexThinkingLevel: nil,
+            isFastModeEnabled: true,
+            claudeEffortLevel: .ultra
+        )
+        desktopSession.queuePausedAt = "2026-07-28T12:00:00Z"
+
+        let reconciledSession = try database.write { database in
+            try #require(
+                CloudChatPersistence.reconcileSessionVisibility(
+                    from: [desktopSession],
+                    canonicalWorkspaceID: "workspace",
+                    remoteWorkspaceID: "workspace",
+                    in: database
+                )
+                .first
+            )
+        }
+        var expectedSession = cloudSession
+        expectedSession.isHidden = true
+        expectedSession.queuePausedAt = desktopSession.queuePausedAt
+
+        #expect(reconciledSession == expectedSession)
+
+        desktopSession.isHidden = false
+        desktopSession.queuePausedAt = nil
+        let resumedSession = try database.write { database in
+            try #require(
+                CloudChatPersistence.reconcileSessionVisibility(
+                    from: [desktopSession],
+                    canonicalWorkspaceID: "workspace",
+                    remoteWorkspaceID: "workspace",
+                    in: database
+                )
+                .first
+            )
+        }
+        #expect(resumedSession == cloudSession)
+    }
+
     @Test("Cloud sessions remain isolated and query in API order")
     func sessionIsolationAndOrder() throws {
         let database = try appDatabase()
