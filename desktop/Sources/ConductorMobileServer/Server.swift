@@ -830,7 +830,7 @@ public enum Server {
                     parsedSettings.defaultFastMode = match.1 == "true"
                 }
 
-            case .claude:
+            case .claude, .claudeCode:
                 if let match = line.firstMatch(
                     of: /^default_(?:thinking|effort)_level\s*=\s*"([^"]+)"/
                 ) {
@@ -854,6 +854,7 @@ public enum Server {
     private enum ModelSettingsSection: String {
         case models = "[models]"
         case claude = "[models.claude]"
+        case claudeCode = "[models.claude_code]"
         case codex = "[models.codex]"
     }
 
