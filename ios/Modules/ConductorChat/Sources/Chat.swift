@@ -193,16 +193,23 @@ public struct Chat: Sendable {
             guard workCycle.attemptID != attemptID else {
                 return
             }
-            workCycle = .working(
-                attemptID: attemptID,
-                baselineTurnID: turns?.last?.id,
-                correlatedTurnID: nil
-            )
+            workCycle = if displayedSessionStatus == .working {
+                .working(
+                    attemptID: attemptID,
+                    baselineTurnID: turns?.last?.id,
+                    correlatedTurnID: nil
+                )
+            } else {
+                .awaitingSessionStart(
+                    attemptID: attemptID,
+                    baselineTurnID: turns?.last?.id,
+                    correlatedTurnID: nil
+                )
+            }
         }
 
         mutating func beginPendingSendCycleIfNeeded() -> Bool {
-            guard !workCycle.isWorking,
-                  let attempt = displayedDeliveryAttempts.last(where: {
+            guard let attempt = displayedDeliveryAttempts.last(where: {
                       guard $0.messageMode == .sent,
                             !hasCanonicalMessage(for: $0) else {
                           return false
@@ -215,7 +222,8 @@ public struct Chat: Sendable {
                       default:
                           false
                       }
-                  }) else {
+                  }),
+                  workCycle.attemptID != attempt.attemptID else {
                 return false
             }
             beginSendCycle(attemptID: attempt.attemptID)
@@ -238,7 +246,14 @@ public struct Chat: Sendable {
                     baselineTurnID: baselineTurnID,
                     correlatedTurnID: nil
                 )
-            case .idle, .working:
+            case let .awaitingSessionStart(activeAttemptID, baselineTurnID, _)
+                where activeAttemptID == attemptID:
+                .idle(
+                    attemptID: nil,
+                    baselineTurnID: baselineTurnID,
+                    correlatedTurnID: nil
+                )
+            case .awaitingSessionStart, .idle, .working:
                 workCycle
             }
         }
@@ -273,13 +288,20 @@ public struct Chat: Sendable {
                     baselineTurnID: baselineTurnID,
                     correlatedTurnID: turnID
                 )
+            case let .awaitingSessionStart(activeAttemptID, baselineTurnID, _)
+                where activeAttemptID == attemptID:
+                .awaitingSessionStart(
+                    attemptID: activeAttemptID,
+                    baselineTurnID: baselineTurnID,
+                    correlatedTurnID: turnID
+                )
             case let .idle(nil, _, correlatedTurnID):
                 .idle(
                     attemptID: nil,
                     baselineTurnID: turnID,
                     correlatedTurnID: correlatedTurnID
                 )
-            case .idle, .working:
+            case .awaitingSessionStart, .idle, .working:
                 workCycle
             }
         }
@@ -288,6 +310,16 @@ public struct Chat: Sendable {
             let turns = turns ?? []
             workCycle = if sessionStatus == .working {
                 switch workCycle {
+                case let .awaitingSessionStart(
+                    attemptID,
+                    baselineTurnID,
+                    correlatedTurnID
+                ):
+                    .working(
+                        attemptID: attemptID,
+                        baselineTurnID: baselineTurnID,
+                        correlatedTurnID: correlatedTurnID
+                    )
                 case let .idle(
                     attemptID,
                     baselineTurnID,
@@ -302,11 +334,16 @@ public struct Chat: Sendable {
                     workCycle
                 }
             } else {
-                .idle(
-                    attemptID: nil,
-                    baselineTurnID: turns.last?.id,
-                    correlatedTurnID: nil
-                )
+                switch workCycle {
+                case .awaitingSessionStart:
+                    workCycle
+                case .idle, .working:
+                    .idle(
+                        attemptID: nil,
+                        baselineTurnID: turns.last?.id,
+                        correlatedTurnID: nil
+                    )
+                }
             }
             displayedSessionStatus = sessionStatus
             updateRows()
@@ -347,7 +384,8 @@ public struct Chat: Sendable {
             let activeTurnID: Turn.ID? = switch workCycle {
             case .idle:
                 nil
-            case let .working(_, baselineTurnID, correlatedTurnID):
+            case let .awaitingSessionStart(_, baselineTurnID, correlatedTurnID),
+                 let .working(_, baselineTurnID, correlatedTurnID):
                 if let correlatedTurnID,
                    turns.contains(where: { $0.id == correlatedTurnID }) {
                     correlatedTurnID
@@ -454,6 +492,11 @@ public struct Chat: Sendable {
         }
 
         enum WorkCycle: Equatable {
+            case awaitingSessionStart(
+                attemptID: UUID,
+                baselineTurnID: Turn.ID?,
+                correlatedTurnID: Turn.ID?
+            )
             case idle(
                 attemptID: UUID?,
                 baselineTurnID: Turn.ID?,
@@ -467,6 +510,8 @@ public struct Chat: Sendable {
 
             var attemptID: UUID? {
                 switch self {
+                case let .awaitingSessionStart(attemptID, _, _):
+                    attemptID
                 case let .idle(attemptID, _, _),
                      let .working(attemptID, _, _):
                     attemptID
@@ -474,9 +519,10 @@ public struct Chat: Sendable {
             }
 
             var isWorking: Bool {
-                if case .working = self {
+                switch self {
+                case .awaitingSessionStart, .working:
                     true
-                } else {
+                case .idle:
                     false
                 }
             }

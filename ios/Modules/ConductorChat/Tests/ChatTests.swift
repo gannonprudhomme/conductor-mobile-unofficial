@@ -1206,12 +1206,12 @@ struct ChatTests {
         }
     }
 
-    @Test("A pending persisted send starts elapsed time before session status refreshes")
-    func pendingPersistedSendStartsProgressImmediately() async throws {
+    @Test("A pending persisted send stays visible until a confirmed work cycle ends")
+    func pendingPersistedSendStaysVisibleThroughEarlyIdleStatus() async throws {
         try await withDependencies {
             try $0.bootstrapDatabase()
         } operation: {
-            let session = try makeSession()
+            let session = try makeSession(status: "creating")
             let startedAt = Date(timeIntervalSince1970: 1_783_558_800)
             for (index, deliveryState) in [
                 MessageDeliveryAttempt.State.ready,
@@ -1239,7 +1239,7 @@ struct ChatTests {
                     $0.updateRows()
                 }
 
-                #expect(store.state.displayedSessionStatus == .idle)
+                #expect(store.state.displayedSessionStatus.rawValue == "creating")
                 expectNoDifference(
                     try #require(store.state.rows)
                         .map(DisplayedRowProjection.init),
@@ -1249,6 +1249,35 @@ struct ChatTests {
                             id: attemptID.uuidString,
                             startedAt: startedAt
                         ),
+                    ]
+                )
+
+                await store.send(.sessionStatusChanged(.idle)) {
+                    $0.sessionStatusChanged(.idle)
+                }
+                expectNoDifference(
+                    try #require(store.state.rows)
+                        .map(DisplayedRowProjection.init),
+                    [
+                        .human(id: attemptID.uuidString, content: "Run it"),
+                        .turnInProgress(
+                            id: attemptID.uuidString,
+                            startedAt: startedAt
+                        ),
+                    ]
+                )
+
+                await store.send(.sessionStatusChanged(.working)) {
+                    $0.sessionStatusChanged(.working)
+                }
+                await store.send(.sessionStatusChanged(.idle)) {
+                    $0.sessionStatusChanged(.idle)
+                }
+                expectNoDifference(
+                    try #require(store.state.rows)
+                        .map(DisplayedRowProjection.init),
+                    [
+                        .human(id: attemptID.uuidString, content: "Run it"),
                     ]
                 )
             }
@@ -1407,6 +1436,7 @@ struct ChatTests {
                 "previous-turn",
                 attemptID: UUID(0)
             )
+            state.sessionStatusChanged(.working)
             state.sessionStatusChanged(.idle)
             state.sessionStatusChanged(.working)
 
