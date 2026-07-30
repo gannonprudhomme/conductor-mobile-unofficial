@@ -43,6 +43,7 @@ public struct ModelAndFastModeControls: View {
     let isFastModeButtonDisabled: Bool
     let showsFastMode: Bool
     let selectedModel: Session.Model
+    let selectedModelTitle: String?
     let selectedReasoningEffort: Session.ReasoningEffort?
     let onFastModeTapped: @MainActor () -> Void
     let onInformationalControlTapped: @MainActor (ModelConfigurationControl) -> Void
@@ -59,6 +60,7 @@ public struct ModelAndFastModeControls: View {
         isFastModeButtonDisabled: Bool = false,
         showsFastMode: Bool = true,
         selectedModel: Session.Model,
+        selectedModelTitle: String? = nil,
         selectedReasoningEffort: Session.ReasoningEffort?,
         onFastModeTapped: @escaping @MainActor () -> Void,
         onInformationalControlTapped: @escaping @MainActor (
@@ -76,6 +78,7 @@ public struct ModelAndFastModeControls: View {
         self.isFastModeButtonDisabled = isFastModeButtonDisabled
         self.showsFastMode = showsFastMode
         self.selectedModel = selectedModel
+        self.selectedModelTitle = selectedModelTitle
         self.selectedReasoningEffort = selectedReasoningEffort
         self.onFastModeTapped = onFastModeTapped
         self.onInformationalControlTapped = onInformationalControlTapped
@@ -112,6 +115,7 @@ public struct ModelAndFastModeControls: View {
                 allowsAgentSwitching: allowsAgentSwitching,
                 allowedModels: allowedModels,
                 selectedModel: selectedModel,
+                selectedModelTitle: selectedModelTitle,
                 onSelect: onSelectModel
             )
             .equatable()
@@ -229,9 +233,12 @@ public struct ModelAndFastModeControls: View {
     }
 
     var displayedModelName: String {
-        selectedModel.rawValue.isEmpty
-            ? "Default"
-            : selectedModel.displayName
+        selectedModelTitle
+            ?? (
+                selectedModel.rawValue.isEmpty
+                    ? "Default"
+                    : selectedModel.displayName
+            )
     }
 
     var displayedReasoningEffortName: String {
@@ -370,6 +377,7 @@ public struct ModelPicker: Equatable, View {
     let allowsAgentSwitching: Bool
     let allowedModels: Set<Session.Model>?
     let selectedModel: Session.Model
+    let selectedModelTitle: String?
     let onSelect: @MainActor (Session.Model) -> Void
 
     public init(
@@ -377,12 +385,14 @@ public struct ModelPicker: Equatable, View {
         allowsAgentSwitching: Bool = false,
         allowedModels: Set<Session.Model>? = nil,
         selectedModel: Session.Model,
+        selectedModelTitle: String? = nil,
         onSelect: @escaping @MainActor (Session.Model) -> Void
     ) {
         self.agentType = agentType
         self.allowsAgentSwitching = allowsAgentSwitching
         self.allowedModels = allowedModels
         self.selectedModel = selectedModel
+        self.selectedModelTitle = selectedModelTitle
         self.onSelect = onSelect
     }
 
@@ -393,6 +403,7 @@ public struct ModelPicker: Equatable, View {
             && lhs.allowsAgentSwitching == rhs.allowsAgentSwitching
             && lhs.allowedModels == rhs.allowedModels
             && lhs.selectedModel == rhs.selectedModel
+            && lhs.selectedModelTitle == rhs.selectedModelTitle
     }
 
     public var body: some View {
@@ -403,8 +414,12 @@ public struct ModelPicker: Equatable, View {
             selectedModel: selectedModel,
             onSelect: onSelect
         ) { model, agentType in
-            modelLabel(model, agentType: agentType)
+            modelLabel(
+                selectedModelTitle ?? model.displayName,
+                agentType: agentType
+            )
         }
+        .accessibilityValue(selectedModelTitle ?? selectedModel.displayName)
     }
 
     func allowsSelection(for sectionAgentType: Session.AgentType) -> Bool {

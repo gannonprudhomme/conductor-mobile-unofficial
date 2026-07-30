@@ -234,6 +234,20 @@ public enum Server {
             }
         }
 
+        router.get(
+            "/workspaces/{workspaceID}/sessions/{sessionID}/model-history"
+        ) { request, context in
+            let history = try await SessionRoute.modelHistory(
+                context: context,
+                database: database
+            )
+            return try JSONEncoder.conductor.encode(
+                history,
+                from: request,
+                context: context
+            )
+        }
+
         router.patch(
             "/workspaces/{workspaceID}/sessions/{sessionID}/messages/queue"
         ) { request, context in

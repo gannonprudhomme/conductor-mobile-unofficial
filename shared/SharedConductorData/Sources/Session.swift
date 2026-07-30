@@ -94,6 +94,19 @@ extension Session {
 
     }
 
+    public struct ModelHistory: Codable, Equatable, Sendable {
+        public let hasMessages: Bool
+        public let lastUsedModel: Model?
+
+        public init(
+            hasMessages: Bool,
+            lastUsedModel: Model?
+        ) {
+            self.hasMessages = hasMessages
+            self.lastUsedModel = lastUsedModel
+        }
+    }
+
     public struct Model: Codable, Hashable, Identifiable, QueryBindable, QueryDecodable, RawRepresentable, Sendable {
         public var rawValue: String
 
