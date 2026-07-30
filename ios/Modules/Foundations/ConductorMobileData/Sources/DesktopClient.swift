@@ -11,6 +11,8 @@ import Foundation
 import SharedConductorData
 import Sharing
 
+private let liveModelSettingsCache = DesktopClient.ModelSettingsCache()
+
 @DependencyClient
 public struct DesktopClient: Sendable {
     public typealias MessageDeliveryResult = SharedConductorData.MessageDeliveryResult
@@ -30,6 +32,10 @@ public struct DesktopClient: Sendable {
         _ model: Session.Model,
         _ isFastModeEnabled: Bool
     ) async throws -> CreatedWorkspace
+    /// Returns the settings already fetched for the currently configured desktop this launch.
+    public var cachedModelSettings: @Sendable () -> ModelSettings? = {
+        nil
+    }
     public var deleteQueuedMessage: @Sendable (_ workspaceID: String, _ sessionID: String, _ messageID: Message.ID) async throws -> Void
     public var fetchModelSettings: @Sendable () async throws -> ModelSettings = {
         throw CancellationError()
@@ -142,6 +148,86 @@ public struct DesktopClient: Sendable {
             self.defaultModel = defaultModel
             self.defaultReasoningEffort = defaultReasoningEffort
             self.isFastModeEnabled = isFastModeEnabled
+        }
+    }
+
+    fileprivate final class ModelSettingsCache: @unchecked Sendable {
+        private struct CachedValue {
+            let settings: ModelSettings
+            let url: URL
+        }
+
+        private struct Request {
+            let id: UUID
+            let task: Task<ModelSettings, any Error>
+            let url: URL
+        }
+
+        private enum Lookup {
+            case cached(ModelSettings)
+            case request(Request)
+        }
+
+        private let lock = NSLock()
+        private var cachedValue: CachedValue?
+        private var request: Request?
+
+        func cachedValue(for url: URL) -> ModelSettings? {
+            lock.withLock {
+                guard cachedValue?.url == url else {
+                    return nil
+                }
+                return cachedValue?.settings
+            }
+        }
+
+        func value(
+            for url: URL,
+            load: @escaping @Sendable () async throws -> ModelSettings
+        ) async throws -> ModelSettings {
+            let lookup = lock.withLock {
+                if let cachedValue, cachedValue.url == url {
+                    return Lookup.cached(cachedValue.settings)
+                }
+                if let request, request.url == url {
+                    return Lookup.request(request)
+                }
+                let request = Request(
+                    id: UUID(),
+                    task: Task {
+                        try await load()
+                    },
+                    url: url
+                )
+                self.request = request
+                return Lookup.request(request)
+            }
+
+            switch lookup {
+            case let .cached(settings):
+                return settings
+
+            case let .request(request):
+                do {
+                    let settings = try await request.task.value
+                    lock.withLock {
+                        guard self.request?.id == request.id else {
+                            return
+                        }
+                        cachedValue = CachedValue(settings: settings, url: url)
+                        self.request = nil
+                    }
+                    return settings
+                } catch {
+                    lock.withLock {
+                        guard self.request?.id == request.id else {
+                            return
+                        }
+                        self.request = nil
+                    }
+                    throw error
+                }
+            }
         }
     }
 
@@ -313,6 +399,11 @@ extension DesktopClient: DependencyKey {
                 throw DesktopClientError.invalidResponse
             }
             return createdWorkspace
+        } cachedModelSettings: {
+            guard let url = try? settingsURL() else {
+                return nil
+            }
+            return liveModelSettingsCache.cachedValue(for: url)
         } deleteQueuedMessage: { workspaceID, sessionID, messageID in
             let request = try jsonRequest(
                 method: "DELETE",
@@ -323,15 +414,18 @@ extension DesktopClient: DependencyKey {
             let (data, response) = try await data(for: request)
             try validateSuccessfulHTTPResponse(response, data: data)
         } fetchModelSettings: {
-            let settings = try await get(SettingsResponse.self, from: settingsURL())
-            let defaultModel = Session.Model(rawValue: settings.defaultModel)
-            return ModelSettings(
-                defaultModel: defaultModel,
-                defaultReasoningEffort: settings.defaultReasoningEffort.map {
-                    Session.ReasoningEffort(rawValue: $0)
-                } ?? defaultModel.defaultReasoningEffort,
-                isFastModeEnabled: settings.defaultFastMode ?? false
-            )
+            let url = try settingsURL()
+            return try await liveModelSettingsCache.value(for: url) {
+                let settings = try await get(SettingsResponse.self, from: url)
+                let defaultModel = Session.Model(rawValue: settings.defaultModel)
+                return ModelSettings(
+                    defaultModel: defaultModel,
+                    defaultReasoningEffort: settings.defaultReasoningEffort.map {
+                        Session.ReasoningEffort(rawValue: $0)
+                    } ?? defaultModel.defaultReasoningEffort,
+                    isFastModeEnabled: settings.defaultFastMode ?? false
+                )
+            }
         } fetchSessionModelHistory: { workspaceID, sessionID in
             try await get(
                 Session.ModelHistory.self,

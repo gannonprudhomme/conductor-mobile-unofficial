@@ -72,6 +72,8 @@ public struct CreateWorkspace: Sendable {
             cloudCandidates: [CloudWorkspaceCreationCandidate] = [],
             selectedRepositoryIDFilter: Repository.ID? = nil
         ) {
+            @Dependency(\.desktopClient) var desktopClient
+
             precondition(
                 !repositories.isEmpty || !cloudCandidates.isEmpty,
                 "CreateWorkspace requires a local or Cloud repository"
@@ -90,7 +92,9 @@ public struct CreateWorkspace: Sendable {
                     ?? cloudCandidates[0].id
             }
             let modelSettings =
-                mobileModelSettingsOverride ?? DesktopClient.ModelSettings.conductorDefaults
+                mobileModelSettingsOverride
+                ?? desktopClient.cachedModelSettings()
+                ?? DesktopClient.ModelSettings.conductorDefaults
             if let agentType = modelSettings.defaultModel.agentType {
                 self.agentType = agentType
                 self.selectedModel = modelSettings.defaultModel
@@ -175,6 +179,9 @@ public struct CreateWorkspace: Sendable {
             switch action {
             case .task:
                 guard state.mode == .local else {
+                    return .none
+                }
+                guard desktopClient.cachedModelSettings() == nil else {
                     return .none
                 }
                 return .run { send in

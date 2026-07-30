@@ -72,6 +72,10 @@ public struct Main: Sendable {
             Reduce { state, action in
                 switch action {
                 case .task:
+                    let warmDesktopModelSettings: Effect<Action> = .run {
+                        [desktopClient] _ in
+                        _ = try? await desktopClient.fetchModelSettings()
+                    }
                     let startRunner: Effect<Action> = .run {
                         [cloudMutationRunner] send in
                         await send(
@@ -97,6 +101,7 @@ public struct Main: Sendable {
                             runChatSyncForeground(),
                             startRunner,
                             startOutbox,
+                            warmDesktopModelSettings,
                             .send(.workspaces(.task))
                         )
                     }
@@ -104,6 +109,7 @@ public struct Main: Sendable {
                         runChatSyncForeground(),
                         startRunner,
                         startOutbox,
+                        warmDesktopModelSettings,
                         .run { [cloudCredentialClient] send in
                             await send(
                             .cloudCredentialReconciliationResult(
