@@ -1,10 +1,10 @@
-# *Unofficial* Conductor.build iOS app
+# Unofficial Conductor iOS app
 
-A native-iOS app prototype for [Conductor.build](https://conductor.build), supporting both local and cloud workspaces.
+A native iOS app for [Conductor.build](https://conductor.build), supporting both local and cloud workspaces.
 
 ## Screenshots
 
-|<img src="docs/resources/showcase-home.png" width=200>|<img src="docs/resources/showcase-chat.png" width=200>|<img src="docs/resources/showcase-chat-menu.png" width=200>|
+|<img src="docs/resources/workspaces-looping.gif" width=250>|<img src="docs/resources/create-workspace.gif" width=250>|<img src="docs/resources/chat-scroll.gif" width=250>|
 |--|--|--|
 
 ## Installation
@@ -23,12 +23,10 @@ brew install mise xcodegen xcbeautify
 
 Steps:
 1. Install Xcode 26
-
-    a. I recommend installing it through https://www.xcodes.app/ for convenience. Any Xcode 26 version should do
-
-    b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
-
 2. Clone the repo & run `mise run xcode` to generate the Xcode project + open it.
+  
+   a. Alternatively, to deploy to a simulator, run `mise run deploy` and stop here.
+
 3. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
 
     a. Alternatively, give an agent your team ID and have it swap it in in xcodegen's [project.yml](ios/project.yml)
@@ -37,11 +35,11 @@ Steps:
 
     a. If you haven't connected it to your Mac before, you'll need to plug it in with a cable. After this initial pairing you can deploy it over Wi-Fi.
 
-6. Press Run (Cmd+R)
+5. Press Run (Cmd+R)
 
 ### Desktop Companion
 
-In order to read and write to local workspaces, as well as support features the public Conductor Cloud API doesn't support yet (like GitHub PR status, queued messages, & in-progress status for Cloud workspaces), you can install our macOS companion app. You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
+In order to read and write to local workspaces, as well as support features the public Conductor Cloud API doesn't support yet like GitHub PR status, unread statuses, and queued messages, you can install our macOS companion app. You can grab it from [Releases](https://github.com/gannonprudhomme/conductor-mobile-unofficial/releases), or build it yourself with `mise run desktop`.
 
 ## Setup
 
@@ -73,7 +71,7 @@ For Cloud workspaces we generally use Conductor's public API. However the public
 
 ### Writing data through the UI hook
 
-While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagated the changes to the UI, nor cause messages to be sent to the agent.
+While Conductor does use SQLite to persist pretty much all of it's data, writing to the database doesn't actually propagate the changes to the UI, nor cause messages to be sent to the agent.
 
 As a result of this, we install a "UI Hook" where instead of writing the data to the database, we install a script* in Tauri's Web Inspector. The Desktop companion connects to this script and sends commands to it whenever requested from the mobile app.
 
@@ -88,8 +86,6 @@ We use [sqlite-data](https://github.com/pointfreeco/sqlite-data) as our backing 
 Our SQLite tables are generally a 1:1 match to Conductor's schema, though we often store extra "metadata" in sibling tables we JOIN on.
 
 ## Development
-
-Your agent can probably figure it out, but I'll leave this in here in case you want to read. For the most part the `mise` scripts is what my agent uses. I also recommend installing [Xcodebuildmcp](https://github.com/getsentry/XcodeBuildMCP) as it gives easy access for your agent to "see", among other things, though it's not strictly necessary.
 
 Generate both native projects and open them in Xcode with:
 

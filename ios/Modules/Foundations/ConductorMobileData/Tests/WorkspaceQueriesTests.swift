@@ -117,6 +117,51 @@ struct WorkspaceQueriesTests {
         expectNoDifference(filteredByWorkspace.map(\.workspace.id), ["w2"])
     }
 
+    @Test("Cloud workspace activity is derived from a working session when available")
+    func cloudWorkspaceSessionActivity() throws {
+        let database = try appDatabase()
+        let workingWorkspace = Workspace.preview(
+            id: "working-cloud",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+        let idleWorkspace = Workspace.preview(
+            id: "idle-cloud",
+            hostingServerURL: Workspace.conductorCloudHostingServerURL
+        )
+
+        try database.write { database in
+            try Workspace
+                .insert { [workingWorkspace, idleWorkspace] }
+                .execute(database)
+            try Session
+                .insert {
+                    [
+                        Session.preview(
+                            id: "working-session",
+                            workspaceID: workingWorkspace.id,
+                            status: .working
+                        ),
+                        Session.preview(
+                            id: "idle-session",
+                            workspaceID: idleWorkspace.id,
+                            status: .idle
+                        ),
+                    ]
+                }
+                .execute(database)
+        }
+
+        let workspaces = try database.read { database in
+            try WorkspaceWithRepository.all().fetchAll(database)
+        }
+        let isWorkingByWorkspaceID = Dictionary(
+            uniqueKeysWithValues: workspaces.map { ($0.id, $0.isWorking) }
+        )
+
+        #expect(isWorkingByWorkspaceID[workingWorkspace.id] == true)
+        #expect(isWorkingByWorkspaceID[idleWorkspace.id] == false)
+    }
+
     @Test("Workspace query orders section groups and rows in SQLite")
     func queryGroupingOrder() throws {
         let database = try appDatabase()

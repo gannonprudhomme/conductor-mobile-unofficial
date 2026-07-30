@@ -310,11 +310,24 @@ struct MainTests {
         }
     }
 
-    @Test("Workspace creation pushes its chat")
-    func workspaceCreationPushesChat() async throws {
+    @Test("Workspace creation pushes its persisted chat without a loader")
+    func workspaceCreationPushesPersistedChat() async throws {
         let workspace = Workspace.preview(activeSessionID: "active")
         let session = Session.preview(id: "active", workspaceID: workspace.id)
         let item = WorkspaceWithRepository(workspace: workspace, repository: .preview())
+        let attemptID = UUID(0)
+        let attempt = MessageDeliveryAttempt(
+            attemptID: attemptID,
+            route: .desktop,
+            canonicalWorkspaceID: workspace.id,
+            canonicalSessionID: session.id,
+            content: "Run it",
+            model: .gpt_5_6_terra,
+            isFastModeEnabled: false,
+            mode: .sent,
+            reasoningEffort: .ultra,
+            submittedDraft: "Run it"
+        )
         let requestLease = DesktopRequestLease(
             baseURL: try #require(URL(string: "http://test:3768")),
             endpointEpoch: 0
@@ -330,6 +343,9 @@ struct MainTests {
             try $0.bootstrapDatabase()
             try $0.defaultDatabase.write { database in
                 try Session.upsert { session }.execute(database)
+                try MessageDeliveryAttempt
+                    .insert { attempt }
+                    .execute(database)
             }
         } operation: {
             let store = TestStore(initialState: Main.State()) {
@@ -345,16 +361,35 @@ struct MainTests {
                             workspaceWithRepository: item,
                             selectedModel: .gpt_5_6_terra,
                             selectedReasoningEffort: .ultra,
-                            shouldFocusMessageField: true
+                            shouldPresentPersistedChatImmediately: true,
+                            shouldFocusMessageField: false
                         )
                     )
                 )
             }
+
+            let destination = try #require(store.state.path.last)
+            guard case let .workspaceChat(workspaceChat) = destination,
+                  let chat = workspaceChat.chat else {
+                Issue.record("Expected the created workspace chat")
+                return
+            }
+            #expect(!workspaceChat.isLoadingSessions)
+            #expect(!chat.isLoadingMessages)
+            #expect(chat.deliveryAttempts.map(\.attemptID) == [attemptID])
+            #expect(chat.deliveryAttempts.map(\.content) == ["Run it"])
+            #expect(
+                chat.rows?.map(\.id)
+                    == [
+                        "human:\(attemptID.uuidString)",
+                        "turn-in-progress:\(attemptID.uuidString)",
+                    ]
+            )
         }
     }
 
-    @Test("A newly created workspace's message field accepts text")
-    func newlyCreatedWorkspaceMessageFieldAcceptsText() async throws {
+    @Test("A newly created workspace's message field does not focus but accepts text")
+    func newlyCreatedWorkspaceMessageFieldDoesNotFocusButAcceptsText() async throws {
         let repository = Repository.preview()
         let workspace = Workspace.preview(
             activeSessionID: "active",
@@ -426,23 +461,26 @@ struct MainTests {
             let deadline = clock.now.advanced(by: .seconds(5))
             store.send(.workspaces(.workspaceCreated(creation)))
 
-            while firstTextInputResponder(in: hostingController.view) == nil,
+            while firstTextInput(in: hostingController.view) == nil,
                   clock.now < deadline {
                 await Task.yield()
             }
 
-            let responder = try #require(firstTextInputResponder(in: hostingController.view))
-            let center = responder.convert(
-                CGPoint(x: responder.bounds.midX, y: responder.bounds.midY),
+            let textInput = try #require(firstTextInput(in: hostingController.view))
+            #expect(!textInput.isFirstResponder)
+            #expect(textInput.becomeFirstResponder())
+
+            let center = textInput.convert(
+                CGPoint(x: textInput.bounds.midX, y: textInput.bounds.midY),
                 to: hostingController.view
             )
             let hitView = hostingController.view.hitTest(center, with: nil)
             #expect(
-                hitView === responder
-                    || hitView?.isDescendant(of: responder) == true
+                hitView === textInput
+                    || hitView?.isDescendant(of: textInput) == true
             )
 
-            responder.insertText("Test message")
+            textInput.insertText("Test message")
 
             while messageDraft(in: store.state) != "Test message",
                   clock.now < deadline {
@@ -627,13 +665,13 @@ private func waitUntil(
 }
 
 @MainActor
-private func firstTextInputResponder(in view: UIView) -> (UIView & UIKeyInput)? {
-    if view.isFirstResponder, let textInput = view as? UIView & UIKeyInput {
+private func firstTextInput(in view: UIView) -> (UIView & UIKeyInput)? {
+    if let textInput = view as? UIView & UIKeyInput {
         return textInput
     }
     for subview in view.subviews {
-        if let responder = firstTextInputResponder(in: subview) {
-            return responder
+        if let textInput = firstTextInput(in: subview) {
+            return textInput
         }
     }
     return nil

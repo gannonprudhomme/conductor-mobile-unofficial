@@ -24,6 +24,7 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
 
     public var workspace: Workspace
     public var cloudMetadata: CloudWorkspaceMetadata?
+    public var hasWorkingSession: Bool
     public var mobileState: MobileWorkspaceState?
     public var repository: Repository?
 
@@ -31,10 +32,12 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
         workspace: Workspace,
         repository: Repository?,
         mobileState: MobileWorkspaceState? = nil,
-        cloudMetadata: CloudWorkspaceMetadata? = nil
+        cloudMetadata: CloudWorkspaceMetadata? = nil,
+        hasWorkingSession: Bool = false
     ) {
         self.workspace = workspace
         self.cloudMetadata = cloudMetadata
+        self.hasWorkingSession = hasWorkingSession
         self.mobileState = mobileState
         self.repository = repository
     }
@@ -50,7 +53,9 @@ public struct WorkspaceWithRepository: Identifiable, Equatable, Sendable {
                 == Workspace.conductorCloudHostingServerURL
         }
     }
-    public var isWorking: Bool { mobileState?.isWorking ?? false }
+    public var isWorking: Bool {
+        mobileState?.isWorking == true || hasWorkingSession
+    }
     public var status: Workspace.Status {
         if cloudMetadata != nil,
            workspace.manualStatus?.nilIfEmpty == nil,
@@ -174,9 +179,18 @@ extension WorkspaceWithRepository {
                 }
             }
             .select { workspace, mobileState, repository, cloudMetadata in
+                let hasWorkingSession = Session
+                    .where { session in
+                        session.workspaceID.eq(workspace.id)
+                            && session.status.eq(Session.Status.working)
+                    }
+                    .select { _ in 1 }
+                    .exists()
+
                 Columns(
                     workspace: workspace,
                     cloudMetadata: cloudMetadata,
+                    hasWorkingSession: hasWorkingSession,
                     mobileState: mobileState,
                     repository: repository
                 )

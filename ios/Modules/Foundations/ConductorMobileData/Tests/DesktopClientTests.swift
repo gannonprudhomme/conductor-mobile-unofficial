@@ -159,8 +159,10 @@ struct DesktopClientTests {
     @Test("Model defaults are fetched from the desktop settings endpoint")
     func modelSettings() async throws {
         let requestedPath = LockIsolated<String?>(nil)
+        let requestCount = LockIsolated(0)
         DesktopClientURLProtocol.handler.setValue { request in
             requestedPath.setValue(request.url?.path)
+            requestCount.withValue { $0 += 1 }
             return (
                 HTTPURLResponse(
                     url: try #require(request.url),
@@ -185,8 +187,15 @@ struct DesktopClientTests {
             $0.urlSession = urlSession
         } operation: {
             @Shared(.desktopServerAddress) var desktopServerAddress
-            $desktopServerAddress.withLock { $0 = "my-mac" }
-            return try await DesktopClient.liveValue.fetchModelSettings()
+            $desktopServerAddress.withLock { $0 = "model-settings-cache-test.local" }
+            let client = DesktopClient.liveValue
+            #expect(client.cachedModelSettings() == nil)
+            let settings = try await client.fetchModelSettings()
+            #expect(client.cachedModelSettings() == settings)
+            let secondClient = DesktopClient.liveValue
+            #expect(secondClient.cachedModelSettings() == settings)
+            #expect(try await secondClient.fetchModelSettings() == settings)
+            return settings
         }
 
         expectNoDifference(
@@ -198,6 +207,7 @@ struct DesktopClientTests {
             )
         )
         expectNoDifference(requestedPath.value, "/settings")
+        #expect(requestCount.value == 1)
     }
 
     @Test("Session model history uses its lightweight desktop endpoint")

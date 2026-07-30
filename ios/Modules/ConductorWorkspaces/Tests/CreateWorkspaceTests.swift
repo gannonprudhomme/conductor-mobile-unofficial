@@ -23,6 +23,7 @@ struct CreateWorkspaceTests {
     func repositorySelection() {
         withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let first = Repository.preview(id: "first")
             let selected = Repository.preview(id: "selected")
@@ -54,6 +55,7 @@ struct CreateWorkspaceTests {
     func cloudOrganizationDefault() {
         withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let local = Repository.preview(id: "local")
             let firstCloud = Repository.preview(id: "first-cloud")
@@ -84,6 +86,136 @@ struct CreateWorkspaceTests {
         }
     }
 
+    @Test("Create restores the last used location and repository")
+    func restoresLastUsedSelection() {
+        withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
+        } operation: {
+            let firstLocal = Repository.preview(id: "first-local")
+            let lastLocal = Repository.preview(id: "last-local")
+            let cloud = Repository.preview(id: "cloud")
+            @Shared(.createWorkspaceMode) var createWorkspaceMode
+            @Shared(.createWorkspaceRepositoryID) var createWorkspaceRepositoryID
+            $createWorkspaceMode.withLock { $0 = .local }
+            $createWorkspaceRepositoryID.withLock { $0 = lastLocal.id }
+
+            let state = CreateWorkspace.State(
+                repositories: [firstLocal, lastLocal],
+                cloudCandidates: [makeCandidate(cloud)]
+            )
+            expectNoDifference(state.mode, .local)
+            expectNoDifference(state.selectedRepositoryID, lastLocal.id)
+
+            // An active workspace-list filter still wins over the remembered repository.
+            expectNoDifference(
+                CreateWorkspace.State(
+                    repositories: [firstLocal, lastLocal],
+                    cloudCandidates: [makeCandidate(cloud)],
+                    selectedRepositoryIDFilter: firstLocal.id
+                ).selectedRepositoryID,
+                firstLocal.id
+            )
+
+            // A remembered location that is no longer available falls back to the other one.
+            let cloudOnly = CreateWorkspace.State(
+                repositories: [],
+                cloudCandidates: [makeCandidate(cloud)]
+            )
+            expectNoDifference(cloudOnly.mode, .cloud)
+            expectNoDifference(cloudOnly.selectedRepositoryID, cloud.id)
+        }
+    }
+
+    @Test("Selecting a location and repository remembers them")
+    func remembersSelection() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
+        } operation: {
+            let local = Repository.preview(id: "local")
+            let firstCloud = Repository.preview(id: "first-cloud")
+            let otherCloud = Repository.preview(id: "other-cloud")
+            @Shared(.createWorkspaceMode) var createWorkspaceMode
+            @Shared(.createWorkspaceRepositoryID) var createWorkspaceRepositoryID
+            $createWorkspaceMode.withLock { $0 = .local }
+
+            let store = TestStore(
+                initialState: CreateWorkspace.State(
+                    repositories: [local],
+                    cloudCandidates: [
+                        makeCandidate(firstCloud),
+                        makeCandidate(otherCloud),
+                    ]
+                )
+            ) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.desktopClient.fetchModelSettings = { throw TestError() }
+            }
+
+            await store.send(.modeSelected(.cloud)) {
+                $0.mode = .cloud
+                $0.selectedRepositoryID = firstCloud.id
+                $0.$lastSelectedMode.withLock { $0 = .cloud }
+                $0.applyCloudConfigurationDefault()
+            }
+            expectNoDifference(createWorkspaceMode, .cloud)
+
+            await store.send(.binding(.set(\.selectedRepositoryID, otherCloud.id))) {
+                $0.selectedRepositoryID = otherCloud.id
+                $0.$lastSelectedRepositoryID.withLock { $0 = otherCloud.id }
+            }
+            expectNoDifference(createWorkspaceRepositoryID, otherCloud.id)
+
+            // Local has no remembered repository of its own, so it falls back to its first entry.
+            await store.send(.modeSelected(.local)) {
+                $0.mode = .local
+                $0.selectedRepositoryID = local.id
+                $0.$lastSelectedMode.withLock { $0 = .local }
+            }
+            await store.receive(\.task)
+            // Switching back restores the remembered Cloud repository.
+            await store.send(.modeSelected(.cloud)) {
+                $0.mode = .cloud
+                $0.selectedRepositoryID = otherCloud.id
+                $0.$lastSelectedMode.withLock { $0 = .cloud }
+                $0.applyCloudConfigurationDefault()
+            }
+        }
+    }
+
+    @Test("Create restores and persists the last selected model")
+    func modelSelection() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
+        } operation: {
+            @Shared(.createWorkspaceModel) var createWorkspaceModel
+            $createWorkspaceModel.withLock { $0 = .gpt_5_6_terra }
+
+            let state = CreateWorkspace.State(repositories: [.preview()])
+            #expect(state.agentType == .codex)
+            #expect(state.hasUserSelectedModel)
+            #expect(state.selectedModel == .gpt_5_6_terra)
+
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            }
+            await store.send(.binding(.set(\.selectedModel, .fable5))) {
+                $0.agentType = .claude
+                $0.selectedModel = .fable5
+                $0.$lastSelectedModel.withLock { $0 = .fable5 }
+            }
+            #expect(createWorkspaceModel == .fable5)
+
+            let reloadedState = CreateWorkspace.State(repositories: [.preview()])
+            #expect(reloadedState.agentType == .claude)
+            #expect(reloadedState.hasUserSelectedModel)
+            #expect(reloadedState.selectedModel == .fable5)
+        }
+    }
+
     @Test("Create sends the selected repository, model, and Fast Mode")
     func createWorkspace() async throws {
         let repository = Repository.preview()
@@ -102,6 +234,7 @@ struct CreateWorkspaceTests {
         let database = try appDatabase()
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             var state = CreateWorkspace.State(repositories: [repository])
             state.agentType = .codex
@@ -197,6 +330,7 @@ struct CreateWorkspaceTests {
 
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let state = CreateWorkspace.State(repositories: [repository])
             state.$prompt.withLock { $0 = "Run it." }
@@ -256,6 +390,7 @@ struct CreateWorkspaceTests {
     func createWorkspaceFailure() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let repository = Repository.preview()
             let state = CreateWorkspace.State(repositories: [repository])
@@ -288,6 +423,7 @@ struct CreateWorkspaceTests {
     func conductorModelDefaults() {
         withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let state = CreateWorkspace.State(repositories: [.preview()])
 
@@ -298,10 +434,37 @@ struct CreateWorkspaceTests {
         }
     }
 
+    @Test("Creation starts with model settings cached at app launch")
+    func cachedDesktopModelSettings() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = {
+                DesktopClient.ModelSettings(
+                    defaultModel: .gpt_5_6_sol,
+                    defaultReasoningEffort: .ultra,
+                    isFastModeEnabled: true
+                )
+            }
+        } operation: {
+            let state = CreateWorkspace.State(repositories: [.preview()])
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            }
+
+            #expect(state.agentType == .codex)
+            #expect(state.selectedModel == .gpt_5_6_sol)
+            #expect(state.selectedReasoningEffort == .ultra)
+            #expect(state.isFastModeEnabled)
+
+            await store.send(.task)
+        }
+    }
+
     @Test("Desktop model settings seed creation until the user makes a selection")
     func modelSettings() async {
         await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let repository = Repository.preview()
             let store = TestStore(
@@ -329,10 +492,12 @@ struct CreateWorkspaceTests {
             await store.send(.binding(.set(\.selectedModel, .opus4_8_1M))) {
                 $0.hasUserSelectedModel = true
                 $0.selectedModel = .opus4_8_1M
+                $0.$lastSelectedModel.withLock { $0 = .opus4_8_1M }
             }
             await store.send(.binding(.set(\.selectedModel, .gpt_5_6_sol))) {
                 $0.agentType = .codex
                 $0.selectedModel = .gpt_5_6_sol
+                $0.$lastSelectedModel.withLock { $0 = .gpt_5_6_sol }
             }
             await store.send(.binding(.set(\.isFastModeEnabled, false))) {
                 $0.hasUserSelectedFastMode = true
@@ -356,6 +521,7 @@ struct CreateWorkspaceTests {
     func reasoningEffortSelection() async {
         await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let store = TestStore(
                 initialState: CreateWorkspace.State(repositories: [.preview()])
@@ -372,10 +538,12 @@ struct CreateWorkspaceTests {
                 $0.agentType = .codex
                 $0.hasUserSelectedModel = true
                 $0.selectedModel = .gpt5_4
+                $0.$lastSelectedModel.withLock { $0 = .gpt5_4 }
             }
             await store.send(.binding(.set(\.selectedModel, .fable5))) {
                 $0.agentType = .claude
                 $0.selectedModel = .fable5
+                $0.$lastSelectedModel.withLock { $0 = .fable5 }
             }
             await store.send(.reasoningEffortSelected(.ultracode)) {
                 $0.hasUserSelectedReasoningEffort = true
@@ -388,6 +556,7 @@ struct CreateWorkspaceTests {
     func offlineMobileModelSettingsOverride() {
         withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             @Shared(.mobileModelSettingsOverride) var mobileModelSettingsOverride
             $mobileModelSettingsOverride.withLock {
@@ -411,6 +580,7 @@ struct CreateWorkspaceTests {
     func mobileModelSettingsOverride() async {
         await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let state = CreateWorkspace.State(repositories: [.preview()])
             state.$mobileModelSettingsOverride.withLock {
@@ -445,6 +615,7 @@ struct CreateWorkspaceTests {
     func promptDraft() {
         withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let repository = Repository.preview()
             let state = CreateWorkspace.State(repositories: [repository])
@@ -592,6 +763,7 @@ struct CreateWorkspaceTests {
     func promptEditor() async throws {
         try await withDependencies {
             $0.defaultFileStorage = .inMemory
+            $0.desktopClient.cachedModelSettings = { nil }
         } operation: {
             let store = Store(
                 initialState: CreateWorkspace.State(repositories: [.preview()])
@@ -640,6 +812,16 @@ private func firstTextView(in view: UIView) -> UITextView? {
         }
     }
     return nil
+}
+
+private func makeCandidate(
+    _ repository: Repository
+) -> CloudWorkspaceCreationCandidate {
+    CloudWorkspaceCreationCandidate(
+        repository: repository,
+        projectID: "\(repository.id)-project",
+        repositoryURL: nil
+    )
 }
 
 private func makeRequestLease() throws -> DesktopRequestLease {
