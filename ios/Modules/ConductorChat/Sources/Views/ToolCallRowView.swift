@@ -291,25 +291,6 @@ extension DisplayedChatRow.TurnSummary.ToolIcon {
     }
 }
 
-private struct FileTagView: View {
-    let fileName: String
-    
-    var body: some View {
-        Text(fileName)
-            .lineLimit(1)
-            .font(.theme(.codeSmall))
-            .padding(EdgeInsets(vertical: 4, horizontal: 8))
-            .foregroundStyle(.theme(.textPrimary))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(
-                        Color.theme(.input),
-                        lineWidth: 1
-                    )
-            }
-    }
-}
-
 struct LinesChangesStats: View {
     let additions: Int
     let deletions: Int?
