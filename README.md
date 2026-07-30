@@ -1,10 +1,10 @@
-# *Unofficial* Conductor.build iOS app
+# Unofficial Conductor iOS app
 
-A native-iOS app prototype for [Conductor.build](https://conductor.build), supporting both local and cloud workspaces.
+A native iOS app for [Conductor.build](https://conductor.build), supporting both local and cloud workspaces.
 
 ## Screenshots
 
-|<img src="docs/resources/workspaces-looping.gif" width=300>|<img src="docs/resources/chat-scroll.gif" width=300>|<img src="docs/resources/showcase-chat-menu.png" width=300>|
+|<img src="docs/resources/workspaces-looping.gif" width=250>|<img src="docs/resources/create-workspace.gif" width=250>|<img src="docs/resources/chat-scroll.gif" width=250>|
 |--|--|--|
 
 ## Installation
@@ -29,6 +29,9 @@ Steps:
     b. Otherwise, you can download it from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12)
 
 2. Clone the repo & run `mise run xcode` to generate the Xcode project + open it.
+  
+   a. Alternatively, to deploy to a simulator, run `mise run deploy` and stop here.
+
 3. In Xcode, click on the `ConductorMobile` project, then go to Signing & Capabilities -> Team -> Select your developer team
 
     a. Alternatively, give an agent your team ID and have it swap it in in xcodegen's [project.yml](ios/project.yml)
@@ -37,7 +40,7 @@ Steps:
 
     a. If you haven't connected it to your Mac before, you'll need to plug it in with a cable. After this initial pairing you can deploy it over Wi-Fi.
 
-6. Press Run (Cmd+R)
+5. Press Run (Cmd+R)
 
 ### Desktop Companion
 
