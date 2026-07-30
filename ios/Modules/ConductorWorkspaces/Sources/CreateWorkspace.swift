@@ -593,7 +593,7 @@ public struct CreateWorkspaceView: View {
                     .lineLimit(1)
                     .contentTransition(.opacity)
             } icon: {
-                LucideIcon(Lucide.chevronDown, style: .small)
+                LucideIcon(Lucide.chevronsUpDown, style: .small)
                     .foregroundStyle(.theme(.textSecondary))
             }
             .labelStyle(.conductorSettingsMenu)
