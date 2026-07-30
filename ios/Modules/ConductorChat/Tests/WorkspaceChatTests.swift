@@ -57,6 +57,7 @@ struct WorkspaceChatTests {
             expectNotRestorable { $0.isClosingSession = true }
             expectNotRestorable { $0.isRenamingBranch = true }
             expectNotRestorable { $0.isRenamingSession = true }
+            expectNotRestorable { $0.isRenamingWorkspace = true }
             expectNotRestorable { $0.isWorkspaceMutationInFlight = true }
             expectNotRestorable { $0.sessionIDsBeforeCreation = [] }
             expectNotRestorable { $0.sessionIDAwaitingObservation = "pending" }
@@ -2085,9 +2086,12 @@ struct WorkspaceChatTests {
         }
     }
 
-    @Test("Cloud-only workspace menu actions explain the public API limitation")
-    func cloudOnlyWorkspaceMenuActionsRequireDesktop() async throws {
-        let workspace = try makeWorkspace(branch: "cloud-branch")
+    @Test("Cloud workspace rename is prefilled, trimmed, and submitted")
+    func cloudWorkspaceRename() async throws {
+        let workspace = try makeWorkspace(
+            branch: "cloud-branch",
+            workspaceName: "Cloud workspace"
+        )
         let metadata = CloudWorkspaceMetadata(
             workspaceID: workspace.id,
             accountID: "account",
@@ -2107,19 +2111,40 @@ struct WorkspaceChatTests {
                 try CloudWorkspaceMetadata.insert { metadata }.execute(db)
             }
         } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
             @Shared(.desktopConnectionStatus) var connectionStatus
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(70)
+                )
+            }
             $connectionStatus.withLock { $0 = .disconnected }
-            let requestCount = LockIsolated(0)
+            let requests = LockIsolated<[String]>([])
             let store = TestStore(
                 initialState: WorkspaceChat.State(workspaceWithRepository: item)
             ) {
                 WorkspaceChat()
             } withDependencies: {
-                $0.desktopClient.renameWorkspaceBranch = { _, _ in
-                    requestCount.withValue { $0 += 1 }
+                $0.workspaceMutationClient.renameWorkspace = {
+                    route,
+                    workspace,
+                    name,
+                    owningFeature in
+                    #expect(
+                        route == .cloud(
+                            accountID: "account",
+                            remoteWorkspaceID: "remote-workspace"
+                        )
+                    )
+                    #expect(
+                        owningFeature == .workspaceChat(
+                            workspaceID: workspace.id
+                        )
+                    )
+                    requests.withValue { $0.append(name) }
                 }
                 $0.desktopClient.setWorkspacePinned = { _, _ in
-                    requestCount.withValue { $0 += 1 }
                     return .hook
                 }
             }
@@ -2130,11 +2155,27 @@ struct WorkspaceChatTests {
             await store.send(.destination(.dismiss)) {
                 $0.destination = nil
             }
-            await store.send(.renameBranchButtonTapped) {
-                $0.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+            await store.send(.renameWorkspaceButtonTapped) {
+                $0.workspaceNameDraft = "Cloud workspace"
+                $0.destination = .renameWorkspace
+            }
+            await store.send(
+                .binding(
+                    .set(\.workspaceNameDraft, "  Renamed workspace  ")
+                )
+            ) {
+                $0.workspaceNameDraft = "  Renamed workspace  "
+            }
+            await store.send(.renameWorkspaceSubmitted) {
+                $0.workspaceNameDraft = "Renamed workspace"
+                $0.destination = nil
+                $0.isRenamingWorkspace = true
+            }
+            await store.receive(\.renameWorkspaceResponse.success) {
+                $0.isRenamingWorkspace = false
             }
 
-            #expect(requestCount.value == 0)
+            #expect(requests.value == ["Renamed workspace"])
         }
     }
 
@@ -2174,9 +2215,6 @@ struct WorkspaceChatTests {
                 WorkspaceChat()
             } withDependencies: {
                 $0.date.now = now
-                $0.desktopClient.renameWorkspaceBranch = { workspaceID, branch in
-                    requests.withValue { $0.append("branch:\(workspaceID):\(branch)") }
-                }
                 $0.desktopClient.setWorkspacePinned = { workspaceID, isPinned in
                     requests.withValue { $0.append("pinned:\(workspaceID):\(isPinned)") }
                     return .hook
@@ -2200,18 +2238,6 @@ struct WorkspaceChatTests {
             await store.finish()
             await store.send(.workspaceUnreadButtonTapped)
             await store.finish()
-            await store.send(.renameBranchButtonTapped) {
-                $0.branchNameDraft = "cloud-branch"
-                $0.destination = .renameBranch
-            }
-            await store.send(.binding(.set(\.branchNameDraft, "renamed-branch"))) {
-                $0.branchNameDraft = "renamed-branch"
-            }
-            await store.send(.renameBranchSubmitted) {
-                $0.destination = nil
-                $0.isRenamingBranch = true
-            }
-            await store.finish()
 
             let updatedWorkspace = try await database.read { db in
                 try Workspace.find(workspace.id).fetchOne(db)
@@ -2224,7 +2250,6 @@ struct WorkspaceChatTests {
                     "pinned:remote-workspace:true",
                     "status:remote-workspace:in-review",
                     "unread:remote-workspace:true",
-                    "branch:remote-workspace:renamed-branch",
                 ]
             )
         }
@@ -3982,11 +4007,13 @@ private func makeWorkspace(
     branch: String? = nil,
     id: String = "workspace-1",
     unread: Int = 0,
-    status: Workspace.Status? = nil
+    status: Workspace.Status? = nil,
+    workspaceName: String? = nil
 ) throws -> Workspace {
     let activeSession = activeSessionID.map { "\"\($0)\"" } ?? "null"
     let branch = branch.map { "\"\($0)\"" } ?? "null"
     let derivedStatus = status.map { "\"\($0.rawValue)\"" } ?? "null"
+    let workspaceName = workspaceName.map { "\"\($0)\"" } ?? "null"
     return try JSONDecoder.conductor.decode(
         Workspace.self,
         from: Data(
@@ -3999,7 +4026,8 @@ private func makeWorkspace(
               "created_at": "2026-07-09 00:00:00",
               "updated_at": "2026-07-09 00:00:00",
               "is_working": false,
-              "unread": \(unread)
+              "unread": \(unread),
+              "workspace_name": \(workspaceName)
             }
             """.utf8
         )

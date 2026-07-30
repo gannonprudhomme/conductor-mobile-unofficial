@@ -412,6 +412,7 @@ public enum CloudWorkspacePersistence {
         )
         try reconcileWorkspaceAttempts(
             canonicalWorkspaceID: canonicalWorkspaceID,
+            authoritativeName: workspace.name,
             isAuthoritativelyArchived: status?.status == .archived,
             in: database
         )
@@ -492,6 +493,7 @@ public enum CloudWorkspacePersistence {
 
     private static func reconcileWorkspaceAttempts(
         canonicalWorkspaceID: Workspace.ID,
+        authoritativeName: String,
         isAuthoritativelyArchived: Bool,
         in database: Database
     ) throws {
@@ -547,6 +549,23 @@ public enum CloudWorkspacePersistence {
                     .fetchCount(database) > 0
                 if !hasUnconsumedOutcome, !hasUnresolvedDelivery {
                     try CloudPendingMutation.find(attempt.attemptID)
+                        .delete()
+                        .execute(database)
+                }
+
+            case .renameWorkspace:
+                let request = try attempt.request(
+                    as: CloudRenameWorkspaceRequest.self
+                )
+                try Workspace
+                    .find(canonicalWorkspaceID)
+                    .update {
+                        $0.workspaceName = #bind(request.name)
+                    }
+                    .execute(database)
+                if authoritativeName == request.name {
+                    try CloudPendingMutation
+                        .find(attempt.attemptID)
                         .delete()
                         .execute(database)
                 }

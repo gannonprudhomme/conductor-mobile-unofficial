@@ -681,6 +681,21 @@ private actor LiveCloudMutationRunner {
                 throw CloudAPIClientError.invalidResponse
             }
 
+        case .renameWorkspace:
+            let workspaceID = try required(attempt.remoteWorkspaceID)
+            let request = try attempt.request(
+                as: CloudRenameWorkspaceRequest.self
+            )
+            let response = try await cloudAPIClient.renameWorkspace(
+                expectedAccountID: attempt.accountID,
+                workspaceID: workspaceID,
+                request: request
+            )
+            guard response.id == workspaceID,
+                  response.name == request.name else {
+                throw CloudAPIClientError.invalidResponse
+            }
+
         default:
             throw CloudAPIClientError.invalidResponse
         }
@@ -778,7 +793,12 @@ private actor LiveCloudMutationRunner {
                 return
             }
             try Self.rollback(attempt, in: database)
-            let owner = if attempt.mutationOperation == .createWorkspace
+            let owner = if attempt.mutationOperation == .renameWorkspace,
+                           let rollback = try attempt.rollback(
+                               as: CloudRenameWorkspaceRollback.self
+                           ) {
+                rollback.owningFeature
+            } else if attempt.mutationOperation == .createWorkspace
                 || attempt.mutationOperation == .archiveWorkspace {
                 CloudMutationOutcome.OwningFeature.workspaces
             } else if let workspaceID = attempt.canonicalWorkspaceID {
@@ -859,6 +879,19 @@ private actor LiveCloudMutationRunner {
                         $0.state = #bind(
                             rollback.state.map(Workspace.State.init(rawValue:))
                         )
+                    }
+                    .execute(database)
+            }
+
+        case .renameWorkspace:
+            if let canonicalWorkspaceID = attempt.canonicalWorkspaceID,
+               let rollback = try attempt.rollback(
+                   as: CloudRenameWorkspaceRollback.self
+               ) {
+                try Workspace
+                    .find(canonicalWorkspaceID)
+                    .update {
+                        $0.workspaceName = #bind(rollback.workspaceName)
                     }
                     .execute(database)
             }

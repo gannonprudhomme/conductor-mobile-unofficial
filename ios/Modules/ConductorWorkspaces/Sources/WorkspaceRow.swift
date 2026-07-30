@@ -14,6 +14,7 @@ import SwiftUI
 enum WorkspaceRowAction {
     case archive
     case open
+    case renameWorkspace
     case setStatus(Workspace.Status)
     case togglePinned
     case toggleUnread
@@ -203,6 +204,21 @@ struct WorkspaceRow: View {
         }
 
         Section {
+            if isCloudHosted {
+                Button {
+                    action(.renameWorkspace)
+                } label: {
+                    Label {
+                        Text("Rename workspace")
+                    } icon: {
+                        ColoredMenuImage(
+                            Lucide.pencil,
+                            color: .theme(.textPrimary)
+                        )
+                    }
+                }
+            }
+
             Button(role: .destructive) {
                 action(.archive)
             } label: {

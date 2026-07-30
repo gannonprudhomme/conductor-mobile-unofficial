@@ -81,6 +81,72 @@ struct CloudWorkspacePersistenceTests {
         #expect(unwrappedItem.isCloudOnly)
     }
 
+    @Test("Pending workspace rename survives polling until confirmed")
+    func pendingWorkspaceRenameReconciliation() throws {
+        let database = try appDatabase()
+        let workspaceID = "cloud-workspace"
+
+        try database.write { database in
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(workspaceIDs: [workspaceID]),
+                in: database
+            )
+            let rollback = try JSONEncoder.cloudMutation.encode(
+                CloudRenameWorkspaceRollback(
+                    workspaceName: "Cloud workspace",
+                    owningFeature: .workspaces
+                )
+            )
+            let attempt = try CloudPendingMutation(
+                accountID: "account-1",
+                credentialGeneration: UUID(72),
+                operation: .renameWorkspace,
+                resourceKind: .workspace,
+                request: CloudRenameWorkspaceRequest(
+                    name: "Renamed workspace"
+                ),
+                rollbackPayload: rollback,
+                canonicalWorkspaceID: workspaceID,
+                remoteWorkspaceID: workspaceID
+            )
+            var workspace = try #require(
+                try Workspace.find(workspaceID).fetchOne(database)
+            )
+            workspace.workspaceName = "Renamed workspace"
+            try Workspace.upsert { workspace }.execute(database)
+            try CloudPendingMutation.insert { attempt }.execute(database)
+
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(workspaceIDs: [workspaceID]),
+                in: database
+            )
+            let pendingWorkspace = try Workspace
+                .find(workspaceID)
+                .fetchOne(database)
+            #expect(pendingWorkspace?.workspaceName == "Renamed workspace")
+            #expect(
+                try CloudPendingMutation.find(attempt.attemptID)
+                    .fetchOne(database) != nil
+            )
+
+            try CloudWorkspacePersistence.persist(
+                cloudSnapshot(
+                    workspaceIDs: [workspaceID],
+                    workspaceName: "Renamed workspace"
+                ),
+                in: database
+            )
+            let confirmedWorkspace = try Workspace
+                .find(workspaceID)
+                .fetchOne(database)
+            #expect(confirmedWorkspace?.workspaceName == "Renamed workspace")
+            #expect(
+                try CloudPendingMutation.find(attempt.attemptID)
+                    .fetchOne(database) == nil
+            )
+        }
+    }
+
     @Test("Cloud persistence matches repositories and preserves desktop-owned fields")
     func preservesDesktopFields() throws {
         let database = try appDatabase()
@@ -771,7 +837,8 @@ private func cloudSnapshot(
     accountID: String = "account-1",
     workspaceIDs: [CloudWorkspace.ID],
     status: CloudWorkspaceStatusResponse.Status = .ready,
-    gitRemote: String = "https://github.com/example/mobile.git"
+    gitRemote: String = "https://github.com/example/mobile.git",
+    workspaceName: String = "Cloud workspace"
 ) -> CloudWorkspaceSnapshot {
     let project = CloudProject(
         id: "project-1",
@@ -781,7 +848,7 @@ private func cloudSnapshot(
     let workspaces = workspaceIDs.map { workspaceID in
         CloudWorkspace(
             id: workspaceID,
-            name: "Cloud workspace",
+            name: workspaceName,
             createdAt: Date(timeIntervalSince1970: 1),
             creatorID: "creator-1",
             lastActivityAt: Date(timeIntervalSince1970: 2)

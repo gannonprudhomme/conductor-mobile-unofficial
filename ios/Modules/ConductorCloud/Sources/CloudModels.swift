@@ -544,6 +544,14 @@ public struct CloudRenameSessionRequest: Codable, Equatable, Sendable {
     }
 }
 
+public struct CloudRenameWorkspaceRequest: Codable, Equatable, Sendable {
+    public let name: String
+
+    public init(name: String) {
+        self.name = name
+    }
+}
+
 public struct CloudArchiveSessionResponse: Decodable, Equatable, Sendable {
     public let workspaceID: String
     public let sessionID: String

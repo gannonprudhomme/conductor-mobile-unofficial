@@ -40,6 +40,43 @@ struct CloudAPIClientTests {
         #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
     }
 
+    @Test("Workspace rename uses the documented endpoint and request body")
+    func workspaceRenameRequest() async throws {
+        let requests = LockIsolated<[URLRequest]>([])
+        try await performRequests(
+            responses: [
+                #"{"userId":"user-1","authMethod":"api-key"}"#,
+                #"""
+                {
+                  "id": "workspace-1",
+                  "name": "Renamed workspace",
+                  "createdAt": "2026-07-24T15:24:17Z",
+                  "deepLink": "https://conductor.build/workspace"
+                }
+                """#,
+            ]
+        ) { request in
+            requests.withValue { $0.append(request) }
+        } operation: { client in
+            let workspace = try await client.renameWorkspace(
+                expectedAccountID: "user-1",
+                workspaceID: "workspace-1",
+                request: CloudRenameWorkspaceRequest(
+                    name: "Renamed workspace"
+                )
+            )
+            #expect(workspace.name == "Renamed workspace")
+        }
+
+        let request = try #require(requests.value.last)
+        #expect(request.httpMethod == "POST")
+        #expect(request.url?.path == "/v0/workspaces/workspace-1/rename")
+        #expect(
+            request.httpBody
+                == Data(#"{"name":"Renamed workspace"}"#.utf8)
+        )
+    }
+
     @Test("Structured server errors preserve authentication details")
     func structuredError() async throws {
         do {
