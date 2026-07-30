@@ -64,6 +64,11 @@ public struct CloudAPIClient: Sendable {
         _ sessionID: String,
         _ request: CloudRenameSessionRequest
     ) async throws -> CloudSession
+    public var renameWorkspace: @Sendable (
+        _ expectedAccountID: String,
+        _ workspaceID: String,
+        _ request: CloudRenameWorkspaceRequest
+    ) async throws -> CloudWorkspace
     public var sendMessage: @Sendable (
         _ expectedAccountID: String,
         _ sessionID: String,
@@ -370,6 +375,21 @@ extension CloudAPIClient: DependencyKey {
                     CloudSession.self,
                     baseURL: baseURL,
                     path: ["v0", "sessions", sessionID, "rename"],
+                    method: "POST",
+                    body: try JSONEncoder().encode(requestBody),
+                    apiKey: key
+                )
+            },
+            renameWorkspace: { expectedAccountID, workspaceID, requestBody in
+                let key = try await verifiedAPIKey(
+                    expectedAccountID: expectedAccountID,
+                    baseURL: baseURL,
+                    apiKey: apiKey
+                )
+                return try await request(
+                    CloudWorkspace.self,
+                    baseURL: baseURL,
+                    path: ["v0", "workspaces", workspaceID, "rename"],
                     method: "POST",
                     body: try JSONEncoder().encode(requestBody),
                     apiKey: key

@@ -126,6 +126,7 @@ public struct CloudPendingMutation: Equatable, Identifiable, Sendable {
         public static let renameSession = Self(rawValue: "rename-session")
         public static let archiveSession = Self(rawValue: "archive-session")
         public static let createWorkspace = Self(rawValue: "create-workspace")
+        public static let renameWorkspace = Self(rawValue: "rename-workspace")
         public static let archiveWorkspace = Self(rawValue: "archive-workspace")
     }
 

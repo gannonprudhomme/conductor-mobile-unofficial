@@ -35,6 +35,11 @@ struct CloudArchiveWorkspaceRollback: Codable, Equatable, Sendable {
     let state: String?
 }
 
+struct CloudRenameWorkspaceRollback: Codable, Equatable, Sendable {
+    let workspaceName: String?
+    let owningFeature: CloudMutationOutcome.OwningFeature
+}
+
 @DependencyClient
 public struct WorkspaceMutationClient: Sendable {
     public var archiveSession: @Sendable (
@@ -66,6 +71,12 @@ public struct WorkspaceMutationClient: Sendable {
         _ route: WorkspaceMutationRoute,
         _ session: Session,
         _ title: String
+    ) async throws -> Void
+    public var renameWorkspace: @Sendable (
+        _ route: WorkspaceMutationRoute,
+        _ workspace: Workspace,
+        _ name: String,
+        _ owningFeature: CloudMutationOutcome.OwningFeature
     ) async throws -> Void
 }
 
@@ -220,6 +231,21 @@ extension WorkspaceMutationClient: DependencyKey {
                         database: database
                     )
                 }
+            },
+            renameWorkspace: { route, workspace, name, owningFeature in
+                @Dependency(\.defaultDatabase) var database
+
+                guard case let .cloud(accountID, remoteWorkspaceID) = route else {
+                    throw WorkspaceMutationClientError.unsupportedOperation
+                }
+                try await persistWorkspaceRename(
+                    accountID: accountID,
+                    remoteWorkspaceID: remoteWorkspaceID,
+                    workspace: workspace,
+                    name: name,
+                    owningFeature: owningFeature,
+                    database: database
+                )
             }
         )
     }
@@ -423,6 +449,58 @@ extension WorkspaceMutationClient: DependencyKey {
                 .update {
                     $0.state = #bind(Workspace.State(rawValue: "archived"))
                 }
+                .execute(database)
+            try CloudPendingMutation.insert { attempt }.execute(database)
+        }
+    }
+
+    private static func persistWorkspaceRename(
+        accountID: String,
+        remoteWorkspaceID: String,
+        workspace: Workspace,
+        name: String,
+        owningFeature: CloudMutationOutcome.OwningFeature,
+        database: any DatabaseWriter
+    ) async throws {
+        let configuration = try currentConfiguration(accountID: accountID)
+        try await database.write { database in
+            _ = try ownedWorkspace(
+                canonicalWorkspaceID: workspace.id,
+                accountID: accountID,
+                remoteWorkspaceID: remoteWorkspaceID,
+                in: database
+            )
+            guard try !hasUnresolvedAttempt(
+                operation: .renameWorkspace,
+                canonicalWorkspaceID: workspace.id,
+                in: database
+            ) else {
+                throw WorkspaceMutationClientError.conflictingMutation
+            }
+            guard let persistedWorkspace = try Workspace
+                .find(workspace.id)
+                .fetchOne(database) else {
+                throw WorkspaceMutationClientError.ownershipMismatch
+            }
+            let rollback = try JSONEncoder.cloudMutation.encode(
+                CloudRenameWorkspaceRollback(
+                    workspaceName: persistedWorkspace.workspaceName,
+                    owningFeature: owningFeature
+                )
+            )
+            let attempt = try CloudPendingMutation(
+                accountID: accountID,
+                credentialGeneration: configuration.credentialGeneration,
+                operation: .renameWorkspace,
+                resourceKind: .workspace,
+                request: CloudRenameWorkspaceRequest(name: name),
+                rollbackPayload: rollback,
+                canonicalWorkspaceID: workspace.id,
+                remoteWorkspaceID: remoteWorkspaceID
+            )
+            try Workspace
+                .find(workspace.id)
+                .update { $0.workspaceName = #bind(name) }
                 .execute(database)
             try CloudPendingMutation.insert { attempt }.execute(database)
         }
@@ -648,6 +726,18 @@ extension WorkspaceMutationClient: DependencyKey {
                 && $0.mutationState != .acknowledged
         }
     }
+
+    private static func hasUnresolvedAttempt(
+        operation: CloudPendingMutation.Operation,
+        canonicalWorkspaceID: Workspace.ID,
+        in database: Database
+    ) throws -> Bool {
+        try CloudPendingMutation.all.fetchAll(database).contains {
+            $0.mutationOperation == operation
+                && $0.canonicalWorkspaceID == canonicalWorkspaceID
+                && $0.mutationState != .acknowledged
+        }
+    }
 }
 
 public extension DependencyValues {
@@ -672,7 +762,7 @@ private enum WorkspaceMutationClientError: LocalizedError {
         case .accountChanged:
             "The active Conductor Cloud account changed."
         case .conflictingMutation:
-            "A Cloud change for this chat is already pending."
+            "A Cloud change for this item is already pending."
         case .ownershipMismatch:
             "This Cloud chat is read-only for the current account."
         case .unsupportedConfiguration:

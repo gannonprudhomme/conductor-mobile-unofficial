@@ -46,6 +46,7 @@ public struct WorkspaceChat: Sendable {
         var isCreatingSession = false
         var isRenamingBranch = false
         var isRenamingSession = false
+        var isRenamingWorkspace = false
         var isLoadingSessions = true
         var isWorkspaceMutationInFlight = false
         var branchNameDraft = ""
@@ -57,6 +58,7 @@ public struct WorkspaceChat: Sendable {
         var transcriptCopyCount = 0
         var renamingSession: Session?
         var sessionTitleDraft = ""
+        var workspaceNameDraft = ""
 
         @FetchAll public var activeSessions: [Session]
         @FetchAll public var archivedSessions: [Session]
@@ -174,6 +176,7 @@ public struct WorkspaceChat: Sendable {
                 && !isCreatingSession
                 && !isRenamingBranch
                 && !isRenamingSession
+                && !isRenamingWorkspace
                 && !isWorkspaceMutationInFlight
                 && sessionIDsBeforeCreation == nil
                 && sessionIDAwaitingObservation == nil
@@ -202,6 +205,15 @@ public struct WorkspaceChat: Sendable {
             return !title.isEmpty && title != renamingSession?.title
         }
 
+        var canRenameWorkspace: Bool {
+            let name = workspaceNameDraft.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return !isRenamingWorkspace
+                && !name.isEmpty
+                && name != (workspace.workspaceName ?? workspace.displayName)
+        }
+
         var canUseDesktopWorkspaceActions: Bool {
             source != .cloud || connectionStatus == .connected
         }
@@ -228,6 +240,7 @@ public struct WorkspaceChat: Sendable {
         case archivedSessions(ArchivedSessions)
         case renameBranch
         case renameSession
+        case renameWorkspace
 
         public enum Alert: Equatable {
             case openSettings
@@ -270,6 +283,9 @@ public struct WorkspaceChat: Sendable {
         case renameSessionButtonTapped(Session)
         case renameSessionResponse(Result<Void, any Error>)
         case renameSessionSubmitted
+        case renameWorkspaceButtonTapped
+        case renameWorkspaceResponse(Result<Void, any Error>)
+        case renameWorkspaceSubmitted
         case sessionSnapshotPersisted
         case sessionButtonTapped(Session)
         case task
@@ -535,8 +551,8 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .renameBranchButtonTapped:
-                guard state.canUseDesktopWorkspaceActions else {
-                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
+                guard state.mutationRoute?.capabilities.canRenameBranch
+                    == true else {
                     return .none
                 }
                 state.branchNameDraft = state.workspace.branch ?? ""
@@ -544,11 +560,8 @@ public struct WorkspaceChat: Sendable {
                 return .none
 
             case .renameBranchSubmitted:
-                guard state.canUseDesktopWorkspaceActions else {
-                    state.destination = .alert(.cloudWorkspaceActionRequiresDesktop)
-                    return .none
-                }
-                guard state.canRenameBranch else {
+                guard state.mutationRoute?.capabilities.canRenameBranch == true,
+                      state.canRenameBranch else {
                     return .none
                 }
 
@@ -580,6 +593,62 @@ public struct WorkspaceChat: Sendable {
                 state.isRenamingBranch = false
                 state.destination = .alert(
                     .failedToRenameBranch(message: error.localizedDescription)
+                )
+                return .none
+
+            case .renameWorkspaceButtonTapped:
+                guard state.mutationRoute?.capabilities.canRenameWorkspace
+                    == true else {
+                    return .none
+                }
+                state.workspaceNameDraft =
+                    state.workspace.workspaceName ?? state.workspace.displayName
+                state.destination = .renameWorkspace
+                return .none
+
+            case .renameWorkspaceSubmitted:
+                guard state.canRenameWorkspace,
+                      let mutationRoute = state.mutationRoute,
+                      mutationRoute.capabilities.canRenameWorkspace else {
+                    return .none
+                }
+                let name = state.workspaceNameDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                state.workspaceNameDraft = name
+                state.destination = nil
+                state.isRenamingWorkspace = true
+                return .run {
+                    [
+                        mutationRoute,
+                        name,
+                        workspace = state.workspace,
+                    ] send in
+                    await send(
+                        .renameWorkspaceResponse(
+                            Result {
+                                try await workspaceMutationClient.renameWorkspace(
+                                    route: mutationRoute,
+                                    workspace: workspace,
+                                    name: name,
+                                    owningFeature: .workspaceChat(
+                                        workspaceID: workspace.id
+                                    )
+                                )
+                            }
+                        )
+                    )
+                }
+
+            case .renameWorkspaceResponse(.success):
+                state.isRenamingWorkspace = false
+                return .none
+
+            case let .renameWorkspaceResponse(.failure(error)):
+                Logger.chat.error("Failed to rename workspace: \(error)")
+                state.isRenamingWorkspace = false
+                state.destination = .alert(
+                    .failedToRenameWorkspace(message: error.localizedDescription)
                 )
                 return .none
 
@@ -1673,6 +1742,14 @@ extension AlertState where Action == WorkspaceChat.Destination.Alert {
         }
     }
 
+    static func failedToRenameWorkspace(message: String) -> Self {
+        AlertState {
+            TextState("Failed to rename workspace")
+        } message: {
+            TextState(message)
+        }
+    }
+
     static func failedToSendMessage(message: String) -> Self {
         AlertState {
             TextState("Failed to send message")
@@ -1793,6 +1870,29 @@ public struct WorkspaceChatView: View {
     }
 
     public var body: some View {
+        presentedWorkspaceContent
+            .sensoryFeedback(.error, trigger: store.destination) { _, destination in
+                destination?.alert != nil
+            }
+            .sensoryFeedback(.selection, trigger: store.transcriptCopyCount)
+            .onChange(of: store.transcriptCopyCount) {
+                UIPasteboard.general.string = store.conciseTranscript
+            }
+            .sheet(
+                item: $store.scope(
+                    state: \.destination?.archivedSessions,
+                    action: \.destination.archivedSessions
+                )
+            ) { archivedSessionsStore in
+                ArchivedSessionsView(store: archivedSessionsStore)
+                    .presentationDetents([.medium, .large])
+            }
+            .task {
+                await store.send(.task).finish()
+            }
+    }
+
+    private var workspaceContent: some View {
         ChatTaskOwner(store: store) {
             if let chatStore = store.scope(state: \.chat, action: \.chat) {
                 ChatView(
@@ -1859,60 +1959,67 @@ public struct WorkspaceChatView: View {
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(.theme(.background))
-        .alert(
-            "Rename branch",
-            isPresented: isRenameBranchPresented
-        ) {
-            TextField("Branch name", text: $store.branchNameDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .tint(.theme(.accent))
+    }
 
-            Button("Rename", role: .confirm) {
-                store.send(.renameBranchSubmitted)
+    private var presentedWorkspaceContent: some View {
+        workspaceContent
+            .alert(
+                "Rename branch",
+                isPresented: isRenameBranchPresented
+            ) {
+                TextField("Branch name", text: $store.branchNameDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .tint(.theme(.accent))
+
+                Button("Rename", role: .confirm) {
+                    store.send(.renameBranchSubmitted)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!store.canRenameBranch)
+
+                Button("Cancel", role: .cancel) { }
             }
-            .keyboardShortcut(.defaultAction)
-            .disabled(!store.canRenameBranch)
+            .alert(
+                "Rename chat",
+                isPresented: isRenameSessionPresented
+            ) {
+                TextField("Chat name", text: $store.sessionTitleDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .tint(.theme(.accent))
 
-            Button("Cancel", role: .cancel) { }
-        }
-        .alert(
-            "Rename chat",
-            isPresented: isRenameSessionPresented
-        ) {
-            TextField("Chat name", text: $store.sessionTitleDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .tint(.theme(.accent))
+                Button("Rename", role: .confirm) {
+                    store.send(.renameSessionSubmitted)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!store.canRenameSession)
 
-            Button("Rename", role: .confirm) {
-                store.send(.renameSessionSubmitted)
+                Button("Cancel", role: .cancel) { }
             }
-            .keyboardShortcut(.defaultAction)
-            .disabled(!store.canRenameSession)
+            .alert(
+                "Rename workspace",
+                isPresented: isRenameWorkspacePresented
+            ) {
+                TextField("Workspace name", text: $store.workspaceNameDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .tint(.theme(.accent))
 
-            Button("Cancel", role: .cancel) { }
-        }
-        .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
-        .sensoryFeedback(.error, trigger: store.destination) { _, destination in
-            destination?.alert != nil
-        }
-        .sensoryFeedback(.selection, trigger: store.transcriptCopyCount)
-        .onChange(of: store.transcriptCopyCount) {
-            UIPasteboard.general.string = store.conciseTranscript
-        }
-        .sheet(
-            item: $store.scope(
-                state: \.destination?.archivedSessions,
-                action: \.destination.archivedSessions
+                Button("Rename", role: .confirm) {
+                    store.send(.renameWorkspaceSubmitted)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!store.canRenameWorkspace)
+
+                Button("Cancel", role: .cancel) { }
+            }
+            .alert(
+                $store.scope(
+                    state: \.destination?.alert,
+                    action: \.destination.alert
+                )
             )
-        ) { archivedSessionsStore in
-            ArchivedSessionsView(store: archivedSessionsStore)
-                .presentationDetents([.medium, .large])
-        }
-        .task {
-            await store.send(.task).finish()
-        }
     }
 
     private var shouldShowLoadingIndicator: Bool {
@@ -1935,6 +2042,14 @@ public struct WorkspaceChatView: View {
     private var isRenameSessionPresented: Binding<Bool> {
         Binding {
             store.destination == .renameSession
+        } set: {
+            dismissDestination(isPresented: $0)
+        }
+    }
+
+    private var isRenameWorkspacePresented: Binding<Bool> {
+        Binding {
+            store.destination == .renameWorkspace
         } set: {
             dismissDestination(isPresented: $0)
         }
@@ -2008,20 +2123,44 @@ public struct WorkspaceChatView: View {
             }
 
             Section {
-                Button {
-                    store.send(.renameBranchButtonTapped)
-                } label: {
-                    Label {
-                        Text("Rename branch")
-                    } icon: {
-                        ColoredMenuImage(Lucide.pencil, color: .theme(.textPrimary))
-                    }
+                if store.mutationRoute.capabilities.canRenameWorkspace {
+                    Button {
+                        store.send(.renameWorkspaceButtonTapped)
+                    } label: {
+                        Label {
+                            Text("Rename workspace")
+                        } icon: {
+                            ColoredMenuImage(
+                                Lucide.pencil,
+                                color: .theme(.textPrimary)
+                            )
+                        }
 
-                    if let branch = store.workspace.branch {
-                        Text(verbatim: branch)
+                        Text(
+                            verbatim: store.workspace.workspaceName
+                                ?? store.workspace.displayName
+                        )
                     }
+                    .disabled(store.isRenamingWorkspace)
+                } else if store.mutationRoute.capabilities.canRenameBranch {
+                    Button {
+                        store.send(.renameBranchButtonTapped)
+                    } label: {
+                        Label {
+                            Text("Rename branch")
+                        } icon: {
+                            ColoredMenuImage(
+                                Lucide.pencil,
+                                color: .theme(.textPrimary)
+                            )
+                        }
+
+                        if let branch = store.workspace.branch {
+                            Text(verbatim: branch)
+                        }
+                    }
+                    .disabled(store.isRenamingBranch)
                 }
-                .disabled(store.isRenamingBranch)
 
                 if !store.isLoadingSessions, !store.archivedSessions.isEmpty {
                     Button {

@@ -15,6 +15,72 @@ import SQLiteData
 import Testing
 
 struct WorkspaceMutationClientTests {
+    @Test("Cloud workspace rename is optimistic and durably queued")
+    func workspaceRename() async throws {
+        let accountID = "account"
+        let generation = UUID(53)
+        let workspace = Workspace.preview(
+            id: "workspace",
+            workspaceName: "Original workspace"
+        )
+
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: accountID,
+                    credentialGeneration: generation
+                )
+            }
+            try await database.write { database in
+                try Workspace.insert { workspace }.execute(database)
+                try CloudWorkspaceMetadata.insert {
+                    CloudWorkspaceMetadata(
+                        workspaceID: workspace.id,
+                        accountID: accountID,
+                        remoteWorkspaceID: "remote-workspace",
+                        lastSeenGeneration: "generation"
+                    )
+                }
+                .execute(database)
+            }
+
+            try await WorkspaceMutationClient.liveValue.renameWorkspace(
+                route: .cloud(
+                    accountID: accountID,
+                    remoteWorkspaceID: "remote-workspace"
+                ),
+                workspace: workspace,
+                name: "Renamed workspace",
+                owningFeature: .workspaces
+            )
+
+            let persisted = try await database.read { database in
+                (
+                    workspace: try Workspace.find(workspace.id).fetchOne(database),
+                    attempt: try CloudPendingMutation.all.fetchOne(database)
+                )
+            }
+            let attempt = try #require(persisted.attempt)
+            let request = try attempt.request(
+                as: CloudRenameWorkspaceRequest.self
+            )
+            let rollback = try attempt.rollback(
+                as: CloudRenameWorkspaceRollback.self
+            )
+            #expect(persisted.workspace?.workspaceName == "Renamed workspace")
+            #expect(attempt.mutationOperation == .renameWorkspace)
+            #expect(attempt.remoteWorkspaceID == "remote-workspace")
+            #expect(request.name == "Renamed workspace")
+            #expect(rollback?.workspaceName == "Original workspace")
+            #expect(rollback?.owningFeature == .workspaces)
+        }
+    }
+
     @Test("Cloud workspace creation carries a request-specific recovery marker")
     func workspaceCreationRecoveryMarker() async throws {
         let accountID = "account"

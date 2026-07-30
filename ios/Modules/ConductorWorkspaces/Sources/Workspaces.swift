@@ -85,6 +85,8 @@ public struct Workspaces: Sendable {
 
         var deferredWorkspaces: [WorkspaceWithRepository]?
         var pendingWorkspaceCreation: WorkspaceCreationResult?
+        var renamingWorkspace: WorkspaceWithRepository?
+        var workspaceNameDraft = ""
 
         @FetchAll(
             WorkspaceWithRepository.all(),
@@ -97,6 +99,7 @@ public struct Workspaces: Sendable {
         var hasPresentedCloudFailureAlert = false
         var presentedCloudFailure: CloudFailure?
         var isLoadingWorkspaces: Bool
+        var isRenamingWorkspace = false
         var sections: [WorkspaceSection] = []
 
         public var isCloudCredentialConfigured: Bool {
@@ -133,6 +136,20 @@ public struct Workspaces: Sendable {
         var canCreateWorkspace: Bool {
             !repositoriesAvailableForWorkspaceCreation.isEmpty
                 || !cloudWorkspaceCreationCandidates.isEmpty
+        }
+
+        var canRenameWorkspace: Bool {
+            guard let renamingWorkspace else {
+                return false
+            }
+            let name = workspaceNameDraft.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let currentName = renamingWorkspace.workspace.workspaceName
+                ?? renamingWorkspace.workspace.displayName
+            return !isRenamingWorkspace
+                && !name.isEmpty
+                && name != currentName
         }
 
         public init() {
@@ -270,6 +287,7 @@ public struct Workspaces: Sendable {
     public enum Destination {
         case alert(AlertState<Alert>)
         case createWorkspace(CreateWorkspace)
+        case renameWorkspace
 
         public enum Alert: Equatable {
             case openSettings
@@ -320,9 +338,10 @@ public struct Workspaces: Sendable {
         }
     }
 
-    public enum Action {
+    public enum Action: BindableAction {
         case appBecameActive
         case appEnteredBackground
+        case binding(BindingAction<State>)
         case cloudConfigurationChanged(CloudConfiguration?)
         case cloudObservationFailed(CloudFailure)
         case cloudSnapshotReceived
@@ -352,6 +371,9 @@ public struct Workspaces: Sendable {
         case workspaceMutationFailed(any Error)
         case workspaceMutationUsedSQLiteFallback
         case workspacePinnedButtonTapped(WorkspaceWithRepository)
+        case workspaceRenameButtonTapped(WorkspaceWithRepository)
+        case workspaceRenameResponse(Result<Void, any Error>)
+        case workspaceRenameSubmitted
         case workspaceStatusButtonTapped(WorkspaceWithRepository, Workspace.Status)
         case workspaceTapped(WorkspaceWithRepository)
         case workspaceUnreadButtonTapped(WorkspaceWithRepository)
@@ -368,6 +390,7 @@ public struct Workspaces: Sendable {
     }
 
     public var body: some ReducerOf<Self> {
+        BindingReducer()
         Reduce { state, action in
             switch action {
             case .task:
@@ -757,6 +780,60 @@ public struct Workspaces: Sendable {
                 state.destination = .alert(.failedToArchiveWorkspace(error: error))
                 return .none
 
+            case let .workspaceRenameButtonTapped(item):
+                guard item.source == .cloud,
+                      item.mutationRoute(
+                          cloudConfiguration: state.cloudConfiguration
+                      )?.capabilities.canRenameWorkspace == true else {
+                    return .none
+                }
+                state.renamingWorkspace = item
+                state.workspaceNameDraft =
+                    item.workspace.workspaceName ?? item.workspace.displayName
+                state.destination = .renameWorkspace
+                return .none
+
+            case .workspaceRenameSubmitted:
+                guard state.canRenameWorkspace,
+                      let item = state.renamingWorkspace,
+                      let route = item.mutationRoute(
+                          cloudConfiguration: state.cloudConfiguration
+                      ),
+                      route.capabilities.canRenameWorkspace else {
+                    return .none
+                }
+                let name = state.workspaceNameDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                state.workspaceNameDraft = name
+                state.renamingWorkspace = nil
+                state.destination = nil
+                state.isRenamingWorkspace = true
+                return .run { [item, name, route] send in
+                    await send(
+                        .workspaceRenameResponse(
+                            Result {
+                                try await workspaceMutationClient.renameWorkspace(
+                                    route: route,
+                                    workspace: item.workspace,
+                                    name: name,
+                                    owningFeature: .workspaces
+                                )
+                            }
+                        )
+                    )
+                }
+
+            case .workspaceRenameResponse(.success):
+                state.isRenamingWorkspace = false
+                return .none
+
+            case let .workspaceRenameResponse(.failure(error)):
+                Logger.workspace.error("Failed to rename workspace: \(error)")
+                state.isRenamingWorkspace = false
+                state.destination = .alert(.failedToRenameWorkspace(error: error))
+                return .none
+
             case let .workspaceMutationFailed(error):
                 state.destination = .alert(.failedToUpdateWorkspace(error: error))
                 return .none
@@ -883,7 +960,8 @@ public struct Workspaces: Sendable {
                     )
                 }
 
-            case .destination,
+            case .binding,
+                 .destination,
                  .settingsButtonTapped,
                  .workspaceCreated,
                  .workspaceTapped:
@@ -1125,6 +1203,14 @@ extension AlertState where Action == Workspaces.Destination.Alert {
         }
     }
 
+    static func failedToRenameWorkspace(error: any Error) -> Self {
+        AlertState {
+            TextState("Failed to rename workspace")
+        } message: {
+            TextState(error.localizedDescription)
+        }
+    }
+
     static var cloudWorkspaceActionRequiresDesktop: Self {
         AlertState {
             TextState("Desktop connection required")
@@ -1299,8 +1385,35 @@ public struct WorkspacesView: View {
             .matchedTransitionSource(id: "new-workspace", in: namespace)
         }
         .background(.theme(.background))
+        .alert(
+            "Rename workspace",
+            isPresented: isRenameWorkspacePresented
+        ) {
+            TextField("Workspace name", text: $store.workspaceNameDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .tint(.theme(.accent))
+
+            Button("Rename", role: .confirm) {
+                store.send(.workspaceRenameSubmitted)
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(!store.canRenameWorkspace)
+
+            Button("Cancel", role: .cancel) { }
+        }
         .alert($store.scope(state: \.destination?.alert, action: \.destination.alert))
         .preferredColorScheme(.dark)
+    }
+
+    private var isRenameWorkspacePresented: Binding<Bool> {
+        Binding {
+            store.destination == .renameWorkspace
+        } set: {
+            if !$0 {
+                store.send(.destination(.dismiss))
+            }
+        }
     }
 
     private var emptyDescription: String {
@@ -1537,6 +1650,9 @@ public struct WorkspacesView: View {
 
         case .open:
             store.send(.workspaceTapped(item))
+
+        case .renameWorkspace:
+            store.send(.workspaceRenameButtonTapped(item))
 
         case let .setStatus(status):
             store.send(.workspaceStatusButtonTapped(item, status))

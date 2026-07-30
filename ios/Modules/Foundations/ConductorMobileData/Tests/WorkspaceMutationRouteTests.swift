@@ -26,6 +26,7 @@ struct WorkspaceMutationRouteTests {
 
         #expect(route == .desktop)
         #expect(route.capabilities.canManageQueue)
+        #expect(!route.capabilities.canRenameWorkspace)
     }
 
     @Test("Cloud mutation authority requires current account ownership")
@@ -82,6 +83,7 @@ struct WorkspaceMutationRouteTests {
         #expect(!capabilities.canManageQueue)
         #expect(!capabilities.canRestoreSession)
         #expect(!capabilities.canRenameBranch)
+        #expect(capabilities.canRenameWorkspace)
         #expect(!capabilities.canPin)
         #expect(!capabilities.canMarkUnread)
         #expect(!capabilities.canSetStatus)

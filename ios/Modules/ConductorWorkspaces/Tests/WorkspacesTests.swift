@@ -1245,6 +1245,67 @@ struct WorkspacesTests {
         }
     }
 
+    @Test("Cloud workspace rename is prefilled, trimmed, and submitted")
+    func cloudWorkspaceRename() async throws {
+        try await withDependencies {
+            $0.defaultFileStorage = .inMemory
+            try $0.bootstrapDatabase()
+        } operation: {
+            @Shared(.cloudConfiguration) var cloudConfiguration
+            $cloudConfiguration.withLock {
+                $0 = CloudConfiguration(
+                    accountID: "account",
+                    credentialGeneration: UUID(71)
+                )
+            }
+            let item = cloudWorkspace()
+            let requests = LockIsolated<[String]>([])
+            let store = TestStore(initialState: Workspaces.State()) {
+                Workspaces()
+            } withDependencies: {
+                $0.workspaceMutationClient.renameWorkspace = {
+                    route,
+                    workspace,
+                    name,
+                    owningFeature in
+                    #expect(
+                        route == .cloud(
+                            accountID: "account",
+                            remoteWorkspaceID: "remote-workspace"
+                        )
+                    )
+                    #expect(workspace.id == item.id)
+                    #expect(owningFeature == .workspaces)
+                    requests.withValue { $0.append(name) }
+                }
+            }
+
+            await store.send(.workspaceRenameButtonTapped(item)) {
+                $0.renamingWorkspace = item
+                $0.workspaceNameDraft = "Cloud workspace"
+                $0.destination = .renameWorkspace
+            }
+            await store.send(
+                .binding(
+                    .set(\.workspaceNameDraft, "  Renamed workspace  ")
+                )
+            ) {
+                $0.workspaceNameDraft = "  Renamed workspace  "
+            }
+            await store.send(.workspaceRenameSubmitted) {
+                $0.renamingWorkspace = nil
+                $0.workspaceNameDraft = "Renamed workspace"
+                $0.destination = nil
+                $0.isRenamingWorkspace = true
+            }
+            await store.receive(\.workspaceRenameResponse.success) {
+                $0.isRenamingWorkspace = false
+            }
+
+            #expect(requests.value == ["Renamed workspace"])
+        }
+    }
+
     @Test("Connected Cloud workspace actions use the desktop workspace ID")
     func connectedCloudWorkspaceActionsUseDesktop() async throws {
         try await withDependencies {
@@ -1602,7 +1663,8 @@ private func cloudWorkspace() -> WorkspaceWithRepository {
     let workspace = Workspace.preview(
         id: "canonical-workspace",
         derivedStatus: Workspace.Status.inProgress.rawValue,
-        hostingServerURL: Workspace.conductorCloudHostingServerURL
+        hostingServerURL: Workspace.conductorCloudHostingServerURL,
+        workspaceName: "Cloud workspace"
     )
     return WorkspaceWithRepository(
         workspace: workspace,

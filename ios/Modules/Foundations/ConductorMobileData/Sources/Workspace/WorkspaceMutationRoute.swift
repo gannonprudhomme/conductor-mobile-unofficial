@@ -36,6 +36,7 @@ public struct WorkspaceCapabilities: Equatable, Sendable {
     public var canManageQueue: Bool
     public var canRestoreSession: Bool
     public var canRenameBranch: Bool
+    public var canRenameWorkspace: Bool
     public var canPin: Bool
     public var canMarkUnread: Bool
     public var canSetStatus: Bool
@@ -51,6 +52,7 @@ public struct WorkspaceCapabilities: Equatable, Sendable {
         canManageQueue: false,
         canRestoreSession: false,
         canRenameBranch: false,
+        canRenameWorkspace: false,
         canPin: false,
         canMarkUnread: false,
         canSetStatus: false,
@@ -67,6 +69,7 @@ public struct WorkspaceCapabilities: Equatable, Sendable {
         canManageQueue: true,
         canRestoreSession: true,
         canRenameBranch: true,
+        canRenameWorkspace: false,
         canPin: true,
         canMarkUnread: true,
         canSetStatus: true,
@@ -83,6 +86,7 @@ public struct WorkspaceCapabilities: Equatable, Sendable {
         canManageQueue: false,
         canRestoreSession: false,
         canRenameBranch: false,
+        canRenameWorkspace: true,
         canPin: false,
         canMarkUnread: false,
         canSetStatus: false,
