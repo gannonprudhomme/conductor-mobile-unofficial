@@ -46,6 +46,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.productivity
         LSRequiresIPhoneOS: true
+        NSMicrophoneUsageDescription: Record speech to add a transcription to your message. Recordings are processed locally on this device.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
@@ -158,6 +159,20 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorWorkspacesTests
         PRODUCT_NAME: $(TARGET_NAME)
+  ConductorVoiceInputTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Modules/ConductorVoiceInput/Tests
+    dependencies:
+      - package: ConductorModules
+        product: ConductorVoiceInput
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.gannonprudhomme.conductor-mobile-unofficial.ConductorVoiceInputTests
+        PRODUCT_NAME: $(TARGET_NAME)
   ConductorChatTests:
     type: bundle.unit-test
     platform: iOS
@@ -265,6 +280,13 @@ schemes:
     test:
       targets:
         - ConductorWorkspacesTests
+  ConductorVoiceInputTests:
+    build:
+      targets:
+        ConductorVoiceInputTests: test
+    test:
+      targets:
+        - ConductorVoiceInputTests
   ConductorMainTests:
     build:
       targets:

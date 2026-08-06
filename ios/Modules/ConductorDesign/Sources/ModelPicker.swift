@@ -87,27 +87,45 @@ public struct ModelAndFastModeControls: View {
     }
 
     public var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 4) {
-                modelControl
+        ViewThatFits(in: .horizontal) {
+            controls(
+                showsModelName: true,
+                showsReasoningEffortName: true
+            )
 
-                if showsFastMode {
-                    fastModeControl
-                }
+            controls(
+                showsModelName: true,
+                showsReasoningEffortName: false
+            )
 
-                if isReasoningEffortControlVisible {
-                    reasoningEffortControl
-                }
-            }
+            controls(
+                showsModelName: false,
+                showsReasoningEffortName: false
+            )
         }
-        .scrollIndicators(.hidden)
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-        .defaultScrollAnchor(.leading)
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    private func controls(
+        showsModelName: Bool,
+        showsReasoningEffortName: Bool
+    ) -> some View {
+        HStack(spacing: 4) {
+            modelControl(showsName: showsModelName)
+
+            if showsFastMode {
+                fastModeControl
+            }
+
+            if isReasoningEffortControlVisible {
+                reasoningEffortControl(showsName: showsReasoningEffortName)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
     @ViewBuilder
-    private var modelControl: some View {
+    private func modelControl(showsName: Bool) -> some View {
         switch interactionMode {
         case .editable:
             ModelPicker(
@@ -115,6 +133,7 @@ public struct ModelAndFastModeControls: View {
                 allowsAgentSwitching: allowsAgentSwitching,
                 allowedModels: allowedModels,
                 selectedModel: selectedModel,
+                showsName: showsName,
                 selectedModelTitle: selectedModelTitle,
                 onSelect: onSelectModel
             )
@@ -128,7 +147,8 @@ public struct ModelAndFastModeControls: View {
             } label: {
                 ModelControlLabel(
                     agentType: displayedModelAgentType,
-                    title: displayedModelName
+                    title: displayedModelName,
+                    showsName: showsName
                 )
             }
             .buttonStyle(.spring)
@@ -176,13 +196,14 @@ public struct ModelAndFastModeControls: View {
     }
 
     @ViewBuilder
-    private var reasoningEffortControl: some View {
+    private func reasoningEffortControl(showsName: Bool) -> some View {
         switch interactionMode {
         case .editable:
             ReasoningEffortControl(
                 availableEfforts: availableReasoningEfforts,
                 selectedEffort: selectedReasoningEffort,
                 isDisabled: isDisabledDuringAction(.reasoningEffort),
+                showsName: showsName,
                 onSelect: onSelectReasoningEffort
             )
             .accessibilityIdentifier(
@@ -194,7 +215,8 @@ public struct ModelAndFastModeControls: View {
             } label: {
                 ReasoningEffortLabel(
                     effort: selectedReasoningEffort,
-                    showsDefaultTitle: true
+                    showsDefaultTitle: true,
+                    showsName: showsName
                 )
             }
             .buttonStyle(.spring)
@@ -377,6 +399,7 @@ public struct ModelPicker: Equatable, View {
     let allowsAgentSwitching: Bool
     let allowedModels: Set<Session.Model>?
     let selectedModel: Session.Model
+    let showsName: Bool
     let selectedModelTitle: String?
     let onSelect: @MainActor (Session.Model) -> Void
 
@@ -385,6 +408,7 @@ public struct ModelPicker: Equatable, View {
         allowsAgentSwitching: Bool = false,
         allowedModels: Set<Session.Model>? = nil,
         selectedModel: Session.Model,
+        showsName: Bool = true,
         selectedModelTitle: String? = nil,
         onSelect: @escaping @MainActor (Session.Model) -> Void
     ) {
@@ -392,6 +416,7 @@ public struct ModelPicker: Equatable, View {
         self.allowsAgentSwitching = allowsAgentSwitching
         self.allowedModels = allowedModels
         self.selectedModel = selectedModel
+        self.showsName = showsName
         self.selectedModelTitle = selectedModelTitle
         self.onSelect = onSelect
     }
@@ -403,6 +428,7 @@ public struct ModelPicker: Equatable, View {
             && lhs.allowsAgentSwitching == rhs.allowsAgentSwitching
             && lhs.allowedModels == rhs.allowedModels
             && lhs.selectedModel == rhs.selectedModel
+            && lhs.showsName == rhs.showsName
             && lhs.selectedModelTitle == rhs.selectedModelTitle
     }
 
@@ -437,15 +463,34 @@ public struct ModelPicker: Equatable, View {
         _ title: String,
         agentType: Session.AgentType
     ) -> some View {
-        ModelControlLabel(agentType: agentType, title: title)
+        ModelControlLabel(
+            agentType: agentType,
+            title: title,
+            showsName: showsName
+        )
     }
 }
 
 private struct ModelControlLabel: View {
     let agentType: Session.AgentType
     let title: String
+    var showsName = true
 
     var body: some View {
+        Group {
+            if showsName {
+                label
+                    .labelStyle(.conductorExtraSmall)
+            } else {
+                label
+                    .labelStyle(.iconOnly)
+            }
+        }
+        .foregroundStyle(.theme(.textPrimary))
+        .font(.theme(.small))
+    }
+
+    private var label: some View {
         Label {
             Text(title)
         } icon: {
@@ -455,9 +500,6 @@ private struct ModelControlLabel: View {
                 relativeTo: ThemeFontStyle.small.textStyle
             )
         }
-        .labelStyle(.conductorExtraSmall)
-        .foregroundStyle(.theme(.textPrimary))
-        .font(.theme(.small))
     }
 }
 

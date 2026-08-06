@@ -628,6 +628,137 @@ struct CreateWorkspaceTests {
         }
     }
 
+    @Test("Voice input appends to the latest workspace prompt")
+    func voiceInputAppendsToLatestPrompt() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let (transcripts, transcriptContinuation) = AsyncStream<String>.makeStream()
+            let state = CreateWorkspace.State(repositories: [.preview()])
+            state.$prompt.withLock { $0 = "Inspect this file." }
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = {
+                    for await transcript in transcripts {
+                        return transcript
+                    }
+                    throw CancellationError()
+                }
+            }
+
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
+            }
+            store.state.$prompt.withLock { $0 = "Inspect these files." }
+
+            transcriptContinuation.yield("Then run the tests.")
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.$prompt.withLock {
+                    $0 = "Inspect these files. Then run the tests."
+                }
+                $0.voiceInput.phase = .idle
+            }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
+            transcriptContinuation.finish()
+            await store.finish()
+        }
+    }
+
+    @Test("Voice input fills an empty workspace prompt")
+    func voiceInputFillsEmptyPrompt() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let store = TestStore(
+                initialState: CreateWorkspace.State(repositories: [.preview()])
+            ) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = {
+                    "Run the tests."
+                }
+            }
+
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
+            }
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.$prompt.withLock { $0 = "Run the tests." }
+                $0.voiceInput.phase = .idle
+            }
+            await store.receive(\.voiceInput.delegate.transcriptionFinished)
+        }
+    }
+
+    @Test("Voice input with no transcript preserves the workspace prompt")
+    func voiceInputWithoutTranscript() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let state = CreateWorkspace.State(repositories: [.preview()])
+            state.$prompt.withLock { $0 = "Keep this prompt." }
+            let store = TestStore(initialState: state) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.speechTranscriptionClient.startRecording = { }
+                $0.speechTranscriptionClient.stopRecordingAndTranscribe = { "" }
+            }
+
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .startingRecording
+            }
+            await store.receive(\.voiceInput.recordingStarted) {
+                $0.voiceInput.phase = .recording
+            }
+            await store.send(.voiceInput(.microphoneButtonTapped)) {
+                $0.voiceInput.phase = .transcribing
+            }
+            await store.receive(\.voiceInput.transcriptionResponse) {
+                $0.voiceInput.phase = .idle
+            }
+
+            #expect(store.state.prompt == "Keep this prompt.")
+        }
+    }
+
+    @Test("Leaving create workspace always cancels the shared recorder")
+    func voiceInputCancellation() async {
+        await withDependencies {
+            $0.defaultFileStorage = .inMemory
+        } operation: {
+            let wasCancelled = LockIsolated(false)
+            let store = TestStore(
+                initialState: CreateWorkspace.State(repositories: [.preview()])
+            ) {
+                CreateWorkspace()
+            } withDependencies: {
+                $0.speechTranscriptionClient.cancelRecording = {
+                    wasCancelled.setValue(true)
+                }
+            }
+
+            await store.send(.voiceInput(.cancel))
+            await store.finish()
+
+            #expect(wasCancelled.value)
+        }
+    }
+
     @Test("The create sheet renders and focuses an editable prompt")
     func promptEditor() async throws {
         try await withDependencies {

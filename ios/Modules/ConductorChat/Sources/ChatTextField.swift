@@ -6,6 +6,7 @@
 //
 
 import ConductorDesign
+import ConductorVoiceInput
 import LucideIcons
 import SharedConductorData
 import SwiftUI
@@ -28,12 +29,15 @@ struct ChatTextField: View {
     let isSendInFlight: Bool
     let isStopInFlight: Bool
     let isWorking: Bool
+    let voiceInputPhase: VoiceInputPhase
+    let voiceInputLevels: [Float]
     let shouldFocusOnAppear: Bool
     let onFastModeTapped: @MainActor () -> Void
     let onCancelEditingTapped: @MainActor () -> Void
     let onConfigurationControlTapped: @MainActor (
         ModelConfigurationControl
     ) -> Void
+    let onMicrophoneTapped: @MainActor () -> Void
     let onSelectModel: @MainActor (Session.Model) -> Void
     let onSelectReasoningEffort: @MainActor (Session.ReasoningEffort) -> Void
     let onSendTapped: @MainActor () -> Void
@@ -52,6 +56,8 @@ struct ChatTextField: View {
         isSendInFlight: Bool,
         isStopInFlight: Bool,
         isWorking: Bool,
+        voiceInputPhase: VoiceInputPhase,
+        voiceInputLevels: [Float],
         selectedModel: Session.Model,
         selectedModelTitle: String? = nil,
         selectedReasoningEffort: Session.ReasoningEffort?,
@@ -62,6 +68,7 @@ struct ChatTextField: View {
         onConfigurationControlTapped: @escaping @MainActor (
             ModelConfigurationControl
         ) -> Void = { _ in },
+        onMicrophoneTapped: @escaping @MainActor () -> Void,
         onSelectModel: @escaping @MainActor (Session.Model) -> Void = { _ in },
         onSelectReasoningEffort: @escaping @MainActor (Session.ReasoningEffort) -> Void,
         onSendTapped: @escaping @MainActor () -> Void,
@@ -79,6 +86,8 @@ struct ChatTextField: View {
         self.isSendInFlight = isSendInFlight
         self.isStopInFlight = isStopInFlight
         self.isWorking = isWorking
+        self.voiceInputPhase = voiceInputPhase
+        self.voiceInputLevels = voiceInputLevels
         self.selectedModel = selectedModel
         self.selectedModelTitle = selectedModelTitle
         self.selectedReasoningEffort = selectedReasoningEffort
@@ -87,6 +96,7 @@ struct ChatTextField: View {
         self.onFastModeTapped = onFastModeTapped
         self.onCancelEditingTapped = onCancelEditingTapped
         self.onConfigurationControlTapped = onConfigurationControlTapped
+        self.onMicrophoneTapped = onMicrophoneTapped
         self.onSelectModel = onSelectModel
         self.onSelectReasoningEffort = onSelectReasoningEffort
         self.onSendTapped = onSendTapped
@@ -95,7 +105,7 @@ struct ChatTextField: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: voiceInputPhase.shouldShowTakeover ? 0 : 12) {
             VStack(spacing: 12) {
                 if isEditingQueuedMessage {
                     editingHeader
@@ -104,15 +114,30 @@ struct ChatTextField: View {
 
                 textField
             }
+            .opacity(voiceInputPhase.shouldShowTakeover ? 0 : 1)
+            .overlay {
+                if voiceInputPhase.shouldShowTakeover {
+                    voiceInputTakeover
+                }
+            }
             .animation(.default, value: isFocused)
             .animation(
                 QueuedMessagesPresentation.disclosureAnimation,
                 value: isEditingQueuedMessage
             )
 
-            bottomRowButtons
+            if !voiceInputPhase.shouldShowTakeover {
+                bottomRowButtons
+            }
         }
-        .padding(EdgeInsets(vertical: 12, horizontal: 16))
+        .frame(minHeight: voiceInputPhase.shouldShowTakeover ? 32 : 64)
+        .padding(
+            EdgeInsets(
+                vertical: voiceInputPhase.shouldShowTakeover ? 6 : 12,
+                horizontal: 16
+            )
+        )
+        .animation(.default, value: voiceInputPhase.shouldShowTakeover)
         .glassEffect(
             .clear
                 .tint(.theme(.background).opacity(0.925)),
@@ -145,6 +170,16 @@ struct ChatTextField: View {
                 .disabled(isAnyActionInFlight)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private var voiceInputTakeover: some View {
+        VoiceInputTakeover(
+            phase: voiceInputPhase,
+            levels: voiceInputLevels,
+            contentHeight: 20,
+            accessibilityIdentifier: "chat.voiceInput",
+            onStopTapped: onMicrophoneTapped
+        )
     }
 
     private var textField: some View {
@@ -197,9 +232,19 @@ struct ChatTextField: View {
                     ContextWindowUsageGauge(usage: contextWindowUsage)
                 }
 
+                if !isEditingQueuedMessage {
+                    VoiceInputButton(
+                        phase: voiceInputPhase,
+                        isEnabled: isVoiceInputButtonEnabled,
+                        accessibilityIdentifier: "chat.voiceInput",
+                        idleAccessibilityLabel: "Record message",
+                        action: onMicrophoneTapped
+                    )
+                }
+
                 if !isEditingQueuedMessage && (isWorking || isStopInFlight) {
                     StopButton(
-                        isEnabled: !isAnyActionInFlight,
+                        isEnabled: !isMessageActionInFlight,
                         isInFlight: isStopInFlight,
                         action: onStopTapped
                     )
@@ -224,6 +269,7 @@ struct ChatTextField: View {
         }
         .frame(maxWidth: .infinity)
         .fixedSize(horizontal: false, vertical: true)
+        .animation(.default, value: voiceInputPhase)
     }
 
     private var hasSendableText: Bool {
@@ -231,7 +277,25 @@ struct ChatTextField: View {
     }
 
     private var isAnyActionInFlight: Bool {
+        isMessageActionInFlight || voiceInputPhase == .startingRecording
+            || voiceInputPhase == .transcribing
+    }
+
+    private var isMessageActionInFlight: Bool {
         isSendInFlight || isStopInFlight
+    }
+
+    private var isVoiceInputButtonEnabled: Bool {
+        switch voiceInputPhase {
+        case .idle:
+            !isMessageActionInFlight
+
+        case .recording:
+            true
+
+        case .startingRecording, .transcribing:
+            false
+        }
     }
 
     private struct SendButton: View {
@@ -419,10 +483,13 @@ struct ChatTextField: View {
             isSendInFlight: false,
             isStopInFlight: false,
             isWorking: true,
+            voiceInputPhase: .idle,
+            voiceInputLevels: [],
             selectedModel: selectedModel,
             selectedReasoningEffort: .ultra,
             availableReasoningEfforts: selectedModel.availableCodexReasoningEfforts,
             onFastModeTapped: { isFastModeEnabled.toggle() },
+            onMicrophoneTapped: { },
             onSelectModel: { selectedModel = $0 },
             onSelectReasoningEffort: { _ in },
             onSendTapped: { },

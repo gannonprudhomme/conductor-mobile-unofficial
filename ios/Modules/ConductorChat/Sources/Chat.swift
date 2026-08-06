@@ -10,6 +10,7 @@ import ComposableArchitecture
 import ConductorCloud
 import ConductorDesign
 import ConductorMobileData
+import ConductorVoiceInput
 import Foundation
 import Logging
 import SharedConductorData
@@ -73,6 +74,7 @@ public struct Chat: Sendable {
         var isDesktopDefaultModelUnavailable = false
         var isSessionModelHistoryUnavailable = false
         var hasObservedSessionFastModeChange = false
+        var voiceInput: VoiceInput.State
         var hasObservedSessionReasoningEffortChange = false
         var hasUserSelectedFastMode = false
         var hasUserSelectedModel = false
@@ -635,6 +637,7 @@ public struct Chat: Sendable {
             }
             self.selectedReasoningEffort = selectedReasoningEffort ?? session.reasoningEffort
             self.shouldFocusMessageField = shouldFocusMessageField
+            self.voiceInput = VoiceInput.State(id: session.id)
             reconcileSelectedReasoningEffort()
             deliveryAttempts = fetchedDeliveryAttempts
             if !deliveryAttempts.isEmpty {
@@ -721,6 +724,7 @@ public struct Chat: Sendable {
                 && lhs.isSessionModelHistoryUnavailable
                     == rhs.isSessionModelHistoryUnavailable
                 && lhs.hasObservedSessionFastModeChange == rhs.hasObservedSessionFastModeChange
+                && lhs.voiceInput == rhs.voiceInput
                 && lhs.hasObservedSessionReasoningEffortChange
                     == rhs.hasObservedSessionReasoningEffortChange
                 && lhs.hasUserSelectedFastMode == rhs.hasUserSelectedFastMode
@@ -805,6 +809,7 @@ public struct Chat: Sendable {
         )
         case turnSummaryTapped(Chat.TurnSummaryID)
         case scrollDownButtonTapped
+        case voiceInput(VoiceInput.Action)
     }
 
     @Dependency(\.defaultDatabase) var database
@@ -819,6 +824,10 @@ public struct Chat: Sendable {
     public var body: some ReducerOf<Self> {
         Scope(state: \.queuedMessages, action: \.queuedMessages) {
             QueuedMessages()
+        }
+
+        Scope(state: \.voiceInput, action: \.voiceInput) {
+            VoiceInput()
         }
 
         Reduce { state, action in
@@ -948,6 +957,22 @@ public struct Chat: Sendable {
                 }
                 return .none
 
+            case let .voiceInput(
+                .delegate(.transcriptionFinished(id, transcript))
+            ):
+                guard id == state.sessionID else {
+                    return .none
+                }
+                state.$messageDraft.withLock { draft in
+                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        draft = transcript
+                    } else {
+                        let separator = draft.last?.isWhitespace == true ? "" : " "
+                        draft += separator + transcript
+                    }
+                }
+                return .none
+
             case let .deliveryAttemptsUpdated(attempts):
                 return handleDeliveryAttemptsUpdated(
                     attempts,
@@ -1025,6 +1050,7 @@ public struct Chat: Sendable {
                 )
                 guard !message.isEmpty,
                       !state.isMessageSendInFlight,
+                      state.voiceInput.phase == .idle,
                       let mutationRoute = state.mutationRoute,
                       mutationRoute.capabilities.canSend else {
                     return .none
@@ -1155,7 +1181,8 @@ public struct Chat: Sendable {
 
             case .configurationControlTapped,
                  .queuedDeliveryResult,
-                 .queuedMessages:
+                 .queuedMessages,
+                 .voiceInput:
                 return .none
             }
         }
@@ -1604,6 +1631,9 @@ struct ChatView: View {
         .onChange(of: store.session.reasoningEffort) { _, reasoningEffort in
             store.send(.sessionReasoningEffortChanged(reasoningEffort))
         }
+        .onDisappear {
+            store.send(.voiceInput(.cancel))
+        }
         .preferredColorScheme(.dark)
     }
 
@@ -1883,6 +1913,8 @@ private struct ChatComposer: View {
             isSendInFlight: isSendInFlight,
             isStopInFlight: store.isStopInFlight,
             isWorking: store.session.status == .working,
+            voiceInputPhase: store.voiceInput.phase,
+            voiceInputLevels: store.voiceInput.levels,
             selectedModel: store.selectedModel,
             selectedModelTitle: store.selectedModelDisplayName,
             selectedReasoningEffort: store.selectedReasoningEffort,
@@ -1896,6 +1928,9 @@ private struct ChatComposer: View {
             },
             onConfigurationControlTapped: {
                 store.send(.configurationControlTapped($0))
+            },
+            onMicrophoneTapped: {
+                store.send(.voiceInput(.microphoneButtonTapped))
             },
             onSelectModel: {
                 store.send(.modelSelected($0))

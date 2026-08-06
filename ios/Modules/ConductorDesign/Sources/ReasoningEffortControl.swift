@@ -74,17 +74,20 @@ public struct ReasoningEffortControl: View {
     let availableEfforts: [Session.ReasoningEffort]
     let selectedEffort: Session.ReasoningEffort?
     let isDisabled: Bool
+    let showsName: Bool
     let onSelect: @MainActor (Session.ReasoningEffort) -> Void
 
     public init(
         availableEfforts: [Session.ReasoningEffort],
         selectedEffort: Session.ReasoningEffort?,
         isDisabled: Bool = false,
+        showsName: Bool = true,
         onSelect: @escaping @MainActor (Session.ReasoningEffort) -> Void
     ) {
         self.availableEfforts = availableEfforts
         self.selectedEffort = selectedEffort
         self.isDisabled = isDisabled
+        self.showsName = showsName
         self.onSelect = onSelect
         _displayedEffort = State(initialValue: selectedEffort)
     }
@@ -127,7 +130,8 @@ public struct ReasoningEffortControl: View {
     private func effortLabel(for effort: Session.ReasoningEffort) -> some View {
         ReasoningEffortLabel(
             effort: effort,
-            showsDefaultTitle: false
+            showsDefaultTitle: false,
+            showsName: showsName
         )
     }
 }
@@ -135,21 +139,20 @@ public struct ReasoningEffortControl: View {
 struct ReasoningEffortLabel: View {
     let effort: Session.ReasoningEffort?
     let showsDefaultTitle: Bool
+    var showsName = true
 
     private var displayedEffort: Session.ReasoningEffort {
         effort ?? .none
     }
 
     var body: some View {
-        Label {
-            if showsDefaultTitle || displayedEffort != .none {
-                Text(displayedEffort.displayName)
+        Group {
+            if showsName {
+                label
+            } else {
+                label
+                    .labelStyle(.iconOnly)
             }
-        } icon: {
-            ReasoningEffortIcon(
-                activeBarCount: displayedEffort.activeBarCount,
-                usesUltraAppearance: displayedEffort.usesUltraAppearance
-            )
         }
         .font(.theme(.small))
         .foregroundStyle(
@@ -166,6 +169,19 @@ struct ReasoningEffortLabel: View {
                 : AnyShapeStyle(Color.clear),
             in: .capsule
         )
+    }
+
+    private var label: some View {
+        Label {
+            if showsDefaultTitle || displayedEffort != .none {
+                Text(displayedEffort.displayName)
+            }
+        } icon: {
+            ReasoningEffortIcon(
+                activeBarCount: displayedEffort.activeBarCount,
+                usesUltraAppearance: displayedEffort.usesUltraAppearance
+            )
+        }
     }
 }
 

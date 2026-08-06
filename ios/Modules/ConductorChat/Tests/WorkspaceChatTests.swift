@@ -52,6 +52,7 @@ struct WorkspaceChatTests {
             expectNotRestorable { $0.chat?.isLoadingMessages = true }
             expectNotRestorable { $0.chat?.isEnqueueInFlight = true }
             expectNotRestorable { $0.chat?.isStopInFlight = true }
+            expectNotRestorable { $0.chat?.voiceInput.phase = .recording }
             expectNotRestorable { $0.isCreatingSession = true }
             expectNotRestorable { $0.isArchivingWorkspace = true }
             expectNotRestorable { $0.isClosingSession = true }
@@ -2650,6 +2651,47 @@ struct WorkspaceChatTests {
             ) {
                 $0.destination = .alert(
                     .failedToStopSession(message: TestError().localizedDescription)
+                )
+            }
+            await store.send(.destination(.dismiss)) {
+                $0.destination = nil
+            }
+        }
+    }
+
+    @Test("When voice transcription fails, an alert is presented and dismissed")
+    func voiceTranscriptionFails() async throws {
+        let workspace = try makeWorkspace(activeSessionID: "active")
+        let activeSession = try makeSession(id: "active", workspaceID: workspace.id)
+
+        try await withDependencies {
+            try $0.bootstrapDatabase()
+            try $0.defaultDatabase.write { db in
+                try Session.upsert { activeSession }.execute(db)
+            }
+        } operation: {
+            let store = TestStore(
+                initialState: WorkspaceChat.State(
+                    workspaceWithRepository: WorkspaceWithRepository(
+                        workspace: workspace,
+                        repository: nil
+                    )
+                )
+            ) {
+                WorkspaceChat()
+            }
+
+            await store.send(
+                .chat(
+                    .voiceInput(
+                        .delegate(
+                            .failed(id: activeSession.id, error: TestError())
+                        )
+                    )
+                )
+            ) {
+                $0.destination = .alert(
+                    .failedToTranscribeSpeech(message: TestError().localizedDescription)
                 )
             }
             await store.send(.destination(.dismiss)) {

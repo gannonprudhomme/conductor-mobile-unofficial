@@ -88,6 +88,15 @@ struct ModelPickerTests {
                 agentType: .codex,
                 allowsAgentSwitching: true,
                 selectedModel: .gpt_5_6_sol,
+                showsName: false,
+                onSelect: { _ in }
+            )
+        )
+        #expect(
+            picker != ModelPicker(
+                agentType: .codex,
+                allowsAgentSwitching: true,
+                selectedModel: .gpt_5_6_sol,
                 selectedModelTitle: "GPT-5.6 Sol · Last used",
                 onSelect: { _ in }
             )
@@ -273,7 +282,7 @@ struct ModelPickerTests {
 
         for dynamicTypeSize in [
             DynamicTypeSize.large,
-            .accessibility2,
+            .xxLarge,
         ] {
             let editableHeight = fittingHeight(
                 of: editable,
@@ -284,13 +293,12 @@ struct ModelPickerTests {
                 AnyView(readOnlyDefault),
                 AnyView(readOnlyUnknown),
             ] {
+                let readOnlyHeight = fittingHeight(
+                    of: readOnly,
+                    dynamicTypeSize: dynamicTypeSize
+                )
                 #expect(
-                    abs(
-                        fittingHeight(
-                            of: readOnly,
-                            dynamicTypeSize: dynamicTypeSize
-                        ) - editableHeight
-                    ) < 0.5
+                    abs(readOnlyHeight - editableHeight) < 0.5
                 )
             }
         }

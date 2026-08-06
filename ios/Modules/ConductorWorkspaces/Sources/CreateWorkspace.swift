@@ -8,6 +8,7 @@
 import ComposableArchitecture
 import ConductorDesign
 import ConductorMobileData
+import ConductorVoiceInput
 import Foundation
 import LucideIcons
 import SharedConductorData
@@ -50,6 +51,7 @@ public struct CreateWorkspace: Sendable {
         public var selectedModel = DesktopClient.ModelSettings.conductorDefaults.defaultModel
         public var selectedReasoningEffort: Session.ReasoningEffort? =
             DesktopClient.ModelSettings.conductorDefaults.defaultReasoningEffort
+        var voiceInput = VoiceInput.State(id: "createWorkspace")
         var workspaceID: Workspace.ID?
 
         var availableReasoningEfforts: [Session.ReasoningEffort] {
@@ -212,6 +214,7 @@ public struct CreateWorkspace: Sendable {
         case modeSelected(Mode)
         case reasoningEffortSelected(Session.ReasoningEffort)
         case delegate(Delegate)
+        case voiceInput(VoiceInput.Action)
 
         public enum Alert: Equatable {}
 
@@ -230,6 +233,10 @@ public struct CreateWorkspace: Sendable {
     public var body: some ReducerOf<Self> {
         BindingReducer()
 
+        Scope(state: \.voiceInput, action: \.voiceInput) {
+            VoiceInput()
+        }
+
         Reduce { state, action in
             switch action {
             case .task:
@@ -247,7 +254,7 @@ public struct CreateWorkspace: Sendable {
                 }
 
             case .createButtonTapped:
-                guard !state.isCreateAPIInFlight else {
+                guard !state.isCreateAPIInFlight, state.voiceInput.phase == .idle else {
                     return .none
                 }
                 if state.mode == .cloud {
@@ -436,6 +443,25 @@ public struct CreateWorkspace: Sendable {
                 state.reconcileSelectedReasoningEffort()
                 return .none
 
+            case let .voiceInput(
+                .delegate(.transcriptionFinished(_, transcript))
+            ):
+                state.$prompt.withLock { prompt in
+                    if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        prompt = transcript
+                    } else {
+                        let separator = prompt.last?.isWhitespace == true ? "" : " "
+                        prompt += separator + transcript
+                    }
+                }
+                return .none
+
+            case let .voiceInput(.delegate(.failed(_, error))):
+                state.alert = .failedToTranscribeSpeech(
+                    message: error.localizedDescription
+                )
+                return .none
+
             case let .modeSelected(mode):
                 guard state.mode != mode, !state.displayedRepositories(for: mode).isEmpty else {
                     return .none
@@ -457,7 +483,7 @@ public struct CreateWorkspace: Sendable {
                 state.$lastSelectedRepositoryID.withLock { $0 = state.selectedRepositoryID }
                 return .none
 
-            case .alert, .binding, .delegate:
+            case .alert, .binding, .delegate, .voiceInput:
                 return .none
             }
         }
@@ -526,6 +552,14 @@ extension AlertState where Action == CreateWorkspace.Action.Alert {
             TextState(message)
         }
     }
+
+    static func failedToTranscribeSpeech(message: String) -> Self {
+        AlertState {
+            TextState("Failed to transcribe speech")
+        } message: {
+            TextState(message)
+        }
+    }
 }
 
 public struct CreateWorkspaceView: View {
@@ -544,6 +578,9 @@ public struct CreateWorkspaceView: View {
         .preferredColorScheme(.dark)
         .task {
             await store.send(.task).finish()
+        }
+        .onDisappear {
+            store.send(.voiceInput(.cancel))
         }
     }
 
@@ -642,13 +679,13 @@ public struct CreateWorkspaceView: View {
         .accessibilityLabel("Repository")
         .accessibilityValue(selectedRepositoryName)
         .tint(.theme(.textPrimary))
-        .disabled(store.isCreateAPIInFlight)
+        .disabled(store.isCreateAPIInFlight || store.voiceInput.phase != .idle)
     }
 
     private var promptEditor: some View {
         PromptTextView(
             text: Binding(store.$prompt),
-            isEditable: !store.isCreateAPIInFlight
+            isEditable: !store.isCreateAPIInFlight && store.voiceInput.phase == .idle
         )
             .font(.theme(.body))
             .foregroundStyle(.theme(.textPrimary))
@@ -664,47 +701,78 @@ public struct CreateWorkspaceView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .disabled(store.isCreateAPIInFlight)
+            .disabled(store.isCreateAPIInFlight || store.voiceInput.phase != .idle)
             .accessibilityLabel("Workspace prompt")
     }
 
     private var bottomRow: some View {
-        HStack(spacing: 8) {
-            ModelAndFastModeControls(
-                agentType: store.agentType,
-                allowsAgentSwitching: true,
-                allowedModels: store.mode == .cloud
-                    ? Set(
-                        CloudCreationConfigurationCatalog.configurations
-                            .map(\.model)
+        Group {
+            if !store.voiceInput.phase.shouldShowTakeover {
+                HStack(spacing: 8) {
+                    ModelAndFastModeControls(
+                        agentType: store.agentType,
+                        allowsAgentSwitching: true,
+                        allowedModels: store.mode == .cloud
+                            ? Set(
+                                CloudCreationConfigurationCatalog.configurations
+                                    .map(\.model)
+                            )
+                            : nil,
+                        availableReasoningEfforts: store.availableReasoningEfforts,
+                        isFastModeEnabled: store.isFastModeEnabled,
+                        showsFastMode: store.mode == .local,
+                        selectedModel: store.selectedModel,
+                        selectedReasoningEffort: store.selectedReasoningEffort,
+                        onFastModeTapped: {
+                            if store.mode == .local {
+                                store.isFastModeEnabled.toggle()
+                            }
+                        },
+                        onSelectReasoningEffort: {
+                            store.send(.reasoningEffortSelected($0))
+                        },
+                        onSelectModel: { store.selectedModel = $0 }
                     )
-                    : nil,
-                availableReasoningEfforts: store.availableReasoningEfforts,
-                isFastModeEnabled: store.isFastModeEnabled,
-                showsFastMode: store.mode == .local,
-                selectedModel: store.selectedModel,
-                selectedReasoningEffort: store.selectedReasoningEffort,
-                onFastModeTapped: {
-                    if store.mode == .local {
-                        store.isFastModeEnabled.toggle()
-                    }
-                },
-                onSelectReasoningEffort: {
-                    store.send(.reasoningEffortSelected($0))
-                },
-                onSelectModel: { store.selectedModel = $0 }
-            )
-            .tint(.theme(.textPrimary))
-            .disabled(store.isCreateAPIInFlight)
-            .frame(maxWidth: .infinity, alignment: .leading)
+                    .tint(.theme(.textPrimary))
+                    .disabled(
+                        store.isCreateAPIInFlight
+                            || store.voiceInput.phase != .idle
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            createButton
+                    VoiceInputButton(
+                        phase: store.voiceInput.phase,
+                        isEnabled: !store.isCreateAPIInFlight
+                            && store.voiceInput.phase == .idle,
+                        accessibilityIdentifier: "createWorkspace.voiceInput",
+                        idleAccessibilityLabel: "Record workspace prompt",
+                        action: {
+                            store.send(.voiceInput(.microphoneButtonTapped))
+                        }
+                    )
+
+                    createButton
+                }
+            } else {
+                VoiceInputTakeover(
+                    phase: store.voiceInput.phase,
+                    levels: store.voiceInput.levels,
+                    accessibilityIdentifier: "createWorkspace.voiceInput",
+                    onStopTapped: {
+                        store.send(.voiceInput(.microphoneButtonTapped))
+                    }
+                )
+                .frame(maxWidth: .infinity)
+            }
         }
+        .frame(maxWidth: .infinity)
+        .animation(.default, value: store.voiceInput.phase)
         .padding(.top, 8)
     }
 
     private var createButton: some View {
         let isEnabled = !store.isCreateAPIInFlight
+            && store.voiceInput.phase == .idle
 
         return Button {
             store.send(.createButtonTapped)
