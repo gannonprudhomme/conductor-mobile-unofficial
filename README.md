@@ -65,7 +65,7 @@ After downloading & launching the macOS app, you must install the "UI hook" into
 ### Reading data
 
 For local workspaces, we read Conductor's local SQLite database.
-Assuming the iOS app is connected, we poll `PRAGMA data_version` very rapidly - every 3 ms - and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
+Assuming the iOS app is connected, we poll `PRAGMA data_version` every 25 ms and if there are any changes to the tables/IDs we're monitoring we send them to the app over a web socket.
 
 For Cloud workspaces we generally use Conductor's public API. However the public API is missing a handful of features, like queued messages, GitHub PR status, etc, so we instead retrieve that information from the local SQLite database when available.
 
