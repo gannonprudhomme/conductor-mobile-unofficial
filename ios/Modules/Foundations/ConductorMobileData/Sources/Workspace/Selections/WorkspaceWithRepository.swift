@@ -187,7 +187,7 @@ extension WorkspaceWithRepository {
                     .select { _ in 1 }
                     .exists()
 
-                Columns(
+                return Columns(
                     workspace: workspace,
                     cloudMetadata: cloudMetadata,
                     hasWorkingSession: hasWorkingSession,
